@@ -178,8 +178,7 @@ use sunrise_world::block_collision::BlockCollisionRegistry;
 use sunrise_world::native_load_context::LoopContext;
 
 mod model;
-use model::ModelNormals;
-pub use model::{Part, Polygon};
+pub use model::{ModelNormals, Part, Polygon};
 
 /// Kept for callers of the earlier simple AI; species now select behaviour.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -482,7 +481,7 @@ impl MobTypes {
                 for prefix in def.layer_prefixes() {
                     let start = format!("minecraft:{prefix}#");
                     for (k, v) in all.iter().filter(|(k, _)| k.starts_with(&start)) {
-                        let mut part = Part::parse("root", v);
+                        let mut part = Part::parse_layer(k, v);
                         if culls_back_faces(k) {
                             part.set_cull_back();
                         }
@@ -542,7 +541,7 @@ impl MobTypes {
                         || empty_model.clone(),
                         |model| {
                             Arc::new({
-                                let mut part = Part::parse("root", model);
+                                let mut part = Part::parse_layer(&model_key, model);
                                 if culls_back_faces(&model_key) {
                                     part.set_cull_back();
                                 }
@@ -5033,7 +5032,7 @@ impl EntityModelDocument {
     }
 
     pub fn model(&self, key: &str) -> Option<Part> {
-        self.0.get(key).map(|m| Part::parse("root", m))
+        self.0.get(key).map(|m| Part::parse_layer(key, m))
     }
 
     pub fn keys(&self) -> impl Iterator<Item = &str> {

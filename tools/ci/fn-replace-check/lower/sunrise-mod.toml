@@ -73,3 +73,37 @@ bindings = [
     { name = "m", ty = "&Mob", value = "m" },
     { name = "left", ty = "bool", value = "left" },
 ]
+
+# A cancellable HEAD that draws `right_arm` of the player layer in two segments, bent at the elbow
+# by the angle a mod stored on the part's `Poses`, as BendableCuboids replaces `ModelPart.Cube.compile`
+# in Java; any other part goes on to the game's own polygons (sunrise-org/sunrise#3951). The build is
+# the check.
+[[native.mixin]]
+id = "bend"
+target = "sunrise_client_lib::mobs::render::compile_part"
+kind = "HEAD"
+cancellable = true
+helper = "src/mixins/bend.rs"
+bindings = [
+    { name = "layer", ty = "Option<&str>", value = "layer" },
+    { name = "part", ty = "&Part", value = "part" },
+    { name = "matrix", ty = "glam::Mat4", value = "matrix" },
+    { name = "normals", ty = "ModelNormals", value = "normals" },
+    { name = "paint", ty = "Paint", value = "paint" },
+    { name = "poses", ty = "&Poses", value = "poses" },
+    { name = "out", ty = "&mut Vec<Vertex>", value = "&mut *out" },
+]
+
+# A RETURN that takes `right_arm` of the player layer, so the player model is drawn on the CPU,
+# where the `bend` row above runs; every other model stays on the GPU (sunrise-org/sunrise#3951).
+# The build is the check.
+[[native.mixin]]
+id = "takes"
+target = "sunrise_client_lib::mobs::render::takes_part"
+kind = "RETURN"
+helper = "src/mixins/takes.rs"
+bindings = [
+    { name = "value", ty = "bool", value = "$value" },
+    { name = "layer", ty = "&str", value = "layer" },
+    { name = "part", ty = "&str", value = "part" },
+]

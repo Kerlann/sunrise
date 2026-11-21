@@ -164,9 +164,27 @@ impl SkinModels {
         model: &Arc<Part>,
         frame: &mut SkinFrame,
     ) -> Option<(&Stored, &mut Rotations)> {
+        let takes_part: &dyn Fn(&str, &str) -> bool = &super::render::takes_part;
+        self.entry_taking(model, frame, || {
+            super::render::parts_taken_hooked().then_some(takes_part)
+        })
+    }
+
+    /// [`SkinModels::entry`], with `takes` asked once, on the model's first sight, for the
+    /// parts mods draw themselves (`render::takes_part` when a mixin replaced it): a model
+    /// with one of them is stored as drawn on the CPU, where `render::compile_part` runs.
+    fn entry_taking<'t>(
+        &mut self,
+        model: &Arc<Part>,
+        frame: &mut SkinFrame,
+        takes: impl FnOnce() -> Option<&'t dyn Fn(&str, &str) -> bool>,
+    ) -> Option<(&Stored, &mut Rotations)> {
         let key = Arc::as_ptr(model) as usize;
         let vertices = &mut self.vertices;
         let (_, stored) = self.stored.entry(key).or_insert_with(|| {
+            if takes().is_some_and(|takes| part_taken(model, takes)) {
+                return (model.clone(), None);
+            }
             // The renderer appends `new_model` to its store in order, so a
             // model's first vertex is the store's size when it is added.
             let before = frame.new_model.len();
@@ -252,6 +270,18 @@ fn flatten_item(
         runs,
         bounds: (lo, hi),
     })
+}
+
+/// Whether `takes` takes a part of `model` (by its layer and the part's name); never for a
+/// model with no layer.
+fn part_taken(model: &Part, takes: &dyn Fn(&str, &str) -> bool) -> bool {
+    fn walk(part: &Part, layer: &str, takes: &dyn Fn(&str, &str) -> bool) -> bool {
+        takes(layer, &part.name) || part.children.iter().any(|c| walk(c, layer, takes))
+    }
+    model
+        .layer
+        .as_deref()
+        .is_some_and(|layer| walk(model, layer, takes))
 }
 
 /// The model's vertices in pre-order (a part's polygons, then its children),
@@ -1169,5 +1199,59 @@ mod tests {
             }
         }
         assert_eq!(drawn, 10);
+    }
+
+    /// `takes_part`'s answer is asked once per model, on its first sight: a model with a
+    /// part taken is stored as drawn on the CPU, one without (another layer, or no part
+    /// taken) stays on the GPU, and a model with no layer is never asked about.
+    #[test]
+    fn a_model_with_a_taken_part_is_drawn_on_the_cpu() {
+        let layer = |key: &str| {
+            Arc::new(Part::parse_layer(
+                key,
+                &serde_json::json!({"children": {
+                    "body": {
+                        "polygons": [[[0, 0, 0, 0, 0], [0, 16, 0, 0, 1],
+                                      [0, 16, 16, 1, 1], [0, 0, 16, 1, 0]]],
+                        "normals": [[1, 0, 0]]
+                    },
+                    "right_arm": {}
+                }}),
+            ))
+        };
+        let player = layer("minecraft:player#main");
+        let zombie = layer("minecraft:zombie#main");
+        let mut unnamed = (*layer("minecraft:player#main")).clone();
+        unnamed.layer = None;
+        let unnamed = Arc::new(unnamed);
+        let asked = std::cell::Cell::new(0);
+        let takes = |layer: &str, part: &str| {
+            asked.set(asked.get() + 1);
+            layer == "minecraft:player#main" && part == "right_arm"
+        };
+        let takes: &dyn Fn(&str, &str) -> bool = &takes;
+        let mut models = SkinModels::default();
+        let mut frame = SkinFrame::default();
+        for _ in 0..2 {
+            assert!(
+                models
+                    .entry_taking(&player, &mut frame, || Some(takes))
+                    .is_none()
+            );
+            assert!(
+                models
+                    .entry_taking(&zombie, &mut frame, || Some(takes))
+                    .is_some()
+            );
+        }
+        // The player's root and body before its right arm; the zombie's root, body and right
+        // arm; once each, not again on the second draw.
+        assert_eq!(asked.get(), 3 + 3);
+        assert!(
+            models
+                .entry_taking(&unnamed, &mut frame, || Some(takes))
+                .is_some()
+        );
+        assert_eq!(asked.get(), 6);
     }
 }

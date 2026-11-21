@@ -6,6 +6,7 @@ use super::{
     Mob, MobData, ModelNormals, Part, Species,
     anim::{self, Poses},
     living::wrap,
+    skin::Paint,
 };
 use crate::mesher::Vertex;
 use std::borrow::Cow;
@@ -16,6 +17,15 @@ use sunrise_core::geometry::trig::Mth;
 #[path = "invisible_body.rs"]
 mod invisible_body;
 pub use invisible_body::render_seen_invisible;
+
+/// Whether a mixin build installed a patched copy of the free function `$function` of this
+/// module. The prebuilt game's staging pass answers it from the function's replacement slot; a
+/// build without replacement slots has no patched functions.
+macro_rules! replaced {
+    ($function:ident) => {
+        false
+    };
+}
 
 /// Immutable resources and the optional frame-local gameplay animation observer.
 /// Ordinary tools and probes use MobData directly, with no callbacks.
@@ -1318,30 +1328,42 @@ pub fn draw_scrolled(
     overlay: u32,
     out: &mut Vec<Vertex>,
 ) {
-    draw_normals(
-        part,
-        base,
-        ModelNormals::new(base),
-        poses,
+    let paint = Paint {
         uv,
         scroll,
         color,
         light,
         overlay,
+    };
+    // Asked once per draw, not per part: while no mod replaced `compile_part`, the parts'
+    // polygons are pushed as they always were, without going through it.
+    let compile = replaced!(compile_part).then_some(compile_part as CompilePart);
+    draw_normals(
+        part,
+        base,
+        ModelNormals::new(base),
+        poses,
+        paint,
+        part.layer.as_deref(),
+        compile,
         out,
     );
 }
+/// [`compile_part`]'s signature, for a draw that goes through it.
+type CompilePart =
+    fn(Option<&str>, &Part, glam::Mat4, ModelNormals, Paint, &Poses, &mut Vec<Vertex>);
+/// `ModelPart.render`: the part and its children under their poses. `layer` is the model
+/// layer of the tree drawn (its root's), `compile` the replaced [`compile_part`] when a mod
+/// installed one.
 #[allow(clippy::too_many_arguments)]
 fn draw_normals(
     part: &Part,
     base: glam::Mat4,
     normals: ModelNormals,
     poses: &Poses,
-    uv: [f32; 4],
-    scroll: f32,
-    color: u32,
-    light: u32,
-    overlay: u32,
+    paint: Paint,
+    layer: Option<&str>,
+    compile: Option<CompilePart>,
     out: &mut Vec<Vertex>,
 ) {
     let p = poses.pose(part);
@@ -1353,34 +1375,99 @@ fn draw_normals(
     // `skips` is a name lookup: ask once per part, not once per polygon. A part
     // hidden this way still draws its children, so only the polygons are gated.
     if !poses.skips(part) {
-        for poly in &part.polygons {
-            let normal = poly.vertex_normal(normals);
-            for v in poly.vertices {
-                let pos = m.transform_point3(glam::Vec3::new(v[0], v[1], v[2]) / 16.0);
-                // The armour glint scrolls the layer's model UV in the shader;
-                // the item path already passed its transformed UV.
-                let glint_uv = if overlay == ARMOR_GLINT {
-                    [v[3], v[4]]
-                } else {
-                    [0.0, 0.0]
-                };
-                out.push(Vertex {
-                    normal,
-                    pos: pos.to_array(),
-                    uv: [
-                        uv[0] + (uv[2] - uv[0]) * scroll_u(v[3], scroll),
-                        uv[1] + (uv[3] - uv[1]) * v[4],
-                    ],
-                    layer: overlay,
-                    color,
-                    light,
-                    glint_uv,
-                });
-            }
+        match compile {
+            Some(compile) => compile(layer, part, m, normals, paint, poses, out),
+            None => push_polygons(&part.polygons, m, normals, paint, out),
         }
     }
     for c in &part.children {
-        draw_normals(c, m, normals, poses, uv, scroll, color, light, overlay, out);
+        draw_normals(c, m, normals, poses, paint, layer, compile, out);
+    }
+}
+/// `ModelPart.compile` (`ModelPart.Cube.compile` per cube): pushes one part's own polygons,
+/// posed by `matrix` (the part's, as [`posed`] gives it under its parents) with the normals of
+/// its pose, painted with `paint`. Its children are drawn after it, each through this function
+/// too. Parts hidden, scaled to nothing or with `skipDraw` set don't come here.
+///
+/// A native mod draws a part its own way through `[[native.mixin]]`, as BendableCuboids
+/// replaces `ModelPart.Cube.compile` in Java: a limb bent in two segments, a squashed or
+/// stretched part, another mesh. `layer` is the model layer of the tree being drawn
+/// (`minecraft:player#main`; None for a model not read from `entity-models.json`) and
+/// `part.name` the part. An entity's own state reaches the replacement through `poses`, where
+/// the mod's mixin on `anim::setup` writes it ([`Poses::set_data`]). A model is drawn on the
+/// GPU without this function unless one of its parts is taken by [`takes_part`], so a mod that
+/// replaces this function replaces that one too. Without a replacement, the same vertices in
+/// the same order as before this function existed.
+#[sunrise_mod_api_macros::replaceable]
+pub fn compile_part(
+    layer: Option<&str>,
+    part: &Part,
+    matrix: glam::Mat4,
+    normals: ModelNormals,
+    paint: Paint,
+    poses: &Poses,
+    out: &mut Vec<Vertex>,
+) {
+    let _ = (layer, poses);
+    push_polygons(&part.polygons, matrix, normals, paint, out);
+}
+/// Whether a native mod draws the part `part` of the model layer `layer`
+/// (`minecraft:player#main`) itself, in its replacement of [`compile_part`]. A model with a
+/// part taken is drawn on the CPU, where [`compile_part`] runs; one without stays on the GPU.
+///
+/// The answer must be fixed per (layer, part) for the whole session: it is asked once per
+/// model, the first time the GPU path sees it, and kept. What changes per entity or per frame
+/// (a bend that is on or off) belongs in the replacement of [`compile_part`], which can push
+/// the part's own polygons when that entity has nothing to change.
+#[sunrise_mod_api_macros::replaceable]
+pub fn takes_part(layer: &str, part: &str) -> bool {
+    let _ = (layer, part);
+    false
+}
+/// Whether a mixin replaced [`takes_part`]: while none has, no model is asked about.
+pub(super) fn parts_taken_hooked() -> bool {
+    replaced!(takes_part)
+}
+/// The vertices of `polygons` posed by `m`: [`compile_part`]'s own body, which a replacement
+/// can call for the parts or polygons it leaves as they are.
+pub fn push_polygons(
+    polygons: &[super::Polygon],
+    m: glam::Mat4,
+    normals: ModelNormals,
+    paint: Paint,
+    out: &mut Vec<Vertex>,
+) {
+    let Paint {
+        uv,
+        scroll,
+        color,
+        light,
+        overlay,
+    } = paint;
+    for poly in polygons {
+        let normal = poly.vertex_normal(normals);
+        for v in poly.vertices {
+            let pos = m.transform_point3(glam::Vec3::new(v[0], v[1], v[2]) / 16.0);
+            // The armour glint scrolls the layer's model UV in the shader;
+            // the item path already passed its transformed UV.
+            let glint_uv = if overlay == ARMOR_GLINT {
+                [v[3], v[4]]
+            } else {
+                [0.0, 0.0]
+            };
+            out.push(Vertex {
+                normal,
+                pos: pos.to_array(),
+                uv: [
+                    uv[0] + (uv[2] - uv[0]) * scroll_u(v[3], scroll),
+                    uv[1] + (uv[3] - uv[1]) * v[4],
+                ],
+                layer: overlay,
+                color,
+                light,
+                glint_uv,
+            });
+        }
     }
 }
 /// A part's matrix under `base` for its pose (`ModelPart.translateAndRotate`
@@ -1417,7 +1504,7 @@ pub fn put(
     overlay: u32,
     out: &mut Vec<Vertex>,
 ) {
-    let paint = super::skin::Paint {
+    let paint = Paint {
         uv,
         scroll,
         color,
@@ -3195,6 +3282,7 @@ mod tests {
             pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
             polygons,
             children: Vec::new(),
+            layer: None,
         };
         assert_eq!(
             cube_bounds(&part),
@@ -3979,6 +4067,7 @@ mod emissive_tests {
                 ],
             }],
             children: Vec::new(),
+            layer: None,
         });
         Mob::new(1, kind, sunrise_core::geometry::Vec3::ZERO, 0.0)
     }
@@ -4284,6 +4373,7 @@ mod random_texture_tests {
                 ],
             }],
             children: Vec::new(),
+            layer: None,
         });
         Mob::new(1, kind, sunrise_core::geometry::Vec3::ZERO, 0.0)
     }
@@ -4613,5 +4703,258 @@ mod translate_to_hand_tests {
                 part_matrix(&model, base, &poses, arm, shift).unwrap()
             );
         }
+    }
+}
+#[cfg(test)]
+mod compile_part_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A humanoid layer: five parts of one quad each (facing +x, their texture corners
+    /// apart), drawn body, head, left_arm, right_arm, right_leg (children in name order), so
+    /// `right_arm`'s four vertices are the 13th to the 16th.
+    fn humanoid() -> Part {
+        let part = |name: &str, u: f32, pose: [f32; 9]| {
+            let v = json!({
+                "pose": pose,
+                "polygons": [[[0, 0, 0, u, 0.25], [0, 12, 0, u, 0.35],
+                              [0, 12, 4, u + 0.1, 0.35], [0, 0, 4, u + 0.1, 0.25]]],
+                "normals": [[1, 0, 0]]
+            });
+            (name.to_owned(), v)
+        };
+        let children: serde_json::Map<_, _> = [
+            part("body", 0.0, [0.0, 0.0, 0.0, 0.1, 0.0, 0.0, 1.0, 1.0, 1.0]),
+            part("head", 0.1, [0.0, -2.0, 0.0, 0.0, 0.3, 0.0, 1.0, 1.0, 1.0]),
+            part(
+                "left_arm",
+                0.2,
+                [5.0, 2.0, 0.0, 0.3, -0.1, 0.0, 1.0, 1.0, 1.0],
+            ),
+            part(
+                "right_arm",
+                0.3,
+                [-5.0, 2.0, 0.0, -0.4, 0.1, 0.05, 1.0, 1.0, 1.0],
+            ),
+            part(
+                "right_leg",
+                0.4,
+                [-2.0, 12.0, 0.0, 0.2, 0.0, 0.0, 1.0, 1.25, 1.0],
+            ),
+        ]
+        .into_iter()
+        .collect();
+        Part::parse_layer("minecraft:player#main", &json!({ "children": children }))
+    }
+
+    fn paint() -> Paint {
+        Paint {
+            uv: [0.125, 0.25, 0.75, 0.875],
+            scroll: 0.0,
+            color: 0xff80_c0ff,
+            light: 0x70a0,
+            overlay: 0,
+        }
+    }
+
+    fn drawn(model: &Part, poses: &Poses, compile: Option<CompilePart>) -> Vec<Vertex> {
+        let base = glam::Mat4::from_translation(glam::Vec3::new(0.25, 1.5, -0.75))
+            * glam::Mat4::from_rotation_y(0.7);
+        let mut out = Vec::new();
+        draw_normals(
+            model,
+            base,
+            ModelNormals::new(base),
+            poses,
+            paint(),
+            model.layer.as_deref(),
+            compile,
+            &mut out,
+        );
+        out
+    }
+
+    fn bytes(vertices: &[Vertex]) -> &[u8] {
+        bytemuck::cast_slice(vertices)
+    }
+
+    /// `draw_normals` as it was before `compile_part` was split out of it: the reference
+    /// for "with no replacement, a model draws as before".
+    #[allow(clippy::too_many_arguments)]
+    fn before_split(
+        part: &Part,
+        base: glam::Mat4,
+        normals: ModelNormals,
+        poses: &Poses,
+        uv: [f32; 4],
+        scroll: f32,
+        color: u32,
+        light: u32,
+        overlay: u32,
+        out: &mut Vec<Vertex>,
+    ) {
+        let p = poses.pose(part);
+        let m = posed(base, p);
+        if poses.is_hidden(part) || p[6] == 0.0 && p[7] == 0.0 && p[8] == 0.0 {
+            return;
+        }
+        let normals = normals.part(p);
+        if !poses.skips(part) {
+            for poly in &part.polygons {
+                let normal = poly.vertex_normal(normals);
+                for v in poly.vertices {
+                    let pos = m.transform_point3(glam::Vec3::new(v[0], v[1], v[2]) / 16.0);
+                    let glint_uv = if overlay == ARMOR_GLINT {
+                        [v[3], v[4]]
+                    } else {
+                        [0.0, 0.0]
+                    };
+                    out.push(Vertex {
+                        normal,
+                        pos: pos.to_array(),
+                        uv: [
+                            uv[0] + (uv[2] - uv[0]) * scroll_u(v[3], scroll),
+                            uv[1] + (uv[3] - uv[1]) * v[4],
+                        ],
+                        layer: overlay,
+                        color,
+                        light,
+                        glint_uv,
+                    });
+                }
+            }
+        }
+        for c in &part.children {
+            before_split(c, m, normals, poses, uv, scroll, color, light, overlay, out);
+        }
+    }
+
+    /// Without a replacement, `draw_scrolled` pushes the bytes the loop before the split
+    /// pushed, through a nonuniform scale, a skipped part, a hidden one, a scroll and the
+    /// armour glint; and `compile_part`'s own body pushes those bytes too.
+    #[test]
+    fn without_a_replacement_a_model_draws_as_before_the_split() {
+        let model = humanoid();
+        let mut poses = Poses::new(&model);
+        poses.get("right_arm")[6] = 0.5;
+        poses.skip_draw("head");
+        poses.visible("left_arm", false);
+        let base = glam::Mat4::from_translation(glam::Vec3::new(0.25, 1.5, -0.75))
+            * glam::Mat4::from_rotation_y(0.7)
+            * glam::Mat4::from_scale(glam::Vec3::new(0.9375, 0.9375, -0.9375));
+        for (scroll, overlay) in [(0.0, 0), (0.375, 0), (0.0, ARMOR_GLINT)] {
+            let p = Paint {
+                scroll,
+                overlay,
+                ..paint()
+            };
+            let mut expected = Vec::new();
+            before_split(
+                &model,
+                base,
+                ModelNormals::new(base),
+                &poses,
+                p.uv,
+                p.scroll,
+                p.color,
+                p.light,
+                p.overlay,
+                &mut expected,
+            );
+            let mut now = Vec::new();
+            draw_scrolled(
+                &model, base, &poses, p.uv, p.scroll, p.color, p.light, p.overlay, &mut now,
+            );
+            assert_eq!(expected.len(), 12);
+            assert_eq!(bytes(&now), bytes(&expected));
+            let mut through = Vec::new();
+            draw_normals(
+                &model,
+                base,
+                ModelNormals::new(base),
+                &poses,
+                p,
+                model.layer.as_deref(),
+                Some(compile_part),
+                &mut through,
+            );
+            assert_eq!(bytes(&through), bytes(&expected));
+        }
+    }
+
+    /// What a test mod's replacement of `compile_part` does: `right_arm` of the player layer,
+    /// when its mixin on `anim::setup` stored a bend angle in `Poses`, as two segments (its
+    /// polygons squashed to the upper half, then to the lower half turned about X at the
+    /// elbow); anything else as the game draws it.
+    fn bent_right_arm(
+        layer: Option<&str>,
+        part: &Part,
+        matrix: glam::Mat4,
+        normals: ModelNormals,
+        paint: Paint,
+        poses: &Poses,
+        out: &mut Vec<Vertex>,
+    ) {
+        let bend = poses.data("right_arm").map(|data| data[0]);
+        match bend {
+            Some(angle) if layer == Some("minecraft:player#main") && part.name == "right_arm" => {
+                let half = glam::Mat4::from_scale(glam::Vec3::new(1.0, 0.5, 1.0));
+                let elbow = glam::Vec3::new(0.0, 6.0 / 16.0, 0.0);
+                push_polygons(&part.polygons, matrix * half, normals, paint, out);
+                let lower = matrix
+                    * glam::Mat4::from_translation(elbow)
+                    * glam::Mat4::from_rotation_x(angle)
+                    * half;
+                push_polygons(&part.polygons, lower, normals, paint, out);
+            }
+            _ => compile_part(layer, part, matrix, normals, paint, poses, out),
+        }
+    }
+
+    /// A replacement that draws `right_arm` bent reaches it with its layer and the entity's
+    /// bend: only `right_arm`'s vertices change, its texture coordinates stay its own, and
+    /// the other parts draw exactly as without the replacement. This calls the replacement
+    /// through `draw_normals` as a draw does once a mixin installed it; it does not install
+    /// a mixin row (the fn-replace-check fixture builds one).
+    #[test]
+    fn a_replacement_bends_only_the_right_arm() {
+        let model = humanoid();
+        let mut poses = Poses::new(&model);
+        let plain = drawn(&model, &poses, None);
+        assert_eq!(plain.len(), 20);
+        // No bend stored: the replacement draws what the game draws.
+        assert_eq!(
+            bytes(&drawn(&model, &poses, Some(bent_right_arm))),
+            bytes(&plain)
+        );
+        poses.set_data("right_arm", [0.8, 0.0, 0.0, 0.0]);
+        let bent = drawn(&model, &poses, Some(bent_right_arm));
+        assert_eq!(bent.len(), 24);
+        assert_eq!(
+            bytes(&bent[..12]),
+            bytes(&plain[..12]),
+            "body, head, left_arm"
+        );
+        assert_eq!(bytes(&bent[20..]), bytes(&plain[16..]), "right_leg");
+        let arm = &plain[12..16];
+        for segment in [&bent[12..16], &bent[16..20]] {
+            for (v, a) in segment.iter().zip(arm) {
+                assert_eq!(
+                    (v.uv, v.color, v.light, v.layer),
+                    (a.uv, a.color, a.light, a.layer)
+                );
+            }
+        }
+        // The upper segment keeps the shoulder; the lower one is turned away from the
+        // straight arm.
+        assert_eq!(bent[12].pos, arm[0].pos);
+        assert_ne!(bent[17].pos, arm[1].pos);
+        // A model of another layer keeps its arm, bend or not.
+        let mut zombie = humanoid();
+        zombie.layer = Some("minecraft:zombie#main".into());
+        assert_eq!(
+            bytes(&drawn(&zombie, &poses, Some(bent_right_arm))),
+            bytes(&drawn(&zombie, &poses, None))
+        );
     }
 }

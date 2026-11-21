@@ -124,6 +124,9 @@ pub struct Poses {
     skipped: FxHashSet<u64>,
     /// Parts with `visible` cleared: neither they nor their children draw.
     hidden: FxHashSet<u64>,
+    /// A mod's own values per part ([`Poses::set_data`]), keyed like `map`; the engine
+    /// never reads them.
+    data: FxHashMap<u64, [f32; 4]>,
     /// Names this content: a fresh number at each change, kept by copies
     /// ([`Poses::version`]).
     version: u64,
@@ -192,6 +195,7 @@ impl Poses {
         self.dummy = other.dummy;
         self.skipped.clone_from(&other.skipped);
         self.hidden.clone_from(&other.hidden);
+        self.data.clone_from(&other.data);
         self.version = other.version;
     }
     /// Refills this for another model, keeping the map and the sets' capacity:
@@ -208,6 +212,7 @@ impl Poses {
         self.dummy = [0.0; 9];
         self.skipped.clear();
         self.hidden.clear();
+        self.data.clear();
         walk(model, &mut self.map);
         self.changed();
     }
@@ -257,6 +262,27 @@ impl Poses {
             self.map.contains_key(&key(n)) && self.hidden.insert(key(n))
         };
         if changed {
+            self.changed();
+        }
+    }
+    /// Stores four values of a mod's own on the part named `name`, when the model has one:
+    /// the engine never reads them. A mod's mixin on [`setup`] writes, say, a limb's bend
+    /// here, and its replacement of `render::compile_part` reads it back for the part it
+    /// draws. A write changes [`Poses::version`], so a later draw never reuses part
+    /// matrices of the walk before it. `reset` clears the values, `copy_from` copies them.
+    pub fn set_data(&mut self, name: &str, data: [f32; 4]) {
+        if self.map.contains_key(&key(name)) {
+            self.data.insert(key(name), data);
+            self.changed();
+        }
+    }
+    /// The values [`Poses::set_data`] stored on the part named `name`.
+    pub fn data(&self, name: &str) -> Option<[f32; 4]> {
+        self.data.get(&key(name)).copied()
+    }
+    /// Removes the values [`Poses::set_data`] stored on the part named `name`.
+    pub fn clear_data(&mut self, name: &str) {
+        if self.data.remove(&key(name)).is_some() {
             self.changed();
         }
     }
@@ -1209,6 +1235,7 @@ mod flight_pose_tests {
             skipped: Default::default(),
             hidden: Default::default(),
             version: 0,
+            data: Default::default(),
         };
         player_model_visibility(&mut p, 0, true);
         for part in ["body", "right_arm", "left_arm", "right_leg", "left_leg"] {
@@ -1237,6 +1264,7 @@ mod flight_pose_tests {
                     skipped: Default::default(),
                     hidden: Default::default(),
                     version: 0,
+                    data: Default::default(),
                 };
                 let arm = if right { "right_arm" } else { "left_arm" };
                 p.xrot("head", pitch);
@@ -1277,6 +1305,7 @@ mod flight_pose_tests {
                     skipped: Default::default(),
                     hidden: Default::default(),
                     version: 0,
+                    data: Default::default(),
                 };
                 let arm = if right { "right_arm" } else { "left_arm" };
                 p.xrot("head", pitch);
@@ -1332,6 +1361,7 @@ mod flight_pose_tests {
             skipped: Default::default(),
             hidden: Default::default(),
             version: 0,
+            data: Default::default(),
         };
         enderman::anim(&seated, &state, &mut poses);
         let right = *poses.get("right_leg");
@@ -1389,6 +1419,7 @@ mod flight_pose_tests {
             skipped: Default::default(),
             hidden: Default::default(),
             version: 0,
+            data: Default::default(),
         };
         let mut ground = make();
         let mut flight = make();
@@ -1432,6 +1463,7 @@ mod flight_pose_tests {
             skipped: Default::default(),
             hidden: Default::default(),
             version: 0,
+            data: Default::default(),
         };
         let same_angle = |a: f32, b: f32| ((a - b + PI).rem_euclid(PI * 2.0) - PI).abs() < 1e-5;
         let mut h = Hum::new(ArmPose::Empty, ArmPose::Empty);
@@ -1540,6 +1572,7 @@ mod flight_pose_tests {
             skipped: Default::default(),
             hidden: Default::default(),
             version: 0,
+            data: Default::default(),
         };
         let mut m = player();
         m.extra.set_slot_id(
@@ -1568,6 +1601,7 @@ mod flight_pose_tests {
             skipped: Default::default(),
             hidden: Default::default(),
             version: 0,
+            data: Default::default(),
         };
         setup(&m, &state, &mut p, &HashMap::new());
         assert!((p.get("right_arm")[3] + PI / 10.0).abs() < 1e-6);
@@ -1598,6 +1632,7 @@ mod flight_pose_tests {
             skipped: Default::default(),
             hidden: Default::default(),
             version: 0,
+            data: Default::default(),
         };
         let mut m = player();
         m.extra
@@ -1666,6 +1701,7 @@ mod flight_pose_tests {
             skipped: Default::default(),
             hidden: Default::default(),
             version: 0,
+            data: Default::default(),
         };
         let mut m = player();
         m.extra.set_slot_id(
@@ -1914,14 +1950,59 @@ mod flight_pose_tests {
             pose: [0.0, 0.0, 0.0, xrot, 0.0, 0.0, 1.0, 1.0, 1.0],
             polygons: Vec::new(),
             children: Vec::new(),
+            layer: None,
         };
         let root = Part {
             name: "root".into(),
             pose: [0.0; 9],
             polygons: Vec::new(),
             children: vec![child(0.5), child(-0.5)],
+            layer: None,
         };
         let mut p = Poses::new(&root);
         assert_eq!(p.get("leg")[3], 0.5);
+    }
+}
+
+#[cfg(test)]
+mod part_data_tests {
+    use super::*;
+
+    /// A mod's values on a part are a change of the poses: every write gives a new
+    /// `version`, so `Skin::draw` never reuses the part matrices of a walk before it; a copy
+    /// keeps them and the version, and a reset for another draw drops them.
+    #[test]
+    fn writing_a_parts_data_changes_the_version() {
+        let model = Part::parse(
+            "root",
+            &serde_json::json!({"children": {"right_arm": {}, "left_arm": {}}}),
+        );
+        let mut poses = Poses::new(&model);
+        let start = poses.version();
+        poses.set_data("right_arm", [0.5, 0.0, 0.0, 0.0]);
+        let set = poses.version();
+        assert_ne!(set, start);
+        assert_eq!(poses.data("right_arm"), Some([0.5, 0.0, 0.0, 0.0]));
+        poses.set_data("right_arm", [0.5, 0.0, 0.0, 0.0]);
+        assert_ne!(
+            poses.version(),
+            set,
+            "a rewrite of the same values is still a write"
+        );
+        let mut copy = Poses::default();
+        copy.copy_from(&poses);
+        assert_eq!(copy.version(), poses.version());
+        assert_eq!(copy.data("right_arm"), Some([0.5, 0.0, 0.0, 0.0]));
+        // A part the model lacks has no slot: nothing stored, nothing changed.
+        let before = poses.version();
+        poses.set_data("tail", [1.0; 4]);
+        assert_eq!((poses.data("tail"), poses.version()), (None, before));
+        poses.clear_data("left_arm");
+        assert_eq!(poses.version(), before, "nothing to clear");
+        poses.clear_data("right_arm");
+        assert_ne!(poses.version(), before);
+        assert_eq!(poses.data("right_arm"), None);
+        copy.reset(&model);
+        assert_eq!(copy.data("right_arm"), None);
     }
 }
