@@ -1165,6 +1165,7 @@ impl Game<'_> {
                 .raw
                 .get(sunrise_client::lan::SUNRISE_CLIENTS_ONLY)
                 .is_some_and(|v| v.trim().eq_ignore_ascii_case("true")),
+            clients_only_reason: sunrise_client::lan::clients_only_reason(),
             lod_distance: sunrise_client::lod_net::distance_property(
                 props.raw.get(sunrise_client::lod_net::PROPERTY).as_deref(),
             ),

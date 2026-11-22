@@ -9,6 +9,11 @@
 /// files sends the player there.
 pub const WEBSITE: &str = "https://playsunrise.net";
 
+/// What a client the official server turns away (`sunrise-clients-only`) is told: its address is
+/// part of the text, so it lives here with the other built-in addresses. The engine's neutral
+/// text names no address; only a Sunrise crate above it supplies this one.
+pub const CLIENTS_ONLY_REASON: &str = "This server is for the Sunrise client: playsunrise.net";
+
 /// The repository's licence file, linked from the Mods screen's Sunrise row.
 pub const LICENSE: &str = "https://github.com/sunrise-org/sunrise/blob/main/LICENSE";
 

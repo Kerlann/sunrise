@@ -1753,7 +1753,7 @@ fn login_and_configure(
         && (shared.config.sunrise_clients_only || crate::content_identity::requires_sunrise())
     {
         let text = if shared.config.sunrise_clients_only {
-            super::SUNRISE_CLIENTS_ONLY_REASON
+            shared.config.clients_only_reason
         } else {
             crate::content_identity::MISMATCH
         };

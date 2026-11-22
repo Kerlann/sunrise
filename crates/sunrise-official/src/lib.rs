@@ -26,6 +26,8 @@ const PARTS: &[&dyn Hooks] = &[
     &sunrise_friends::game::HOOKS,
     // Where a game started without its prepared files sends the player.
     &LAUNCHER_PAGE,
+    // The text a client the official `sunrise-clients-only` server turns away sees.
+    &CLIENTS_ONLY_REASON,
     // "Playing Sunrise" on the player's Discord profile.
     &sunrise_discord::HOOKS,
     // Open and Share for saved performance captures.
@@ -57,6 +59,18 @@ impl Hooks for LauncherPage {
             ],
             button: "sunrise.get_the_game.button",
         })
+    }
+}
+
+/// The text a client the official server turns away (`sunrise-clients-only`) sees: it names
+/// Sunrise, so it is registered here and not by the engine (docs/layers.md).
+static CLIENTS_ONLY_REASON: ClientsOnlyReason = ClientsOnlyReason;
+
+struct ClientsOnlyReason;
+
+impl Hooks for ClientsOnlyReason {
+    fn clients_only_reason(&self) -> Option<&'static str> {
+        Some(sunrise_addresses::CLIENTS_ONLY_REASON)
     }
 }
 
@@ -189,6 +203,15 @@ mod tests {
         ] {
             assert_eq!(identity(server), None, "{server}");
         }
+    }
+
+    #[test]
+    fn clients_only_reason_names_the_official_server() {
+        assert_eq!(
+            CLIENTS_ONLY_REASON.clients_only_reason(),
+            Some(sunrise_addresses::CLIENTS_ONLY_REASON)
+        );
+        assert!(sunrise_addresses::CLIENTS_ONLY_REASON.contains("playsunrise.net"));
     }
 
     #[test]

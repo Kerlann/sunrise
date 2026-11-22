@@ -5,9 +5,10 @@
 
 - off (the default): a client that sends no brand joins, as on vanilla.
 - on (`sunrise-clients-only=true`): a client with no brand, or with vanilla's "vanilla", is disconnected during
-  configuration with "This server is for the Sunrise client: playsunrise.net", and the console says why; a
-  client whose `minecraft:brand` is "sunrise" joins. (Any client can send that brand: the gate keeps out
-  players who didn't install Sunrise, not cheaters.)
+  configuration with the engine's neutral "This server only accepts its own game client.", and the console says
+  why; a client whose `minecraft:brand` is "sunrise" joins. (Any client can send that brand: the gate keeps out
+  players who didn't install Sunrise, not cheaters.) The `sunrise-game` executable this runs does not register
+  Sunrise's official parts, so no hook supplies the official text naming playsunrise.net.
 
 sunrise-bots stand in for the clients (`--brand`). Each server runs in a fresh folder with fresh SUNRISE_HOME
 and XDG folders (lab.game_env), on a free port. Build first:
@@ -29,7 +30,7 @@ from tools import lab
 from tools.server_bench import DONE, Server  # noqa: E402
 
 EXE = '.exe' if os.name == 'nt' else ''
-REASON = 'This server is for the Sunrise client: playsunrise.net'
+REASON = 'This server only accepts its own game client.'
 PROPERTIES = {
     'online-mode': 'false',
     'white-list': 'false',

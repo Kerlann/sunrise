@@ -267,9 +267,16 @@ pub struct NetLog {
 
 /// The server.properties key that lets only the Sunrise client join (off unless "true").
 pub const SUNRISE_CLIENTS_ONLY: &str = "sunrise-clients-only";
-/// What another client is told.
-pub const SUNRISE_CLIENTS_ONLY_REASON: &str =
-    "This server is for the Sunrise client: playsunrise.net";
+/// What another client is told when no hook names its own text: neutral, and naming no address,
+/// so the engine can offer it (docs/layers.md, "Built-in addresses").
+pub const CLIENTS_ONLY_REASON: &str = "This server only accepts its own game client.";
+
+/// What a client a `sunrise-clients-only` server refuses is told: the first registered
+/// [`sunrise_hooks::Hooks::clients_only_reason`], or [`CLIENTS_ONLY_REASON`] with none. Asked
+/// once, when a server builds its config on the game thread.
+pub fn clients_only_reason() -> &'static str {
+    sunrise_hooks::engine::clients_only_reason().unwrap_or(CLIENTS_ONLY_REASON)
+}
 
 /// How the server side of the network behaves: an integrated server's LAN
 /// uses the defaults, a dedicated server takes them from server.properties.
@@ -331,6 +338,9 @@ pub struct NetConfig {
     /// client whose `minecraft:brand` isn't Sunrise's is turned away during
     /// configuration. A brand can be spoofed: a gate, not security.
     pub sunrise_clients_only: bool,
+    /// What a refused client is told (`clients_only_reason()`): a hook's text, or the neutral
+    /// [`CLIENTS_ONLY_REASON`]. Set when the server builds its config.
+    pub clients_only_reason: &'static str,
     /// `sunrise-lod-distance` (Sunrise's own server.properties key, 64): how
     /// far, in chunks, the server samples far terrain for Sunrise clients
     /// (`lod_net`); 0 serves none.
@@ -355,6 +365,16 @@ impl NetConfig {
     }
     /// IntegratedServer.publishServer.
     pub fn lan(port: u16, motd: String, max_players: usize) -> Self {
+        Self::lan_with_reason(port, motd, max_players, clients_only_reason())
+    }
+    /// [`NetConfig::lan`] with the refused-client text given, so a test can check the rest of the
+    /// config without the process-wide hook registry.
+    fn lan_with_reason(
+        port: u16,
+        motd: String,
+        max_players: usize,
+        clients_only_reason: &'static str,
+    ) -> Self {
         Self {
             bind: None,
             port,
@@ -378,6 +398,7 @@ impl NetConfig {
             code_of_conducts: Vec::new(),
             server_links: Vec::new(),
             sunrise_clients_only: false,
+            clients_only_reason,
             lod_distance: crate::lod_net::DEFAULT_DISTANCE,
             levels: crate::chunk::LevelShapes::VANILLA,
             owner_profile: None,
@@ -1400,6 +1421,12 @@ mod tests {
         assert!(lan_b.configuration_tasks.take_task(conn_a, 0).is_none());
         assert!(lan_b.configuration_tasks.remove(conn_a).is_empty());
         assert!(lan_b.configuration_tasks.get(conn_b).is_some());
+    #[test]
+    fn clients_only_reason_defaults_to_neutral_or_the_injected_one() {
+        let config = NetConfig::lan(0, "reason".into(), 1);
+        assert_eq!(config.clients_only_reason, CLIENTS_ONLY_REASON);
+        let injected = NetConfig::lan_with_reason(0, "reason".into(), 1, "A test server");
+        assert_eq!(injected.clients_only_reason, "A test server");
     }
 
     #[test]

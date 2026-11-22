@@ -148,6 +148,13 @@ pub trait Hooks: Sync {
     fn retry(&self) -> Option<connection::Retry> {
         None
     }
+
+    /// The text a client refused by a `sunrise-clients-only` server sees. The first registered
+    /// answer wins; with none the engine's neutral text, which names no address. Asked once on
+    /// the game thread when a server builds its network config, never from login threads.
+    fn clients_only_reason(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 /// What [`Hooks::get_the_game`] answers. The texts are translation keys of the game's own strings
@@ -410,6 +417,11 @@ pub mod engine {
     pub fn retry() -> Option<connection::Retry> {
         all().iter().find_map(|hooks| hooks.retry())
     }
+
+    /// [`Hooks::clients_only_reason`]: the first registered hook's answer.
+    pub fn clients_only_reason() -> Option<&'static str> {
+        all().iter().find_map(|hooks| hooks.clients_only_reason())
+    }
 }
 
 #[cfg(test)]
@@ -452,6 +464,9 @@ mod tests {
         }
         fn retry(&self) -> Option<connection::Retry> {
             Some(connection::Retry::Wait("in 5 s".into()))
+        }
+        fn clients_only_reason(&self) -> Option<&'static str> {
+            Some("This recorder's server")
         }
         fn get_the_game(&self) -> Option<GetTheGame> {
             Some(GetTheGame {
@@ -521,6 +536,10 @@ mod tests {
         ));
         let wait = connection::Retry::Wait("in 5 s".into());
         assert_eq!(engine::retry(), Some(wait));
+        assert_eq!(
+            engine::clients_only_reason(),
+            Some("This recorder's server")
+        );
         assert_eq!(
             engine::get_the_game().map(|g| g.address),
             Some("https://example.org")
