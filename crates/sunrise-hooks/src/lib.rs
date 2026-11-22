@@ -514,6 +514,7 @@ mod tests {
     static RECORDER: Recorder = Recorder(StdMutex::new(Vec::new()));
 
     #[test]
+    #[ignore = "daily"]
     fn registered_hooks_hear_the_game_and_late_ones_are_refused() {
         register(&RECORDER).unwrap();
         register(&Silent).unwrap();

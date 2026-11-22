@@ -84,7 +84,7 @@ def check_off(bins, exe, tag, scratch, out):
     """With the key off both builds let a client without a brand in, as vanilla does."""
     s, port = server(bins, exe, scratch / f'{tag}-off', out, f'{tag}-off', {})
     try:
-        plain = bot(bins, port, out, f'{tag}OffPlain')
+        plain = bot(bins, port, out, f'{tag}Plain')
     finally:
         s.stop()
     if not joined(plain):

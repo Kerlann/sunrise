@@ -1498,6 +1498,8 @@ mod tests {
         assert!(lan_b.configuration_tasks.take_task(conn_a, 0).is_none());
         assert!(lan_b.configuration_tasks.remove(conn_a).is_empty());
         assert!(lan_b.configuration_tasks.get(conn_b).is_some());
+    }
+
     #[test]
     #[ignore = "daily"]
     fn lan_and_loopback_configs_use_the_neutral_reason_without_asking_the_hooks() {

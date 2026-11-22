@@ -4,8 +4,8 @@ sunrise-client-lib a_client_that_offers_the_registry_joins_and_reads_the_entry t
 sunrise-client-lib a_refused_reload_disconnects_instead_of_retaining_the_old_generation test:datapack_join daily network
 sunrise-client-lib a_reload_snapshot_gives_the_client_generation_two_and_stales_old_handles test:datapack_join daily network
 sunrise-client-lib a_required_registry_refuses_a_client_without_the_mod_before_any_registry_data test:datapack_join daily network
-sunrise-client-lib an_incomplete_configuration_snapshot_refuses_finish_after_earlier_replies test:datapack_join daily network
 sunrise-client-lib a_synced_mod_block_entity_reaches_the_chunks_players_once_a_tick test:lan_bot daily child-process
+sunrise-client-lib an_incomplete_configuration_snapshot_refuses_finish_after_earlier_replies test:datapack_join daily network
 sunrise-client-lib api_text::iterative_tests::recursive_fields_survive_512_nodes_on_256_kib lib daily slow
 sunrise-client-lib benchmark::tests::a_refused_command_ends_the_trip_with_the_games_reason lib daily child-process
 sunrise-client-lib benchmark::tests::a_refused_switch_ends_the_run_with_the_games_reason_and_changes_nothing lib daily child-process
@@ -71,6 +71,7 @@ sunrise-client-lib lan::tests::a_flood_of_silent_sockets_is_turned_away lib dail
 sunrise-client-lib lan::tests::a_full_server_closes_the_connection_that_waited_longest lib daily network
 sunrise-client-lib lan::tests::a_local_server_accepts_only_the_requested_loopback_address lib daily network
 sunrise-client-lib lan::tests::actor_ids_never_wrap lib daily network
+sunrise-client-lib lan::tests::lan_and_loopback_configs_use_the_neutral_reason_without_asking_the_hooks lib daily child-process
 sunrise-client-lib lan::viewed_levels::tests::a_viewed_sound_reaches_a_viewer_holding_its_chunk_within_its_distance lib daily network
 sunrise-client-lib lan::viewed_levels::tests::with_no_viewer_no_copy_is_built lib daily network
 sunrise-client-lib lan::waypoints::tests::moves_by_receiver_match_the_loop lib daily slow
@@ -89,6 +90,7 @@ sunrise-client-lib mobs::ai::attack_sound_tests::a_dolphins_blow_plays_its_attac
 sunrise-client-lib mobs::ai::bed_wake_tests::a_sleeper_without_ai_still_stands_when_its_bed_is_gone lib daily resources
 sunrise-client-lib mobs::ai::burn_and_rose_tests::a_burning_zombie_in_powder_snow_breaks_the_block_and_is_put_out lib daily resources
 sunrise-client-lib mobs::ai::burn_and_rose_tests::a_mob_falling_past_a_wither_rose_gets_wither_and_one_beside_it_does_not lib daily resources
+sunrise-client-lib mobs::ai::burn_and_rose_tests::a_mob_in_a_lava_cauldron_burns lib daily resources
 sunrise-client-lib mobs::ai::burn_and_rose_tests::powder_snow_keeps_a_zombie_from_burning_in_daylight lib daily resources
 sunrise-client-lib mobs::ai::burn_and_rose_tests::wither_rose_applies_wither_whatever_the_hit_timer_and_local_difficulty lib daily resources
 sunrise-client-lib mobs::ai::cramming_tests::a_ridden_horse_is_not_counted_for_cramming lib daily resources
@@ -464,4 +466,3 @@ sunrise-client-lib ticket_levels::tests::grid_matches_the_map lib daily slow
 sunrise-client-lib ticket_levels::tiled_tests::tiles_match_scalar_levels_with_overlaps_and_portals lib daily slow
 sunrise-client-lib title::tests::f5_reloads_the_server_list lib daily network
 sunrise-client-lib vanillagen::structure_mobs::tests::structure_maps_reload_without_cross_world_bleed lib daily resources
-sunrise-client-lib mobs::ai::burn_and_rose_tests::a_mob_in_a_lava_cauldron_burns lib daily resources
