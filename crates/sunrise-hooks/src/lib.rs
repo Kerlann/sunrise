@@ -149,10 +149,13 @@ pub trait Hooks: Sync {
         None
     }
 
-    /// The text a client refused by a `sunrise-clients-only` server sees. The first registered
-    /// answer wins; with none the engine's neutral text, which names no address. Asked once on
-    /// the game thread when a server builds its network config, never from login threads.
-    fn clients_only_reason(&self) -> Option<&'static str> {
+    /// The origin, a URL such as `https://example.org`, of the official project whose client a
+    /// `sunrise-clients-only` server takes: the refused client is told its host (the scheme is
+    /// dropped), so the text names the website `sunrise-addresses` already holds instead of
+    /// repeating it. The first registered answer wins; with none the engine's neutral text,
+    /// which names no address. Asked once on the game thread during dedicated server setup and
+    /// only when the key is on, never for a LAN or loopback config and never from login threads.
+    fn clients_only_origin(&self) -> Option<&'static str> {
         None
     }
 }
@@ -418,9 +421,9 @@ pub mod engine {
         all().iter().find_map(|hooks| hooks.retry())
     }
 
-    /// [`Hooks::clients_only_reason`]: the first registered hook's answer.
-    pub fn clients_only_reason() -> Option<&'static str> {
-        all().iter().find_map(|hooks| hooks.clients_only_reason())
+    /// [`Hooks::clients_only_origin`]: the first registered hook's answer.
+    pub fn clients_only_origin() -> Option<&'static str> {
+        all().iter().find_map(|hooks| hooks.clients_only_origin())
     }
 }
 
@@ -465,8 +468,8 @@ mod tests {
         fn retry(&self) -> Option<connection::Retry> {
             Some(connection::Retry::Wait("in 5 s".into()))
         }
-        fn clients_only_reason(&self) -> Option<&'static str> {
-            Some("This recorder's server")
+        fn clients_only_origin(&self) -> Option<&'static str> {
+            Some("https://recorder.example")
         }
         fn get_the_game(&self) -> Option<GetTheGame> {
             Some(GetTheGame {
@@ -488,13 +491,17 @@ mod tests {
     struct Silent;
     impl Hooks for Silent {}
 
-    /// Registered after the recorder: answers for two servers, one the recorder answers too.
+    /// Registered after the recorder: answers for two servers, one the recorder answers too,
+    /// and offers its own clients-only origin, which must not win over the recorder's.
     struct Later;
     impl Hooks for Later {
         fn retry(&self) -> Option<connection::Retry> {
             Some(connection::Retry::Now(connection::Server::new(
                 "b", "P", false,
             )))
+        }
+        fn clients_only_origin(&self) -> Option<&'static str> {
+            Some("https://later.example")
         }
         fn client_identity(&self, server: &str) -> Option<ClientIdentity> {
             matches!(server, "first.example" | "second.example").then(|| ClientIdentity {
@@ -536,9 +543,10 @@ mod tests {
         ));
         let wait = connection::Retry::Wait("in 5 s".into());
         assert_eq!(engine::retry(), Some(wait));
+        // Two hooks answer: the first registered wins, as documented.
         assert_eq!(
-            engine::clients_only_reason(),
-            Some("This recorder's server")
+            engine::clients_only_origin(),
+            Some("https://recorder.example")
         );
         assert_eq!(
             engine::get_the_game().map(|g| g.address),

@@ -1125,6 +1125,17 @@ impl Game<'_> {
                  (Sunrise has no Velocity forwarding any more): turn [transfer] off"
                 .into());
         }
+        let sunrise_clients_only = props
+            .raw
+            .get(sunrise_client::lan::SUNRISE_CLIENTS_ONLY)
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case("true"));
+        // Ask the hook only here, and only with the key on: a LAN or loopback config never
+        // resolves it (that would seal the registry), and with the key off nothing is sent.
+        let clients_only_reason = if sunrise_clients_only {
+            sunrise_client::lan::ClientsOnlyReason::from_hooks()
+        } else {
+            sunrise_client::lan::ClientsOnlyReason::NEUTRAL
+        };
         let net = NetConfig {
             bind,
             port,
@@ -1161,11 +1172,8 @@ impl Game<'_> {
             // DedicatedServer.serverLinks: `bug-report-link` as the only link
             // (ServerLinks.KnownLinkType.BUG_REPORT is id 0).
             levels: self.level_shapes.clone(),
-            sunrise_clients_only: props
-                .raw
-                .get(sunrise_client::lan::SUNRISE_CLIENTS_ONLY)
-                .is_some_and(|v| v.trim().eq_ignore_ascii_case("true")),
-            clients_only_reason: sunrise_client::lan::clients_only_reason(),
+            sunrise_clients_only,
+            clients_only_reason,
             lod_distance: sunrise_client::lod_net::distance_property(
                 props.raw.get(sunrise_client::lod_net::PROPERTY).as_deref(),
             ),

@@ -26,8 +26,8 @@ const PARTS: &[&dyn Hooks] = &[
     &sunrise_friends::game::HOOKS,
     // Where a game started without its prepared files sends the player.
     &LAUNCHER_PAGE,
-    // The text a client the official `sunrise-clients-only` server turns away sees.
-    &CLIENTS_ONLY_REASON,
+    // The website whose host the official `sunrise-clients-only` server names to refused clients.
+    &CLIENTS_ONLY_ORIGIN,
     // "Playing Sunrise" on the player's Discord profile.
     &sunrise_discord::HOOKS,
     // Open and Share for saved performance captures.
@@ -62,15 +62,17 @@ impl Hooks for LauncherPage {
     }
 }
 
-/// The text a client the official server turns away (`sunrise-clients-only`) sees: it names
-/// Sunrise, so it is registered here and not by the engine (docs/layers.md).
-static CLIENTS_ONLY_REASON: ClientsOnlyReason = ClientsOnlyReason;
+/// The official server's origin for a client turned away by `sunrise-clients-only`: its host
+/// comes from the website address, so `playsunrise.net` is written once, in
+/// `sunrise-addresses`. The engine builds the translatable text around it; registering this
+/// here and not in the engine keeps the address in the Sunrise layer (docs/layers.md).
+static CLIENTS_ONLY_ORIGIN: ClientsOnlyOrigin = ClientsOnlyOrigin;
 
-struct ClientsOnlyReason;
+struct ClientsOnlyOrigin;
 
-impl Hooks for ClientsOnlyReason {
-    fn clients_only_reason(&self) -> Option<&'static str> {
-        Some(sunrise_addresses::CLIENTS_ONLY_REASON)
+impl Hooks for ClientsOnlyOrigin {
+    fn clients_only_origin(&self) -> Option<&'static str> {
+        Some(sunrise_addresses::WEBSITE)
     }
 }
 
@@ -206,12 +208,13 @@ mod tests {
     }
 
     #[test]
-    fn clients_only_reason_names_the_official_server() {
+    fn the_clients_only_origin_is_the_official_website() {
+        // The engine turns this into the text refused clients read, naming its host.
         assert_eq!(
-            CLIENTS_ONLY_REASON.clients_only_reason(),
-            Some(sunrise_addresses::CLIENTS_ONLY_REASON)
+            CLIENTS_ONLY_ORIGIN.clients_only_origin(),
+            Some(sunrise_addresses::WEBSITE)
         );
-        assert!(sunrise_addresses::CLIENTS_ONLY_REASON.contains("playsunrise.net"));
+        assert_eq!(sunrise_addresses::WEBSITE, "https://playsunrise.net");
     }
 
     #[test]
