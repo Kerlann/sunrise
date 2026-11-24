@@ -7,6 +7,7 @@ use sunrise_protocol::packets::play::Serverbound as S;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use sunrise_client::spectator_menu::Item;
     use sunrise_protocol::packets::{Empty, play, play::Clientbound as C};
     use {
@@ -57,16 +58,17 @@ mod tests {
                         .collect();
                     assert_eq!(expected_teams.len(), 2);
 
+                    let infos = HashMap::new();
                     let mut players = game.new_spectator_menu();
-                    players.select_slot(0);
-                    players.select_slot(0);
+                    players.select_slot(0, &infos);
+                    players.select_slot(0, &infos);
                     assert!(matches!(players.item(0), Item::Player(p) if p.uuid == LISTED));
                     assert_eq!(players.item(1), Item::Empty);
 
                     let mut teams = game.new_spectator_menu();
                     assert_eq!(teams.item(1), Item::TeleportToTeam { enabled: true });
-                    teams.select_slot(1);
-                    teams.select_slot(1);
+                    teams.select_slot(1, &infos);
+                    teams.select_slot(1, &infos);
                     let shown_teams: Vec<_> = [0, 1]
                         .into_iter()
                         .map(|slot| match teams.item(slot) {
@@ -86,13 +88,13 @@ mod tests {
                         .iter()
                         .position(|t| t.name.plain() == "hidden")
                         .expect("hidden team present");
-                    assert_eq!(shown_teams[hidden_slot].icon, "entity/player/slim/ari");
-                    teams.select_slot(hidden_slot as i32);
-                    teams.select_slot(hidden_slot as i32);
+                    assert_eq!(shown_teams[hidden_slot].icon, UNLISTED);
+                    teams.select_slot(hidden_slot as i32, &infos);
+                    teams.select_slot(hidden_slot as i32, &infos);
                     assert!(matches!(teams.item(0), Item::Player(p) if p.uuid == UNLISTED));
                     assert_eq!(teams.item(1), Item::Empty);
-                    assert_eq!(teams.select_slot(0), Outcome::None);
-                    game.spectator_outcome(teams.select_slot(0));
+                    assert_eq!(teams.select_slot(0, &infos), Outcome::None);
+                    game.spectator_outcome(teams.select_slot(0, &infos));
                     game.send(S::ClientTickEnd(Empty));
                     let mut teleports = Vec::new();
                     loop {

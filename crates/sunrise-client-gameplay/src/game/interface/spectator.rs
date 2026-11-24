@@ -196,6 +196,18 @@ mod tests {
             .collect()
     }
 
+    fn blit_color(draws: &[GuiDraw], texture: &str) -> u32 {
+        draws
+            .iter()
+            .find_map(|draw| match draw {
+                GuiDraw::Blit {
+                    texture: t, color, ..
+                } if t == texture => Some(*color),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no face drawn for {texture}"))
+    }
+
     fn players_page_of(menu: &mut SpectatorMenu, infos: &HashMap<u128, (String, bool)>) {
         menu.select_slot(0, infos);
         menu.select_slot(0, infos);
@@ -263,6 +275,80 @@ mod tests {
         infos.insert(PLAYER, ("skin".to_owned(), true));
         assert!(menu.item(0).enabled(&infos));
         assert_eq!(menu.select_slot(0, &infos), Outcome::Teleport(PLAYER));
+    }
+
+    #[test]
+    fn a_teammate_who_becomes_a_spectator_keeps_the_fade_tint() {
+        const PLAYER: u128 = 0xbeef;
+        let skin = "entity/player/wide/steve";
+        let mut infos = HashMap::from([(PLAYER, (skin.to_owned(), true))]);
+        let team = Team {
+            name: Text::literal("Team"),
+            color: None,
+            players: vec![member(PLAYER, "Player")],
+            icon: PLAYER,
+        };
+        // Open the root page, then Teleport to Team, then the team itself:
+        // `Item::Team` -> `Category::TeamPlayers`.
+        let mut menu = SpectatorMenu::new(Vec::new(), vec![team], &infos);
+        menu.select_slot(1, &infos);
+        menu.select_slot(1, &infos);
+        assert!(matches!(menu.item(0), Item::Team(_)));
+        menu.select_slot(0, &infos);
+        menu.select_slot(0, &infos);
+        assert!(matches!(menu.item(0), Item::Player(p) if p.uuid == PLAYER));
+
+        // They switch to spectator while their team's page is open.
+        infos.insert(PLAYER, (skin.to_owned(), false));
+        assert!(!menu.item(0).enabled(&infos));
+        let mut gui = SpectatorGui::default();
+        gui.on_hotbar_selected(0, 0, Some(menu), &infos);
+        let draws = gui.hotbar(
+            100,
+            100,
+            0,
+            &|_| Text::literal(""),
+            &Font::metrics(&ResourceSource::default()),
+            &infos,
+        );
+        let tint = blit_color(&draws, skin);
+        assert_eq!(tint, hud_layout::white(1.0));
+        assert_ne!(tint, hud_layout::color_from_float(1.0, 0.25, 0.25, 0.25));
+        assert_eq!(gui.on_hotbar_selected(0, 0, None, &infos), Outcome::None);
+        assert_eq!(gui.on_hotbar_selected(0, 0, None, &infos), Outcome::None);
+
+        // Leaving spectator makes the same entry selectable again.
+        infos.insert(PLAYER, (skin.to_owned(), true));
+        assert_eq!(
+            gui.on_hotbar_selected(0, 0, None, &infos),
+            Outcome::Teleport(PLAYER)
+        );
+    }
+
+    #[test]
+    fn a_disabled_player_is_drawn_at_the_fade_alpha() {
+        const PLAYER: u128 = 0xbeef;
+        let skin = "entity/player/wide/steve";
+        let mut infos = HashMap::from([(PLAYER, (skin.to_owned(), true))]);
+        let mut menu = SpectatorMenu::new(vec![member(PLAYER, "Player")], vec![], &infos);
+        players_page_of(&mut menu, &infos);
+        infos.insert(PLAYER, (skin.to_owned(), false));
+        assert!(!menu.item(0).enabled(&infos));
+
+        let mut gui = SpectatorGui::default();
+        gui.on_hotbar_selected(0, 0, Some(menu), &infos);
+        let draws = gui.hotbar(
+            100,
+            100,
+            0,
+            &|_| Text::literal(""),
+            &Font::metrics(&ResourceSource::default()),
+            &infos,
+        );
+        assert_eq!(
+            blit_color(&draws, skin),
+            hud_layout::color_from_float(1.0, 1.0, 1.0, 1.0)
+        );
     }
 
     #[test]
