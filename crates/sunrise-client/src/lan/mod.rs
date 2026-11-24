@@ -271,15 +271,11 @@ pub const SUNRISE_CLIENTS_ONLY: &str = "sunrise-clients-only";
 /// address, so the engine can offer it (docs/layers.md, "Built-in addresses").
 pub const CLIENTS_ONLY_REASON: &str = "This server only accepts its own game client.";
 
-/// The official text's key: the game translates it, `%s` being the official website's host.
-const CLIENTS_ONLY_KEY: &str = "sunrise.server.clients_only";
-/// The official text's English, for clients without the key and for the console.
-const CLIENTS_ONLY_ENGLISH: &str = "This server is for the Sunrise client: %s";
 /// The neutral text's key: the same readable English, with no address to name.
 const CLIENTS_ONLY_NEUTRAL_KEY: &str = "sunrise.server.clients_only.neutral";
 
-/// What a client a `sunrise-clients-only` server refuses is told: the official website's host
-/// when a hook ([`sunrise_hooks::Hooks::clients_only_origin`]) supplies its origin, or the
+/// What a client a `sunrise-clients-only` server refuses is told: the official project's
+/// branded text when a hook ([`sunrise_hooks::Hooks::clients_only`]) supplies it, or the
 /// neutral [`CLIENTS_ONLY_REASON`] naming no address.
 ///
 /// Constructing a config never asks the hooks: [`NetConfig::lan`] and [`NetConfig::loopback`]
@@ -289,26 +285,32 @@ const CLIENTS_ONLY_NEUTRAL_KEY: &str = "sunrise.server.clients_only.neutral";
 pub enum ClientsOnlyReason {
     /// [`CLIENTS_ONLY_REASON`], with no address.
     Neutral,
-    /// The official project's website host, without the scheme (`playsunrise.net`).
-    Official { host: &'static str },
+    /// The official project's branded text, naming its host without the scheme
+    /// (`playsunrise.net`).
+    Official {
+        host: &'static str,
+        key: &'static str,
+        fallback: &'static str,
+    },
 }
 
 impl ClientsOnlyReason {
     /// The neutral reason: what a LAN or loopback config uses, and what a plain build sends.
     pub const NEUTRAL: Self = Self::Neutral;
 
-    /// The first registered hook's origin, or neutral when none answers. Asked once on the game
+    /// The first registered hook's reason, or neutral when none answers. Asked once on the game
     /// thread during dedicated server setup; calling it seals the process-wide hook registry,
     /// which is why LAN and loopback configs never do.
     pub fn from_hooks() -> Self {
-        sunrise_hooks::engine::clients_only_origin()
+        sunrise_hooks::engine::clients_only()
             .map(Self::official)
             .unwrap_or(Self::NEUTRAL)
     }
 
-    /// The official reason naming `origin`'s host (`https://example.org/path` gives
-    /// `example.org`); an origin with no host stays neutral.
-    pub fn official(origin: &'static str) -> Self {
+    /// The official reason naming `clients_only`'s origin host (`https://example.org/path`
+    /// gives `example.org`); an origin with no host stays neutral.
+    pub fn official(clients_only: sunrise_hooks::ClientsOnly) -> Self {
+        let origin = clients_only.origin;
         let host = origin
             .split_once("://")
             .map_or(origin, |(_, without_scheme)| without_scheme);
@@ -316,7 +318,11 @@ impl ClientsOnlyReason {
         if host.is_empty() {
             Self::NEUTRAL
         } else {
-            Self::Official { host }
+            Self::Official {
+                host,
+                key: clients_only.key,
+                fallback: clients_only.fallback,
+            }
         }
     }
 
@@ -329,11 +335,11 @@ impl ClientsOnlyReason {
             Self::Neutral => {
                 Text::translate_with_fallback(CLIENTS_ONLY_NEUTRAL_KEY, CLIENTS_ONLY_REASON, &[])
             }
-            Self::Official { host } => Text::translate_with_fallback(
-                CLIENTS_ONLY_KEY,
-                CLIENTS_ONLY_ENGLISH,
-                &[Text::literal(host)],
-            ),
+            Self::Official {
+                host,
+                key,
+                fallback,
+            } => Text::translate_with_fallback(key, fallback, &[Text::literal(host)]),
         }
     }
 }
@@ -1411,12 +1417,16 @@ mod tests {
     use super::*;
     use std::{io::Read, time::Instant};
 
-    /// A hook that answers an official origin; [`ORIGIN_ASKS`] counts the times it was asked.
+    /// A hook that answers an official reason; [`ORIGIN_ASKS`] counts the times it was asked.
     struct Origin(&'static str);
     impl sunrise_hooks::Hooks for Origin {
-        fn clients_only_origin(&self) -> Option<&'static str> {
+        fn clients_only(&self) -> Option<sunrise_hooks::ClientsOnly> {
             ORIGIN_ASKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Some(self.0)
+            Some(sunrise_hooks::ClientsOnly {
+                origin: self.0,
+                key: "first.example.clients_only",
+                fallback: "This server is for the first client: %s",
+            })
         }
     }
     static ORIGIN_ASKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -1425,6 +1435,29 @@ mod tests {
     /// Implements nothing: registered only to show the registry stayed open.
     struct Silent;
     impl sunrise_hooks::Hooks for Silent {}
+
+    /// Runs this case alone in a child test binary: registering seals the process-wide list, and
+    /// libtest keeps running the other cases in the parent process.
+    fn in_own_process(name: &str, body: impl FnOnce()) {
+        const OWN_PROCESS: &str = "SUNRISE_TEST_OWN_PROCESS";
+        if std::env::var_os(OWN_PROCESS).is_some_and(|v| v == name) {
+            return body();
+        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([name, "--exact", "--include-ignored", "--test-threads=1"])
+            .env(OWN_PROCESS, name)
+            .output()
+            .unwrap();
+        let report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            out.status.success() && report.contains("test result: ok. 1 passed;"),
+            "{name} failed in its own process:\n{report}"
+        );
+    }
 
     #[test]
     fn a_handshake_wait_ends_when_its_connection_closes_or_the_server_stops() {
@@ -1503,54 +1536,67 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn lan_and_loopback_configs_use_the_neutral_reason_without_asking_the_hooks() {
-        // The only unit test in this binary that registers: the registry is process-wide, as in
-        // the game (sunrise-hooks' own test registers too, in its own binary).
-        sunrise_hooks::register(&FIRST_ORIGIN).unwrap();
-        sunrise_hooks::register(&SECOND_ORIGIN).unwrap();
-        let lan = NetConfig::lan(0, "reason".into(), 1);
-        let loopback = NetConfig::loopback(0, "reason".into(), 1);
-        for config in [&lan, &loopback] {
-            assert_eq!(config.clients_only_reason, ClientsOnlyReason::NEUTRAL);
-            let text = config.clients_only_reason.text().component();
-            assert_eq!(text["translate"], "sunrise.server.clients_only.neutral");
-            assert_eq!(text["fallback"], CLIENTS_ONLY_REASON);
-        }
-        assert_eq!(
-            ORIGIN_ASKS.load(std::sync::atomic::Ordering::SeqCst),
-            0,
-            "constructing a LAN or loopback config asked the hooks"
-        );
-        // Neither sealed the registry: registering after building them still succeeds.
-        sunrise_hooks::register(&Silent).unwrap();
-        // Resolving is dedicated setup's job, and the first provider wins.
-        let official = ClientsOnlyReason::from_hooks();
-        assert_eq!(
-            official,
-            ClientsOnlyReason::Official {
-                host: "first.example"
-            }
-        );
-        assert_eq!(
-            ORIGIN_ASKS.load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "only the first provider should answer"
-        );
-        let text = official.text().component();
-        assert_eq!(text["translate"], "sunrise.server.clients_only");
-        assert_eq!(text["fallback"], CLIENTS_ONLY_ENGLISH);
-        assert_eq!(text["with"][0]["text"], "first.example");
-        // An injected reason still drives a config, with the scheme dropped from its host.
-        let injected = NetConfig::lan_with_reason(
-            0,
-            "reason".into(),
-            1,
-            ClientsOnlyReason::official("https://injected.example"),
-        );
-        assert_eq!(
-            injected.clients_only_reason,
-            ClientsOnlyReason::Official {
-                host: "injected.example"
-            }
+        in_own_process(
+            "lan::tests::lan_and_loopback_configs_use_the_neutral_reason_without_asking_the_hooks",
+            || {
+                // The only unit test in this binary that registers: the registry is process-wide, as in
+                // the game (sunrise-hooks' own test registers too, in its own binary).
+                sunrise_hooks::register(&FIRST_ORIGIN).unwrap();
+                sunrise_hooks::register(&SECOND_ORIGIN).unwrap();
+                let lan = NetConfig::lan(0, "reason".into(), 1);
+                let loopback = NetConfig::loopback(0, "reason".into(), 1);
+                for config in [&lan, &loopback] {
+                    assert_eq!(config.clients_only_reason, ClientsOnlyReason::NEUTRAL);
+                    let text = config.clients_only_reason.text().component();
+                    assert_eq!(text["translate"], "sunrise.server.clients_only.neutral");
+                    assert_eq!(text["fallback"], CLIENTS_ONLY_REASON);
+                }
+                assert_eq!(
+                    ORIGIN_ASKS.load(std::sync::atomic::Ordering::SeqCst),
+                    0,
+                    "constructing a LAN or loopback config asked the hooks"
+                );
+                // Neither sealed the registry: registering after building them still succeeds.
+                sunrise_hooks::register(&Silent).unwrap();
+                // Resolving is dedicated setup's job, and the first provider wins.
+                let official = ClientsOnlyReason::from_hooks();
+                assert_eq!(
+                    official,
+                    ClientsOnlyReason::Official {
+                        host: "first.example",
+                        key: "first.example.clients_only",
+                        fallback: "This server is for the first client: %s",
+                    }
+                );
+                assert_eq!(
+                    ORIGIN_ASKS.load(std::sync::atomic::Ordering::SeqCst),
+                    1,
+                    "only the first provider should answer"
+                );
+                let text = official.text().component();
+                assert_eq!(text["translate"], "first.example.clients_only");
+                assert_eq!(text["fallback"], "This server is for the first client: %s");
+                assert_eq!(text["with"][0]["text"], "first.example");
+                // An injected reason still drives a config, with the scheme dropped from its host.
+                let injected = NetConfig::lan_with_reason(
+                    0,
+                    "reason".into(),
+                    1,
+                    ClientsOnlyReason::official(sunrise_hooks::ClientsOnly {
+                        origin: "https://injected.example",
+                        key: "injected.clients_only",
+                        fallback: "Injected: %s",
+                    }),
+                );
+                assert_eq!(
+                    injected.clients_only_reason,
+                    ClientsOnlyReason::Official {
+                        host: "injected.example",
+                        key: "injected.clients_only",
+                        fallback: "Injected: %s",
+                    }
+                );
+            },
         );
     }
 

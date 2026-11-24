@@ -64,13 +64,13 @@ def bot(bins, port, out, name, *extra):
     return json.loads(report.read_text())['per_bot'][0]
 
 
-def server(bins, exe, folder, out, name, extra):
+def server(bins, folder, out, name, extra, exe=None):
     folder.mkdir(parents=True)
     port = lab.free_port()
     props = dict(PROPERTIES, **extra, **{'server-port': str(port)})
     (folder / 'server.properties').write_text(''.join(f'{k}={v}\n' for k, v in props.items()))
     (folder / 'eula.txt').write_text('eula=true\n')
-    command = [exe, '--resources', lab.RESOURCES, '--dedicated', '--nogui']
+    command = [exe or bins / PLAIN, '--resources', lab.RESOURCES, '--dedicated', '--nogui']
     s = Server(command, folder, out / f'{name}.log')
     s.wait_for(DONE, 300)
     return s, port
@@ -82,7 +82,7 @@ def joined(entry):
 
 def check_off(bins, exe, tag, scratch, out):
     """With the key off both builds let a client without a brand in, as vanilla does."""
-    s, port = server(bins, exe, scratch / f'{tag}-off', out, f'{tag}-off', {})
+    s, port = server(bins, scratch / f'{tag}-off', out, f'{tag}-off', {}, exe=exe)
     try:
         plain = bot(bins, port, out, f'{tag}Plain')
     finally:
@@ -94,8 +94,8 @@ def check_off(bins, exe, tag, scratch, out):
 
 def check_on(bins, exe, tag, reason, scratch, out):
     """With the key on both builds turn away other brands with their own reason, wire and console."""
-    s, port = server(bins, exe, scratch / f'{tag}-on', out, f'{tag}-on',
-                     {'sunrise-clients-only': 'true'})
+    s, port = server(bins, scratch / f'{tag}-on', out, f'{tag}-on',
+                     {'sunrise-clients-only': 'true'}, exe=exe)
     try:
         results = {name: bot(bins, port, out, f'{tag}{name}', *extra) for name, extra in
                    [('None', ()), ('Vanilla', ('--brand', 'vanilla')), ('Sunrise', ('--brand', 'sunrise'))]}
