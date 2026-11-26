@@ -16,6 +16,7 @@ use super::scan::{QUALIFIERS, STORAGE, significant};
 use super::{Error, GbuffersInputs, Program, Target};
 use crate::Preprocessed;
 use crate::macros::lex;
+use crate::preprocess::check_line_count;
 
 /// How a geometry program's vertex invocations reach their triangle's vertices.
 #[derive(Clone, Debug, Default)]
@@ -30,7 +31,8 @@ pub struct GeometryInputs {
 }
 
 /// Translates `vertex`, `geometry` and `fragment` (a shadow program): the program, and how many
-/// triangles the geometry stage can emit (the instances to draw).
+/// triangles the geometry stage can emit (the instances to draw). A fold that cannot keep a
+/// stage's line origins is refused at that stage's file.
 pub fn translate_geometry(
     vertex: &Preprocessed,
     geometry: &Preprocessed,
@@ -259,6 +261,7 @@ fn classify(tokens: &[&str], range: std::ops::Range<usize>) -> Statement {
 }
 
 /// The combined vertex stage's source, and the triangles the geometry stage can emit.
+/// Each rewritten stage must still match its own source map before it can join the fold.
 fn combine(
     vertex: &Preprocessed,
     geometry: &Preprocessed,
@@ -482,11 +485,9 @@ fn combine(
     main.push_str(&result);
     main.push_str("}\n");
 
-    // The source, lines mapped: ours (no file), the geometry stage, ours, the vertex stage, ours.
-    let mut files = geometry.files().to_vec();
-    let offset = files.len();
-    files.extend(vertex.files().iter().cloned());
-    let (mut code, mut lines) = (String::new(), Vec::new());
+    // Map the generated lines to the stage without an authored line number. Map each rewritten
+    // stage separately: a dropped vertex line must not cancel an added geometry line.
+    let (mut code, mut lines, mut files) = (String::new(), Vec::new(), Vec::new());
     let ours = |code: &mut String, lines: &mut Vec<crate::Origin>, text: &str| {
         for l in text.lines() {
             code.push_str(l);
@@ -494,20 +495,31 @@ fn combine(
             lines.push(crate::Origin::default());
         }
     };
-    ours(&mut code, &mut lines, &head);
-    code.push_str(&gs_text.concat());
-    code.push('\n');
-    lines.extend(geometry.lines().iter().copied());
-    ours(&mut code, &mut lines, &emit);
-    code.push_str(&vs_text.concat());
-    code.push('\n');
-    lines.extend(vertex.lines().iter().map(|o| crate::Origin {
-        file: o.file + offset,
-        line: o.line,
-    }));
+    for (kind, stage, text, before) in [
+        ("geometry", geometry, gs_text, head),
+        ("vertex", vertex, vs_text, emit),
+    ] {
+        let text = text.concat();
+        check_line_count(&text, stage.lines().len()).map_err(|message| {
+            vec![Error::new(
+                stage.file(),
+                0,
+                format!("{kind} stage: {message}"),
+            )]
+        })?;
+        let offset = files.len();
+        files.extend_from_slice(stage.files());
+        ours(&mut code, &mut lines, &before);
+        code.push_str(&text);
+        code.push('\n');
+        lines.extend(stage.lines().iter().map(|o| crate::Origin {
+            file: o.file + offset,
+            line: o.line,
+        }));
+    }
     ours(&mut code, &mut lines, &main);
-    let code = code.trim_end_matches('\n').to_owned();
-    lines.resize(code.split('\n').count(), crate::Origin::default());
+    // The final `}` line needs no separator after it.
+    code.pop();
     let mut out = Preprocessed::new(code, lines, files).map_err(error)?;
     out.version = geometry.version.clone().or(vertex.version.clone());
     // A strip of n vertices is n - 2 triangles: at most `max_vertices - 2`, whichever of the
@@ -524,6 +536,7 @@ fn writes(name: &str) -> bool {
 /// Calls that write images or buffers run for one invocation of a triangle only: as statements,
 /// `if (!hz_primary) {} else imageStore(...)`; in an expression the others read the value instead,
 /// `(hz_primary ? imageAtomicOr(i, p, v) : imageLoad(i, p).x)`, `(hz_primary ? atomicAdd(m, v) : m)`.
+/// Any line breaks in copied arguments stay only in the original call.
 fn once(text: &mut [String], tokens: &[&str]) {
     for (i, &t) in tokens.iter().enumerate() {
         let open = (i + 1..tokens.len()).find(|&j| significant(tokens[j]));
@@ -566,7 +579,7 @@ fn once(text: &mut [String], tokens: &[&str]) {
             continue;
         };
         text[i] = format!("(hz_primary ? {t}");
-        text[close] = format!(") : {read})");
+        text[close] = format!(") : {})", read.replace('\n', " "));
     }
 }
 
@@ -585,7 +598,8 @@ fn blank(text: &mut [String], range: std::ops::Range<usize>) {
     }
 }
 
-/// Removes a declaration's `layout(...)`, storage and interpolation words: a plain global.
+/// Removes a declaration's `layout(...)`, storage and interpolation words to make a plain
+/// global without moving later lines.
 fn strip_storage(text: &mut [String], tokens: &[&str], range: std::ops::Range<usize>) {
     let mut in_layout = false;
     for i in range {
@@ -611,10 +625,11 @@ fn strip_storage(text: &mut [String], tokens: &[&str], range: std::ops::Range<us
                     | "invariant"
             )
         {
-            text[i] = if tokens[i].contains('\n') {
-                "\n".into()
-            } else {
+            let breaks = tokens[i].matches('\n').count();
+            text[i] = if breaks == 0 {
                 " ".into()
+            } else {
+                "\n".repeat(breaks)
             };
         }
     }
@@ -880,6 +895,52 @@ mod tests {
         let fsh = "#version 430\nuniform float far;\nin float gDepth;\n\
                    void main() {\n    gl_FragData[0] = vec4(gDepth / far);\n}\n";
         fold(vsh, gsh, fsh).unwrap_or_else(|e| panic!("{e:?}"));
+    }
+
+    #[test]
+    fn multiline_atomic_arguments_keep_the_folded_error_origins() {
+        let pack = Pack::from_zip_bytes(
+            "P.zip",
+            zip(&[
+                (
+                    "shaders/shadow.gsh",
+                    "layout(triangles) in;\nlayout(triangle_strip, max_vertices = 3) out;\n\
+                     #include \"lib/emit.glsl\"\nvoid main() { emit(); }",
+                ),
+                (
+                    "shaders/lib/emit.glsl",
+                    "layout(std430, binding = 2) buffer Counters { int counter; };\n\
+                     void emit() {\n    int old = atomicAdd(\n        counter, 1);\n    bad_geometry;\n}",
+                ),
+            ]),
+        )
+        .unwrap();
+        let geometry = preprocess(&pack, "shadow.gsh", &Macros::standard());
+        let vertex = Preprocessed::from_source("shadow.vsh", "void main() { bad_vertex; }");
+        let (folded, _) = combine(&vertex, &geometry, &GeometryInputs::default()).unwrap();
+        let tokens = lex(folded.code());
+        for (name, expected) in [
+            ("bad_geometry", ("lib/emit.glsl", 5)),
+            ("bad_vertex", ("shadow.vsh", 1)),
+        ] {
+            let at = tokens.iter().position(|&token| token == name).unwrap();
+            let error = crate::translate::scan::error_at_token(&folded, &tokens, at, name);
+            assert_eq!((error.file.as_str(), error.line), expected);
+        }
+    }
+
+    #[test]
+    fn multiline_vertex_layout_keeps_the_next_error_origin() {
+        let vertex = Preprocessed::from_source(
+            "shadow.vsh",
+            "layout(\n\n    location = 0) in vec3 position;\nvoid main() { bad_vertex; }",
+        );
+        let geometry = Preprocessed::from_source("shadow.gsh", PASS_GSH);
+        let (folded, _) = combine(&vertex, &geometry, &GeometryInputs::default()).unwrap();
+        let tokens = lex(folded.code());
+        let at = tokens.iter().position(|&token| token == "bad_vertex").unwrap();
+        let error = crate::translate::scan::error_at_token(&folded, &tokens, at, "bad_vertex");
+        assert_eq!((error.file.as_str(), error.line), ("shadow.vsh", 4));
     }
 
     #[test]
