@@ -63,13 +63,7 @@ impl Preprocessed {
     /// Refuses a `lines` that is not one origin per line of `code`, or an origin whose file is
     /// not in `files`.
     pub fn new(code: String, lines: Vec<Origin>, files: Vec<String>) -> Result<Self, String> {
-        let expected = code.split('\n').count();
-        if lines.len() != expected {
-            return Err(format!(
-                "{} line origins for {expected} lines of code",
-                lines.len()
-            ));
-        }
+        check_line_count(&code, lines.len())?;
         if let Some(origin) = lines.iter().find(|o| o.file >= files.len()) {
             return Err(format!(
                 "a line of file {} when there are {} files",
@@ -142,14 +136,28 @@ impl Preprocessed {
     }
 
     /// This stage with `code` in place of its own, for a rewrite that keeps its lines where they
-    /// are. A line the rewrite added at the end gets [`Origin::default`], and one it removed
-    /// loses its origin.
-    pub(crate) fn with_code(&self, code: String) -> Self {
-        let mut out = self.clone();
-        out.lines
-            .resize(code.split('\n').count(), Origin::default());
-        out.code = code;
-        out
+    /// are. Refuses a different line count at the stage file, without changing the source map.
+    pub(crate) fn with_code(&self, code: String) -> Result<Self, crate::Error> {
+        check_line_count(&code, self.lines.len())
+            .map_err(|message| crate::Error::new(self.file(), 0, message))?;
+        Ok(Self {
+            code,
+            lines: self.lines.clone(),
+            files: self.files.clone(),
+            version: self.version.clone(),
+            extensions: self.extensions.clone(),
+            comments: self.comments.clone(),
+            diagnostics: self.diagnostics.clone(),
+            warnings: self.warnings.clone(),
+        })
+    }
+
+    /// Records a fatal error about the stage as a whole, without assigning it an authored line.
+    pub(crate) fn refuse(&mut self, message: String) {
+        self.diagnostics.push(Diagnostic {
+            origin: Origin::default(),
+            message,
+        });
     }
 
     /// This stage with `declaration` after its leading directives (`#version`, `#extension`...).
@@ -206,6 +214,15 @@ impl Preprocessed {
             None => crate::Error::new(self.file(), 0, message),
         }
     }
+}
+
+/// Refuses text that cannot be paired, line by line, with the given number of origins.
+pub(crate) fn check_line_count(code: &str, origins: usize) -> Result<(), String> {
+    let expected = code.split('\n').count();
+    if origins != expected {
+        return Err(format!("{origins} line origins for {expected} lines of code"));
+    }
+    Ok(())
 }
 
 /// Runs the preprocessor on the stage file `path` of `pack` with `macros` defined.
@@ -985,6 +1002,19 @@ mod tests {
                 ("float after;", "final.fsh:2".into()),
             ]
         );
+    }
+
+    #[test]
+    fn a_line_preserving_rewrite_refuses_added_or_removed_lines() {
+        let stage = Preprocessed::from_source("stage.fsh", "one\ntwo");
+        for (code, message) in [
+            ("one", "2 line origins for 1 lines of code"),
+            ("one\ntwo\n", "2 line origins for 3 lines of code"),
+        ] {
+            let err = stage.with_code(code.to_owned()).unwrap_err();
+            assert_eq!((err.file.as_str(), err.line), ("stage.fsh", 0));
+            assert_eq!(err.message, message);
+        }
     }
 
     #[test]

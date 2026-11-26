@@ -1700,9 +1700,10 @@ impl Loader<'_> {
     }
 
     /// Stage file `path` through the preprocessor; the pack's images declared without a format
-    /// (GLSL lets a write-only image omit it) get the one `image.*` gives them.
+    /// (GLSL lets a write-only image omit it) get the one `image.*` gives them. A rewrite that
+    /// changes the line count is recorded as a refusal on the stage file.
     fn preprocess(&self, path: &str) -> Preprocessed {
-        let pp = preprocess(self.pack, path, self.macros);
+        let mut pp = preprocess(self.pack, path, self.macros);
         if self.post.images.is_empty() || !pp.code().contains("image") {
             return pp;
         }
@@ -1742,7 +1743,13 @@ impl Loader<'_> {
                 }
             })
             .collect();
-        pp.with_code(lines.join("\n"))
+        match pp.with_code(lines.join("\n")) {
+            Ok(out) => out,
+            Err(error) => {
+                pp.refuse(error.message);
+                pp
+            }
+        }
     }
 
     /// A program with a geometry stage, folded into its vertex stage.

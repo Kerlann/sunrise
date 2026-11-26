@@ -14,6 +14,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
+use super::Error;
 use super::scan::{is_ident, significant};
 use crate::Preprocessed;
 use crate::macros::lex;
@@ -93,9 +94,10 @@ fn std430(ty: &str) -> Option<(u32, u32)> {
 }
 
 /// `pp` with its shared and buffer vectors that atomic functions use by component rewritten.
-pub(super) fn rewrite(pp: &Preprocessed) -> Option<Preprocessed> {
+/// Refuses a rewrite that cannot keep the original line map.
+pub(super) fn rewrite(pp: &Preprocessed) -> Result<Option<Preprocessed>, Error> {
     if !ATOMICS.iter().any(|a| pp.code().contains(a)) {
-        return None;
+        return Ok(None);
     }
     let tokens = lex(pp.code());
     let next = |i: usize| (i + 1..tokens.len()).find(|&j| significant(tokens[j]));
@@ -104,7 +106,8 @@ pub(super) fn rewrite(pp: &Preprocessed) -> Option<Preprocessed> {
     let bracket = |open: usize| -> Option<(String, Option<usize>)> {
         let close = (open..tokens.len()).find(|&j| tokens[j] == "]")?;
         let size: String = tokens[open + 1..close].concat();
-        Some((size.trim().to_owned(), next(close)))
+        // The original line breaks stay in the blanked declaration; don't insert them again.
+        Some((size.trim().replace('\n', " "), next(close)))
     };
     // What an atomic function takes a component of: its first name, and the name after a `.`.
     let mut used: Vec<(&str, Option<&str>)> = Vec::new();
@@ -409,7 +412,7 @@ pub(super) fn rewrite(pp: &Preprocessed) -> Option<Preprocessed> {
         }
     }
     if splits.is_empty() {
-        return None;
+        return Ok(None);
     }
     let mut out: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
     for (start, end, decl) in &decls {
@@ -464,7 +467,8 @@ pub(super) fn rewrite(pp: &Preprocessed) -> Option<Preprocessed> {
                 i = name_end + 1;
                 continue;
             }
-            // `name[k]`: the index's tokens, written back as they are.
+            // `name[k]`: copy the index to the replacement without the line breaks, which
+            // stay where they were when the original tokens are blanked.
             let Some(open) = next(name_end).filter(|&j| tokens[j] == "[") else {
                 i += 1;
                 continue;
@@ -484,7 +488,7 @@ pub(super) fn rewrite(pp: &Preprocessed) -> Option<Preprocessed> {
                     _ => {}
                 }
             }
-            let index: String = tokens[open + 1..close].concat();
+            let index = tokens[open + 1..close].concat().replace('\n', " ");
             base = format!("{base}[{index}]");
             // GLSL won't turn a `uint` index into the `int` the getter and setter take.
             getter_args = format!("int({index})");
@@ -566,7 +570,7 @@ pub(super) fn rewrite(pp: &Preprocessed) -> Option<Preprocessed> {
         }
         i = end + 1;
     }
-    Some(pp.with_code(out.concat()))
+    pp.with_code(out.concat()).map(Some)
 }
 
 /// `hz_get_<key>` and `hz_set_<key>`: a whole vector of `split` (of an array: the `k`th),
@@ -601,7 +605,7 @@ mod tests {
 
     fn rewritten(code: &str) -> String {
         let pp = Preprocessed::from_source("", code);
-        let out = rewrite(&pp).expect("rewritten").code().to_owned();
+        let out = rewrite(&pp).unwrap().expect("rewritten").code().to_owned();
         assert_eq!(out.lines().count(), code.lines().count(), "{out}");
         out
     }
@@ -635,10 +639,33 @@ mod tests {
     }
 
     #[test]
+    fn multiline_array_sizes_and_indices_do_not_move_later_origins() {
+        let pp = Preprocessed::from_source(
+            "setup.csh",
+            "shared ivec2 values[1 +\n2];\nvoid main() {\n    atomicAdd(values[0 +\n1].x, 1);\n    int after = 0;\n}",
+        );
+        let out = rewrite(&pp).unwrap().expect("rewritten");
+        let after = out
+            .code()
+            .lines()
+            .position(|line| line.contains("int after"))
+            .unwrap();
+        assert_eq!(out.locate(after), "setup.csh:6");
+    }
+
+    #[test]
     fn untouched_without_atomics_on_a_component() {
         let pp = |code: &str| Preprocessed::from_source("", code);
-        assert!(rewrite(&pp("shared ivec4 v;\nvoid f() { v.x = 1; }\n")).is_none());
-        assert!(rewrite(&pp("shared int n;\nvoid f() { atomicAdd(n, 1); }\n")).is_none());
+        assert!(
+            rewrite(&pp("shared ivec4 v;\nvoid f() { v.x = 1; }\n"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            rewrite(&pp("shared int n;\nvoid f() { atomicAdd(n, 1); }\n"))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -691,6 +718,7 @@ mod tests {
         };
         // The control: a known offset splits the vector.
         let out = rewrite(&block("float small[4];"))
+            .unwrap()
             .expect("rewritten")
             .code()
             .to_owned();
@@ -701,7 +729,7 @@ mod tests {
             "float a[1000000000]; float c[1000000000];",
             "float a[1073741823];",
         ] {
-            assert!(rewrite(&block(members)).is_none(), "{members}");
+            assert!(rewrite(&block(members)).unwrap().is_none(), "{members}");
         }
     }
 
@@ -711,6 +739,6 @@ mod tests {
             "",
             "shared struct S { ivec3 lo; } sh;\nvoid f(S s) { atomicMin(sh.lo.x, 1); }\n",
         );
-        assert!(rewrite(&pp).is_none());
+        assert!(rewrite(&pp).unwrap().is_none());
     }
 }
