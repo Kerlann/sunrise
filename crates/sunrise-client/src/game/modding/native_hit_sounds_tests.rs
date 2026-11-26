@@ -142,6 +142,11 @@ fn check(attacker: i32, expected_at: [f64; 3], hit: impl FnOnce(&mut super::Game
             for id in [300, 301, 302] {
                 game.mobs.push(Mob::new(id, kind.clone(), Vec3::ZERO, 0.0));
             }
+            if attacker != 7 && !(300..=302).contains(&(attacker as u32)) {
+                // The level allocates unsigned ids; one above `i32::MAX` still names this body.
+                game.mobs
+                    .push(Mob::new(attacker as u32, kind.clone(), Vec3::ZERO, 0.0));
+            }
             let epoch = game.entity(7).unwrap().epoch();
             {
                 let mut handles = handles.lock().unwrap();
@@ -242,5 +247,23 @@ fn a_cancelled_mob_hit_on_a_mob_plays_sounds_and_draws_the_attacking_mobs_random
 fn a_cancelled_mob_hit_on_the_player_plays_sounds_and_draws_the_attacking_mobs_random() {
     check(302, [0.0, 0.0, 0.0], |game| {
         game.mob_hits_player_caused(4.0, [0.0, 0.0, 0.0], "minecraft:mob_attack", Some(302));
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn a_high_bit_mob_id_still_reaches_the_hook_view() {
+    // The level's ids are unsigned; the hit view must not drop one whose high bit an `i32`
+    // cast would sign. The listener still draws the attacker's random and plays its sound.
+    let attacker = 0x8000_0002u32 as i32;
+    check(attacker, [0.0, 0.0, 0.0], |game| {
+        let source = Damage {
+            kind: DamageKind::MobAttack,
+            attacker: Some(Who::Mob(attacker as u32)),
+            from: Some([0.0, 0.0, 0.0]),
+            direct: None,
+            attacker_species: None,
+        };
+        assert!(!game.mob_hits_mob(300, 4.0, source));
     });
 }

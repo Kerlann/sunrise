@@ -9,18 +9,9 @@ use mod_api::__private::LivingParty;
 use mod_api::{ActiveEffect, EquipmentSlot};
 use std::sync::Arc;
 use sunrise_client::health::{FixedBody, LivingBody, PlayerBody, PlayerHealthRead};
-use sunrise_client::mobs::Mob;
 use sunrise_client::mobs::finalize::{self, EquipmentRead};
-use sunrise_entity_data::Hurtable;
 use sunrise_world::attribute_map::ValueKind;
 use sunrise_world::attributes::entity::Catalog;
-
-/// The simulator body behind a lent living body, for the reads only it can answer.
-fn mob(m: &dyn Hurtable) -> &Mob {
-    (m as &dyn std::any::Any)
-        .downcast_ref::<Mob>()
-        .expect("mob body")
-}
 
 /// `LivingEntity.getHealth`.
 pub(super) fn body_health(body: LivingBody<'_>) -> Option<f32> {
@@ -57,7 +48,7 @@ pub(super) fn body_absorption(body: LivingBody<'_>) -> Option<f32> {
 /// dragon its 200) until live attribute maps cover them.
 pub(super) fn body_max_health(body: LivingBody<'_>) -> Option<f32> {
     match body {
-        LivingBody::Mob(m) => Some(mob(m).attrs.max_health),
+        LivingBody::Mob(m) => Some(m.attrs.max_health),
         LivingBody::Player(p) => {
             player_attribute(p, "minecraft:max_health", ValueKind::Computed).map(|max| max as f32)
         }
@@ -76,15 +67,12 @@ pub(super) fn body_attribute(
     kind: ValueKind,
 ) -> Option<f64> {
     match body {
-        LivingBody::Mob(m) => {
-            let m = mob(m);
-            m.extra.live.read(catalog, &m.kind.id, name, kind, || {
-                sunrise_client::entity_nbt::attribute_entries(m)
-                    .into_iter()
-                    .map(|(_, entry)| entry)
-                    .collect()
-            })
-        }
+        LivingBody::Mob(m) => m.extra.live.read(catalog, &m.kind.id, name, kind, || {
+            sunrise_client::entity_nbt::attribute_entries(m)
+                .into_iter()
+                .map(|(_, entry)| entry)
+                .collect()
+        }),
         LivingBody::Player(p) => player_attribute(p, name, kind),
         LivingBody::Stand(s) => s
             .live
@@ -107,7 +95,6 @@ fn player_attribute(player: PlayerBody<'_>, name: &str, kind: ValueKind) -> Opti
 pub(super) fn body_effect(body: LivingBody<'_>, index: usize) -> Option<ActiveEffect> {
     match body {
         LivingBody::Mob(m) => {
-            let m = mob(m);
             let e = m
                 .extra
                 .effects
@@ -123,10 +110,7 @@ pub(super) fn body_effect(body: LivingBody<'_>, index: usize) -> Option<ActiveEf
 /// `LivingEntity.getActiveEffects`, in the order their store keeps them.
 pub(super) fn body_effects(body: LivingBody<'_>) -> Option<Vec<ActiveEffect>> {
     match body {
-        LivingBody::Mob(m) => {
-            let m = mob(m);
-            Some(m.extra.effects.iter().map(|e| mob_effect(m, e)).collect())
-        }
+        LivingBody::Mob(m) => Some(m.extra.effects.iter().map(|e| mob_effect(m, e)).collect()),
         LivingBody::Player(p) => Some(p.effects?.list.iter().map(active_effect).collect()),
         LivingBody::Stand(_) | LivingBody::Dragon(_) => None,
     }
@@ -135,13 +119,11 @@ pub(super) fn body_effects(body: LivingBody<'_>) -> Option<Vec<ActiveEffect>> {
 /// `LivingEntity.hasEffect` of the effect at registry index `index`.
 pub(super) fn body_potion_affected(body: LivingBody<'_>, index: usize) -> bool {
     match body {
-        LivingBody::Mob(m) => {
-            let m = mob(m);
-            m.extra
-                .effects
-                .iter()
-                .any(|e| e.registry_index == Some(index))
-        }
+        LivingBody::Mob(m) => m
+            .extra
+            .effects
+            .iter()
+            .any(|e| e.registry_index == Some(index)),
         LivingBody::Player(p) => p
             .effects
             .is_some_and(|effects| effects.get_registered(index).is_some()),
@@ -155,7 +137,7 @@ pub(super) fn body_equipment(
     slot: EquipmentSlot,
 ) -> Option<EquipmentRead<'_>> {
     let stack = match body {
-        LivingBody::Mob(m) => return finalize::equipment_slot(mob(m), slot),
+        LivingBody::Mob(m) => return finalize::equipment_slot(m, slot),
         LivingBody::Player(p) => *p.equipment.get(slot as usize)?,
         LivingBody::Stand(s) | LivingBody::Dragon(s) => s.equipment.get(slot as usize),
     }?;
@@ -166,7 +148,7 @@ pub(super) fn body_equipment(
 /// `entity_kind` and a hit's view both resolve.
 pub(super) fn body_kind_name<'a>(body: LivingBody<'a>) -> &'a str {
     match body {
-        LivingBody::Mob(m) => &mob(m).kind.id,
+        LivingBody::Mob(m) => &m.kind.id,
         LivingBody::Player(_) => PLAYER,
         LivingBody::Stand(_) => ARMOR_STAND,
         LivingBody::Dragon(_) => ENDER_DRAGON,
@@ -186,7 +168,7 @@ pub(super) fn body_kind(
     keys: sunrise_client::health::LivingTypeKeys,
 ) -> Option<mod_api::EntityTypeKey> {
     match body {
-        LivingBody::Mob(m) => mob(m).kind.type_key,
+        LivingBody::Mob(m) => m.kind.type_key,
         LivingBody::Player(_) => keys.player,
         LivingBody::Stand(_) => keys.armor_stand,
         LivingBody::Dragon(_) => keys.ender_dragon,
@@ -197,7 +179,7 @@ pub(super) fn body_kind(
 /// any other entity's by id.
 pub(super) fn body_holder(body: LivingBody<'_>) -> Option<mod_api::Holder> {
     Some(match body {
-        LivingBody::Mob(m) => mod_api::Holder::Entity(m.id() as u32),
+        LivingBody::Mob(m) => mod_api::Holder::Entity(m.id()),
         LivingBody::Player(p) => mod_api::Holder::Player(p.uuid?),
         LivingBody::Stand(s) | LivingBody::Dragon(s) => mod_api::Holder::Entity(s.id),
     })
@@ -206,7 +188,7 @@ pub(super) fn body_holder(body: LivingBody<'_>) -> Option<mod_api::Holder> {
 /// `Mob.isNoAi`: None for anything but a mob.
 pub(super) fn body_no_ai(body: LivingBody<'_>) -> Option<bool> {
     match body {
-        LivingBody::Mob(m) => Some(mob(m).no_ai),
+        LivingBody::Mob(m) => Some(m.no_ai),
         _ => None,
     }
 }
@@ -244,7 +226,7 @@ pub(super) struct BodyReads<'a> {
 impl mod_api::__private::LivingReads for BodyReads<'_> {
     fn living_entity(&self, _: LivingParty) -> Option<mod_api::EntityRef> {
         let id = match self.body {
-            LivingBody::Mob(m) => u32::try_from(m.id()).ok()?,
+            LivingBody::Mob(m) => m.id(),
             LivingBody::Player(p) => u32::try_from(p.id).ok()?,
             LivingBody::Stand(s) | LivingBody::Dragon(s) => s.id,
         };
@@ -299,7 +281,7 @@ impl mod_api::__private::LivingReads for BodyReads<'_> {
 /// `dispatch` runs with it once its reads are built, and not at all where they cannot be (no
 /// open world names the entity). Called only behind the hook's subscription check.
 pub(crate) fn with_lent_view(
-    lend: sunrise_client::health::LivingLend<'_>,
+    lend: sunrise_client::mobs::LivingLend<'_>,
     dispatch: impl FnOnce(&mod_api::LivingView<'_>),
 ) {
     let Some(reads) = (lend.reads)() else {
@@ -372,9 +354,9 @@ impl Game<'_> {
                 body.attachments = None;
                 LivingBody::Player(body)
             }
-            Target::Mob(id) => LivingBody::Mob(
-                self.mobs.iter().find(|m| m.id == id && !m.removed)? as &dyn Hurtable,
-            ),
+            Target::Mob(id) => {
+                LivingBody::Mob(self.mobs.iter().find(|m| m.id == id && !m.removed)?)
+            }
             Target::Stand(id) => stand_body(self.armor_stands.iter().find(|a| a.id == id)?),
             Target::Dragon(id) => dragon_body(self.dragon.as_ref().filter(|d| d.id == id)?),
             _ => return None,

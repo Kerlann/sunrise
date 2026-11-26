@@ -5,8 +5,8 @@
 mod integrate;
 mod player_init;
 use crate::{
-    Result, assets::Assets, collisions::SceneCollisions, health::LivingLend,
-    living_attributes::attribute_error, world::World,
+    Result, assets::Assets, collisions::SceneCollisions, living_attributes::attribute_error,
+    mobs::LivingLend, world::World,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},

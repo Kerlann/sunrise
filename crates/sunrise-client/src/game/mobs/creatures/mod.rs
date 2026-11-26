@@ -1818,15 +1818,9 @@ impl Game<'_> {
         while self
             .paused_mob_hurt
             .as_ref()
-            .and_then(|hit| hit.downcast_ref::<sunrise_client::mobs::PausedMobHurt>())
             .is_some_and(|hit| hit.victim == id && hit.join == join)
         {
-            let mut paused = *self
-                .paused_mob_hurt
-                .take()
-                .expect("matching paused hit")
-                .downcast::<sunrise_client::mobs::PausedMobHurt>()
-                .expect("matching paused hit");
+            let mut paused = *self.paused_mob_hurt.take().expect("matching paused hit");
             // Nested hits from this callback are independent of the suspended hit.
             self.mobs[index].release_hurt_pause();
             match paused.action {

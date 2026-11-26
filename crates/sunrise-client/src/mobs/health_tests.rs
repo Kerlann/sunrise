@@ -1,6 +1,5 @@
 //! The damage engine's tests, beside the mob body they build.
 
-use super::*;
 use crate::health::*;
 #[test]
 fn a_hook_can_refuse_one_damage_type_and_allow_another() {
@@ -356,7 +355,7 @@ fn set_hook() -> (crate::health::DamageHooks, fn(i32) -> Vec<(String, f32)>) {
             | Hurting::Dragon(e, s)
             | Hurting::ArmorStand(e, s)
             | Hurting::Entity(e, _, s) => (e, format!("{} {}", s.damage_type, s.causing)),
-            Hurting::Mob(mob, source) => (mob.id(), format!("{:?}", source.kind)),
+            Hurting::Mob(mob, source) => (mob.id as i32, format!("{:?}", source.kind)),
         };
         if !matches!(entity, 9001..=9005 | 9011..=9013) {
             return false;
@@ -496,7 +495,7 @@ fn set_knockback_hook() -> (
         let Hurting::Mob(mob, source) = pushed else {
             return false;
         };
-        let entity = mob.id();
+        let entity = mob.id as i32;
         if !(9101..=9106).contains(&entity) {
             return false;
         }

@@ -1985,7 +1985,7 @@ impl Mob {
         let mut speed = self.ai.speed;
         let side = w.side;
         let reads = || side.hit_reads();
-        let living = crate::health::LivingLend::mob(self, &reads);
+        let living = crate::mobs::LivingLend::mob(self, &reads);
         crate::motion::native_living_speed(w.loop_context, living, &mut speed);
         speed
     }
@@ -2002,7 +2002,7 @@ impl Mob {
             0.02
         };
         let reads = || side.hit_reads();
-        let living = crate::health::LivingLend::mob(self, &reads);
+        let living = crate::mobs::LivingLend::mob(self, &reads);
         crate::motion::native_living_flying_speed(context, living, &mut speed);
         speed
     }
@@ -2562,7 +2562,7 @@ impl Mob {
             + self.jump_boost_power();
         let side = w.side;
         let reads = || side.hit_reads();
-        let living = crate::health::LivingLend::mob(self, &reads);
+        let living = crate::mobs::LivingLend::mob(self, &reads);
         crate::motion::native_living_jump_power(w.loop_context, living, &mut power);
         power
     }

@@ -162,7 +162,7 @@ fn the_bridge_names_the_attacker_and_what_it_holds() {
         };
         let mut push = |pushed: Hurting<'_>, attack: &Attack| {
             let victim = match &pushed {
-                Hurting::Mob(mob, _) => mob.id(),
+                Hurting::Mob(mob, _) => mob.id as i32,
                 _ => 12,
             };
             let plan = game.prepare_knockback_credit(victim, None, game.combat.attack());

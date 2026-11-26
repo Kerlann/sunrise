@@ -1236,7 +1236,7 @@ impl Game<'_> {
                 if let Some(player) = self.player.as_ref() {
                     let mut cancel = false;
                     let reads = || crate::game::entity::hit_reads_of!(self);
-                    let healed = sunrise_client::health::LivingLend::player(
+                    let healed = sunrise_client::mobs::LivingLend::player(
                         player.entity_id,
                         &player.attributes,
                         &player.health.data,

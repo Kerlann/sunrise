@@ -1,11 +1,12 @@
 //! Hunger and regeneration over the resident player's actual health, damage,
 //! attribute and exhaustion storage. Starvation borrows the same FoodData that
 //! is mid-tick, preserving damage callbacks and the following timer reset.
+use crate::mobs::LivingLend;
 use crate::{
     Result,
     health::{
         Attributes, DamageLevel, Environment, HealthEvent, HealthResources, HealthRules, HitReads,
-        LivingLend, State, Updates,
+        State, Updates,
     },
     motion::{MotionEvent, PlayerMotion},
 };

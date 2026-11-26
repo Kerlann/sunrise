@@ -1299,7 +1299,8 @@ impl mod_api::HitHost for super::native_hooks::HitLevel<'_> {
         let Some((id, at, _)) = hit.entity(entity) else {
             return false;
         };
-        super::native_hooks::sound_id(sound) && hit.play(sound, at, source, volume, pitch, Some(id))
+        super::native_hooks::sound_id(sound)
+            && hit.play(sound, at, source, volume, pitch, Some(id as i32))
     }
     #[inline]
     fn lend_entity_random(&mut self, entity: mod_api::EntityRef, draw: mod_api::RandomDraw<'_>) {

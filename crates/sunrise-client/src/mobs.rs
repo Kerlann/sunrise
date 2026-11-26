@@ -55,7 +55,9 @@ pub mod item_break;
 pub mod keyframes;
 pub mod landing;
 pub mod leash;
+pub mod lend;
 pub mod living;
+pub use lend::{LendBody, LivingLend};
 pub mod llama;
 mod mob_slot;
 pub mod mod_behaviors;
@@ -2431,8 +2433,6 @@ include!("mobs/seen.rs");
 #[cfg(test)]
 #[path = "mobs/health_tests.rs"]
 mod health_tests;
-#[path = "mobs/hurt_body.rs"]
-mod hurt_body;
 #[path = "mobs/hurt_handoff.rs"]
 mod hurt_handoff;
 use hurt_handoff::{HurtStage, MobHurt, ReducedHurt};
@@ -4468,12 +4468,7 @@ impl Mob {
                 post,
             }));
         } else {
-            self.finish_hurt_before_post(
-                tail,
-                level
-                    .variants()
-                    .and_then(|v| v.downcast_ref::<crate::mobs::variants::VariantTables>()),
-            );
+            self.finish_hurt_before_post(tail, level.variants());
             // The last of `LivingEntity.hurtServer`: Post also runs for a hit taking no health.
             // A killing hit's owner runs it after die, including when death is vetoed.
             self.damage_completion = level.finish_damage(
@@ -4666,11 +4661,7 @@ impl Mob {
             && !self.is_invulnerable_to(&source);
         let hurt = self.damage(level, amount, source);
         if self.hurt_paused {
-            level
-                .paused_mob_hurt()
-                .downcast_mut::<PausedMobHurt>()
-                .expect("paused hit")
-                .direct_tail = Some((direct, cloud));
+            level.paused_mob_hurt().direct_tail = Some((direct, cloud));
         } else {
             self.finish_damage_by(hurt, &source, direct, cloud);
         }
@@ -5114,7 +5105,7 @@ impl Mob {
         }
     }
     /// `LivingEntity.heal`, with the native heal hook; `reads` is what the hook's view of the
-    /// mob needs beyond its body ([`LivingLend`](crate::health::LivingLend)).
+    /// mob needs beyond its body ([`LivingLend`](crate::mobs::LivingLend)).
     pub fn heal<'r>(
         &mut self,
         context: &LoopContext,
@@ -5123,7 +5114,7 @@ impl Mob {
     ) {
         let mut cancel = false;
         let lent = || reads();
-        let healed = crate::health::LivingLend::mob(self, &lent);
+        let healed = crate::mobs::LivingLend::mob(self, &lent);
         crate::hunger::native_living_heal(context, healed, &mut amount, &mut cancel);
         if !cancel && self.health > 0.0 {
             self.health = (self.health + amount).clamp(0.0, self.attrs.max_health);
@@ -8543,7 +8534,7 @@ mod live_damage_reduction_tests {
             let Hurting::Mob(mob, _) = hurting else {
                 return false;
             };
-            match mob.id() {
+            match mob.id as i32 {
                 // Negative reduction: increases damage taken, credits no dealt_absorbed.
                 4104 => container.add_reduction_modifier(
                     Reduction::Absorption,

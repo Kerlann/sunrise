@@ -9,10 +9,7 @@ use crate::{
 pub use mod_api::entity::health::{HurtSource, ShieldBlock, Victim};
 use std::{fs, io, path::Path};
 use sunrise_client_core::who::Who;
-use sunrise_entity_data::{
-    Hurtable,
-    damage::{Damage, DamageKind, NamedDamage},
-};
+use sunrise_entity_data::damage::{Damage, DamageKind, NamedDamage};
 use sunrise_world::{
     attributes::live::LiveAttributes,
     block_landing::LandingDamage,

@@ -17,8 +17,8 @@ pub struct EntityFields {
     pub yaw: f32,
     /// `Rotation`'s second float: `Entity.getXRot`, positive looking down.
     pub pitch: f32,
-    /// `FallDistance`: blocks fallen since the entity last landed.
-    pub fall_distance: f32,
+    /// `FallDistance`: blocks fallen since the entity last landed (vanilla stores a double).
+    pub fall_distance: f64,
     /// `Fire`: remaining fire ticks; negative while the entity is in fire but not burning.
     pub fire: i32,
     /// `Air`: remaining air ticks before drowning damage.

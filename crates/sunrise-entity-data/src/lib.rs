@@ -8,13 +8,9 @@
 //! - [`EntityFields`] is the record every entity's save starts from, and
 //!   [`HasEntityFields`] is how a simulator lends it to a codec (issue #2210's
 //!   `EntityFields`, wave 2.2);
-//! - [`Hurtable`] is what a damage site needs of the entity it hurts, without naming
-//!   the simulator's body type (wave 2.1).
 //!
 //! Nothing here holds a `World`, a `Game` or a renderer: the crate is portable.
 
 mod fields;
 pub use fields::{EntityFields, HasEntityFields};
 pub mod damage;
-mod hurt;
-pub use hurt::Hurtable;
