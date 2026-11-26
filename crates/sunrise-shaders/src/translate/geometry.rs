@@ -938,7 +938,10 @@ mod tests {
         let geometry = Preprocessed::from_source("shadow.gsh", PASS_GSH);
         let (folded, _) = combine(&vertex, &geometry, &GeometryInputs::default()).unwrap();
         let tokens = lex(folded.code());
-        let at = tokens.iter().position(|&token| token == "bad_vertex").unwrap();
+        let at = tokens
+            .iter()
+            .position(|&token| token == "bad_vertex")
+            .unwrap();
         let error = crate::translate::scan::error_at_token(&folded, &tokens, at, "bad_vertex");
         assert_eq!((error.file.as_str(), error.line), ("shadow.vsh", 4));
     }

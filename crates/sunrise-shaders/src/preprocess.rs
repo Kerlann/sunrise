@@ -90,11 +90,8 @@ impl Preprocessed {
             code: code.to_owned(),
             lines: code
                 .split('\n')
-                .enumerate()
-                .map(|(line, _)| Origin {
-                    file: 0,
-                    line: u32::try_from(line + 1).unwrap_or(u32::MAX),
-                })
+                .zip(1u32..)
+                .map(|(_, line)| Origin { file: 0, line })
                 .collect(),
             files: vec![file.to_owned()],
             version: None,
@@ -220,7 +217,9 @@ impl Preprocessed {
 pub(crate) fn check_line_count(code: &str, origins: usize) -> Result<(), String> {
     let expected = code.split('\n').count();
     if origins != expected {
-        return Err(format!("{origins} line origins for {expected} lines of code"));
+        return Err(format!(
+            "{origins} line origins for {expected} lines of code"
+        ));
     }
     Ok(())
 }
