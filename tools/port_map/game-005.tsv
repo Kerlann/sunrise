@@ -77,10 +77,10 @@ Entity.getInterpolatedBoundingBox	port	crates/sunrise-client/src/game/interface/
 Entity.getFirstPassenger	inline	crates/sunrise-client/src/game/entities/passengers.rs::Game::sync_riders	gap: minor: one rider id per mob vehicle (extra.rider), not a list
 Entity.hasPassenger	inline	crates/sunrise-client/src/game/entities/passengers.rs::Game::sync_riders	gap: minor: one rider id per mob vehicle (extra.rider); the player's vehicle is Game.riding
 Entity.hasIndirectPassenger	skip:other		vehicle chains are seated by position_riders in three passes; no separate lookup is kept
-Entity.isLocalInstanceAuthoritative	port	crates/sunrise-client/src/motion.rs::MotionWorld::locally_authoritative	the player's server copy is not authoritative; mobs are always local
-Entity.isLocalClientAuthoritative	inline	crates/sunrise-client/src/motion.rs::MotionWorld::locally_authoritative	a ridden vehicle's passenger check is not modelled; the player's own copy decides
+Entity.isLocalInstanceAuthoritative	port	crates/sunrise-client/src/motion/integrate.rs::MotionWorld::locally_authoritative	the player's server copy is not authoritative; mobs are always local
+Entity.isLocalClientAuthoritative	inline	crates/sunrise-client/src/motion/integrate.rs::MotionWorld::locally_authoritative	a ridden vehicle's passenger check is not modelled; the player's own copy decides
 Entity.isClientAuthoritative	skip:other		the host trusts its own player and LAN guests send their moves; there is no per-vehicle authority switch
-Entity.canSimulateMovement	port	crates/sunrise-client/src/motion.rs::MotionWorld::can_simulate	gap: minor: always true; the move simulation type of vehicles and remote entities is not consulted
+Entity.canSimulateMovement	port	crates/sunrise-client/src/motion/integrate.rs::MotionWorld::can_simulate	gap: minor: always true; the move simulation type of vehicles and remote entities is not consulted
 Entity.getCollisionHorizontalEscapeVector	inline	crates/sunrise-client/src/game/entities/boats/mod.rs::Game::boat_dismount_target	gap: minor: only boats use the formula; horses and striders use a plain side offset in dismount_mount
 Entity.getControlledVehicle	skip:other		the player's vehicle is Game.riding and a mob's is extra.mount; the controlling passenger is the first rider
 Entity.createCommandSourceStackForNameResolution	inline	crates/sunrise-client/src/game/interface/scoreboard/mod.rs::Game::resolve_component	gap: minor: selector and score parts resolve from the player's view, not from the entity's own position and no-permission source

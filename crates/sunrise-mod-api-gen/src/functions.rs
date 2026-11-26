@@ -154,6 +154,14 @@ impl FunctionIndex {
             return Err((refused.code.name(), refused.why.clone()));
         }
         let Some(function) = self.functions.get(&key) else {
+            if let Some(named) = self.named_by_type(&key) {
+                return Err((
+                    "E_MIXIN_TARGET_MISSING",
+                    format!(
+                        "`{key}` names the module of the file its `impl` is in; a method below the game crate is named by the module that declares its type: `{named}`"
+                    ),
+                ));
+            }
             return Err(if krate == "sunrise_client" {
                 (
                     "E_MIXIN_TARGET_MISSING",
@@ -183,6 +191,34 @@ impl FunctionIndex {
             )));
         }
         Ok(())
+    }
+
+    /// The listed method a crate below the game crate names by its type's module that `key`
+    /// names by the module of the file its `impl` is in, as targets were written before.
+    fn named_by_type(&self, key: &str) -> Option<&str> {
+        self.functions.iter().find_map(|(listed, function)| {
+            if listed.split("::").next() == Some("sunrise_client") {
+                return None;
+            }
+            let by_file = match target_path(listed)? {
+                TargetPath {
+                    qualified: Some((module, ty, tr)),
+                    name,
+                    ..
+                } => (plain_path(module) != function.module)
+                    .then(|| format!("{}::<{ty} as {tr}>::{name}", function.module))?,
+                TargetPath { front, name, .. } => {
+                    let front = plain_path(front);
+                    let (module, owner) = front.rsplit_once("::")?;
+                    // A free function is in its file's module already.
+                    if front == function.module || module == function.module {
+                        return None;
+                    }
+                    format!("{}::{owner}::{name}", function.module)
+                }
+            };
+            (by_file == key).then_some(listed.as_str())
+        })
     }
 
     /// The index as its reader may trust it, or why not: every crate and library is a Rust
@@ -249,8 +285,14 @@ impl FunctionIndex {
             text: &text,
             lines: &lines,
         };
+        let krate = function.module.split("::").next().unwrap_or_default();
+        let types = if krate == "sunrise_client" {
+            None
+        } else {
+            Some(source.owner_types(krate).map_err(stale)?)
+        };
         let mut candidates = BTreeMap::new();
-        collect(&function.module, &items, &file, &mut candidates);
+        collect(&function.module, &items, &file, types, &mut candidates);
         let [start, end] = function.span;
         candidates
             .remove(&key)
@@ -313,12 +355,15 @@ pub(crate) fn index_of(
         .filter_map(|path| path.split("::").next())
         .filter(|krate| *krate != "sunrise_client")
         .collect();
+    // A method below the game crate is named by its type's module.
+    let mut owners = BTreeMap::new();
     for krate in lower {
         if !source.load(krate)? {
             return Err(format!(
                 "{krate}: it has #[sunrise_mod_api_macros::replaceable] functions, but its sources can't be read"
             ));
         }
+        owners.insert(krate, crate::replace::crate_owner_types(root, krate)?);
     }
     let mut index = FunctionIndex::default();
     for (module, files) in &source.files {
@@ -417,7 +462,8 @@ pub(crate) fn index_of(
             text: &text,
             lines: &lines,
         };
-        collect(&module, &items, &file, &mut candidates);
+        let krate = module.split("::").next().unwrap_or_default();
+        collect(&module, &items, &file, owners.get(krate), &mut candidates);
     }
     for (key, mut found) in candidates {
         let krate = key.split("::").next().unwrap_or_default();
@@ -506,11 +552,13 @@ impl File<'_> {
 }
 
 /// The functions of `items`, module `module`, by the key a target naming each has: free
-/// functions and methods of every `impl`, inline modules included (test modules left out).
+/// functions and methods of every `impl`, inline modules included (test modules left out). Below
+/// the game crate (`types`, its crate's), a method is keyed by its type's module.
 fn collect(
     module: &str,
     items: &[Item],
     file: &File<'_>,
+    types: Option<&crate::replace::OwnerTypes>,
     out: &mut BTreeMap<String, Vec<Candidate>>,
 ) {
     for item in items {
@@ -554,6 +602,10 @@ fn collect(
                         .collect(),
                 };
                 let owner = plain_path(&block.self_ty.to_token_stream().to_string());
+                let named_in = types.map_or_else(
+                    || module.to_owned(),
+                    |types| crate::replace::owner_module(types, module, &block.self_ty),
+                );
                 let scope = match &block.trait_ {
                     Some((_, path, _)) => {
                         let last = path
@@ -561,9 +613,9 @@ fn collect(
                             .last()
                             .map(|s| s.ident.to_string())
                             .unwrap_or_default();
-                        format!("{module}::<{owner} as {last}>")
+                        format!("{named_in}::<{owner} as {last}>")
                     }
-                    None => format!("{module}::{owner}"),
+                    None => format!("{named_in}::{owner}"),
                 };
                 for member in &block.items {
                     if let ImplItem::Fn(method) = member {
@@ -582,7 +634,13 @@ fn collect(
             }
             Item::Mod(inline) if !mod_source::modules::test_only(&inline.attrs) => {
                 if let Some((_, inner)) = &inline.content {
-                    collect(&format!("{module}::{}", inline.ident), inner, file, out);
+                    collect(
+                        &format!("{module}::{}", inline.ident),
+                        inner,
+                        file,
+                        types,
+                        out,
+                    );
                 }
             }
             _ => {}

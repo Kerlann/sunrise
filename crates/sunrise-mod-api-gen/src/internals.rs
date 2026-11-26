@@ -1702,7 +1702,8 @@ fn collect(root: &Path, lists: &[(&str, String)], discovery: bool) -> Result<Pas
             }
         }
     }
-    for (origin, path) in crate::replace::marked(root)? {
+    // Each marked function where its item is: a method under its `impl`'s file module.
+    for (origin, path) in crate::replace::marked_items(root)? {
         pass.lower(root, &path, true)
             .map_err(|e| format!("{origin}: {path}: {e}"))?;
     }

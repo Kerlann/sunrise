@@ -367,21 +367,19 @@ impl Source {
 
     /// The types `krate` declares, from the files the staging pass reads: the installer a
     /// trait method has in the prebuilt game was decided on the same set.
-    fn owner_types(&mut self, krate: &str) -> Result<&crate::replace::OwnerTypes, String> {
+    pub(crate) fn owner_types(
+        &mut self,
+        krate: &str,
+    ) -> Result<&crate::replace::OwnerTypes, String> {
         if !self.owners.contains_key(krate) {
-            let files = if krate == "sunrise_client" {
-                crate::source::game_files(&self.root.join("crates/sunrise-client/src"), true)?
+            let types = if krate == "sunrise_client" {
+                crate::replace::OwnerTypes::of(&crate::source::game_files(
+                    &self.root.join("crates/sunrise-client/src"),
+                    true,
+                )?)?
             } else {
-                crate::source::crate_files(&self.root, krate)?
+                crate::replace::crate_owner_types(&self.root, krate)?
             };
-            let mut types = crate::replace::OwnerTypes::default();
-            for file in files {
-                let text = std::fs::read_to_string(&file.path)
-                    .map_err(|e| format!("{}: {e}", file.path.display()))?;
-                let parsed =
-                    syn::parse_file(&text).map_err(|e| format!("{}: {e}", file.path.display()))?;
-                types.declare(&file.module, &parsed.items);
-            }
             self.owners.insert(krate.to_owned(), types);
         }
         Ok(&self.owners[krate])
@@ -719,54 +717,62 @@ pub(crate) fn find(source: &mut Source, target: &str) -> Result<Found, (&'static
             )
         }
     };
-    let items = source
-        .module(&module)
-        .map_err(|why| ("E_MIXIN_TARGET_MISSING", why))?
-        .items
-        .clone();
+    // Below the game crate, a method is named by the module that declares its type, so its
+    // `impl` may be in any module of the crate.
+    let by_type = krate != "sunrise_client" && !owner.is_empty();
+    let modules: Vec<String> = if by_type {
+        source
+            .files
+            .keys()
+            .filter(|listed| {
+                listed.as_str() == krate
+                    || listed
+                        .strip_prefix(krate)
+                        .is_some_and(|rest| rest.starts_with("::"))
+            })
+            .cloned()
+            .collect()
+    } else {
+        vec![module.clone()]
+    };
     let mut found = Vec::new();
-    for item in &items {
-        match item {
-            Item::Fn(function) if owner.is_empty() && function.sig.ident == name => {
-                found.push(Found {
-                    module: module.clone(),
-                    owner: None,
-                    function: syn::ImplItemFn {
-                        attrs: function.attrs.clone(),
-                        vis: function.vis.clone(),
-                        defaultness: None,
-                        sig: function.sig.clone(),
-                        block: (*function.block).clone(),
-                    },
-                })
+    for at in &modules {
+        let items = source
+            .module(at)
+            .map_err(|why| ("E_MIXIN_TARGET_MISSING", why))?
+            .items
+            .clone();
+        found.extend(named(&items, at, &owner, trait_name.as_deref(), name));
+    }
+    // Where the type is declared: the module a target names a method below the game crate by.
+    let mut misnamed = None;
+    if by_type {
+        let types = source
+            .owner_types(krate)
+            .map_err(|why| ("E_MIXIN_SOURCE", why))?;
+        found.retain(|candidate| {
+            let block = candidate.owner.as_ref().expect("a method has its impl");
+            let declaring = crate::replace::owner_module(types, &candidate.module, &block.self_ty);
+            if declaring == module {
+                return true;
             }
-            Item::Impl(block)
-                if !owner.is_empty()
-                    && block.trait_.as_ref().map(|(_, path, _)| {
-                        path.segments
-                            .last()
-                            .map(|s| s.ident.to_string())
-                            .unwrap_or_default()
-                    }) == trait_name
-                    && crate::source::plain_path(&block.self_ty.to_token_stream().to_string())
-                        == owner =>
-            {
-                for member in &block.items {
-                    if let ImplItem::Fn(function) = member
-                        && function.sig.ident == name
-                    {
-                        found.push(Found {
-                            module: module.clone(),
-                            owner: Some(block.clone()),
-                            function: function.clone(),
-                        });
-                    }
-                }
+            if candidate.module == module {
+                misnamed = Some(match &trait_name {
+                    Some(trait_name) => format!("{declaring}::<{owner} as {trait_name}>::{name}"),
+                    None => format!("{declaring}::{owner}::{name}"),
+                });
             }
-            _ => {}
-        }
+            false
+        });
     }
     match found.len() {
+        0 if misnamed.is_some() => Err((
+            "E_MIXIN_TARGET_MISSING",
+            format!(
+                "`{target}` names the module of the file its `impl` is in; a method below the game crate is named by the module that declares its type: `{}`",
+                misnamed.expect("named")
+            ),
+        )),
         0 => Err((
             "E_MIXIN_TARGET_MISSING",
             format!(
@@ -784,6 +790,65 @@ pub(crate) fn find(source: &mut Source, target: &str) -> Result<Found, (&'static
             "several functions have this path (a cfg-gated pair, for one)".into(),
         )),
     }
+}
+
+/// The functions among `items`, module `module`'s, that a target naming `name` on `owner` (a
+/// free function when empty) through `trait_name` finds.
+fn named(
+    items: &[Item],
+    module: &str,
+    owner: &str,
+    trait_name: Option<&str>,
+    name: &str,
+) -> Vec<Found> {
+    let mut found = Vec::new();
+    for item in items {
+        match item {
+            Item::Fn(function) if owner.is_empty() && function.sig.ident == name => {
+                found.push(Found {
+                    module: module.to_owned(),
+                    owner: None,
+                    function: syn::ImplItemFn {
+                        attrs: function.attrs.clone(),
+                        vis: function.vis.clone(),
+                        defaultness: None,
+                        sig: function.sig.clone(),
+                        block: (*function.block).clone(),
+                    },
+                })
+            }
+            Item::Impl(block)
+                if !owner.is_empty()
+                    && block
+                        .trait_
+                        .as_ref()
+                        .map(|(_, path, _)| {
+                            path.segments
+                                .last()
+                                .map(|s| s.ident.to_string())
+                                .unwrap_or_default()
+                        })
+                        .as_deref()
+                        == trait_name
+                    && crate::source::plain_path(&block.self_ty.to_token_stream().to_string())
+                        == owner =>
+            {
+                for member in &block.items {
+                    if let ImplItem::Fn(function) = member
+                        && function.sig.ident == name
+                    {
+                        found.push(Found {
+                            module: module.to_owned(),
+                            owner: Some(block.clone()),
+                            function: function.clone(),
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    found
 }
 
 /// Whether `function` can be copied and installed through its function's replacement slot: the

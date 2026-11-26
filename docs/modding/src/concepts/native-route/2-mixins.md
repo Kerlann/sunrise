@@ -132,6 +132,14 @@ So `src/game/world/autosave.rs` is `sunrise_client::game::autosave` (`world/` is
 Any function of the game crate can take a mixin. A function in a crate below it, such as `sunrise_world`, needs
 the marker `#[sunrise_mod_api_macros::replaceable]` in its source. Otherwise, target a replaceable caller or callee.
 
+A method in a crate below the game crate is named by the module that **declares its type**, the path
+`internals.txt` lists the type under, not by the module of the file that holds its `impl` block. A type is
+declared in a module by its `struct`, `enum` or `union` item; a re-export (`pub use`) declares nothing.
+`Behaviours::tick_precipitation`, whose `impl` is in `crates/sunrise-world/src/level/weather.rs` but whose type is
+declared in `level`, is `sunrise_world::level::Behaviours::tick_precipitation`. So moving an `impl` between
+the files of a crate keeps its targets. A target naming the `impl`'s file module instead is refused with
+`E_MIXIN_TARGET_MISSING`, and the refusal names the right target.
+
 A literal item-level `include!("path.rs")` adds declarations to the containing module, not to a new
 module. A lower-crate copy and its mirror reach those declarations under the same visibility and
 `cfg` rules as declarations written directly in that module. Each nested path is relative to the file
@@ -195,6 +203,7 @@ A row the build can't apply stops the build, naming the mod, the row and the rea
 | | `… invalid hook; a named hook is a mod_api::Hooks method; a mixin names its target` | Remove the row's `hook` (or `hook_version`) key and name a `target`, or implement the hook in `Hooks`. |
 | | `… invalid target; a mixin targets a game function` | The target is in a mod you depend on. Call that mod's public functions instead. |
 | `E_MIXIN_TARGET_MISSING` | ``<target>: no function `<path>` in this game build's function index (functions.json)``, or ``no crate `<crate>` in the game's source`` | Check the path against the source at your commit, module first. |
+| | ``<target>: `<path>` names the module of the file its `impl` is in; a method below the game crate is named by the module that declares its type: `<right path>` `` | Use the path it names. |
 | `E_MIXIN_TARGET_AMBIGUOUS` | `<target>: several functions have this path (a cfg-gated pair, for one)` | Target another function. |
 | `E_MIXIN_NOT_REPLACEABLE` | `<target>: a function below the game crate takes a replacement only when it carries #[sunrise_mod_api_macros::replaceable]; …` | Target a game-crate function or a caller or callee carrying the marker. |
 | | `<target>: <reason>`, such as ``it is generic over types or takes `impl Trait` …`` | Target a caller or callee that can be copied. |

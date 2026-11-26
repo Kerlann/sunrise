@@ -282,6 +282,9 @@ impl Game<'_> {
             self.server_packs
                 .packs
                 .push(p.id, &p.url, parse_sha1(&p.hash));
+            // `acceptPack`/`pushPack` report ACCEPTED or DECLINED from the packet handler, so
+            // it reaches the server in this phase: before a FinishConfiguration behind it.
+            self.send_pack_replies();
             return;
         }
         // addOrUpdatePackPrompt: one prompt for every pack pushed before it is answered.
@@ -330,6 +333,12 @@ impl Game<'_> {
             r.session.send_pack_status(id, status);
         }
     }
+    /// `DownloadedPackSource`'s feedback: `connection.send` as each status is reported.
+    fn send_pack_replies(&mut self) {
+        for (id, status) in self.server_packs.packs.take_replies() {
+            self.send_pack_status(id, status);
+        }
+    }
 
     /// `PackConfirmScreen`'s callback: push every pending pack and save the server list.
     /// Declining a required pack closes the connection without changing its stored policy.
@@ -355,6 +364,8 @@ impl Game<'_> {
         }
         self.refresh_screen_widgets();
         self.server_packs.complete_prompt(prompt, Some(yes));
+        // `allowServerPacks` and `pushPack` report from the screen's callback.
+        self.send_pack_replies();
         Ok(())
     }
 
@@ -403,9 +414,7 @@ impl Game<'_> {
                 self.start_pack_reload(&load);
             }
         }
-        for (id, status) in self.server_packs.packs.take_replies() {
-            self.send_pack_status(id, status);
-        }
+        self.send_pack_replies();
     }
     fn start_pack_downloads(&mut self, requests: Vec<sunrise_client::server_packs::Request>) {
         let state = &mut self.server_packs;
@@ -765,6 +774,76 @@ mod tests {
                     }
                     assert_eq!(replies, PACK_IDS.map(|id| (id, 1))); // DECLINED
                     assert_eq!(servers::load_all(file), (shown, hidden));
+                });
+            },
+        );
+    }
+
+    /// `ServerPackManager.acceptPack` reports from `handleResourcePackPush`, so a pack
+    /// the server list allows is ACCEPTED in configuration, before the FinishConfiguration
+    /// that the same poll acknowledges.
+    #[test]
+    #[ignore = "daily"]
+    fn an_allowed_pack_is_accepted_before_finish_configuration() {
+        in_own_process(
+            "game::server_packs::tests::an_allowed_pack_is_accepted_before_finish_configuration",
+            || {
+                use sunrise_protocol::packets::{configuration as cfg, login};
+                const ADDRESS: &str = "pack-order.invalid";
+                let dir = tempfile::tempdir().unwrap();
+                sunrise_client::logging::set_player_dir(dir.path().to_owned());
+                let mut entry = servers::ServerEntry::new("Packs", ADDRESS);
+                entry.accept_textures = Some(true);
+                servers::save_all(&dir.path().join("servers.dat"), &[entry], &[]).unwrap();
+                with_client_game(|game| {
+                    let mut peer = Connection::local(logged_client(game));
+                    peer.reader
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    game.server_packs_connect(Some(ADDRESS), None, ("SessionReadTest".into(), 42));
+                    peer.recv().unwrap(); // Intention.
+                    peer.recv().unwrap(); // Hello.
+                    let finished = login::Clientbound::LoginFinished(login::LoginFinished {
+                        profile: login::GameProfile {
+                            uuid: 42,
+                            name: "SessionReadTest".into(),
+                            properties: vec![],
+                        },
+                        session: 1,
+                    });
+                    peer.send(&finished.encode()).unwrap();
+                    peer.recv().unwrap(); // Login acknowledged.
+                    peer.recv().unwrap(); // Brand.
+                    peer.recv().unwrap(); // Client information.
+                    let push = cfg::ResourcePackPush {
+                        id: PACK_IDS[0],
+                        url: "https://pack-order.invalid/server.zip".into(),
+                        hash: String::new(),
+                        required: false,
+                        prompt: None,
+                    };
+                    for packet in [
+                        cfg::Clientbound::ResourcePackPush(push),
+                        cfg::Clientbound::FinishConfiguration(Empty),
+                    ] {
+                        peer.send(&packet.encode()).unwrap();
+                    }
+                    // Both reach main and are handled in one poll, with no pack tick between.
+                    game.acknowledge_test_configuration();
+                    let mut sent = Vec::new();
+                    loop {
+                        let (id, body) = peer.recv().unwrap();
+                        match cfg::Serverbound::decode(id, &body).unwrap() {
+                            cfg::Serverbound::ResourcePack(r) => sent.push(Some((r.id, r.action))),
+                            cfg::Serverbound::FinishConfiguration(_) => {
+                                sent.push(None);
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                    assert_eq!(sent, [Some((PACK_IDS[0], action::ACCEPTED)), None]);
+                    assert!(game.server_packs.packs.take_replies().is_empty());
                 });
             },
         );

@@ -53,7 +53,7 @@ LivingEntity.onEffectUpdated	port	crates/sunrise-client/src/game/items/potions.r
 LivingEntity.onEffectsRemoved	port	crates/sunrise-client/src/game/items/potions.rs::Game::apply_effect_status	gap: minor: same as onEffectUpdated, mobs only react to speed and slowness
 LivingEntity.refreshDirtyAttributes	port	crates/sunrise-client/src/game/items/potions.rs::Game::apply_effect_status	modifiers diffed against the applied list each tick (player)
 LivingEntity.dealDefaultKnockback	inline	crates/sunrise-client/src/mobs.rs::Mob::damage_with	gap: minor: pushed away from the source position; an arrow uses its previous position, vanilla uses its flight direction
-LivingEntity.applyItemBlocking	port	crates/sunrise-client/src/health.rs::Environment::apply_blocking	gap: minor: the player's shield only; a mob holding a shield never blocks
+LivingEntity.applyItemBlocking	port	crates/sunrise-client/src/health/environment.rs::Environment::apply_blocking	gap: minor: the player's shield only; a mob holding a shield never blocks
 LivingEntity.playSecondaryHurtSound	port	crates/sunrise-client/src/game/items/enchant_effects.rs::Game::thorns	enchant.thorns.hit at the attacker
 LivingEntity.resolveMobResponsibleForDamage	inline	crates/sunrise-client/src/mobs.rs::Mob::damage_with	gap: minor: last_hurt_by comes from any attacker; no #no_anger damage types or wind charge exemption
 LivingEntity.resolvePlayerResponsibleForDamage	inline	crates/sunrise-client/src/game/mobs/creatures/mod.rs::Game::resolve_player_responsible	a tamed wolf's or cat's hit is its owner's (setLastHurtByPlayer), so the kill drops experience and player-only loot
@@ -93,7 +93,7 @@ LivingEntity.handleHandSwap	skip:other		the LAN server sends both changed slots 
 LivingEntity.handleEquipmentChanges	port	crates/sunrise-client/src/lan/entity.rs::ServerEntity::send_equipment	changed slots as one SetEquipment
 LivingEntity.updatePlayersWithNewEquipment	inline	crates/sunrise-client/src/lan/entity.rs::ServerEntity::send_equipment	the packet is built there
 LivingEntity.tickHeadTurn	port	crates/sunrise-client/src/game/network/remote/mod.rs::remote_player_head_turn	another player's body turn; mobs use Mob::body_rotation_tick in control.rs
-LivingEntity.canGlide	inline	crates/sunrise-client/src/motion.rs::MotionWorld::player_movement_tick_with_fluids	gap: minor: the player only (airborne, not flying, a worn glider, no Levitation); mobs never glide
+LivingEntity.canGlide	inline	crates/sunrise-client/src/motion/integrate.rs::MotionWorld::player_movement_tick_with_fluids	gap: minor: the player only (airborne, not flying, a worn glider, no Levitation); mobs never glide
 LivingEntity.onItemPickup	port	crates/sunrise-client/src/game/mobs/sulfur_cubes.rs::Game::sulfur_cube_pickups	gap: player: only a sulfur cube's pickup fires thrown_item_picked_up_by_entity; a piglin picking up gold you threw does not, so Oh Shiny never unlocks
 LivingEntity.isUsingItem	inline	crates/sunrise-client/src/game/remote.rs::RemoteInputWorld::using_item	Game::using is Some; a mob's is extra.using_item above 0
 LivingEntity.setLivingEntityFlag	skip:java		bit accessor; the flags are built when synced in game/lan.rs::mob_meta

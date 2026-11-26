@@ -18,6 +18,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 # Every `.rs` file under these folders, checked one file at a time (no child modules followed).
 TREES = ("crates/sunrise-mod-api/src", "crates/sunrise-mod-vocab/src", "crates/sunrise-client/src/game",
+         "crates/sunrise-client/src/health",
+         "crates/sunrise-client/src/mobs/goals",
          "crates/sunrise-client/src/save/carrier")
 # Files no `mod` line reaches.
 DISCOVERED = ("crates/sunrise-mod-api-gen/dispatch-tests/src/fixtures/*.rs",

@@ -562,6 +562,18 @@ impl ModRenderTargets {
         Ok((depth.view_id, depth.sample_view.clone()))
     }
 
+    /// Whether `owner` may render into mip level `mip_level` of `handle`: the target is live,
+    /// theirs, and has that level. Reads the table entry only, resolving no view, for a check
+    /// made before the pass runs ([`Self::resolve_target`] makes the same refusals).
+    pub fn check_level(
+        &self,
+        owner: Option<&'static str>,
+        handle: RenderTargetRef,
+        mip_level: u32,
+    ) -> Result<(), RenderTargetError> {
+        self.owned_level(owner, handle, mip_level).map(|_| ())
+    }
+
     /// Snapshot the views of mip level `mip_level` and format metadata for executing an
     /// [`OffscreenPass`]; `size` is that level's size
     /// (`GpuTextureView.getWidth(mipLevel)`, `getHeight(mipLevel)`).
@@ -571,10 +583,7 @@ impl ModRenderTargets {
         handle: RenderTargetRef,
         mip_level: u32,
     ) -> Result<ResolvedOffscreenTarget, RenderTargetError> {
-        let entry = self.get_owned(owner, handle)?;
-        if mip_level >= entry.mip_levels {
-            return Err(RenderTargetError::InvalidMipLevels);
-        }
+        let entry = self.owned_level(owner, handle, mip_level)?;
         Ok(ResolvedOffscreenTarget {
             handle,
             size: [
@@ -606,6 +615,20 @@ impl ModRenderTargets {
             return None;
         }
         entry.colors.get(attachment as usize).map(|c| &c.texture)
+    }
+
+    /// The entry of `handle` when `owner` may use it and it has mip level `mip_level`.
+    fn owned_level(
+        &self,
+        owner: Option<&'static str>,
+        handle: RenderTargetRef,
+        mip_level: u32,
+    ) -> Result<&ModRenderTarget, RenderTargetError> {
+        let entry = self.get_owned(owner, handle)?;
+        if mip_level >= entry.mip_levels {
+            return Err(RenderTargetError::InvalidMipLevels);
+        }
+        Ok(entry)
     }
 
     fn get_owned(
@@ -848,6 +871,20 @@ impl super::mod_gpu::ModGpuResources {
             .resolve_depth(owner, target, filterable)
     }
 
+    /// [`ModRenderTargets::check_level`]: validate a pass's target and mip level without
+    /// resolving its views.
+    pub fn check_mod_render_target_level(
+        &self,
+        owner: Option<&'static str>,
+        target: RenderTargetRef,
+        mip_level: u32,
+    ) -> Result<(), RenderTargetError> {
+        self.render_targets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .check_level(owner, target, mip_level)
+    }
+
     /// Snapshot attachment views for executing an [`OffscreenPass`].
     pub fn resolve_mod_render_target(
         &self,
@@ -1007,6 +1044,44 @@ mod tests {
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         let mapped = readback.slice(..).get_mapped_range().unwrap();
         f32::from_ne_bytes(mapped[..4].try_into().unwrap())
+    }
+
+    /// #6031: `check_level`, the check `add_pass` makes, refuses exactly what `resolve_target`
+    /// refuses (a level past the chain, another mod's target, a released one) and accepts what
+    /// it accepts, from the table entry alone.
+    #[test]
+    #[ignore = "daily"]
+    fn checking_a_level_agrees_with_resolving_it() {
+        let _gpu = crate::gfx::test_gpu::lock();
+        let Some((_, device, _)) = crate::gfx::test_gpu::optional_device() else {
+            return;
+        };
+        let mut targets = ModRenderTargets::default();
+        let desc = RenderTargetDescriptor::new([16, 16])
+            .color_target(RenderTargetFormat::Rgba8Unorm)
+            .mip_levels(2);
+        let rt = targets.create(&device, Some("owner"), &desc).unwrap();
+        let agree = |targets: &ModRenderTargets, owner, level| {
+            let checked = targets.check_level(owner, rt, level);
+            let resolved = targets.resolve_target(owner, rt, level).map(|_| ());
+            assert_eq!(checked, resolved, "{owner:?} level {level}");
+            checked
+        };
+        assert_eq!(agree(&targets, Some("owner"), 0), Ok(()));
+        assert_eq!(agree(&targets, Some("owner"), 1), Ok(()));
+        assert_eq!(
+            agree(&targets, Some("owner"), 2),
+            Err(RenderTargetError::InvalidMipLevels)
+        );
+        assert!(
+            agree(&targets, Some("other"), 0).is_err(),
+            "another mod's target"
+        );
+        targets.release(Some("owner"), rt).unwrap();
+        assert_eq!(
+            agree(&targets, Some("owner"), 0),
+            Err(RenderTargetError::Stale)
+        );
     }
 
     #[test]

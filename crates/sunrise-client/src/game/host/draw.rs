@@ -1042,7 +1042,7 @@ impl FrameGraphContext for GameFrameGraphContext<'_, '_> {
         // renders into, up front.
         if let FrameTarget::Mod(rt) = desc.target {
             renderer
-                .resolve_mod_render_target(owner, rt, desc.mip_level)
+                .check_mod_render_target_level(owner, rt, desc.mip_level)
                 .map_err(FrameGraphError::InvalidTarget)?;
         }
         for &t in desc.reads.iter().chain(desc.writes.iter()) {

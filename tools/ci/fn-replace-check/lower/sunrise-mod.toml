@@ -211,7 +211,7 @@ bindings = [
 
 [[native.mixin]]
 id = "tick_precipitation"
-target = "sunrise_world::level::weather::Behaviours::tick_precipitation"
+target = "sunrise_world::level::Behaviours::tick_precipitation"
 kind = "RETURN"
 helper = "src/mixins/tick_precipitation.rs"
 bindings = [

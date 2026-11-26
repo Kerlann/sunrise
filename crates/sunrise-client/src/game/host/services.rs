@@ -30,8 +30,17 @@ impl ClientSession for Game<'_> {
     fn client_player_skins(&self) -> Option<ClientPlayerSkins> {
         CallbackOwner::call_host(|| self.native_client_player_skins())
     }
+    fn client_fishing_hook(&self) -> Option<ClientFishingHook> {
+        CallbackOwner::call_host(|| self.native_client_fishing_hook())
+    }
     fn client_frame_stats(&self) -> Option<ClientFrameStats> {
         CallbackOwner::call_host(|| self.native_client_frame_stats())
+    }
+    fn client_titles(&self) -> Result<Option<ClientTitles>, ClientSessionReadError> {
+        CallbackOwner::call_host(|| self.native_client_titles())
+    }
+    fn client_boss_bars(&self) -> Result<Option<Vec<ClientBossBarEntry>>, ClientSessionReadError> {
+        CallbackOwner::call_host(|| self.native_client_boss_bars())
     }
 }
 impl Commands for Game<'_> {

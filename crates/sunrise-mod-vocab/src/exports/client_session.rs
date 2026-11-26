@@ -1,6 +1,6 @@
 pub use client::client_session::{
-    BlockBreakingState, ClientFrameStats, ClientServer, ClientSessionReadError, ClientTabList,
-    ClientTabListEntry, ItemUse,
+    BlockBreakingState, ClientBossBarEntry, ClientFishingHook, ClientFrameStats, ClientServer,
+    ClientSessionReadError, ClientTabList, ClientTabListEntry, ClientTitles, ItemUse,
 };
 pub use client::client_session::{
     ClientPlayerSkin, ClientPlayerSkins, ClientWaypointEntry, ClientWaypointId,

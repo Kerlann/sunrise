@@ -289,7 +289,6 @@ tools/port_map/rest-003.tsv	OptionInstance.OptionInstanceSliderButton.applyValue
 tools/port_map/rest-004.tsv	BlockColors.getTintSource	crates/sunrise-client-render/src/mesher.rs::Mesher::tint
 tools/port_map/rest-004.tsv	BlockTintSources.constant	crates/sunrise-client-render/src/mesher.rs::Mesher::tint
 tools/port_map/rest-004.tsv	LocalPlayer.closeContainer	crates/sunrise-client/src/game/network/remote/mod.rs::Game::remote_close_container
-tools/port_map/rest-004.tsv	LocalPlayer.isSuppressingSlidingDownLadder	crates/sunrise-client/src/motion.rs::MotionWorld::suppressing_ladder_slide
 tools/port_map/rest-004.tsv	LocalPlayer.startUsingItem	crates/sunrise-client/src/game.rs::Game::use_hand
 tools/port_map/rest-004.tsv	net/minecraft/client/main/Main#getQuickPlayVariant	crates/sunrise-client/src/game/launch_options.rs::Options::read
 tools/port_map/rest-004.tsv	net/minecraft/client/main/Main#parseArgument	crates/sunrise-client/src/game/launch_options.rs::Options::parse

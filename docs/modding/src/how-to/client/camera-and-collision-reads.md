@@ -308,11 +308,24 @@ These read the local player as the client sees it. They take no mod-controlled n
   of uv [8, 8], src [8, 8] over tex [64, 64], then the hat at uv [40, 8] — the same blit the tab
   list uses. Entries come in no order; join on `uuid`. It is what this client has been sent and
   changes as skins download; `None` outside a world.
+- `ClientHost::client_session().client_titles()` is the title, subtitle and action bar on screen
+  now: `ClientTitles { title, subtitle, action_bar }`. Each is `None` once its timer has run out,
+  and the subtitle shows only with a title. It is `Ok(None)` outside a world; a text conversion
+  error is returned for the failing read, never plain words.
+- `ClientHost::client_session().client_boss_bars()` is every boss bar the client holds, in
+  server order: `Vec<ClientBossBarEntry>` with each bar's `name` and `progress`
+  (0 to 1, as drawn). The HUD draws only those that fit within `guiHeight / 3`.
+  It is `Ok(None)` outside a world; a text conversion error is returned
+  for the failing read, never plain words.
 - `ClientHost::local_item_use()` reports ordinary item use: `ItemUse { hand, ticks_used, ticks_remaining }`
   (`isUsingItem`, `getUsedItemHand`, `getTicksUsingItem`, `getUseItemRemainingTicks`).
   `ticks_used + ticks_remaining` is the use duration. It is `None` when no item is in use or no world
   is open. Track intercepted main-hand input through [`ClientItemUseBehavior` callbacks](../../concepts/parts/item-and-tag-parts.md#intercept-main-hand-client-input)
   instead; interception does not make the player use or block with the item.
+- `ClientHost::client_session().client_fishing_hook()` is the local player's fishing hook:
+  `ClientFishingHook { position, biting }`. `position` is the bobber's position as the client
+  tracks it; `biting` is true while a fish is biting. It is `None` outside a world or when
+  no hook is out.
 - `ClientHost::creative_search_items()` returns the built creative search tab's display order,
   for ranking stacks in inventory sorters. It requests the catalog with the local player's permission
   and Operator Items Tab option. A cache miss can fire the creative build hook, so this read needs a
