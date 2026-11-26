@@ -5392,6 +5392,7 @@ dependencies = [
  "sunrise-command",
  "sunrise-core",
  "sunrise-dualsense",
+ "sunrise-entity-data",
  "sunrise-friends",
  "sunrise-gameplay",
  "sunrise-hooks",
