@@ -16,7 +16,7 @@ use sunrise_world::attributes::entity::Catalog;
 /// `LivingEntity.getHealth`.
 pub(super) fn body_health(body: LivingBody<'_>) -> Option<f32> {
     match body {
-        LivingBody::Mob(m) => Some(m.health()),
+        LivingBody::Mob(m) => Some(m.health),
         LivingBody::Player(p) => match p.health {
             PlayerHealthRead::Synced(data, ids) => data.get(ids.health).ok(),
             PlayerHealthRead::Record { health, .. } => Some(*health),
@@ -30,7 +30,7 @@ pub(super) fn body_health(body: LivingBody<'_>) -> Option<f32> {
 /// `LivingEntity.getAbsorptionAmount`: none for an armor stand or the dragon, which carry none.
 pub(super) fn body_absorption(body: LivingBody<'_>) -> Option<f32> {
     match body {
-        LivingBody::Mob(m) => Some(m.absorption()),
+        LivingBody::Mob(m) => Some(m.absorption),
         LivingBody::Player(p) => match p.health {
             PlayerHealthRead::Synced(data, ids) => data.get(ids.absorption).ok(),
             PlayerHealthRead::Record {
@@ -179,7 +179,7 @@ pub(super) fn body_kind(
 /// any other entity's by id.
 pub(super) fn body_holder(body: LivingBody<'_>) -> Option<mod_api::Holder> {
     Some(match body {
-        LivingBody::Mob(m) => mod_api::Holder::Entity(m.id()),
+        LivingBody::Mob(m) => mod_api::Holder::Entity(m.id),
         LivingBody::Player(p) => mod_api::Holder::Player(p.uuid?),
         LivingBody::Stand(s) | LivingBody::Dragon(s) => mod_api::Holder::Entity(s.id),
     })
@@ -226,7 +226,7 @@ pub(super) struct BodyReads<'a> {
 impl mod_api::__private::LivingReads for BodyReads<'_> {
     fn living_entity(&self, _: LivingParty) -> Option<mod_api::EntityRef> {
         let id = match self.body {
-            LivingBody::Mob(m) => m.id(),
+            LivingBody::Mob(m) => m.id,
             LivingBody::Player(p) => u32::try_from(p.id).ok()?,
             LivingBody::Stand(s) | LivingBody::Dragon(s) => s.id,
         };

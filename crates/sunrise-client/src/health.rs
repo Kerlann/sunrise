@@ -29,6 +29,9 @@ use sunrise_world::{
 pub(crate) type Attributes = LiveAttributes<Box<dyn sunrise_world::attributes::live::Identities>>;
 pub(crate) type State = HurtState<DamageTypeId>;
 
+/// The typed body a heal or movement hook lends; the mob side builds it
+/// (`mobs/lend.rs`) and the old `health::` path stays.
+pub use crate::mobs::lend::{LendBody, LivingLend};
 pub use crate::world::HealthRules;
 mod accepted_hit;
 mod attack;

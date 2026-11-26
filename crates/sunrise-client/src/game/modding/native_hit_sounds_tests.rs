@@ -19,6 +19,8 @@ use sunrise_core::{
 #[derive(Default)]
 struct Handles {
     attacker: Option<EntityRef>,
+    /// `HitHost::causing()`'s id as the listener sees it, unsigned like the level's ids.
+    causing: Option<u32>,
     other: Option<EntityRef>,
     stale: Option<EntityRef>,
     refused: Option<Refusals>,
@@ -43,6 +45,7 @@ impl Hooks for Probe {
         event: &mut LivingIncomingDamageEvent<'_>,
     ) -> Flow {
         let mut handles = self.0.lock().unwrap();
+        handles.causing = level.causing().map(|view| view.id());
         let attacker = handles.attacker.unwrap();
         let (roll, zero_bound) = attacker
             .with_random(level, |rng| {
@@ -150,8 +153,13 @@ fn check(attacker: i32, expected_at: [f64; 3], hit: impl FnOnce(&mut super::Game
             let epoch = game.entity(7).unwrap().epoch();
             {
                 let mut handles = handles.lock().unwrap();
-                handles.attacker = game.entity(attacker as u32);
-                handles.other = game.entity(301);
+                // The listener holds the attacker's own level handle, as a mod would after a
+                // lookup: the epoch and the unsigned id are all a handle carries.
+                handles.attacker = Some(EntityRef::new(
+                    WorldEpoch::new(epoch.get()),
+                    attacker as u32,
+                ));
+                handles.other = Some(EntityRef::new(WorldEpoch::new(epoch.get()), 301));
                 handles.stale = Some(EntityRef::new(WorldEpoch::new(epoch.get() + 1), 7));
             }
             // Independently seeded expectations.
@@ -204,6 +212,8 @@ fn check(attacker: i32, expected_at: [f64; 3], hit: impl FnOnce(&mut super::Game
             };
             assert_eq!(after, attacker_random.next_int());
             assert_eq!(game.world.random.next_int(), level_random.next_int());
+            // The hook view itself names the causer by the level's unsigned id, high bit intact.
+            assert_eq!(handles.lock().unwrap().causing, Some(attacker as u32));
             // A mob the hit does not lend, and a handle of another open, refuse and queue nothing.
             assert_eq!(
                 handles.lock().unwrap().refused,

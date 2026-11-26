@@ -4539,6 +4539,7 @@ pub(crate) mod tests {
     #[test]
     fn installed_slot_rules_change_mod_menu_placement() {
         use crate::native_client_hooks::test_hooks::{JUMPS, STILL_VALID_ASKED};
+        use sunrise_world::native_load_context::{DataLoadOrigin, LoadContext, LoadInputs};
         crate::native_client_hooks::test_hooks::install();
         JUMPS.set(0);
         STILL_VALID_ASKED.set(0);
