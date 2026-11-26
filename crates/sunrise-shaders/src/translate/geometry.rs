@@ -484,7 +484,7 @@ fn combine(
 
     // The source, lines mapped: ours (no file), the geometry stage, ours, the vertex stage, ours.
     let mut files = geometry.files().to_vec();
-    let offset = files.len() as u16;
+    let offset = files.len();
     files.extend(vertex.files().iter().cloned());
     let (mut code, mut lines) = (String::new(), Vec::new());
     let ours = |code: &mut String, lines: &mut Vec<crate::Origin>, text: &str| {

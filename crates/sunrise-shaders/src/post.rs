@@ -1885,13 +1885,14 @@ fn default_draw_buffers(shadow: bool) -> Vec<u32> {
     if shadow { (0..8).collect() } else { vec![0] }
 }
 
+/// `pp`'s refusals, located.
 fn diagnostics(pp: &Preprocessed) -> Vec<String> {
-    located(pp, &pp.diagnostics)
+    located(pp, pp.diagnostics())
 }
 
 /// `pp`'s warnings (conditions read as false, unbalanced conditionals), located.
 fn warnings(pp: &Preprocessed) -> Vec<String> {
-    located(pp, &pp.warnings)
+    located(pp, pp.warnings())
 }
 
 fn located(pp: &Preprocessed, list: &[crate::preprocess::Diagnostic]) -> Vec<String> {
