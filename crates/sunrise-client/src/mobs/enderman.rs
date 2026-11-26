@@ -786,6 +786,7 @@ mod tests {
 
             let w = MobWorld {
                 side: sunrise_client::motion::dry_side(),
+                variant_tables: None,
                 goal_host: None,
                 border: Some(&border),
                 ..w.clone()

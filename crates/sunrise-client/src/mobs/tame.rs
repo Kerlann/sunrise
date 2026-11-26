@@ -2054,6 +2054,7 @@ mod tests {
             with_test_world(&seen, |w, _| {
                 let indexed = MobWorld {
                     side: sunrise_client::motion::dry_side(),
+                    variant_tables: None,
                     others_grid: Some(&grid),
                     ..w.clone()
                 };
@@ -2542,6 +2543,7 @@ mod tests {
                 let seen = [attacker.seen(None, &crate::items::Items::empty())];
                 let world = crate::mobs::MobWorld {
                     side: sunrise_client::motion::dry_side(),
+                    variant_tables: None,
                     others: &seen,
                     ..world
                 };
@@ -2549,6 +2551,7 @@ mod tests {
                 p.hurt_by = Some((Who::Mob(2), 5));
                 let world = crate::mobs::MobWorld {
                     side: sunrise_client::motion::dry_side(),
+                    variant_tables: None,
                     player: Some(p),
                     ..world
                 };
@@ -2669,6 +2672,7 @@ mod tests {
                 }
                 let world = crate::mobs::MobWorld {
                     side: sunrise_client::motion::dry_side(),
+                    variant_tables: None,
                     player: Some(view),
                     player_identity: Some((uuid, seen)),
                     player_selection: Some(&selection),
@@ -2768,6 +2772,7 @@ mod tests {
                 }
                 let world = crate::mobs::MobWorld {
                     side: sunrise_client::motion::dry_side(),
+                    variant_tables: None,
                     player: Some(view),
                     player_identity: Some((uuid, seen)),
                     player_selection: Some(&selection),

@@ -3686,6 +3686,10 @@ pub struct MobWorld<'a> {
     pub loop_context: &'a sunrise_world::native_load_context::LoopContext,
     /// The side's level data beyond blocks: weather, features, tags and block entities.
     pub side: &'a dyn crate::motion::SideLevel,
+    /// The world's frozen variant registries, lent by whoever builds the mob world: a dry
+    /// test or probe side passes none, so absence stays real and block contact never names
+    /// the mob module.
+    pub variant_tables: Option<&'a crate::mobs::variants::VariantTables>,
     pub world: &'a World,
     pub registry: &'a sunrise_world::registry::BlockRegistry,
     pub facts: &'a BlockFacts,
@@ -3803,9 +3807,9 @@ pub struct MobWorld<'a> {
 }
 
 impl<'a> MobWorld<'a> {
-    /// The side's frozen variant registries, typed for the mob code.
+    /// The variant registries lent when this world was built, typed for the mob code.
     pub fn variant_tables(&self) -> Option<&'a crate::mobs::variants::VariantTables> {
-        self.side.variant_tables()
+        self.variant_tables
     }
 }
 /// The read-only decision from a registered effect's native tick Parts.

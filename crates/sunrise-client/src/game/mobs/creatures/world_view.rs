@@ -11,6 +11,7 @@ impl Game<'_> {
         let player = self.player_view();
         MobWorld {
             side: self,
+            variant_tables: Some(self.world_variants()),
             mob_maps: self.mob_maps(),
             section_writer: None,
             trading_players: Some(self),

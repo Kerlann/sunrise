@@ -1023,6 +1023,7 @@ mod tests {
             |w, _| {
                 let w = MobWorld {
                     side: sunrise_client::motion::dry_side(),
+                    variant_tables: None,
                     passenger_objects: &retained,
                     ..w.clone()
                 };
@@ -1117,6 +1118,7 @@ mod tests {
                     let items = raiders(members);
                     let w = MobWorld {
                         side: sunrise_client::motion::dry_side(),
+                        variant_tables: None,
                         passenger_objects: &retained,
                         items: Some(&items),
                         ..w.clone()

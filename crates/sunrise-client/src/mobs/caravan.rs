@@ -314,6 +314,7 @@ mod defend_trader_tests {
                 let seen = [owner.seen(None, &crate::items::Items::empty())];
                 let world = crate::mobs::MobWorld {
                     side: sunrise_client::motion::dry_side(),
+                    variant_tables: None,
                     others: &seen,
                     ..world
                 };
