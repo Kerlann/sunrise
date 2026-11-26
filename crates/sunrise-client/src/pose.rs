@@ -115,7 +115,7 @@ pub struct PoseFlags {
 }
 /// `Player.getDesiredPose` of the player `player` (entity id): sleeping, swimming, fall flying,
 /// Riptide's spin, crouching (shift held, not flying), else standing. `updatePlayerPose` then
-/// keeps it only where it fits ([`MotionWorld::update_player_pose`]: the client's prediction
+/// keeps it only where it fits ([`crate::motion::MotionWorld::update_player_pose`]: the client's prediction
 /// and the server's copy of every player), and the server shows the others the pose that
 /// update took. NeoForge and Fabric have no event that decides the
 /// pose, so a Java mod mixes into `Player.getDesiredPose`; a native mod answers here through

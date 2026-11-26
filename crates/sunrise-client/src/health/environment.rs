@@ -492,7 +492,7 @@ impl HurtWorld for Environment<'_> {
     fn helmet_empty(&mut self, _: &mut State) -> io::Result<bool> {
         Ok(!self.helmet)
     }
-    /// The game wears it between the hit's halves ([`PlayerMotion::start_hurt`]).
+    /// The game wears it between the hit's halves ([`crate::motion::PlayerMotion::start_hurt`]).
     #[inline]
     fn hurt_helmet(&mut self, _: &mut State, _: f32) -> io::Result<()> {
         Ok(())

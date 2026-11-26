@@ -8,9 +8,11 @@ use std::path::Path;
 /// What the hook of these tests saw: entity, damage type (a mob's kind)
 /// and causing entity, amount.
 static SEEN: std::sync::Mutex<Vec<(i32, String, f32)>> = std::sync::Mutex::new(Vec::new());
-/// Sets the native damage hook of these tests (global: it stays set for
-/// the process): for entities 9001 to 9004 and 9011 to 9013 it records the
-/// hit, cancels x1's, doubles x2's, and gives 9005's hit armor and absorption modifiers.
+/// The native damage hook these tests install on their own `TestLevel`: each test builds a
+/// fresh level and lends it this hook, so the hook is scoped to that level, not process-wide
+/// (only [`SEEN`] is a process-wide record). For entities 9001 to 9004 and 9011 to 9013 it
+/// records the hit, cancels x1's, doubles x2's, and gives 9005's hit armor and absorption
+/// modifiers.
 fn set_hook() -> (health::DamageHooks, fn(i32) -> Vec<(String, f32)>) {
     use health::{DamageContainer, DamageLevel, Hurting, Victim};
     fn hook(

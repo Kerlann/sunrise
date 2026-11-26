@@ -3803,10 +3803,9 @@ pub struct MobWorld<'a> {
 }
 
 impl<'a> MobWorld<'a> {
-    /// The side's frozen variant registries, typed for the mob code: `SideLevel` keeps them
-    /// opaque so the block/side layer never names a mob type.
+    /// The side's frozen variant registries, typed for the mob code.
     pub fn variant_tables(&self) -> Option<&'a crate::mobs::variants::VariantTables> {
-        self.side.variant_tables()?.downcast_ref()
+        self.side.variant_tables()
     }
 }
 /// The read-only decision from a registered effect's native tick Parts.

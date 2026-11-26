@@ -415,7 +415,7 @@ pub(crate) struct Environment<'a> {
     /// The damage `ENTITY_HURT_PLAYER` is told of.
     pub(crate) dealt: f32,
 }
-/// A hit on a player stopped at `hurtHelmet` ([`PlayerMotion::start_hurt`]): the hit's own
+/// A hit on a player stopped at `hurtHelmet` ([`crate::motion::PlayerMotion::start_hurt`]): the hit's own
 /// state, which borrows nothing, so the game can run the helmet's wear on its real host.
 /// Everything the player and level hold is read again when it resumes.
 #[derive(Debug)]

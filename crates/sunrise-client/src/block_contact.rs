@@ -59,11 +59,10 @@ pub trait SideLevel {
     fn block_states(&self) -> Option<mod_api::BlockStates<'_>> {
         None
     }
-    /// The world's frozen variant registries (server's world tables, or client's synced tables),
-    /// opaque here: the type belongs to the mob code, which downcasts at its own reads
-    /// (`MobWorld::variant_tables`). Naming it from the block/side layer would put this module
-    /// and `mobs` in a cycle.
-    fn variant_tables(&self) -> Option<&dyn std::any::Any> {
+    /// The world's frozen variant registries (server's world tables, or client's synced
+    /// tables). The borrow stays typed all the way to its reads: a side that has none (a dry
+    /// test or probe) answers `None`, never a wrong-typed fallback.
+    fn variant_tables(&self) -> Option<&crate::mobs::variants::VariantTables> {
         None
     }
 }
