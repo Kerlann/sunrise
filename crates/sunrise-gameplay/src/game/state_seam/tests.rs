@@ -40,9 +40,77 @@ const B_UUID: u128 = 343;
 const HIT: [i32; 3] = [3, 64, 4];
 const BESIDE: [i32; 3] = [3, 65, 4];
 
+type TicketObservations = Vec<(bool, bool)>;
+
 thread_local! {
-    static ARRIVAL_TICKETS: std::cell::RefCell<Option<Vec<(bool, bool)>>> =
+    static ARRIVAL_TICKETS: std::cell::RefCell<Option<TicketObservations>> =
         const { std::cell::RefCell::new(None) };
+    static RESUMES: std::cell::RefCell<Vec<(ActorInLevel, bool)>> = const { std::cell::RefCell::new(Vec::new()) };
+    static COMMAND_ACTORS: std::cell::RefCell<Vec<Option<PlayerId>>> = const { std::cell::RefCell::new(Vec::new()) };
+    static SOUND_PRESENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+struct TicketRecording;
+
+impl TicketRecording {
+    fn start() -> Self {
+        ARRIVAL_TICKETS.with_borrow_mut(|observations| *observations = Some(Vec::new()));
+        Self
+    }
+
+    fn finish(self) -> TicketObservations {
+        ARRIVAL_TICKETS.with_borrow_mut(Option::take).unwrap()
+    }
+}
+
+impl Drop for TicketRecording {
+    fn drop(&mut self) {
+        ARRIVAL_TICKETS.with_borrow_mut(|observations| *observations = None);
+    }
+}
+
+pub(super) fn record_resume(actor: ActorInLevel, valid: bool) {
+    RESUMES.with_borrow_mut(|observations| observations.push((actor, valid)));
+}
+
+pub(in crate::game) fn record_command_actor(actor: Option<PlayerId>) {
+    COMMAND_ACTORS.with_borrow_mut(|observations| observations.push(actor));
+}
+
+pub(in crate::game) fn record_pending_placement_sounds(
+    game: &ServerGame<'_>,
+    conn: u32,
+    heard: usize,
+) {
+    let placer = game
+        .server
+        .lan
+        .as_ref()
+        .and_then(|host| host.hub.guest(conn));
+    SOUND_PRESENT.set(placer.is_some_and(|placer| {
+        game.server
+            .pending_sounds
+            .iter()
+            .skip(heard)
+            .any(|sound| sound.except_entity == Some(placer.entity_id as u32))
+    }));
+}
+
+#[test]
+fn guest_slot_reacquires_by_identity_and_rejects_reuse() {
+    let mut guests = GuestList::default();
+    let (a, _rx) = placed_guest(A, Dim::Overworld, [0.; 3]);
+    let (b, _rx) = placed_guest(B, Dim::Overworld, [0.; 3]);
+    let actor = PlayerId::guest(&a);
+    guests.push(b);
+    guests.push(a);
+    assert_eq!(actor.live_slot(&guests), Some(1));
+    guests.remove(0);
+    assert_eq!(actor.live_slot(&guests), Some(0));
+    guests.remove(0);
+    let (replacement, _rx) = placed_guest(A, Dim::Overworld, [0.; 3]);
+    guests.push(replacement);
+    assert_eq!(actor.live_slot(&guests), None);
 }
 
 pub(in crate::game) fn record_arrival_ticket(game: &ServerGame<'_>, changed: bool) {
@@ -173,11 +241,17 @@ enum Travel {
 
 struct TravelListener {
     mode: Travel,
+    dedicated: bool,
     events: Arc<Mutex<Vec<&'static str>>>,
 }
 
 #[mod_api::__subscriptions]
 impl Hooks for TravelListener {
+    fn server_started(&self, _: &mut dyn ServerHost, event: &mut mod_api::ServerStartedEvent) {
+        assert_eq!(event.dedicated, self.dedicated);
+        self.events.lock().unwrap().push("authority");
+    }
+
     fn entity_travel_to_dimension(
         &self,
         host: &mut dyn ServerHost,
@@ -257,6 +331,7 @@ fn spectator_arrival(role: ExecutionRole, mode: Travel) {
         "observe-travel",
         Box::new(TravelListener {
             mode,
+            dedicated: role == ExecutionRole::DedicatedServer,
             events: events.clone(),
         }),
     )]
@@ -272,6 +347,8 @@ fn spectator_arrival(role: ExecutionRole, mode: Travel) {
                     .begin_open(Some(mod_api::Authority::DedicatedServer));
             }
             game.native_level_opened(Dim::Overworld);
+            game.server_lifecycle_world_ready();
+            assert_eq!(std::mem::take(&mut *events.lock().unwrap()), ["authority"]);
             open_fixture_hub(game);
             let out = add_player(game, A);
             let watcher = add_player(game, B);
@@ -357,9 +434,26 @@ fn spectator_arrival(role: ExecutionRole, mode: Travel) {
                 .unwrap();
             game.enter_level(Dim::Overworld).unwrap();
             assert!(game.levels_to_tick().contains(&Dim::End));
-            ARRIVAL_TICKETS.with_borrow_mut(|events| *events = Some(Vec::new()));
+            RESUMES.with_borrow_mut(Vec::clear);
+            let recording = TicketRecording::start();
             game.tick_server(true).unwrap();
-            let tickets = ARRIVAL_TICKETS.with_borrow_mut(Option::take).unwrap();
+            let tickets = recording.finish();
+            RESUMES.with_borrow(|resumes| {
+                let expected_valid = mode != Travel::ReopenDestination;
+                assert!(
+                    resumes
+                        .iter()
+                        .any(|(actor, valid)| actor.level.dim == Dim::End
+                            && *valid == expected_valid)
+                );
+                if mode == Travel::DisconnectAtPlatform {
+                    assert!(
+                        resumes
+                            .iter()
+                            .any(|(actor, valid)| actor.level.dim == Dim::End && !valid)
+                    );
+                }
+            });
             assert_eq!(tickets, [(false, false), (true, true)]);
             game.enter_level(Dim::End).unwrap();
             let expected: &[_] = if mode == Travel::ReopenDestination {
@@ -482,9 +576,8 @@ impl Hooks for BlockListener {
                         (player.uuid(), permission),
                         (B_UUID, PermissionLevel::Owners)
                     );
-                    assert_eq!(command.player(), Some(player));
                     assert_eq!(command.position, [4.5, 64.0, 6.5]);
-                    assert_eq!(command.dimension, Dim::Overworld.key());
+                    assert_eq!(command.dimension, Dim::Nether.key());
                     assert_eq!(host.players().acting_player(), Some(player));
                     let displaced = mod_api::__private::game::player_ref(
                         mod_api::EntityRef::new(player.entity().epoch(), A),
@@ -523,7 +616,7 @@ impl Hooks for BlockListener {
         let b = host.player(B_UUID).unwrap();
         assert!(b.entity().run_command(
             host,
-            "execute as @s positioned 4 64 6 run checknested",
+            "execute in minecraft:the_nether positioned 4 64 6 run checknested",
             PermissionLevel::Owners,
             true
         ));
@@ -603,10 +696,7 @@ fn placement_packet_restores_actor_and_source_and_corrects_prediction() {
                 use_on(game, [15, 64, 4], 1);
                 assert!(events.lock().unwrap().is_empty());
                 let packets = out();
-                assert_eq!(
-                    packets.iter().find_map(|p| receipt(p, 1)),
-                    Some([false, false])
-                );
+                packet_index(&packets[first..], |p| receipt(p, 1) == Some([false, false]));
                 assert!(
                     !packets[first..]
                         .iter()
@@ -720,7 +810,15 @@ fn placement_packet_restores_actor_and_source_and_corrects_prediction() {
                 game.as_guest(A, |game| {
                     game.as_guest(B, |game| {
                         let i = game.guest_index(A).unwrap();
-                        assert_eq!(game.as_guest_at(i, A, |_| ()), Err(TurnRefused::Nested));
+                        let player = PlayerId::guest(
+                            game.server.lan.as_ref().unwrap().hub.guest(A).unwrap(),
+                        );
+                        let level = LevelId::loaded(game, Dim::Overworld).unwrap();
+                        let actor = ActorInLevel { player, level };
+                        assert_eq!(
+                            actor.with_guest(game, i, A, |_| ()),
+                            Err(TurnRefused::Nested)
+                        );
                     })
                     .unwrap();
                     assert_eq!(game.server.lan_acting, Some(A));
@@ -733,10 +831,24 @@ fn placement_packet_restores_actor_and_source_and_corrects_prediction() {
                 let actor = PlayerId::guest(guest);
                 assert!(actor.view_at(game, index).is_some());
                 disconnect.store(true, Ordering::Relaxed);
+                game.server.audio_capture_active = true;
+                game.server.pending_sounds.clear();
+                RESUMES.with_borrow_mut(Vec::clear);
+                COMMAND_ACTORS.with_borrow_mut(Vec::clear);
                 use_on(game, HIT, 5);
+                assert!(SOUND_PRESENT.get());
+                assert!(game.server.pending_sounds.is_empty());
+                let b = PlayerId::guest(game.server.lan.as_ref().unwrap().hub.guest(B).unwrap());
+                assert!(COMMAND_ACTORS.with_borrow(|actors| actors.contains(&Some(b))));
+                assert!(RESUMES.with_borrow(|resumes| {
+                    resumes
+                        .iter()
+                        .any(|(id, valid)| id.player == actor && !valid)
+                }));
                 assert!(actor.view_at(game, index).is_none());
                 assert_eq!(&*game.block_name(BESIDE), "minecraft:dirt");
 
+                game.native_level_opened(Dim::Overworld);
                 let old = LevelId::loaded(game, Dim::Overworld).unwrap();
                 game.server.levels.0.clear();
                 assert!(old.view(game).is_none());
@@ -746,7 +858,17 @@ fn placement_packet_restores_actor_and_source_and_corrects_prediction() {
                 assert!(LevelId::loaded(game, Dim::Overworld).is_none());
                 game.native_level_opened(Dim::Overworld);
                 assert!(reset.view(game).is_none());
-                assert!(LevelId::loaded(game, Dim::Overworld).is_some());
+                let opened = LevelId::loaded(game, Dim::Overworld).unwrap();
+                game.native_level_closed(Dim::Overworld);
+                game.server_lifecycle_open_at(WorldEpoch::new(123));
+                let lifecycle = LevelId::loaded(game, Dim::Overworld).unwrap();
+                assert_ne!(opened, lifecycle);
+                game.native_level_closed(Dim::Overworld);
+                game.server
+                    .levels
+                    .0
+                    .reset_active_closed_for_test(Dim::Overworld);
+                assert_ne!(LevelId::loaded(game, Dim::Overworld).unwrap(), lifecycle);
             });
         });
     });

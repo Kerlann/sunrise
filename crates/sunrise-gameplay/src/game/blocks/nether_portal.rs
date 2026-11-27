@@ -704,7 +704,7 @@ impl crate::game::ServerGame<'_> {
     /// Only a server holds levels with tickets of their own.
     pub(in crate::game::server_side) fn place_portal_ticket(&mut self, chunk: (i32, i32)) {
         if !self.common.options.execution_role.is_client() {
-            self.server.tickets.0.add_portal(chunk);
+            crate::game::state_seam::LevelWrite::active(self).add_portal(chunk);
         }
     }
 

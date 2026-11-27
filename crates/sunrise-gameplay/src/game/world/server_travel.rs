@@ -11,7 +11,7 @@ use super::nether_portal::Plan;
 use super::respawn_anchor::RespawnConfig;
 use super::respawn_position::Respawn;
 use super::{Dim, Mob, lan::LanHost, minecarts};
-use crate::game::state_seam::{ActorInLevel, LevelId, PlayerId};
+use crate::game::state_seam::{ActorInLevel, LevelId, PlayerId, PlayerWrite, active_views};
 use std::ops::ControlFlow;
 use sunrise_core::{geometry::Vec3, position::BlockPos};
 use sunrise_gameplay_common::game::end_state::GatewayJob;
@@ -500,6 +500,7 @@ impl crate::game::ServerGame<'_> {
         };
         let at = Vec3::new(g.position[0], g.position[1], g.position[2]);
         let seen_credits = g.seen_credits;
+        let actor = (name == "end_portal").then(|| PlayerId::guest(g));
         // EndGatewayBlock.getPortalDestination: none without its block entity.
         let gateway_ok = name != "end_gateway"
             || self
@@ -562,6 +563,7 @@ impl crate::game::ServerGame<'_> {
                     }
                 } else if self.server_player_travel_allowed(conn, Dim::End, TravelCause::EndPortal)
                 {
+                    let conn = actor.map_or(conn, |actor| actor.resume_connection(self, conn));
                     self.start_server_trip(conn, Dim::End, None);
                 }
             }
@@ -952,6 +954,7 @@ impl crate::game::ServerGame<'_> {
         let player =
             (target == Dim::End && plan.is_none() && g.spectator()).then(|| PlayerId::guest(g));
         let source = self.common.dim;
+        let source_level = player.and_then(|_| LevelId::loaded(self, source));
         let end = plan.is_none();
         // Coordinates scale by the levels' coordinate scales (8 between the Overworld
         // and the Nether); an End portal has fixed destinations.
@@ -991,7 +994,9 @@ impl crate::game::ServerGame<'_> {
             if let Some(hold) = menu_hold {
                 self.resume_menu_opens(hold);
             }
-            if let Err(e) = self.enter_level(source) {
+            if let Err(e) = self.enter_level(
+                source_level.map_or(source, |level| level.restore_dimension(self, source)),
+            ) {
                 log::error!("could not reopen {}: {e}", source.id());
             }
             return;
@@ -1018,6 +1023,7 @@ impl crate::game::ServerGame<'_> {
             .hub
             .begin_level_change(i, at, yaw, None, PLAYER_DELAY, &ctx);
         self.send_player_command_tree(conn);
+        let i = arrival_actor.map_or(i, |actor| actor.resume_transfer_slot(self, source, i));
         let ctx = server_ctx!(self);
         if let Some(host) = self.server.lan.as_mut() {
             host.hub.finish_level_change(i, change, true, &ctx);
@@ -1053,7 +1059,9 @@ impl crate::game::ServerGame<'_> {
             hold: false,
             left: Some(source),
         });
-        if let Err(e) = self.enter_level(source) {
+        if let Err(e) = self
+            .enter_level(source_level.map_or(source, |level| level.restore_dimension(self, source)))
+        {
             log::error!("could not reopen {}: {e}", source.id());
         }
     }
@@ -1390,14 +1398,15 @@ impl crate::game::ServerGame<'_> {
             // A portal's trip (`start_server_trip`): its client waits to land.
             let portal = trip.end || trip.plan.is_some();
             self.resolve_arrivals();
-            let Some(host) = self.server.lan.as_ref() else {
+            let slot = trip
+                .arrival_actor
+                .map_or(i, |actor| actor.resume_slot(self, i));
+            let Some((_, player)) =
+                active_views(self, trip.arrival_actor.map(|actor| actor.level), slot)
+            else {
                 return;
             };
-            // A failed validation keeps the legacy row selection until travel publication changes.
-            let yaw = trip
-                .arrival_actor
-                .and_then(|actor| actor.view_at(self, i))
-                .map_or_else(|| host.hub.guests[i].yaw, |view| view.guest.yaw);
+            let yaw = player.guest.yaw;
             let (position, yaw) = if let Some(job) = trip.gateway {
                 match self.resolve_gateway(job, trip.target) {
                     Ok(at) => (at, yaw),
@@ -1415,6 +1424,9 @@ impl crate::game::ServerGame<'_> {
                     Some(arrival) => arrival,
                     None => self.end_arrival(entering, trip.target, &mut trip.finder),
                 };
+                let slot = trip
+                    .arrival_actor
+                    .map_or(i, |actor| actor.resume_slot(self, i));
                 match arrival {
                     Ok(Some((at, [turned, tilted]))) => {
                         // EndPortalBlock.getPortalDestination: PLACE_PORTAL_TICKET.
@@ -1422,7 +1434,9 @@ impl crate::game::ServerGame<'_> {
                         if let Some(pitch) = tilted
                             && let Some(host) = self.server.lan.as_mut()
                         {
-                            host.hub.guests.update(i, |guest| guest.pitch = pitch);
+                            PlayerWrite::update(&mut host.hub.guests, slot, |view| {
+                                view.guest.pitch = pitch
+                            });
                         }
                         (at, turned.unwrap_or(yaw))
                     }
@@ -1456,13 +1470,17 @@ impl crate::game::ServerGame<'_> {
                 self.arrive_vehicle(trip.source, vehicle, position, yaw);
             }
             // Player.getDimensionChangingDelay.
+            let slot = trip
+                .arrival_actor
+                .map_or(i, |actor| actor.resume_slot(self, i));
             let Some(host) = self.server.lan.as_mut() else {
                 return;
             };
             if !trip.hold {
                 host.play.entry(trip.conn).or_default().portal.cooldown = 10;
             }
-            host.hub.guests.update(i, |g| {
+            PlayerWrite::update(&mut host.hub.guests, slot, |view| {
+                let g = view.guest;
                 g.yaw = yaw;
                 // A new body at the exit: no fall distance or motion carried over,
                 // but the player's attributes (ServerPlayer.teleport keeps the entity).
@@ -1472,9 +1490,9 @@ impl crate::game::ServerGame<'_> {
             });
             let at = [position.x, position.y, position.z];
             if portal {
-                host.hub.land(i, at);
+                host.hub.land(slot, at);
             } else {
-                host.hub.teleport(i, Some(at));
+                host.hub.teleport(slot, Some(at));
             }
             self.tell_mods_changed_dimension(trip.conn, trip.left, trip.dim);
         }

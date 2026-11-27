@@ -322,35 +322,39 @@ impl crate::game::ServerGame<'_> {
             .command_source
             .clone()
             .unwrap_or_else(|| self.player_source());
-        let origin = if let Some(id) = self.server.exec.0.functions.last() {
-            CommandSource::Function {
+        use crate::game::state_seam::CommandOrigin;
+        let origin = match CommandOrigin::read(self, &source) {
+            CommandOrigin::Function(id) => CommandSource::Function {
                 id: mod_api::Identifier::parse(id).map_err(|_| err("command.failed", &[]))?,
                 permission,
-            }
-        } else if let Some((x, y, z)) = source.block {
-            CommandSource::CommandBlock {
+            },
+            CommandOrigin::Block((x, y, z), dimension) => CommandSource::CommandBlock {
                 position: [x, y, z],
-                level: source.origin_dimension.key(),
+                level: dimension.key(),
                 permission,
+            },
+            CommandOrigin::Cart(id) => {
+                let entity = self
+                    .with_source(
+                        super::commands::execute::Source {
+                            dimension: source.origin_dimension,
+                            ..source
+                        },
+                        |game| game.entity(id),
+                    )
+                    .ok_or_else(|| err("argument.entity.notfound.entity", &[]))?;
+                CommandSource::CommandBlockMinecart { entity, permission }
             }
-        } else if let Some(id) = source.cart {
-            let entity = self
-                .with_source(
-                    super::commands::execute::Source {
-                        dimension: source.origin_dimension,
-                        ..source
-                    },
-                    |game| game.entity(id),
-                )
-                .ok_or_else(|| err("argument.entity.notfound.entity", &[]))?;
-            CommandSource::CommandBlockMinecart { entity, permission }
-        } else if source.origin_player {
-            let player = self
-                .native_acting_player()
-                .ok_or_else(|| err("argument.entity.notfound.player", &[]))?;
-            CommandSource::Player { player, permission }
-        } else {
-            CommandSource::Console { permission }
+            CommandOrigin::Player(actor) => {
+                #[cfg(test)]
+                crate::game::state_seam::tests::record_command_actor(actor);
+                let _ = actor;
+                let player = self
+                    .native_acting_player()
+                    .ok_or_else(|| err("argument.entity.notfound.player", &[]))?;
+                CommandSource::Player { player, permission }
+            }
+            CommandOrigin::Console => CommandSource::Console { permission },
         };
         Ok(origin)
     }
