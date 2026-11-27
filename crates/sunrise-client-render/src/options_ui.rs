@@ -2322,10 +2322,10 @@ impl OptionsUi {
         self.data_pack_stamp = (crate::datapack::folder_stamp(&dir), Instant::now());
         self.data_pack_dir = Some(dir);
     }
-    /// `PackSelectionScreen.tick`'s watcher: once a second, the Data Packs
-    /// folder's packs are listed again if it changed, the selection kept
+    /// `PackSelectionScreen.tick`'s watcher (`PackSelectionScreen.java:175-180`): once a second,
+    /// the Data Packs folder's packs are listed again if it changed, the selection kept
     /// (the search text and scroll start over).
-    fn watch_data_packs(&mut self, atlas: &HudAtlas, size: (f32, f32)) {
+    pub fn watch_data_packs(&mut self, atlas: &HudAtlas, size: (f32, f32)) {
         let Some(dir) = &self.data_pack_dir else {
             return;
         };

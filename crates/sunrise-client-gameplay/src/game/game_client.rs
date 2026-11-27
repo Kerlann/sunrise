@@ -2260,8 +2260,12 @@ impl crate::game::ClientGame<'_> {
             return batch;
         }
         if self.client.screen == Screen::Options && self.client.title.0.is_some() {
+            self.sync_options_controller_context();
             let drawn = self.draw_screen_with_pre_hook(&mut batch);
             self.draw_options(&mut batch, drawn);
+            if drawn {
+                self.show_calibration((w, h));
+            }
             self.publish_screen_regions(&batch, None);
             self.draw_screen_with_post_hook(&mut batch);
             return batch;
@@ -2695,11 +2699,17 @@ impl crate::game::ClientGame<'_> {
         if screen == Screen::Options {
             self.flush_skin_slots();
             self.update_remote_skins();
+            self.sync_options_controller_context();
         }
         let drawn = self.draw_screen_with_pre_hook(&mut batch);
         let mut region_screen = None;
         match screen {
-            Screen::Options => self.draw_options(&mut batch, drawn),
+            Screen::Options => {
+                self.draw_options(&mut batch, drawn);
+                if drawn {
+                    self.show_calibration((w, h));
+                }
+            }
             _ if !drawn => {}
             Screen::Paused if self.client.pause_menu => self.draw_pause_menu(&mut batch),
             // PauseScreen(false): only its title, at the top.

@@ -144,7 +144,7 @@ impl ClientGame<'_> {
         }
     }
 
-    /// New codes and sessions, once a tick and while the pause menu is drawn.
+    /// New codes and sessions, once a client tick (including while paused in singleplayer).
     pub(in crate::game) fn tick_friends(&mut self) {
         // Retire stale sharing if LAN closed or rebound to a different port.
         if let Some(port) = self.client.friends.as_ref().map(|s| s.port)
@@ -213,10 +213,8 @@ impl ClientGame<'_> {
         }
     }
 
-    /// Play with Friends. The world is paused under it in singleplayer, so
-    /// new codes and sessions are read while it is drawn.
+    /// Play with Friends. `tick_friends` runs on every client tick (paused or not).
     pub(in crate::game::client_side) fn draw_friends_screen(&mut self, batch: &mut HudBatch) {
-        self.tick_friends();
         let view = self.friends_view();
         sunrise_client::widgets::begin_screen(|| {
             sunrise_client::widgets::ScreenInfo::new("friends", friends_screen::TITLE)

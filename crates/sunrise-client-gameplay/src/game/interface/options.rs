@@ -173,6 +173,29 @@ impl crate::game::ClientGame<'_> {
         if let Page::NativeMod(index) = page {
             self.native_settings_refresh(index);
         }
+        self.sync_options_controller_context();
+    }
+    /// Per-tick options work (`PackSelectionScreen.tick` at `PackSelectionScreen.java:175-180`):
+    /// polls the resource-pack and data-pack folder watchers outside `draw_options`.
+    pub(in crate::game::client_side) fn tick_options(&mut self) {
+        if self.client.screen != Screen::Options {
+            self.client.pack_folder = None;
+            return;
+        }
+        self.watch_pack_folder();
+        if self.client.chat_ui.options.page() == Page::Packs {
+            let size = self.gui_size();
+            self.client
+                .chat_ui
+                .options
+                .watch_data_packs(&self.client.gui.atlas, size);
+        }
+    }
+    pub(in crate::game::client_side) fn sync_options_controller_context(&mut self) {
+        if self.client.chat_ui.options.controller_open() {
+            let context = self.controller_settings_context();
+            self.client.chat_ui.options.set_controller_context(context);
+        }
     }
     /// While the resource pack screen is open, `resourcepacks/` is looked at once a second
     /// and the list found again when its packs changed (`PackSelectionScreen.tick`'s
@@ -227,11 +250,6 @@ impl crate::game::ClientGame<'_> {
             self.client.chat_ui.options.discard_draw();
             return;
         }
-        self.watch_pack_folder();
-        let context = self.controller_settings_context();
-        if self.client.chat_ui.options.controller_open() {
-            self.client.chat_ui.options.set_controller_context(context);
-        }
         let output = self
             .client
             .renderer
@@ -257,7 +275,6 @@ impl crate::game::ClientGame<'_> {
             &self.client.gui.atlas,
             self.client.cursor,
         );
-        self.show_calibration((batch.width, batch.height));
     }
     fn controller_settings_context(&self) -> sunrise_client::controller_ui::Context {
         sunrise_client::controller_ui::Context {

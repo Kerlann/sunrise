@@ -31,7 +31,6 @@ impl crate::game::ClientGame<'_> {
                     self.tick_script_step(event_loop);
                 }
                 sunrise_level::spans::time("tick", || self.tick())?;
-                self.tick_friends();
                 if self.client.remote.is_some() {
                     // Cave mood (a shader pack's playerMood) samples on a random
                     // seeded from the clock: under `SUNRISE_STILL` it waits for the
@@ -48,6 +47,10 @@ impl crate::game::ClientGame<'_> {
                 // Minecraft.tick still picks while the game mode and level are paused.
                 self.refresh_client_pick(1.0);
             }
+            if self.client.title.0.is_none() {
+                self.tick_friends();
+            }
+            self.tick_options();
             self.tick_win_screen()?;
             self.native_configs_tick_client();
             // Gui.tick runs ChatListener.tick paused or not; Hud.tickCount advances
