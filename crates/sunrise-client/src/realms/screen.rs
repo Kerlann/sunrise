@@ -164,8 +164,8 @@ impl Screen {
     }
 
     /// `RealmsUtil.extractPlayerFace`: a player's head in a `sunrise/world-iconN` slot,
-    /// resolved and downloaded on the title screen's own workers. `None` until both
-    /// answers are there (or when the player has no profile or skin).
+    /// read from the cache filled in [`Self::poll`]. `None` until both workers have answered
+    /// (or when the player has no profile or skin).
     fn face_sprite(
         &self,
         batch: &mut HudBatch,
@@ -173,40 +173,159 @@ impl Screen {
         uuid: Option<&str>,
         slot: usize,
     ) -> Option<String> {
-        let id = uuid.and_then(sunrise_client_render::auth::parse_uuid)?;
+        let face = self.skin_faces.borrow().get(uuid?)?.clone();
+        icon_sprite(batch, atlas, slot, &face)
+    }
+
+    /// Resolves and downloads one player's skin head into `skin_faces` during [`Self::poll`]
+    /// so `draw` only reads the cache.
+    fn poll_face(&self, uuid: &str) {
+        if self.skin_faces.borrow().contains_key(uuid) {
+            return;
+        }
+        let Some(id) = sunrise_client_render::auth::parse_uuid(uuid) else {
+            return;
+        };
         let value = {
-            let mut profiles = self.skin_workers.profiles.lock().ok()?;
+            let Ok(mut profiles) = self.skin_workers.profiles.lock() else {
+                return;
+            };
             let crate::skins::Resolve::Done(Some(profile)) =
                 profiles.state(&crate::skins::NameOrId::Id(id))
             else {
-                return None;
+                return;
             };
-            profile.textures()?.to_owned()
+            let Some(textures) = profile.textures() else {
+                return;
+            };
+            textures.to_owned()
         };
         let textures = crate::skins::unpack_insecure(&value);
-        let url = textures.skin?;
-        let location = crate::skins::skin_location(&crate::skins::texture_hash(&url)?);
-        let mut downloads = self.skin_workers.downloads.lock().ok()?;
+        let Some(url) = textures.skin else {
+            return;
+        };
+        let Some(hash) = crate::skins::texture_hash(&url) else {
+            return;
+        };
+        let location = crate::skins::skin_location(&hash);
+        let Ok(mut downloads) = self.skin_workers.downloads.lock() else {
+            return;
+        };
         if downloads.state(crate::skins::Kind::Skin, &url) != crate::skins::Download::Ready {
-            return None;
+            return;
         }
         // The ready list is the game's hand-off; drain it so it does not grow, then
         // read the processed 64x64 skin from the downloader's own cache.
         let _ = downloads.take_ready();
-        let cached = self.skin_faces.borrow().get(&location).cloned();
-        let face = match cached {
-            Some(face) => face,
-            None => {
-                let skin = downloads.image(&location)?;
-                let face = face_from_skin(skin)?;
-                self.skin_faces
-                    .borrow_mut()
-                    .insert(location.clone(), face.clone());
-                face
-            }
+        let Some(skin) = downloads.image(&location) else {
+            return;
         };
-        drop(downloads);
-        icon_sprite(batch, atlas, slot, &face)
+        let Some(face) = face_from_skin(skin) else {
+            return;
+        };
+        self.skin_faces.borrow_mut().insert(uuid.to_owned(), face);
+    }
+
+    /// Populates player-face, template-image, and local world-icon caches outside `draw`.
+    fn poll_caches(&self) {
+        match &self.subscreen {
+            SubScreen::Main => {
+                for server in self.servers() {
+                    if let Some(uuid) = server.owner_uuid.as_deref() {
+                        self.poll_face(uuid);
+                    }
+                    if let Some(players) = self.live_players.get(&server.id) {
+                        for uuid in players {
+                            self.poll_face(uuid);
+                        }
+                    }
+                }
+            }
+            SubScreen::PendingInvites {
+                invites: Some(Ok(list)),
+                ..
+            } => {
+                for invite in list {
+                    if let Some(uuid) = invite.world_owner_uuid.as_deref() {
+                        self.poll_face(uuid);
+                    }
+                }
+            }
+            SubScreen::Configure {
+                tab: ConfigureTab::Players,
+                detail: Some(Ok(detail)),
+                ..
+            } => {
+                for player in &detail.players {
+                    if let Some(uuid) = player.uuid.as_deref() {
+                        self.poll_face(uuid);
+                    }
+                }
+            }
+            SubScreen::Configure {
+                tab: ConfigureTab::Worlds,
+                server,
+                detail: Some(Ok(detail)),
+                ..
+            } => {
+                let mut cache = self.template_images.borrow_mut();
+                for slot in 1..=4 {
+                    let entry = detail.slots.get(&slot);
+                    let empty = if slot == 4 {
+                        server.minigame_id.is_none_or(|id| id == -1)
+                    } else {
+                        entry.is_none_or(|slot| slot.options.empty)
+                    };
+                    let image = if slot == 4 {
+                        server.minigame_image.as_deref()
+                    } else {
+                        entry.and_then(|entry| {
+                            (entry.options.template_id != -1)
+                                .then_some(entry.options.template_image.as_deref())
+                                .flatten()
+                        })
+                    };
+                    if let SlotPicture::Image(encoded) = slot_picture(slot, empty, image) {
+                        let key = format!("slot-{slot}-{}", encoded_key(encoded));
+                        cache.entry(key).or_insert_with(|| template_image(encoded));
+                    }
+                }
+            }
+            SubScreen::TemplateList { templates, .. } => {
+                let mut cache = self.template_images.borrow_mut();
+                for template in templates {
+                    if let Some(image) = template.image.as_ref() {
+                        let key = format!("{}:{}", template.id, image.len());
+                        cache.entry(key).or_insert_with(|| template_image(image));
+                    }
+                }
+            }
+            SubScreen::UploadSelect { worlds, .. } => {
+                if let Some(saves) = self.saves.as_ref() {
+                    let mut icons = self.world_icons.borrow_mut();
+                    for world in worlds {
+                        let path = saves.join(&world.folder).join("icon.png");
+                        let Ok(modified) = std::fs::metadata(&path).and_then(|m| m.modified())
+                        else {
+                            continue;
+                        };
+                        let cached = icons
+                            .entry(path.clone())
+                            .or_insert_with(|| (std::time::UNIX_EPOCH, None));
+                        if cached.0 != modified {
+                            *cached = (
+                                modified,
+                                crate::hud::decode(&path)
+                                    .ok()
+                                    .filter(|(w, h, _)| *w == 64 && *h == 64)
+                                    .map(|(_, _, pixels)| pixels),
+                            );
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     /// `RealmsMainScreen.createAddRealmButton`: with a trial available the button reads
@@ -822,6 +941,7 @@ impl Screen {
                 error,
                 done,
                 started,
+                speed,
                 ..
             } => {
                 // `checkDownloadSize`: the HEAD runs once; an answer over the limit asks
@@ -839,6 +959,15 @@ impl Screen {
                     } else {
                         start_download =
                             Some((download.clone(), world_name.clone(), Arc::clone(progress)));
+                    }
+                }
+                if progress.written() != 0 && !progress.is_cancelled() {
+                    let (last_written, last_sample, _) = speed.get();
+                    let now = Instant::now();
+                    if now.duration_since(last_sample) >= Duration::from_secs(1) {
+                        let elapsed = now.duration_since(last_sample).as_millis().max(1) as u64;
+                        let rate = 1000 * progress.written().saturating_sub(last_written) / elapsed;
+                        speed.set((progress.written(), now, rate));
                     }
                 }
                 if let Some(result) = job.as_ref().and_then(take) {
@@ -1151,6 +1280,7 @@ impl Screen {
         if refresh {
             self.refresh();
         }
+        self.poll_caches();
         Outcome::None
     }
 
@@ -6479,18 +6609,9 @@ impl Screen {
                         84.0,
                         u32::MAX,
                     );
-                    // `extractDownloadSpeed`: a sample every 20 ticks (a second), drawn
+                    // `extractDownloadSpeed`: sampled once a second in `poll`, drawn
                     // beside the percentage while it is not 0.
-                    let (last_written, last_sample, last_rate) = speed.get();
-                    let now = Instant::now();
-                    let rate = if now.duration_since(last_sample) >= Duration::from_secs(1) {
-                        let elapsed = now.duration_since(last_sample).as_millis().max(1) as u64;
-                        let rate = 1000 * progress.written().saturating_sub(last_written) / elapsed;
-                        speed.set((progress.written(), now, rate));
-                        rate
-                    } else {
-                        last_rate
-                    };
+                    let (_, _, rate) = speed.get();
                     if rate > 0 {
                         let label = crate::lang::tr("mco.download.speed", &[&human_readable(rate)]);
                         let percent_w = HudBatch::text_width(atlas, &percent);
@@ -6849,13 +6970,12 @@ impl Screen {
                                     ),
                                     SlotPicture::Image(encoded) => {
                                         let key = format!("slot-{slot}-{}", encoded_key(encoded));
-                                        let pixels = {
-                                            let mut cache = self.template_images.borrow_mut();
-                                            cache
-                                                .entry(key)
-                                                .or_insert_with(|| template_image(encoded))
-                                                .clone()
-                                        };
+                                        let pixels = self
+                                            .template_images
+                                            .borrow()
+                                            .get(&key)
+                                            .cloned()
+                                            .flatten();
                                         if let Some(sprite) = pixels.as_deref().and_then(|rgba| {
                                             icon_sprite(batch, atlas, slot as usize - 1, rgba)
                                         }) {
@@ -8570,14 +8690,10 @@ impl Screen {
                             );
                         }
                         // `RealmsTextureManager.worldTemplate`: the service's base64 PNG,
-                        // decoded to a 64x64 icon slot and drawn 38x38 inside the frame.
+                        // decoded during `poll` to a 64x64 icon slot and drawn 38x38 inside the frame.
                         let pixels = template.image.as_ref().and_then(|image| {
                             let key = format!("{}:{}", template.id, image.len());
-                            let mut cache = self.template_images.borrow_mut();
-                            cache
-                                .entry(key)
-                                .or_insert_with(|| template_image(image))
-                                .clone()
+                            self.template_images.borrow().get(&key).cloned().flatten()
                         });
                         let picture = pixels
                             .as_deref()

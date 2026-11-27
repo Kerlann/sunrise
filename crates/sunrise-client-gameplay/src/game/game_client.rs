@@ -2251,6 +2251,7 @@ impl crate::game::ClientGame<'_> {
         if self.client.screen == Screen::Win {
             let drawn = self.draw_screen_with_pre_hook(&mut batch);
             if drawn {
+                self.advance_win_screen();
                 self.draw_win_screen(&mut batch);
             }
             // The early return skips the match below: the hooks still see the
@@ -2736,7 +2737,10 @@ impl crate::game::ClientGame<'_> {
                     sunrise_client::screen_draw::RenderPhase::Foreground,
                 );
             }
-            Screen::GameModeSwitcher => self.draw_gamemode_switcher(&mut batch),
+            Screen::GameModeSwitcher => {
+                self.update_gamemode_switcher_hover(w, h);
+                self.draw_gamemode_switcher(&mut batch);
+            }
             Screen::Dead => self.draw_death_screen(&mut batch),
             Screen::Stats => self.draw_stats(&mut batch),
             Screen::Advancements => self.draw_advancements(&mut batch),

@@ -63,9 +63,22 @@ impl crate::game::ClientGame<'_> {
         false
     }
 
+    /// `GameModeSwitcherScreen.extractRenderState` (`GameModeSwitcherScreen.java:73-94`) records
+    /// the initial pointer position and updates `currentlyHovered` per frame; split out right before
+    /// `draw_gamemode_switcher` so drawing itself mutates no state.
+    pub(in crate::game::client_side) fn update_gamemode_switcher_hover(&mut self, w: f32, h: f32) {
+        if let Some(switcher) = &mut self.client.gamemode_switcher {
+            switcher.hover(
+                w as i32,
+                h as i32,
+                (self.client.cursor.0 as i32, self.client.cursor.1 as i32),
+            );
+        }
+    }
+
     pub(in crate::game::client_side) fn draw_gamemode_switcher(&mut self, batch: &mut HudBatch) {
         let (w, h) = (batch.width as i32, batch.height as i32);
-        let Some(switcher) = &mut self.client.gamemode_switcher else {
+        let Some(switcher) = &self.client.gamemode_switcher else {
             self.draw_screen_phase(batch, sunrise_client::screen_draw::RenderPhase::Background);
             self.draw_screen_phase(batch, sunrise_client::screen_draw::RenderPhase::Foreground);
             return;
@@ -75,11 +88,6 @@ impl crate::game::ClientGame<'_> {
         sunrise_client::widgets::begin_screen(|| {
             sunrise_client::widgets::ScreenInfo::new("gamemode_switcher", "")
         });
-        switcher.hover(
-            w,
-            h,
-            (self.client.cursor.0 as i32, self.client.cursor.1 as i32),
-        );
         let selected = switcher.selected;
         let atlas = &self.client.gui.atlas;
         batch.sprite_region(
