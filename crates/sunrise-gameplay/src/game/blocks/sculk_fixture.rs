@@ -475,7 +475,7 @@ impl crate::game::ServerGame<'_> {
             }
         });
         self.common.level_events.clear();
-        self.server.sculk.known = self.common.world.chunks.keys().copied().collect();
+        self.server.sculk.level.known = self.common.world.chunks.keys().copied().collect();
         self.server.sculk.known_revision = Some(self.common.world.chunks.membership_revision());
         self.sculk_sync_index();
         let mut names: HashMap<u32, String> = HashMap::new();

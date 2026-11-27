@@ -23,7 +23,7 @@ use super::{
     nether_portal::PortalLevelState,
     ominous_item_spawner_common::OminousItemSpawner,
     raids::RaidLevelState,
-    sculk_server::SculkState,
+    sculk_server::SculkLevelState,
     tnt_common::PrimedTnt,
 };
 use mod_api::DimensionKey;
@@ -217,7 +217,7 @@ pub struct Parked {
     anims: BlockEntityLevelTicks,
     pub raiding: RaidLevelState,
     chunk_spawn_enemies: bool,
-    sculk: SculkState,
+    sculk: SculkLevelState,
     creaking: CreakingLevelState,
     /// Natural spawning's candidate cache: each level keeps its own players' squares.
     spawn_scratch: super::natural_spawning::SpawnScratch,
