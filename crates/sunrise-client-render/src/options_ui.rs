@@ -5742,6 +5742,73 @@ mod tests {
     }
 
     #[test]
+    fn hiding_a_mod_setting_drops_its_keyboard_focus_and_slider_drag() {
+        use crate::mod_list::{NativeSetting, NativeSettingValue as V, SettingVisibility};
+
+        let mut settings = Settings::default();
+        settings.mods.installed.push(crate::mod_list::Installed {
+            id: "native".into(),
+            title: "Native".into(),
+            description: String::new(),
+            problem: None,
+            dev: false,
+            native: Some(crate::mod_list::NativePage {
+                settings: vec![
+                    NativeSetting {
+                        key: "mode".into(),
+                        label: "mode".into(),
+                        tooltip: None,
+                        category: None,
+                        visible_when: None,
+                        value: V::Choice {
+                            options: vec!["a".into(), "b".into()],
+                            index: 0,
+                        },
+                    },
+                    NativeSetting {
+                        key: "scale".into(),
+                        label: "scale".into(),
+                        tooltip: None,
+                        category: None,
+                        visible_when: Some(SettingVisibility {
+                            choice_setting: "mode".into(),
+                            choice_index: 0,
+                        }),
+                        value: V::Range {
+                            min: 0.0,
+                            max: 2.0,
+                            step: 0.5,
+                            value: 1.0,
+                        },
+                    },
+                ],
+                ..Default::default()
+            }),
+        });
+
+        let mut ui = OptionsUi::default();
+        ui.show(Page::NativeMod(0));
+        let scale = Opt::ModSetting(0, 1);
+        ui.focus = Some(FocusId::Slider(scale));
+        ui.focus_from_keyboard = true;
+        ui.can_change_value = true;
+        ui.dragging = Some(scale);
+        ui.slider_value = Some((scale, 0.75, std::time::Instant::now()));
+
+        settings.mods.installed[0].native.as_mut().unwrap().settings[0]
+            .value
+            .click();
+        ui.layout_changed();
+        let _ = ui.built_layout(&settings, 480.0, 270.0);
+
+        assert_eq!(ui.focus, None);
+        assert!(!ui.focus_from_keyboard);
+        assert_eq!(ui.dragging, None);
+        assert_eq!(ui.slider_value, None);
+        assert!(!ui.can_change_value);
+    }
+
+    #[test]
     fn an_uncategorized_mod_page_has_no_headings() {
         use crate::mod_list::{NativeSetting, NativeSettingValue as V};
         let mut s = Settings::default();
