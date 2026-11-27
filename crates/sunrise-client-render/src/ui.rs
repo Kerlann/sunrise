@@ -809,6 +809,90 @@ pub struct ButtonVisualState {
     pub focused: bool,
 }
 
+/// Optional icon drawn inside a button (`SpriteIconButton.CenteredIcon` / `TextAndIcon`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ButtonIcon {
+    /// Centred icon with no text label (`SpriteIconButton.CenteredIcon`).
+    Centered { sprite: &'static str, size: f32 },
+    /// Right-aligned icon beside the scrolling label (`SpriteIconButton.TextAndIcon`).
+    Trailing { sprite: &'static str, size: f32 },
+}
+
+/// Button label placement at `now_ms`, shared between [`button`] and icon-bearing buttons
+/// (`SpriteIconButton.TextAndIcon`).
+#[allow(clippy::too_many_arguments)]
+pub fn button_label_at(
+    batch: &mut HudBatch,
+    atlas: &HudAtlas,
+    [x, y, w, h]: [f32; 4],
+    label: &Text,
+    room: f32,
+    trailing_width: Option<f32>,
+    offset: Option<[f32; 2]>,
+    now_ms: i64,
+    color: u32,
+) {
+    let left = x + 2.0;
+    let (center_x, right) = match trailing_width {
+        Some(size) => (x + (w / 2.0).floor(), x + w - size - 4.0),
+        None => {
+            let right = x + w - 2.0;
+            // `acceptScrollingWithDefaultCenter`: `(left + right) / 2` with the
+            // margin's 2 px each side, truncated toward zero.
+            (((left + right) / 2.0).trunc(), right)
+        }
+    };
+    scrolling_text_with_offset(
+        batch,
+        atlas,
+        label,
+        LabelPlacement {
+            center_x,
+            clip: [left + room, y, right, y + h],
+            offset,
+        },
+        now_ms,
+        color,
+    );
+}
+
+/// A button with optional action declaration, icon decoration, custom art, and narration.
+/// Focus highlights its sprite while pointer hover alone drives cursor and hover narration.
+#[allow(clippy::too_many_arguments)]
+pub fn button_decorated(
+    batch: &mut HudBatch,
+    atlas: &HudAtlas,
+    rect: [f32; 4],
+    label: &Text,
+    state: ButtonVisualState,
+    action: Option<crate::widgets::Action>,
+    icon: Option<ButtonIcon>,
+    sprites: Option<&ButtonSprites>,
+    narration: impl FnOnce([f32; 4]) -> crate::widgets::Narratable,
+) {
+    let room = if let Some(action) = action {
+        crate::widgets::declare_action(action, rect, state.active);
+        if state.active {
+            crate::widgets::action_glyph_room()
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+    button_core(
+        batch,
+        atlas,
+        rect,
+        label,
+        state,
+        room,
+        icon,
+        sprites,
+        |rect| narration(rect).hovered(state.hovered),
+    );
+}
+
 /// A button whose focus highlights its art but whose cursor depends only on pointer hover.
 pub fn button_focused_as(
     batch: &mut HudBatch,
@@ -868,12 +952,45 @@ pub(crate) fn focused_button(
 fn button_with_room(
     batch: &mut HudBatch,
     atlas: &HudAtlas,
-    [x, y, w, h]: [f32; 4],
+    rect: [f32; 4],
     label: &Text,
     active: bool,
     hover: bool,
     focused: bool,
     room: f32,
+    sprites: Option<&ButtonSprites>,
+    narration: impl FnOnce([f32; 4]) -> crate::widgets::Narratable,
+) {
+    button_core(
+        batch,
+        atlas,
+        rect,
+        label,
+        ButtonVisualState {
+            active,
+            hovered: hover,
+            focused,
+        },
+        room,
+        None,
+        sprites,
+        |rect| narration(rect).hovered(hover || focused),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn button_core(
+    batch: &mut HudBatch,
+    atlas: &HudAtlas,
+    [x, y, w, h]: [f32; 4],
+    label: &Text,
+    ButtonVisualState {
+        active,
+        hovered,
+        focused,
+    }: ButtonVisualState,
+    room: f32,
+    icon: Option<ButtonIcon>,
     sprites: Option<&ButtonSprites>,
     narration: impl FnOnce([f32; 4]) -> crate::widgets::Narratable,
 ) {
@@ -883,9 +1000,9 @@ fn button_with_room(
     if active && plain.trim().is_empty() {
         crate::widgets::target([x, y, w, h]);
     }
-    crate::widgets::narratable(|| narration([x, y, w, h]).hovered(hover || focused));
-    crate::widgets::widget_cursor(hover, active);
-    let highlighted = hover || focused;
+    crate::widgets::narratable(|| narration([x, y, w, h]));
+    crate::widgets::widget_cursor(hovered, active);
+    let highlighted = hovered || focused;
     let custom = sprites.and_then(|sprites| {
         let state = if !active {
             sprites.disabled.as_deref()
@@ -919,24 +1036,51 @@ fn button_with_room(
     } else {
         rgba(160, 160, 160, 255)
     };
+    if let Some(ButtonIcon::Centered { sprite, size }) = icon {
+        // CenteredIcon divides the button and sprite sizes separately:
+        // a 15px icon in a 20px button starts at 10 - 7 = 3, not 2.
+        batch.sprite_scaled(
+            atlas,
+            sprite,
+            x + (w / 2.0).floor() - (size / 2.0).floor(),
+            y + (h / 2.0).floor() - (size / 2.0).floor(),
+            size,
+            size,
+            u32::MAX,
+        );
+        return;
+    }
+    let trailing_width = match icon {
+        Some(ButtonIcon::Trailing { size, .. }) => Some(size),
+        _ => None,
+    };
     // Centre the label (keeping it out from under a glyph), then apply the mod's offset.
     let offset = sprites
         .map(|sprites| sprites.label_offset)
         .filter(|offset| offset.iter().all(|coord| coord.is_finite()));
-    scrolling_text_with_offset(
+    button_label_at(
         batch,
         atlas,
+        [x, y, w, h],
         label,
-        LabelPlacement {
-            // `acceptScrollingWithDefaultCenter`: `(left + right) / 2` with the
-            // margin's 2 px each side, which is `x + w / 2` truncated.
-            center_x: ((x + 2.0 + x + w - 2.0) / 2.0).trunc(),
-            clip: [x + 2.0 + room, y, x + w - 2.0, y + h],
-            offset,
-        },
+        room,
+        trailing_width,
+        offset,
         crate::hud_overlays::now_ms(),
         color,
     );
+    if let Some(ButtonIcon::Trailing { sprite, size }) = icon {
+        // TextAndIcon: `x + width - spriteWidth - 2`, centred in the height.
+        batch.sprite_scaled(
+            atlas,
+            sprite,
+            x + w - size - 2.0,
+            y + (h / 2.0).floor() - (size / 2.0).floor(),
+            size,
+            size,
+            u32::MAX,
+        );
+    }
 }
 /// AbstractSliderButton: track, 8px handle at `value` (0..1) and the label.
 pub fn slider(
@@ -2647,6 +2791,100 @@ mod tests {
             .map(|t| t.rect)
             .collect();
         assert_eq!(targets, [[10.0, 20.0, 20.0, 20.0]]);
+    }
+
+    #[test]
+    fn button_decorated_handles_centered_and_trailing_icons() {
+        let mut atlas = atlas();
+        for (n, name) in [
+            "widget/button",
+            "widget/button_highlighted",
+            "widget/button_disabled",
+            "icon/centered",
+            "icon/trailing",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            atlas.gui.insert(
+                name.into(),
+                GuiSprite::Present {
+                    rect: Rect {
+                        u0: n as f32 / 8.0,
+                        v0: 0.0,
+                        u1: (n as f32 + 0.5) / 8.0,
+                        v1: 0.25,
+                        w: 16,
+                        h: 16,
+                    },
+                    scaling: None,
+                },
+            );
+        }
+        let saved = crate::widgets::take();
+        crate::widgets::set_narrating(true);
+        crate::widgets::end_frame(9_001);
+        crate::widgets::begin_screen(|| crate::widgets::ScreenInfo::new("title", "Title"));
+        let mut batch = HudBatch::scratch([640, 480]);
+        // Focused-only button highlights sprite but keeps hover narration false and cursor Arrow.
+        button_decorated(
+            &mut batch,
+            &atlas,
+            [10.0, 20.0, 20.0, 20.0],
+            &Text::empty(),
+            ButtonVisualState {
+                active: true,
+                hovered: false,
+                focused: true,
+            },
+            None,
+            Some(ButtonIcon::Centered {
+                sprite: "icon/centered",
+                size: 15.0,
+            }),
+            None,
+            |rect| crate::widgets::Narratable::button("Language", rect, true),
+        );
+        assert_eq!(crate::widgets::take_cursor(), crate::widgets::Cursor::Arrow);
+        // Trailing-icon hovered button requests pointing hand and records label.
+        button_decorated(
+            &mut batch,
+            &atlas,
+            [40.0, 20.0, 100.0, 20.0],
+            &Text::literal("Options"),
+            ButtonVisualState {
+                active: true,
+                hovered: true,
+                focused: false,
+            },
+            Some(crate::widgets::Action::Options),
+            Some(ButtonIcon::Trailing {
+                sprite: "icon/trailing",
+                size: 16.0,
+            }),
+            None,
+            |rect| crate::widgets::Narratable::button("Options", rect, true),
+        );
+        assert_eq!(
+            crate::widgets::take_cursor(),
+            crate::widgets::Cursor::PointingHand
+        );
+        crate::widgets::end_frame(9_002);
+        let widgets = crate::widgets::last();
+        assert_eq!(widgets.len(), 2);
+        assert_eq!(widgets[0].label, "");
+        assert_eq!(widgets[1].label, "Options");
+        let targets: Vec<[f32; 4]> = crate::widgets::last_targets()
+            .iter()
+            .map(|t| t.rect)
+            .collect();
+        assert_eq!(targets, [[10.0, 20.0, 20.0, 20.0]]);
+        let narration = crate::widgets::take_last_narration();
+        assert_eq!(narration.items.len(), 2);
+        assert_eq!(narration.items[0].hovered, Some(false));
+        assert_eq!(narration.items[1].hovered, Some(true));
+        crate::widgets::set_narrating(false);
+        crate::widgets::put(saved);
     }
 
     #[test]

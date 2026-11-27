@@ -475,25 +475,15 @@ impl crate::game::ClientGame<'_> {
             return;
         }
         let atlas = &self.client.gui.atlas;
-        let y = oy - 50.0;
-        for (x, label, step) in [(ox, "<", -1), (ox + Creative::WIDTH - 20.0, ">", 1)] {
-            let hover = Self::creative_page_button(ox, oy, self.client.cursor, pages) == Some(step);
-            let page = self.client.creative_screen.0.page as i64 + step;
-            let active = (0..pages as i64).contains(&page);
-            let sprite = match (active, hover) {
-                (false, _) => "widget/button_disabled",
-                (true, true) => "widget/button_highlighted",
-                (true, false) => "widget/button",
-            };
-            sunrise_client::ui::nine_slice(batch, atlas, sprite, x, y, 20.0, 20.0, u32::MAX);
-            let color = if active {
-                u32::MAX
-            } else {
-                rgba(160, 160, 160, 255)
-            };
-            let w = HudBatch::text_width(atlas, label);
-            batch.text(atlas, label, x + (20.0 - w) / 2.0, y + 6.0, color, true);
-        }
+        draw_creative_page_buttons(
+            batch,
+            atlas,
+            ox,
+            oy,
+            self.client.cursor,
+            self.client.creative_screen.0.page,
+            pages,
+        );
         let text = format!("{} / {}", self.client.creative_screen.0.page + 1, pages);
         let w = HudBatch::text_width(atlas, &text);
         batch.text(
@@ -514,6 +504,130 @@ impl crate::game::ClientGame<'_> {
             x,
             y,
         );
+    }
+}
+
+fn draw_creative_page_buttons(
+    batch: &mut HudBatch,
+    atlas: &sunrise_client::hud::HudAtlas,
+    ox: f32,
+    oy: f32,
+    cursor: (f32, f32),
+    current_page: usize,
+    pages: usize,
+) {
+    let y = oy - 50.0;
+    for (x, label, step) in [(ox, "<", -1), (ox + Creative::WIDTH - 20.0, ">", 1)] {
+        let hover =
+            crate::game::ClientGame::creative_page_button(ox, oy, cursor, pages) == Some(step);
+        let page = current_page as i64 + step;
+        let active = (0..pages as i64).contains(&page);
+        sunrise_client::ui::button(
+            batch,
+            atlas,
+            x,
+            y,
+            20.0,
+            20.0,
+            &sunrise_game_data::text::Text::literal(label),
+            active,
+            hover,
+        );
+    }
+}
+
+#[cfg(test)]
+mod page_button_tests {
+    use super::*;
+    use sunrise_client::{
+        hud::{GuiSprite, HudAtlas, Rect},
+        widgets::{self, Cursor, ScreenInfo},
+    };
+
+    #[test]
+    fn creative_page_buttons_record_highlight_and_narrate() {
+        let mut atlas =
+            HudAtlas::build(&sunrise_assets::resource_source::ResourceSource::directory(
+                "/nonexistent/sunrise-test-assets".into(),
+            ))
+            .unwrap();
+        for (n, name) in [
+            "widget/button",
+            "widget/button_highlighted",
+            "widget/button_disabled",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            atlas.gui.insert(
+                name.into(),
+                GuiSprite::Present {
+                    rect: Rect {
+                        u0: n as f32 / 4.0,
+                        v0: 0.0,
+                        u1: (n as f32 + 0.5) / 4.0,
+                        v1: 0.25,
+                        w: 16,
+                        h: 16,
+                    },
+                    scaling: None,
+                },
+            );
+        }
+        let saved = widgets::take();
+        widgets::set_narrating(true);
+        let (ox, oy) = (100.0, 100.0);
+        // Page 0 of 2: "<" is disabled, ">" is active. Hovering ">" highlights it and requests hand.
+        widgets::end_frame(720);
+        widgets::begin_screen(|| ScreenInfo::new("creative", ""));
+        let _ = widgets::take_cursor();
+        let mut batch = HudBatch::scratch([400, 300]);
+        draw_creative_page_buttons(
+            &mut batch,
+            &atlas,
+            ox,
+            oy,
+            (ox + Creative::WIDTH - 10.0, oy - 40.0),
+            0,
+            2,
+        );
+        assert_eq!(widgets::take_cursor(), Cursor::PointingHand);
+        let sprite_u0s: Vec<f32> = batch
+            .vertices
+            .chunks_exact(6)
+            .filter(|q| q[0].text == 0)
+            .map(|q| q[0].uv[0])
+            .collect();
+        assert_eq!(sprite_u0s, [0.5, 0.25]);
+        widgets::end_frame(721);
+        let recorded = widgets::last();
+        assert_eq!(recorded.len(), 2);
+        assert_eq!(
+            (recorded[0].label.as_str(), recorded[0].enabled),
+            ("<", false)
+        );
+        assert_eq!(
+            (recorded[1].label.as_str(), recorded[1].enabled),
+            (">", true)
+        );
+        let narration = widgets::take_last_narration();
+        assert_eq!(narration.items.len(), 2);
+        assert_eq!(narration.items[0].hovered, Some(false));
+        assert_eq!(narration.items[1].hovered, Some(true));
+
+        // Hovering disabled "<" requests NotAllowed cursor and keeps disabled sprite.
+        widgets::begin_screen(|| ScreenInfo::new("creative", ""));
+        let _ = widgets::take_cursor();
+        let mut batch = HudBatch::scratch([400, 300]);
+        draw_creative_page_buttons(&mut batch, &atlas, ox, oy, (ox + 10.0, oy - 40.0), 0, 2);
+        assert_eq!(widgets::take_cursor(), Cursor::NotAllowed);
+        widgets::end_frame(722);
+        let narration = widgets::take_last_narration();
+        assert_eq!(narration.items[0].hovered, Some(true));
+        assert_eq!(narration.items[1].hovered, Some(false));
+
+        widgets::set_narrating(false);
+        widgets::put(saved);
     }
 }
 

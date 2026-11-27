@@ -487,45 +487,26 @@ impl Button {
     /// label on Create World, hi_in's Join Server in the Multiplayer footer).
     /// A button with a `trailing` icon is `SpriteIconButton.TextAndIcon`, whose
     /// label keeps clear of the icon: see [`Button::draw_label_at`].
+    #[cfg(test)]
     fn draw_label(&self, batch: &mut HudBatch, atlas: &HudAtlas, color: u32) {
         self.draw_label_at(batch, atlas, color, crate::hud_overlays::now_ms());
     }
 
-    /// [`Button::draw_label`] at `now_ms`. `SpriteIconButton.TextAndIcon`
-    /// (`extractContents`) hands the label to `acceptScrolling` with `left`
-    /// at the button's x plus 2, `right` at its x plus width minus the
-    /// sprite's width minus 4, and `centerX` at its x plus half its width: the
-    /// label slides inside that box when wider, and one that fits is moved
-    /// left until it ends where the icon's room begins. A plain button takes
-    /// its centre from the midpoint of the unreserved content bounds.
-    /// Controller glyph room narrows the fit and clip bounds, not the centre.
+    #[cfg(test)]
     fn draw_label_at(&self, batch: &mut HudBatch, atlas: &HudAtlas, color: u32, now_ms: i64) {
         let room = if self.action.is_some() && self.enabled {
             crate::widgets::action_glyph_room()
         } else {
             0.0
         };
-        let left = self.x + 2.0;
-        let (center_x, right) = match self.trailing {
-            Some((_, size)) => (
-                self.x + (self.w / 2.0).floor(),
-                self.x + self.w - size - 4.0,
-            ),
-            None => {
-                let right = self.x + self.w - 2.0;
-                // `acceptScrollingWithDefaultCenter`: truncate the midpoint toward zero.
-                (((left + right) / 2.0).trunc(), right)
-            }
-        };
-        crate::ui::scrolling_text_around_at(
+        crate::ui::button_label_at(
             batch,
             atlas,
+            [self.x, self.y, self.w, 20.0],
             &Text::literal(&self.label),
-            center_x,
-            left + room,
-            right,
-            self.y,
-            self.y + 20.0,
+            room,
+            self.trailing.map(|(_, size)| size),
+            None,
             now_ms,
             color,
         );

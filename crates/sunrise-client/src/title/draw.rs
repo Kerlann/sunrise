@@ -794,64 +794,33 @@ impl Title {
         // The hovered button's `Tooltip`, drawn once the widgets are.
         let mut button_tooltip = None;
         for b in self.buttons(w, h) {
-            crate::widgets::record(&b.label, [b.x, b.y, b.w, 20.0], b.enabled);
-            // Realms' icon buttons have no label to record.
-            if b.enabled && b.label.trim().is_empty() {
-                crate::widgets::target([b.x, b.y, b.w, 20.0]);
-            }
-            if let Some(action) = b.action.filter(|_| !self.preparing) {
-                crate::widgets::declare_action(action, [b.x, b.y, b.w, 20.0], b.enabled);
-            }
-            let inside =
-                cursor.0 >= b.x && cursor.0 < b.x + b.w && cursor.1 >= b.y && cursor.1 < b.y + 20.0;
-            crate::widgets::narratable(|| self.button_narration(&b).hovered(inside));
-            crate::widgets::widget_cursor(inside, b.enabled);
+            let rect = [b.x, b.y, b.w, 20.0];
+            let inside = crate::ui::hovered(cursor, b.x, b.y, b.w, 20.0);
             if inside && let Some(key) = self.button_tooltip(b.id) {
-                button_tooltip = Some((key, [b.x, b.y, b.w, 20.0]));
+                button_tooltip = Some((key, rect));
             }
-            let is_focused = self.focused_button == Some(b.id);
-            let hover = b.enabled && (inside || is_focused);
-            let sprite = if !b.enabled {
-                "widget/button_disabled"
-            } else if hover {
-                "widget/button_highlighted"
-            } else {
-                "widget/button"
-            };
-            // `AbstractButton.extractDefaultSprite`: `blitSprite`, as the sprite's `gui.scaling` says.
-            crate::ui::nine_slice(batch, atlas, sprite, b.x, b.y, b.w, 20.0, u32::MAX);
-            let color = if b.enabled {
-                u32::MAX
-            } else {
-                rgba(160, 160, 160, 255)
-            };
-            if let Some((icon, size)) = b.icon {
-                // CenteredIcon divides the button and sprite sizes separately:
-                // a 15px icon in a 20px button starts at 10 - 7 = 3, not 2.
-                batch.sprite_scaled(
-                    atlas,
-                    icon,
-                    b.x + (b.w / 2.0).floor() - (size / 2.0).floor(),
-                    b.y + 10.0 - (size / 2.0).floor(),
-                    size,
-                    size,
-                    u32::MAX,
-                );
-                continue;
-            }
-            b.draw_label(batch, atlas, color);
-            if let Some((icon, size)) = b.trailing {
-                // TextAndIcon: `x + width - spriteWidth - 2`, centred in the height.
-                batch.sprite_scaled(
-                    atlas,
-                    icon,
-                    b.x + b.w - size - 2.0,
-                    b.y + 10.0 - (size / 2.0).floor(),
-                    size,
-                    size,
-                    u32::MAX,
-                );
-            }
+            let icon = b
+                .icon
+                .map(|(sprite, size)| crate::ui::ButtonIcon::Centered { sprite, size })
+                .or_else(|| {
+                    b.trailing
+                        .map(|(sprite, size)| crate::ui::ButtonIcon::Trailing { sprite, size })
+                });
+            crate::ui::button_decorated(
+                batch,
+                atlas,
+                rect,
+                &Text::literal(&b.label),
+                crate::ui::ButtonVisualState {
+                    active: b.enabled,
+                    hovered: inside,
+                    focused: self.focused_button == Some(b.id),
+                },
+                b.action.filter(|_| !self.preparing),
+                icon,
+                None,
+                |_| self.button_narration(&b),
+            );
         }
         // RealmsHeader's notification badges sit on their buttons, so they draw after.
         if let Mode::Realms(screen) = &self.mode {
