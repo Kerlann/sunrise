@@ -2623,8 +2623,77 @@ impl OptionsUi {
         let Some(page) = &m.native else {
             return rows;
         };
+        if !page.mappings.is_empty() {
+            rows.push(Row::Heading("controls.keybinds.title".into()));
+        }
+        let mut last_mapping_category = "";
+        for (k, mapping) in page.mappings.iter().enumerate() {
+            let category = mapping.category.as_str();
+            if !category.is_empty() && category != last_mapping_category {
+                last_mapping_category = category;
+                rows.push(Row::Heading(category.to_owned()));
+            }
+            let (key, modifiers) = s.mods.binding(
+                &m.id,
+                &mapping.id,
+                (mapping.key.as_str(), mapping.modifiers),
+            );
+            let at_default = key == mapping.key && modifiers == mapping.modifiers;
+            let mut binding = binding_text(&key, modifiers);
+            if !key_conflicts(
+                s,
+                &m.id,
+                &mapping.id,
+                &key,
+                modifiers,
+                mapping.context,
+                at_default,
+            )
+            .is_empty()
+            {
+                binding = Text::literal("[ ")
+                    .append(binding.with_color(text::WHITE))
+                    .append(" ]")
+                    .with_color(text::YELLOW);
+            }
+            if self.selected_mod_key == Some((i, k)) {
+                binding = Text::literal("> ")
+                    .append(binding.with_style(&Style {
+                        color: Some(text::WHITE),
+                        underlined: Some(true),
+                        ..Style::default()
+                    }))
+                    .append(" <")
+                    .with_color(text::YELLOW);
+            }
+            let label = tr(&mapping.label)
+                .append(Text::literal(": "))
+                .append(binding);
+            let bind = button(0.0, 0.0, 230.0, label, Act::ModKey(i, k));
+            let reset = button(0.0, 0.0, 75.0, tr("controls.reset"), Act::ResetModKey(i, k));
+            rows.push(Row::Buttons(
+                bind,
+                Some(if at_default { inactive(reset) } else { reset }),
+            ));
+        }
         let mut category: Option<&str> = None;
         for (j, setting) in page.settings.iter().enumerate() {
+            if let Some(visibility) = &setting.visible_when {
+                let visible = page
+                    .settings
+                    .iter()
+                    .find(|controller| controller.key == visibility.choice_setting)
+                    .is_some_and(|controller| {
+                        matches!(
+                            &controller.value,
+                            crate::mod_list::NativeSettingValue::Choice { index, .. }
+                                if *index == visibility.choice_index
+                        )
+                    });
+                if !visible {
+                    continue;
+                }
+            }
             if setting.category.as_deref() != category {
                 category = setting.category.as_deref();
                 if let Some(category) = category {
@@ -5488,6 +5557,7 @@ mod tests {
                     tooltip: None,
                     value: crate::mod_list::NativeSettingValue::Toggle(true),
                     category: None,
+                    visible_when: None,
                 }],
                 ..Default::default()
             }),
@@ -5539,6 +5609,7 @@ mod tests {
             label: key.into(),
             tooltip: None,
             category: category.map(str::to_owned),
+            visible_when: None,
             value,
         };
         s.mods.installed.push(crate::mod_list::Installed {
@@ -5663,6 +5734,82 @@ mod tests {
     }
 
     #[test]
+    fn a_mod_page_shows_its_keybinds_and_only_matching_conditional_settings() {
+        use crate::mod_list::{
+            KeyMapping, NativeSetting, NativeSettingValue as V, SettingVisibility,
+        };
+        let mut s = Settings::default();
+        let ui = OptionsUi::default();
+        let mode = NativeSetting {
+            key: "zoom_mode".into(),
+            label: "zoom.mode".into(),
+            tooltip: None,
+            category: None,
+            visible_when: None,
+            value: V::Choice {
+                options: vec!["zoom.key".into(), "zoom.spyglass".into()],
+                index: 0,
+            },
+        };
+        let magnification = NativeSetting {
+            key: "magnification".into(),
+            label: "zoom.magnification".into(),
+            tooltip: None,
+            category: None,
+            visible_when: Some(SettingVisibility {
+                choice_setting: "zoom_mode".into(),
+                choice_index: 0,
+            }),
+            value: V::Range {
+                min: 2.0,
+                max: 10.0,
+                step: 1.0,
+                value: 4.0,
+            },
+        };
+        s.mods.installed.push(crate::mod_list::Installed {
+            id: "native".into(),
+            title: "Native 1.0".into(),
+            description: String::new(),
+            problem: None,
+            dev: false,
+            native: Some(crate::mod_list::NativePage {
+                mappings: vec![KeyMapping {
+                    id: "zoom".into(),
+                    label: "key.zoom".into(),
+                    key: "key.keyboard.z".into(),
+                    ..Default::default()
+                }],
+                settings: vec![mode.clone(), magnification],
+                ..Default::default()
+            }),
+        });
+
+        let has_setting = |ui: &OptionsUi, s: &Settings, index| {
+            ui.native_rows(s, 0).iter().any(|row| {
+                matches!(row, Row::Buttons(widget, _) if matches!(widget.kind, WKind::Slider { opt: Opt::ModSetting(0, j), .. } if j == index))
+            })
+        };
+        let has_mapping = |ui: &OptionsUi, s: &Settings| {
+            ui.native_rows(s, 0).iter().any(|row| {
+                matches!(row, Row::Buttons(widget, _) if matches!(widget.kind, WKind::Button { act: Act::ModKey(0, 0), .. }))
+            })
+        };
+        assert!(has_mapping(&ui, &s));
+        assert!(has_setting(&ui, &s, 1));
+
+        s.mods.installed[0].native.as_mut().unwrap().settings[0]
+            .value
+            .click();
+        assert!(!has_setting(&ui, &s, 1));
+        assert!(has_mapping(&ui, &s));
+        s.mods.installed[0].native.as_mut().unwrap().settings[0]
+            .value
+            .click();
+        assert!(has_setting(&ui, &s, 1));
+    }
+
+    #[test]
     fn an_uncategorized_mod_page_has_no_headings() {
         use crate::mod_list::{NativeSetting, NativeSettingValue as V};
         let mut s = Settings::default();
@@ -5672,6 +5819,7 @@ mod tests {
             label: key.into(),
             tooltip: None,
             category: None,
+            visible_when: None,
             value,
         };
         s.mods.installed.push(crate::mod_list::Installed {
@@ -5719,6 +5867,7 @@ mod tests {
             label: name.into(),
             tooltip: Some(key.into()),
             category: None,
+            visible_when: None,
             value,
         };
         s.mods.installed.push(crate::mod_list::Installed {
@@ -6451,6 +6600,7 @@ mod tests {
                     tooltip: None,
                     value: crate::mod_list::NativeSettingValue::Toggle(true),
                     category: None,
+                    visible_when: None,
                 }],
                 own_screen: false,
             }),

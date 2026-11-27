@@ -24,6 +24,18 @@ pub fn setting_category(mod_id: &str, key: &str) -> Option<&'static str> {
     })
 }
 
+/// The choice setting and option index that control whether `key` is shown on its mod page.
+pub fn setting_visibility(mod_id: &str, key: &str) -> Option<(&'static str, usize)> {
+    installed().and_then(|installed| {
+        installed
+            .keys
+            .setting_visibility
+            .iter()
+            .find(|(owner, k, _, _)| *owner == mod_id && k == key)
+            .map(|(_, _, controller, choice)| (controller.as_str(), *choice))
+    })
+}
+
 /// Mint an owner-bound [`SettingKey`](crate::SettingKey) during registration.
 pub fn setting_key(owner: &'static str, slot: usize) -> crate::SettingKey {
     crate::SettingKey { owner, slot }
@@ -129,6 +141,17 @@ pub trait SettingsRegistrar {
     /// Called from `Hooks::register`, after `register_setting` for the same key; a key
     /// the calling mod never registered, or an empty category, is refused.
     fn categorize_setting(&mut self, key: &str, category: &str) -> Result<(), crate::SettingError>;
+
+    /// Show the setting `key` on Options > Mods only when the calling mod's earlier choice
+    /// setting `controller` currently has the zero-based option `choice`. The setting stays
+    /// registered and its saved value is retained while hidden. Call after both settings have
+    /// been registered; `controller` must be a choice and `choice` one of its options.
+    fn show_setting_when_choice(
+        &mut self,
+        key: &str,
+        controller: &str,
+        choice: usize,
+    ) -> Result<(), crate::SettingError>;
 
     /// Register the screen the Mods screen's Config button opens for the calling mod
     /// (NeoForge's `IConfigScreenFactory`, registered with `ModContainer.registerExtensionPoint`).

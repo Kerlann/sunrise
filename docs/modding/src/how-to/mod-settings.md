@@ -172,6 +172,11 @@ already, comes back as the error. On the client the settings appear on your mod'
   them: settings sharing a category (a translation key) are drawn under one heading, in registration
   order, on the mod's page. Settings without a category render as today. A key the calling mod never
   registered, or an empty category, comes back as the error.
+- Show a setting only for one option of a choice with
+  `Registrar::show_setting_when_choice(key, controller, choice)`. The controller must be a different,
+  already-registered choice setting, and `choice` is its zero-based option index. The hidden row is
+  removed from the page as soon as the choice changes, but its saved value is retained. A missing
+  setting, non-choice controller, self-reference, or invalid option returns `SettingError`.
 - Update a setting on either host with `host.set_setting(key, value) -> Result<bool, SettingAccessError>`.
   The game validates it, persists it atomically, updates that side's live store and any client Options > Mods
   row, and synchronously tells its owner through `setting_changed`. The hook takes a read-only `&dyn Host` and can

@@ -830,6 +830,7 @@ mod tests {
                             tooltip: None,
                             value: NativeSettingValue::Toggle(false),
                             category: None,
+                            visible_when: None,
                         }],
                         ..Default::default()
                     }),

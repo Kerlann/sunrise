@@ -3871,6 +3871,14 @@ impl Game<'_> {
                     value,
                     category: mod_api::__private::setting_category(mod_id, &spec.key)
                         .map(str::to_owned),
+                    visible_when: mod_api::__private::setting_visibility(mod_id, &spec.key).map(
+                        |(choice_setting, choice_index)| {
+                            sunrise_client::mod_list::SettingVisibility {
+                                choice_setting: choice_setting.to_owned(),
+                                choice_index,
+                            }
+                        },
+                    ),
                 }
             })
             .collect()
