@@ -1135,9 +1135,7 @@ impl crate::game::ClientGame<'_> {
 
     /// Live widget collection for the currently open screen (`ClientHost::screen_widgets`).
     pub fn screen_widgets(&mut self) -> Option<&mut dyn ScreenWidgets> {
-        if self.observed_screen_view().is_none() {
-            return None;
-        }
+        self.observed_screen_view()?;
         let needs_discover = !self.client.screen_state.0.widgets.inner.borrow().discovered;
         if needs_discover {
             let collected = self.discover_screen_widgets();

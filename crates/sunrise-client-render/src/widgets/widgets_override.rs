@@ -156,6 +156,7 @@ pub struct ResolvedWidgetProps {
 }
 
 /// Outcome of [`resolve_engine_widget`].
+#[derive(Debug)]
 pub enum ResolvedEngineWidget {
     /// Neither collecting nor overriding this widget: caller draws with its normal arguments.
     Unchanged,
@@ -652,7 +653,7 @@ mod tests {
         widgets::target([1.0, 2.0, 30.0, 20.0]);
         widgets::request_cursor(Cursor::PointingHand);
 
-        let collected = with_widget_collector(|| {
+        let ((), collected) = with_widget_collector(|| {
             assert!(is_collecting_widgets());
             let label = Text::translate("gui.done", &[]);
             let resolved = resolve_engine_widget(EngineWidgetInput {

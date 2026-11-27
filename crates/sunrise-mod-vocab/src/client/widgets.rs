@@ -855,7 +855,8 @@ impl ScreenChild {
     }
 
     /// Effective ARGB colour used for the label text: `label_text_color` when set, otherwise
-    /// white (`0xFFFF_FFFF`) when active or light grey (`0xFFA0_A0A0`) when inactive.
+    /// active white (`0xFFFF_FFFF`) or vanilla's inactive light grey (`0xFFA0_A0A0`,
+    /// `AbstractWidget.WithInactiveMessage.defaultInactiveMessage`, `AbstractWidget.java:318`).
     pub fn effective_label_text_color(&self) -> u32 {
         self.label_text_color.unwrap_or(if self.active {
             0xFFFF_FFFF
@@ -978,9 +979,12 @@ pub trait ScreenWidgets {
     /// Run the screen's own activation for `id` (`AbstractButton.onPress`), through the same path
     /// a pointer click on its resolved rectangle takes.
     ///
-    /// Returns `false` when `id` is stale, when the widget is not `visible && active`, or while
-    /// staging inside `screen_init_pre` / `screen_init_post` (invoke live through
-    /// `ClientHost::screen_widgets` from a tick, input, or widget callback).
+    /// Returns `false` when `id` is stale or when the widget is not `visible && active`.
+    ///
+    /// **Staging limitation:** `Hooks::screen_init_pre` and `Hooks::screen_init_post` receive
+    /// `&dyn ClientHost` rather than `&mut dyn ClientHost`, so the staging registrar has no mutable
+    /// host handle to run button callbacks or screen click routing and returns `false`; invoke
+    /// `press` live through [`ClientHost::screen_widgets`] from a tick, input, or widget callback.
     fn press(&mut self, id: ScreenWidgetId) -> bool;
 }
 

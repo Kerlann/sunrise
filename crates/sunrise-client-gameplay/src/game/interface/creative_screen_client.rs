@@ -536,6 +536,8 @@ fn draw_creative_page_buttons(
     }
 }
 
+use sunrise_gameplay_common::game::held_items::HeldItemsGameExt1 as _;
+
 #[cfg(test)]
 mod page_button_tests {
     use super::*;
@@ -594,7 +596,9 @@ mod page_button_tests {
         assert_eq!(widgets::take_cursor(), Cursor::PointingHand);
         let sprite_u0s: Vec<f32> = batch
             .vertices
-            .chunks_exact(6)
+            .as_chunks::<6>()
+            .0
+            .iter()
             .filter(|q| q[0].text == 0)
             .map(|q| q[0].uv[0])
             .collect();
@@ -630,5 +634,3 @@ mod page_button_tests {
         widgets::put(saved);
     }
 }
-
-use sunrise_gameplay_common::game::held_items::HeldItemsGameExt1 as _;

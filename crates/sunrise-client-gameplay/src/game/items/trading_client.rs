@@ -590,6 +590,8 @@ fn draw_trade_offer_button(
     );
 }
 
+use sunrise_gameplay_common::game::tables::GameItems as _;
+
 #[cfg(test)]
 mod trade_button_tests {
     use super::*;
@@ -659,5 +661,3 @@ mod trade_button_tests {
         widgets::put(saved);
     }
 }
-
-use sunrise_gameplay_common::game::tables::GameItems as _;
