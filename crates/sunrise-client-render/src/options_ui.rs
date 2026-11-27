@@ -5703,13 +5703,13 @@ mod tests {
             category: None,
             visible_when: Some(SettingVisibility {
                 choice_setting: "zoom_mode".into(),
-                choice_index: 0,
+                choice_index: 1,
             }),
             value: V::Range {
                 min: 2.0,
                 max: 10.0,
                 step: 1.0,
-                value: 4.0,
+                value: 5.0,
             },
         };
         s.mods.installed.push(crate::mod_list::Installed {
@@ -5729,16 +5729,27 @@ mod tests {
                 matches!(row, Row::Buttons(widget, _) if matches!(widget.kind, WKind::Slider { opt: Opt::ModSetting(0, j), .. } if j == index))
             })
         };
-        assert!(has_setting(&ui, &s, 1));
+        assert!(
+            !has_setting(&ui, &s, 1),
+            "reopened mode hides saved scale row"
+        );
+        assert!(matches!(
+            &s.mods.installed[0].native.as_ref().unwrap().settings[1].value,
+            V::Range { value: 5.0, .. }
+        ));
 
         s.mods.installed[0].native.as_mut().unwrap().settings[0]
             .value
             .click();
-        assert!(!has_setting(&ui, &s, 1));
+        assert!(has_setting(&ui, &s, 1));
+        assert!(matches!(
+            &s.mods.installed[0].native.as_ref().unwrap().settings[1].value,
+            V::Range { value: 5.0, .. }
+        ));
         s.mods.installed[0].native.as_mut().unwrap().settings[0]
             .value
             .click();
-        assert!(has_setting(&ui, &s, 1));
+        assert!(!has_setting(&ui, &s, 1));
     }
 
     #[test]
@@ -5806,6 +5817,21 @@ mod tests {
         assert_eq!(ui.dragging, None);
         assert_eq!(ui.slider_value, None);
         assert!(!ui.can_change_value);
+    }
+
+    #[test]
+    fn rebuilding_video_layout_keeps_separately_drawn_search_focus() {
+        let settings = Settings::default();
+        let mut ui = OptionsUi::default();
+        ui.show(Page::Video);
+        ui.focus = Some(FocusId::Search);
+        ui.focus_from_keyboard = true;
+        ui.layout_changed();
+
+        let _ = ui.built_layout(&settings, 480.0, 270.0);
+
+        assert_eq!(ui.focus, Some(FocusId::Search));
+        assert!(ui.focus_from_keyboard);
     }
 
     #[test]

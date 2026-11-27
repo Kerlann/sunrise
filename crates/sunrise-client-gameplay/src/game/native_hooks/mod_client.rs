@@ -2173,7 +2173,7 @@ impl crate::game::ClientGame<'_> {
             .find(|setting| setting.key == spec.key)
         {
             let next = ui_setting_value(spec, value);
-            if setting.value != next {
+            if !Self::native_setting_values_equal(&setting.value, &next) {
                 setting.value = next;
                 true
             } else {
@@ -2184,6 +2184,36 @@ impl crate::game::ClientGame<'_> {
         };
         if changed {
             self.client.chat_ui.options.layout_changed();
+        }
+    }
+
+    /// `NativeSettingValue`'s derived equality considers signed zero equal. The settings
+    /// store compares range values by bits, so keep the displayed model in sync with it.
+    fn native_setting_values_equal(
+        left: &NativeSettingValue,
+        right: &NativeSettingValue,
+    ) -> bool {
+        match (left, right) {
+            (
+                NativeSettingValue::Range {
+                    min: left_min,
+                    max: left_max,
+                    step: left_step,
+                    value: left_value,
+                },
+                NativeSettingValue::Range {
+                    min: right_min,
+                    max: right_max,
+                    step: right_step,
+                    value: right_value,
+                },
+            ) => {
+                left_min.to_bits() == right_min.to_bits()
+                    && left_max.to_bits() == right_max.to_bits()
+                    && left_step.to_bits() == right_step.to_bits()
+                    && left_value.to_bits() == right_value.to_bits()
+            }
+            _ => left == right,
         }
     }
 
