@@ -2503,15 +2503,11 @@ impl crate::game::ServerGame<'_> {
                 return;
             }
         }
+        let motion = self.common.motion;
         if self
-            .server
-            .lan
-            .as_mut()
-            .and_then(|host| {
-                host.hub.update_guest(conn, |g| {
-                    let at = prepared.map_or(g.position, |spawn| spawn.position);
-                    g.build_motion(self.common.motion, at);
-                })
+            .install_guest_body(conn, |g| {
+                let at = prepared.map_or(g.position, |spawn| spawn.position);
+                g.build_motion(motion, at);
             })
             .is_none()
         {
@@ -2558,6 +2554,7 @@ impl crate::game::ServerGame<'_> {
             return;
         };
         host.play.entry(conn).or_default().portal.cooldown = cooldown;
+        self.refresh_parked_guest_protection(conn);
         self.native_player_load_from_file(uuid, &name, &playerdata::directory(&root));
         let Some(host) = self.server.lan.as_mut() else {
             return;
