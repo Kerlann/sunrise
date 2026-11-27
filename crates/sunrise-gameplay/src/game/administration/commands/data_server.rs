@@ -539,6 +539,32 @@ impl crate::game::ServerGame<'_> {
                 }
                 set_key(&mut tag, "UUID", Tag::IntArray(uuid.to_vec()));
             }
+            Target::Cloud(id) => {
+                // `EntityDataAccessor.setData` calls `Entity.load` on a live cloud
+                // too (`AreaEffectCloud.readAdditionalSaveData`). Identity, join
+                // state and runtime-only fields stay on the resident cloud.
+                let index = self
+                    .common
+                    .breath_clouds
+                    .iter()
+                    .position(|c| c.id == id)
+                    .ok_or_else(stale)?;
+                let (_, loaded) =
+                    crate::game::server_side::potions_server::potion_cloud_from_nbt(&tag)
+                        .ok_or_else(stale)?;
+                let uuid = self.uuid_for(id);
+                self.common.breath_clouds.update(index, |c| {
+                    c.at = loaded.at;
+                    c.motion = loaded.motion;
+                    c.fall_distance = loaded.fall_distance;
+                    c.fire_ticks = loaded.fire_ticks;
+                    c.radius = loaded.radius;
+                    c.age = loaded.age;
+                    c.duration = loaded.duration;
+                    c.potion = loaded.potion;
+                });
+                set_key(&mut tag, "UUID", Tag::IntArray(uuid.to_vec()));
+            }
             Target::Bolt(id) => {
                 Self::normalize_loaded_mob_tags(&mut tag);
                 let i = self
@@ -577,6 +603,7 @@ impl crate::game::ServerGame<'_> {
         | Target::Other(id)
         | Target::Fangs(id)
         | Target::Bolt(id)
+        | Target::Cloud(id)
         | Target::Projectile(id) = t
         {
             if let Some(kept) = kept_passengers
