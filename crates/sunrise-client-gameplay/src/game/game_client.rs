@@ -1485,6 +1485,12 @@ impl crate::game::ClientGame<'_> {
                         if self.client.screen_state.0.screen_instance != initial_instance {
                             return Ok(());
                         }
+                        if delta != [0.0; 2] && self.observed_screen_view().is_some() {
+                            self.mounted_widget_mouse_moved(self.cursor());
+                            if self.client.screen_state.0.screen_instance != initial_instance {
+                                return Ok(());
+                            }
+                        }
                         match self.screen_mouse_dragged(delta) {
                             ScreenMousePre::Canceled => return Ok(()),
                             ScreenMousePre::Passed(post) => mouse_post = Some(post),
@@ -1805,8 +1811,12 @@ impl crate::game::ClientGame<'_> {
                         if let Some(child) = native_child {
                             // A hit belongs to the first ordered child even if it declines.
                             // Only the child's own answer can change focus.
-                            let accepted =
-                                self.route_screen_button(button, code, true, double_click)?;
+                            let accepted = self.route_screen_button_with_overrides(
+                                button,
+                                code,
+                                true,
+                                double_click,
+                            )?;
                             if accepted
                                 && button == MouseButton::Left
                                 && self.client.screen_state.0.screen_instance == initial_instance
@@ -1841,8 +1851,12 @@ impl crate::game::ClientGame<'_> {
                             if !handled
                                 && self.client.screen_state.0.screen_instance == initial_instance
                             {
-                                handled =
-                                    self.route_screen_button(button, code, pressed, double_click)?;
+                                handled = self.route_screen_button_with_overrides(
+                                    button,
+                                    code,
+                                    pressed,
+                                    double_click,
+                                )?;
                             }
                         }
                         if inventory_release
@@ -2807,23 +2821,27 @@ impl crate::game::ClientGame<'_> {
         // The pack prompt replaces the connecting screen (setScreen), but
         // in game it opens over the world.
         self.settle_title_toasts();
-        let mut batch = if (self.client.server_packs.0.prompt.is_some()
-            || self.client.code_of_conduct.is_some()
-            || self.dialog_open())
-            && self.common.player.is_none()
-        {
-            gui
-        } else {
-            self.hud_layers(size)
-        };
-        // Vanilla's confirmation replaces the dialog as the screen.
-        if self.client.command_prompt.0.is_none() {
-            self.draw_dialog(&mut batch);
-        }
-        self.draw_pack_prompt(&mut batch);
-        self.draw_code_of_conduct(&mut batch);
-        self.draw_link_prompt(&mut batch);
-        self.draw_command_prompt(&mut batch);
+        let mut batch = self.with_screen_widget_overrides(|this| {
+            let mut batch = if (this.client.server_packs.0.prompt.is_some()
+                || this.client.code_of_conduct.is_some()
+                || this.dialog_open())
+                && this.common.player.is_none()
+            {
+                gui
+            } else {
+                this.hud_layers(size)
+            };
+            // Vanilla's confirmation replaces the dialog as the screen.
+            if this.client.command_prompt.0.is_none() {
+                this.draw_dialog(&mut batch);
+            }
+            this.draw_pack_prompt(&mut batch);
+            this.draw_code_of_conduct(&mut batch);
+            this.draw_link_prompt(&mut batch);
+            this.draw_command_prompt(&mut batch);
+            batch
+        });
+        self.draw_pending_widget_tooltip(&mut batch);
         self.draw_context_menu(&mut batch);
         if let Some((bar, fade)) = reload_overlay {
             self.draw_reload_overlay(&mut batch, bar, fade);

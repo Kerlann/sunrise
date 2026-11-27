@@ -6,6 +6,16 @@
 use crate::gamepad::ScrollArea;
 use std::cell::{Cell, RefCell};
 
+mod widgets_override;
+pub use widgets_override::{
+    CollectedWidget, EngineHitEntry, EngineOverrideMaps, EngineWidgetInput, EngineWidgetKey,
+    EngineWidgetOverride, EngineWidgetPassOutput, EngineWidgetTooltip, PendingWidgetTooltip,
+    ResolvedEngineWidget, ResolvedWidgetProps, WidgetBucket, apply_narration_overrides,
+    is_collecting_widgets, label_abgr_color, label_argb_color, resolve_engine_widget,
+    scale_abgr_alpha, scale_argb_alpha, stable_key_from_text, take_active_pending_tooltip,
+    white_abgr_alpha, with_widget_collector, with_widget_overrides, without_engine_overrides,
+};
+
 /// The mouse cursor a frame's widgets asked for (`CursorTypes`; the others
 /// aren't asked for yet).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -360,6 +370,7 @@ pub fn cover_frame() {
     SCROLL_AREAS.with_borrow_mut(|(current, _)| current.clear());
     FOCUS_LINKS.with_borrow_mut(|(current, _)| current.clear());
     STEPPERS.with_borrow_mut(|(current, _)| current.clear());
+    widgets_override::cover_override_frame();
 }
 
 /// This frame drew a list with something to scroll, in `rect`, scrolled `amount`

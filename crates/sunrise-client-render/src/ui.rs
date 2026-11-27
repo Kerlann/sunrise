@@ -756,23 +756,20 @@ pub fn action_button(
     active: bool,
     hover: bool,
 ) {
-    crate::widgets::declare_action(action, [x, y, w, h], active);
-    let room = if active {
-        crate::widgets::action_glyph_room()
-    } else {
-        0.0
-    };
-    button_with_room(
+    button_core(
         batch,
         atlas,
         [x, y, w, h],
         label,
-        active,
-        hover,
-        false,
-        room,
+        ButtonVisualState {
+            active,
+            hovered: hover,
+            focused: false,
+        },
+        Some(action),
         None,
-        |rect| crate::widgets::Narratable::button(label.plain(), rect, active),
+        None,
+        |rect| crate::widgets::Narratable::button(label.plain(), rect, active).hovered(hover),
     );
 }
 /// A [`button`] with optional custom art and narration. `narration` builds the record from the
@@ -803,6 +800,7 @@ pub fn button_as(
     );
 }
 
+#[derive(Clone, Copy, Debug)]
 pub struct ButtonVisualState {
     pub active: bool,
     pub hovered: bool,
@@ -856,6 +854,63 @@ pub fn button_label_at(
     );
 }
 
+/// Extra visual/narration parameters for a styled or mounted button (`ButtonState` /
+/// `EngineWidgetOverride`).
+#[derive(Clone, Copy, Debug)]
+pub struct ButtonStyle<'a> {
+    pub alpha: f32,
+    pub label_text_color: Option<u32>,
+    pub sprites: Option<&'a ButtonSprites>,
+    pub override_render_highlighted_sprite: Option<bool>,
+    pub tab_order_group: i32,
+    pub tooltip_narration: Option<&'a str>,
+}
+
+impl Default for ButtonStyle<'_> {
+    fn default() -> Self {
+        Self {
+            alpha: 1.0,
+            label_text_color: None,
+            sprites: None,
+            override_render_highlighted_sprite: None,
+            tab_order_group: 0,
+            tooltip_narration: None,
+        }
+    }
+}
+
+/// Draw a mounted mod `Button` through the same core painter as engine buttons, without running
+/// engine widget collection or engine override lookup.
+pub fn button_mounted(
+    batch: &mut HudBatch,
+    atlas: &HudAtlas,
+    rect: [f32; 4],
+    label: &Text,
+    state: ButtonVisualState,
+    style: ButtonStyle<'_>,
+    narration: impl FnOnce([f32; 4]) -> crate::widgets::Narratable,
+) {
+    button_draw_resolved(
+        batch,
+        atlas,
+        rect,
+        label,
+        state,
+        None,
+        None,
+        style,
+        |rect| {
+            let mut n = narration(rect)
+                .hovered(state.hovered || state.focused)
+                .order(style.tab_order_group);
+            if let Some(hint) = style.tooltip_narration {
+                n = n.hint(hint);
+            }
+            n
+        },
+    );
+}
+
 /// A button with optional action declaration, icon decoration, custom art, and narration.
 /// Focus highlights its sprite while pointer hover alone drives cursor and hover narration.
 #[allow(clippy::too_many_arguments)]
@@ -870,23 +925,13 @@ pub fn button_decorated(
     sprites: Option<&ButtonSprites>,
     narration: impl FnOnce([f32; 4]) -> crate::widgets::Narratable,
 ) {
-    let room = if let Some(action) = action {
-        crate::widgets::declare_action(action, rect, state.active);
-        if state.active {
-            crate::widgets::action_glyph_room()
-        } else {
-            0.0
-        }
-    } else {
-        0.0
-    };
     button_core(
         batch,
         atlas,
         rect,
         label,
         state,
-        room,
+        action,
         icon,
         sprites,
         |rect| narration(rect).hovered(state.hovered),
@@ -907,8 +952,20 @@ pub fn button_focused_as(
     sprites: Option<&ButtonSprites>,
     narration: impl FnOnce([f32; 4]) -> crate::widgets::Narratable,
 ) {
-    button_with_room(
-        batch, atlas, rect, label, active, hovered, focused, 0.0, sprites, narration,
+    button_core(
+        batch,
+        atlas,
+        rect,
+        label,
+        ButtonVisualState {
+            active,
+            hovered,
+            focused,
+        },
+        None,
+        None,
+        sprites,
+        |rect| narration(rect).hovered(hovered || focused),
     );
 }
 /// An options button whose focus highlights it without changing the mouse cursor.
@@ -924,43 +981,6 @@ pub(crate) fn focused_button(
     focused: bool,
     action: Option<crate::widgets::Action>,
 ) {
-    let room = if let Some(action) = action {
-        crate::widgets::declare_action(action, rect, active);
-        if active {
-            crate::widgets::action_glyph_room()
-        } else {
-            0.0
-        }
-    } else {
-        0.0
-    };
-    button_with_room(
-        batch,
-        atlas,
-        rect,
-        label,
-        active,
-        hover,
-        focused,
-        room,
-        None,
-        |rect| crate::widgets::Narratable::button(label.plain(), rect, active),
-    );
-}
-/// A button whose label keeps `room` free at its left.
-#[allow(clippy::too_many_arguments)]
-fn button_with_room(
-    batch: &mut HudBatch,
-    atlas: &HudAtlas,
-    rect: [f32; 4],
-    label: &Text,
-    active: bool,
-    hover: bool,
-    focused: bool,
-    room: f32,
-    sprites: Option<&ButtonSprites>,
-    narration: impl FnOnce([f32; 4]) -> crate::widgets::Narratable,
-) {
     button_core(
         batch,
         atlas,
@@ -971,15 +991,105 @@ fn button_with_room(
             hovered: hover,
             focused,
         },
-        room,
+        action,
         None,
-        sprites,
-        |rect| narration(rect).hovered(hover || focused),
+        None,
+        |rect| {
+            crate::widgets::Narratable::button(label.plain(), rect, active)
+                .hovered(hover || focused)
+        },
     );
 }
 
 #[allow(clippy::too_many_arguments)]
 fn button_core(
+    batch: &mut HudBatch,
+    atlas: &HudAtlas,
+    rect: [f32; 4],
+    label: &Text,
+    state: ButtonVisualState,
+    action: Option<crate::widgets::Action>,
+    icon: Option<ButtonIcon>,
+    sprites: Option<&ButtonSprites>,
+    narration: impl FnOnce([f32; 4]) -> crate::widgets::Narratable,
+) {
+    let resolved = crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
+        bucket: crate::widgets::WidgetBucket::Button,
+        rect,
+        label: Some(label),
+        explicit_key: None,
+        active: state.active,
+        hovered: state.hovered,
+        focused: state.focused,
+        tab_order_group: 0,
+    });
+    match resolved {
+        crate::widgets::ResolvedEngineWidget::Skip => {}
+        crate::widgets::ResolvedEngineWidget::Unchanged => {
+            button_draw_resolved(
+                batch,
+                atlas,
+                rect,
+                label,
+                state,
+                action,
+                icon,
+                ButtonStyle {
+                    sprites,
+                    ..ButtonStyle::default()
+                },
+                narration,
+            );
+        }
+        crate::widgets::ResolvedEngineWidget::Draw(props) => {
+            let props_active = props.active;
+            let props_hovered = props.hovered;
+            let effective_label = props.message.as_ref().unwrap_or(label);
+            let effective_state = ButtonVisualState {
+                active: props_active,
+                hovered: props_hovered,
+                focused: state.focused,
+            };
+            let override_msg_plain = props.message.as_ref().map(Text::plain);
+            let tab_order_group = props.tab_order_group;
+            let tooltip_hint = props.tooltip_narration.clone();
+            let style = ButtonStyle {
+                alpha: props.alpha,
+                label_text_color: props.label_text_color,
+                sprites: props.sprites.as_ref().or(sprites),
+                override_render_highlighted_sprite: props.override_render_highlighted_sprite,
+                tab_order_group,
+                tooltip_narration: props.tooltip_narration.as_deref(),
+            };
+            button_draw_resolved(
+                batch,
+                atlas,
+                props.rect,
+                effective_label,
+                effective_state,
+                action,
+                icon,
+                style,
+                move |r| {
+                    let mut n = narration(r);
+                    crate::widgets::apply_narration_overrides(
+                        &mut n,
+                        r,
+                        props_active,
+                        props_hovered || state.focused,
+                        override_msg_plain.as_deref(),
+                        tab_order_group,
+                        tooltip_hint,
+                    );
+                    n
+                },
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn button_draw_resolved(
     batch: &mut HudBatch,
     atlas: &HudAtlas,
     [x, y, w, h]: [f32; 4],
@@ -989,11 +1099,21 @@ fn button_core(
         hovered,
         focused,
     }: ButtonVisualState,
-    room: f32,
+    action: Option<crate::widgets::Action>,
     icon: Option<ButtonIcon>,
-    sprites: Option<&ButtonSprites>,
+    style: ButtonStyle<'_>,
     narration: impl FnOnce([f32; 4]) -> crate::widgets::Narratable,
 ) {
+    let room = if let Some(action) = action {
+        crate::widgets::declare_action(action, [x, y, w, h], active);
+        if active {
+            crate::widgets::action_glyph_room()
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
     let plain = label.plain();
     crate::widgets::record(&plain, [x, y, w, h], active);
     // An icon button has no label to record, and A presses it all the same.
@@ -1002,8 +1122,12 @@ fn button_core(
     }
     crate::widgets::narratable(|| narration([x, y, w, h]));
     crate::widgets::widget_cursor(hovered, active);
-    let highlighted = hovered || focused;
-    let custom = sprites.and_then(|sprites| {
+    let highlighted = match style.override_render_highlighted_sprite {
+        Some(forced) => active && forced,
+        None => active && (hovered || focused),
+    };
+    let sprite_tint = crate::widgets::white_abgr_alpha(style.alpha);
+    let custom = style.sprites.and_then(|sprites| {
         let state = if !active {
             sprites.disabled.as_deref()
         } else if highlighted {
@@ -1020,7 +1144,7 @@ fn button_core(
             })
     });
     if let Some(sprite) = custom {
-        batch.rect_uv(x, y, w, h, sprite, u32::MAX);
+        batch.rect_uv(x, y, w, h, sprite, sprite_tint);
     } else {
         let vanilla = if !active {
             "widget/button_disabled"
@@ -1029,13 +1153,9 @@ fn button_core(
         } else {
             "widget/button"
         };
-        nine_slice(batch, atlas, vanilla, x, y, w, h, u32::MAX);
+        nine_slice(batch, atlas, vanilla, x, y, w, h, sprite_tint);
     }
-    let color = if active {
-        rgba(255, 255, 255, 255)
-    } else {
-        rgba(160, 160, 160, 255)
-    };
+    let color = crate::widgets::label_abgr_color(active, style.label_text_color, style.alpha);
     if let Some(ButtonIcon::Centered { sprite, size }) = icon {
         // CenteredIcon divides the button and sprite sizes separately:
         // a 15px icon in a 20px button starts at 10 - 7 = 3, not 2.
@@ -1046,7 +1166,7 @@ fn button_core(
             y + (h / 2.0).floor() - (size / 2.0).floor(),
             size,
             size,
-            u32::MAX,
+            sprite_tint,
         );
         return;
     }
@@ -1055,20 +1175,23 @@ fn button_core(
         _ => None,
     };
     // Centre the label (keeping it out from under a glyph), then apply the mod's offset.
-    let offset = sprites
+    let offset = style
+        .sprites
         .map(|sprites| sprites.label_offset)
         .filter(|offset| offset.iter().all(|coord| coord.is_finite()));
-    button_label_at(
-        batch,
-        atlas,
-        [x, y, w, h],
-        label,
-        room,
-        trailing_width,
-        offset,
-        crate::hud_overlays::now_ms(),
-        color,
-    );
+    if (color >> 24) != 0 {
+        button_label_at(
+            batch,
+            atlas,
+            [x, y, w, h],
+            label,
+            room,
+            trailing_width,
+            offset,
+            crate::hud_overlays::now_ms(),
+            color,
+        );
+    }
     if let Some(ButtonIcon::Trailing { sprite, size }) = icon {
         // TextAndIcon: `x + width - spriteWidth - 2`, centred in the height.
         batch.sprite_scaled(
@@ -1078,7 +1201,7 @@ fn button_core(
             y + (h / 2.0).floor() - (size / 2.0).floor(),
             size,
             size,
-            u32::MAX,
+            sprite_tint,
         );
     }
 }
@@ -1102,6 +1225,7 @@ pub fn slider(
 
 /// `AbstractSliderButton.extractWidgetRenderState`: track, 8px handle at `value` (0..1),
 /// with support for keyboard focus and `canChangeValue`.
+#[allow(clippy::too_many_arguments)]
 pub fn slider_ext(
     batch: &mut HudBatch,
     atlas: &HudAtlas,
@@ -1116,21 +1240,64 @@ pub fn slider_ext(
     active: bool,
     dragging: bool,
 ) {
+    let orig_rect = [x, y, w, 20.0];
+    let (
+        [x, y, w, h],
+        overridden_msg,
+        hover,
+        active,
+        alpha,
+        label_text_color,
+        tab_order_group,
+        tooltip_hint,
+    ) = match crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
+        bucket: crate::widgets::WidgetBucket::Slider,
+        rect: orig_rect,
+        label: Some(label),
+        explicit_key: None,
+        active,
+        hovered: hover,
+        focused,
+        tab_order_group: 0,
+    }) {
+        crate::widgets::ResolvedEngineWidget::Skip => return,
+        crate::widgets::ResolvedEngineWidget::Unchanged => {
+            (orig_rect, None, hover, active, 1.0, None, 0, None)
+        }
+        crate::widgets::ResolvedEngineWidget::Draw(props) => (
+            props.rect,
+            props.message,
+            props.hovered,
+            props.active,
+            props.alpha,
+            props.label_text_color,
+            props.tab_order_group,
+            props.tooltip_narration,
+        ),
+    };
+    let label = overridden_msg.as_ref().unwrap_or(label);
     let kind = crate::widgets::Kind::Slider {
         value,
         track: [x + 4.0, w - 8.0],
     };
     // The control socket's widget tree (`ui`): its label and value.
-    crate::widgets::record_as(&label.plain(), [x, y, w, 20.0], active, kind);
+    crate::widgets::record_as(&label.plain(), [x, y, w, h], active, kind);
     crate::widgets::narratable(|| {
-        crate::widgets::Narratable::slider(label.plain(), [x, y, w, 20.0], active).hovered(hover)
+        let mut n = crate::widgets::Narratable::slider(label.plain(), [x, y, w, h], active)
+            .hovered(hover)
+            .order(tab_order_group);
+        if let Some(hint) = tooltip_hint {
+            n = n.hint(hint);
+        }
+        n
     });
     if active {
         // A controller's D-pad can focus it (Sunrise's controller support).
-        crate::widgets::target_as([x, y, w, 20.0], kind);
+        crate::widgets::target_as([x, y, w, h], kind);
     }
+    let sprite_tint = crate::widgets::white_abgr_alpha(alpha);
     let (track, handle) = slider_sprites_ext(hover, active, focused, can_change_value, dragging);
-    nine_slice(batch, atlas, track, x, y, w, 20.0, u32::MAX);
+    nine_slice(batch, atlas, track, x, y, w, h, sprite_tint);
     nine_slice(
         batch,
         atlas,
@@ -1138,24 +1305,13 @@ pub fn slider_ext(
         x + (value.clamp(0.0, 1.0) * (w - 8.0)).floor(),
         y,
         8.0,
-        20.0,
-        u32::MAX,
+        h,
+        sprite_tint,
     );
-    let color = if active {
-        u32::MAX
-    } else {
-        rgba(160, 160, 160, 255)
-    };
-    scrolling_text(
-        batch,
-        atlas,
-        label,
-        x + 2.0,
-        x + w - 2.0,
-        y,
-        y + 20.0,
-        color,
-    );
+    let color = crate::widgets::label_abgr_color(active, label_text_color, alpha);
+    if (color >> 24) != 0 {
+        scrolling_text(batch, atlas, label, x + 2.0, x + w - 2.0, y, y + h, color);
+    }
 }
 #[cfg(test)]
 fn slider_sprites(hover: bool, active: bool, dragging: bool) -> (&'static str, &'static str) {
@@ -1437,6 +1593,17 @@ pub fn tooltip_menu(
     cursor: (f32, f32),
     rect: [f32; 4],
 ) {
+    tooltip_menu_styled(batch, atlas, lines, None, cursor, rect);
+}
+/// [`tooltip_menu`] with an optional custom tooltip style (`(namespace, path)`).
+pub fn tooltip_menu_styled(
+    batch: &mut HudBatch,
+    atlas: &HudAtlas,
+    lines: &[Text],
+    style: Option<(&str, &str)>,
+    cursor: (f32, f32),
+    rect: [f32; 4],
+) {
     if lines.is_empty() {
         return;
     }
@@ -1447,10 +1614,20 @@ pub fn tooltip_menu(
         rect.map(|v| v as i32),
         (w.ceil() as i32, h.ceil() as i32),
     );
-    tooltip_box(batch, atlas, lines, x as f32, y as f32, w, h);
+    tooltip_box_styled(batch, atlas, lines, style, x as f32, y as f32, w, h);
 }
 /// `BelowOrAboveWidgetTooltipPositioner.positionTooltip`: a keyboard-focused widget's tooltip.
 pub fn tooltip_focused(batch: &mut HudBatch, atlas: &HudAtlas, lines: &[Text], rect: [f32; 4]) {
+    tooltip_focused_styled(batch, atlas, lines, None, rect);
+}
+/// [`tooltip_focused`] with an optional custom tooltip style (`(namespace, path)`).
+pub fn tooltip_focused_styled(
+    batch: &mut HudBatch,
+    atlas: &HudAtlas,
+    lines: &[Text],
+    style: Option<(&str, &str)>,
+    rect: [f32; 4],
+) {
     if lines.is_empty() {
         return;
     }
@@ -1460,7 +1637,7 @@ pub fn tooltip_focused(batch: &mut HudBatch, atlas: &HudAtlas, lines: &[Text], r
         rect.map(|v| v as i32),
         (w.ceil() as i32, h.ceil() as i32),
     );
-    tooltip_box(batch, atlas, lines, x as f32, y as f32, w, h);
+    tooltip_box_styled(batch, atlas, lines, style, x as f32, y as f32, w, h);
 }
 
 /// `BelowOrAboveWidgetTooltipPositioner.positionTooltip`: below, or above when it does not fit.
@@ -1602,13 +1779,37 @@ fn tooltip_box(
     w: f32,
     h: f32,
 ) {
+    tooltip_box_styled(batch, atlas, lines, None, x, y, w, h);
+}
+#[allow(clippy::too_many_arguments)]
+fn tooltip_box_styled(
+    batch: &mut HudBatch,
+    atlas: &HudAtlas,
+    lines: &[Text],
+    style: Option<(&str, &str)>,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) {
     crate::widgets::frame_tooltip(lines);
-    tooltip_sprites(
-        batch,
-        atlas,
-        ["tooltip/background", "tooltip/frame"],
-        [x, y, w, h],
-    );
+    let custom = style.map(|(ns, path)| tooltip_style_sprites(ns, path));
+    let drew = custom.as_ref().is_some_and(|sprites| {
+        tooltip_sprites(
+            batch,
+            atlas,
+            [sprites[0].as_str(), sprites[1].as_str()],
+            [x, y, w, h],
+        )
+    });
+    if !drew {
+        tooltip_sprites(
+            batch,
+            atlas,
+            ["tooltip/background", "tooltip/frame"],
+            [x, y, w, h],
+        );
+    }
     let mut ly = y;
     for (i, line) in lines.iter().enumerate() {
         batch.text_styled(atlas, line, x, ly, u32::MAX, true);
@@ -2127,6 +2328,31 @@ impl EditBox {
         let caret = self.cursor_visible();
         self.draw_skinned_caret(batch, atlas, format, caret, skin);
     }
+    /// Draw a mounted mod `TextField` with explicit opacity, tab order group, and tooltip hint.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_mounted_at(
+        &mut self,
+        batch: &mut HudBatch,
+        atlas: &HudAtlas,
+        now: Instant,
+        active: bool,
+        alpha: f32,
+        tab_order_group: i32,
+        tooltip_hint: Option<&str>,
+    ) {
+        let caret = active && self.cursor_visible_at(now);
+        self.draw_resolved(
+            batch,
+            atlas,
+            None,
+            caret,
+            None,
+            active,
+            alpha,
+            tab_order_group,
+            tooltip_hint,
+        );
+    }
     fn draw_skinned_caret(
         &mut self,
         batch: &mut HudBatch,
@@ -2135,21 +2361,85 @@ impl EditBox {
         caret: bool,
         skin: Option<&str>,
     ) {
+        let orig_rect = [self.x, self.y, self.width, self.height];
+        let resolved = crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
+            bucket: crate::widgets::WidgetBucket::Field,
+            rect: orig_rect,
+            label: None,
+            explicit_key: (!self.message.is_empty()).then_some(self.message.as_str()),
+            active: true,
+            hovered: false,
+            focused: self.focused,
+            tab_order_group: 0,
+        });
+        match resolved {
+            crate::widgets::ResolvedEngineWidget::Skip => {}
+            crate::widgets::ResolvedEngineWidget::Unchanged => {
+                self.draw_resolved(batch, atlas, format, caret, skin, true, 1.0, 0, None);
+            }
+            crate::widgets::ResolvedEngineWidget::Draw(props) => {
+                [self.x, self.y, self.width, self.height] = props.rect;
+                let prev_message = props
+                    .message
+                    .as_ref()
+                    .map(|m| std::mem::replace(&mut self.message, m.plain()));
+                self.draw_resolved(
+                    batch,
+                    atlas,
+                    format,
+                    caret && props.active,
+                    skin,
+                    props.active,
+                    props.alpha,
+                    props.tab_order_group,
+                    props.tooltip_narration.as_deref(),
+                );
+                if let Some(prev) = prev_message {
+                    self.message = prev;
+                }
+                [self.x, self.y, self.width, self.height] = orig_rect;
+            }
+        }
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn draw_resolved(
+        &mut self,
+        batch: &mut HudBatch,
+        atlas: &HudAtlas,
+        format: Option<&Text>,
+        caret: bool,
+        skin: Option<&str>,
+        active: bool,
+        alpha: f32,
+        tab_order_group: i32,
+        tooltip_hint: Option<&str>,
+    ) {
         self.layout(atlas);
-        crate::widgets::target_as(
-            [self.x, self.y, self.width, self.height],
-            crate::widgets::Kind::Field,
-        );
+        if active {
+            crate::widgets::target_as(
+                [self.x, self.y, self.width, self.height],
+                crate::widgets::Kind::Field,
+            );
+        }
         crate::widgets::narratable(|| {
-            crate::widgets::Narratable::edit_box(
+            let mut n = crate::widgets::Narratable::edit_box(
                 self.message.clone(),
                 self.value.clone(),
                 [self.x, self.y, self.width, self.height],
             )
-            .focused(self.focused)
+            .focused(self.focused && active)
+            .order(tab_order_group);
+            if let crate::widgets::What::EditBox { active: a, .. } = &mut n.what {
+                *a = active;
+            }
+            if let Some(hint) = tooltip_hint {
+                n = n.hint(hint);
+            }
+            n
         });
+        let sprite_tint = crate::widgets::white_abgr_alpha(alpha);
         if self.bordered {
-            let sprite = skin.unwrap_or(if self.focused {
+            let sprite = skin.unwrap_or(if self.focused && active {
                 "widget/text_field_highlighted"
             } else {
                 "widget/text_field"
@@ -2162,14 +2452,17 @@ impl EditBox {
                 self.y,
                 self.width,
                 self.height,
-                u32::MAX,
+                sprite_tint,
             );
         }
-        let color = if self.editable {
-            self.text_color
-        } else {
-            self.text_color_uneditable
-        };
+        let color = crate::widgets::scale_abgr_alpha(
+            if self.editable && active {
+                self.text_color
+            } else {
+                self.text_color_uneditable
+            },
+            alpha,
+        );
         let rest: String = self.value.chars().skip(self.display).collect();
         let shown_len = atlas.font.fit(&rest, self.inner_width());
         let displayed: String = rest.chars().take(shown_len).collect();
