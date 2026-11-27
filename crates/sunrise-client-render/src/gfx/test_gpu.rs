@@ -10,7 +10,7 @@ static GPU_TEST: Mutex<()> = Mutex::new(());
 /// Bind this guard before creating any GPU objects, in the test itself rather
 /// than a helper returning those objects. Locals then drop before the guard,
 /// including during unwinding; one guard also covers tests opening several devices.
-pub(crate) fn lock() -> MutexGuard<'static, ()> {
+pub fn lock() -> MutexGuard<'static, ()> {
     GPU_TEST.lock().unwrap_or_else(|poison| poison.into_inner())
 }
 
@@ -45,8 +45,10 @@ pub(crate) fn request_adapter(
     }
 }
 
+/// Whether the daily GPU lane asks every GPU test to run (`SUNRISE_GPU_TESTS_REQUIRE_ADAPTER=1`),
+/// so a test that cannot run there fails instead of skipping.
 #[cfg(test)]
-fn require_adapter() -> bool {
+pub(crate) fn require_adapter() -> bool {
     std::env::var_os("SUNRISE_GPU_TESTS_REQUIRE_ADAPTER").is_some_and(|value| value == "1")
 }
 

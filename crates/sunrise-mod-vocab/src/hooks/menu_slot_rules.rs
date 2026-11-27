@@ -39,6 +39,11 @@ pub trait Hooks {
     /// prepared crafting result belongs to the grid that was shown with it.
     /// A client without this mod predicts vanilla here; the server corrects it.
     ///
+    /// A stack that cannot cross to the API (an item with no API key, count 0, damage out of
+    /// range) is never offered to the parts: placing it into a slot of a menu type a part
+    /// answers is refused, picking it up keeps the slot's own answer, and the game logs a
+    /// warning.
+    ///
     /// `may_pickup` is `Slot.mayPickup`, answered only for a registered mod
     /// menu type (its own slots and the player's inventory slots in it) and
     /// for the player's own inventory menu; another vanilla menu type keeps its

@@ -24,12 +24,9 @@ import sys
 import time
 from pathlib import Path
 
-try:
-    from . import lab
-    from . import test_frame_identity_parity as identity
-except ImportError:
-    import lab
-    import test_frame_identity_parity as identity
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, test_frame_identity_parity as identity
 
 RUN = lab.LOCAL / 'hdr-auto-flip'
 SCENES = ['day_water', 'night_lights']

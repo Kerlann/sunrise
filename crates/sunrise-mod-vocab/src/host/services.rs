@@ -99,11 +99,34 @@ pub trait ClientSession {
     fn client_player_skins(&self) -> Option<ClientPlayerSkins> {
         unimplemented!("ClientSession::client_player_skins")
     }
+    /// The local player's fishing hook: its position and whether a fish is biting. What
+    /// this client tracks; None outside a logged-in client world or when no hook is out.
+    /// Sends nothing.
+    fn client_fishing_hook(&self) -> Option<ClientFishingHook> {
+        unimplemented!("ClientSession::client_fishing_hook")
+    }
     /// Side: client.
     /// Existing local frame counters; None outside a logged-in client world.
     /// This read collects no history and sends nothing anywhere.
     fn client_frame_stats(&self) -> Option<ClientFrameStats> {
         unimplemented!("ClientSession::client_frame_stats")
+    }
+    /// Side: client.
+    /// The title, subtitle and action bar on screen now. Each is None once its timer has run
+    /// out; the subtitle shows only with a title. What this client has been sent; `Ok(None)`
+    /// outside a logged-in client world. A text conversion error is returned for the failing
+    /// read. No plaintext is substituted. Sends nothing.
+    fn client_titles(&self) -> Result<Option<ClientTitles>, ClientSessionReadError> {
+        Err(ClientSessionReadError::Unavailable)
+    }
+    /// Side: client.
+    /// Every boss bar the client holds, in server order: each bar's name and
+    /// progress (0 to 1, as drawn). The HUD draws only those that fit within
+    /// `guiHeight / 3`. What this client has been sent; `Ok(None)` outside a
+    /// logged-in client world. A text conversion error is returned for the failing read.
+    /// No plaintext is substituted. Sends nothing.
+    fn client_boss_bars(&self) -> Result<Option<Vec<ClientBossBarEntry>>, ClientSessionReadError> {
+        Err(ClientSessionReadError::Unavailable)
     }
 }
 /// The commands service, reached through its host.

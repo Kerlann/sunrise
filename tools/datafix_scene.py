@@ -10,10 +10,12 @@ Every entry is (minimum DataVersion, command template). `{x} {y} {z}` are filled
 with a free position; entities get a fixed UUID so outputs can be matched.
 """
 
-if __package__:
-    from . import datafix_scene_old
-else:
-    import datafix_scene_old
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import datafix_scene_old
 
 A, B, C = 'A', 'B', 'C'
 

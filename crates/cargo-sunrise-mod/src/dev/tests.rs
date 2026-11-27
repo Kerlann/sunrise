@@ -41,6 +41,41 @@ fn the_cache_is_the_override_else_the_platforms_cache_folder() {
 }
 
 #[test]
+fn each_project_folder_has_its_own_work_folder() {
+    let cache = Path::new("/cache");
+    let (project, worktree) = (Path::new("/src/ae2"), Path::new("/src/ae2-feature"));
+    let work = work_dir(cache, "ae2", project);
+    assert_eq!(
+        work,
+        work_dir(cache, "ae2", project),
+        "stable for one project"
+    );
+    assert_ne!(
+        work,
+        work_dir(cache, "ae2", worktree),
+        "same mod id, another folder"
+    );
+    assert_ne!(work, work_dir(cache, "jei", project));
+    assert_eq!(work.parent(), Some(Path::new("/cache/work")));
+    let name = work.file_name().unwrap().to_str().unwrap();
+    let hash = name.strip_prefix("ae2-").unwrap();
+    assert_eq!(hash.len(), 12, "{name}");
+    assert!(hash.bytes().all(|b| b.is_ascii_hexdigit()), "{name}");
+    #[cfg(unix)]
+    {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let first = Path::new(OsStr::from_bytes(b"/src/ae2-\xfe"));
+        let second = Path::new(OsStr::from_bytes(b"/src/ae2-\xff"));
+        assert_ne!(
+            work_dir(cache, "ae2", first),
+            work_dir(cache, "ae2", second),
+            "non-UTF-8 paths differing by one byte must not collide"
+        );
+    }
+}
+
+#[test]
 fn the_rust_is_rustups_else_the_exact_one_on_the_path_else_an_error_saying_how() {
     let target = "x86_64-unknown-linux-gnu";
     let found = |version: &str, host: &str| Found {
@@ -205,20 +240,16 @@ fn a_retained_sdk_builds_a_lower_mixin_with_its_signed_tool() {
     let cache = root.path().join("cache");
     let keys = [key.public()];
     let base = Base::Folder(base);
-    sdk_fetch::fetch(&base, &keys, BUILD, &cache, false).unwrap();
-    let sdk = NativeSdk {
-        index: Index::read(&fs::read(cache.join(sdk::INDEX)).unwrap(), BUILD).unwrap(),
-        rust: Unpacked {
+    let sdk = native_sdk_from(&cache, base, &keys, HOST, BUILD, |_, target, cargo_home| {
+        Ok(Unpacked {
             dir: root.path().into(),
-            target: HOST.into(),
-            cargo_home: root.path().into(),
+            target: target.into(),
+            cargo_home,
             cargo_config: Vec::new(),
             c_bin: None,
-        },
-        stamp: CacheStamp::new(BUILD, &keys),
-        base,
-        dir: cache,
-    };
+        })
+    })
+    .unwrap();
     let plan = contract::Plan {
         contract: contract::CONTRACT,
         package: sdk.slices(sdk::Side::Client, Route::Engine).unwrap(),
@@ -387,4 +418,176 @@ fn run_refuses_a_missing_or_wrong_jar_before_building() {
         "{wrong}"
     );
     assert!(!project.join(crate::RUN_DIR).exists());
+}
+
+#[test]
+fn two_callers_initialize_an_empty_sdk_cache_concurrently() {
+    use lzma_rust2::{XzOptions, XzWriter};
+    use sunrise_release_sign::{self as sign, SigningKey};
+
+    const BUILD: &str = "0123456789abcdef0123456789abcdef01234567";
+    const HOST: &str = "x86_64-unknown-linux-gnu";
+    const SURFACE_BYTES: &[u8] = br#"{"hash":"ab"}"#;
+    const RUNTIME_BYTES: &[u8] = b"runtime-fixture";
+    const API_BYTES: &[u8] = b"api-fixture";
+    const ENGINE_BYTES: &[u8] = b"engine-fixture";
+
+    let root = tempfile::tempdir().unwrap();
+    let base_dir = root.path().join("releases");
+    let tag = format!("sdk-{BUILD}");
+    let release = base_dir.join(&tag);
+    fs::create_dir_all(&release).unwrap();
+    fs::write(release.join(sdk_fetch::SURFACE), SURFACE_BYTES).unwrap();
+    let pack = |kind, path: &str, bytes: &[u8]| {
+        let name = sdk::Asset::name(kind, HOST, sdk::Side::Client);
+        let archive = fs::File::create(release.join(&name)).unwrap();
+        let encoder = XzWriter::new(archive, XzOptions::with_preset(0)).unwrap();
+        let mut tar = tar::Builder::new(encoder);
+        let mut header = tar::Header::new_ustar();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_mode(0o644);
+        header.set_size(bytes.len() as u64);
+        tar.append_data(&mut header, path, bytes).unwrap();
+        tar.into_inner().unwrap().finish().unwrap();
+    };
+    pack(sdk::Kind::Runtime, "sunrise-prebuilt.json", RUNTIME_BYTES);
+    pack(sdk::Kind::Api, "internals.json", API_BYTES);
+    pack(sdk::Kind::Engine, "functions.json", ENGINE_BYTES);
+    let index = Index::of_folder(
+        &release,
+        sdk::Build {
+            commit: BUILD.into(),
+            game: sdk::GAME.into(),
+            date: "2026-11-13".into(),
+            nightly: None,
+        },
+        sunrise_native_build::rust::VERSION.into(),
+    )
+    .unwrap();
+    let bytes = index.to_json().into_bytes();
+    let sums = sign::sums_file(&[(sdk::INDEX.into(), sign::sha256_hex(&bytes))]);
+    let (key, _) = SigningKey::generate().unwrap();
+    fs::write(release.join(sdk::INDEX), bytes).unwrap();
+    fs::write(release.join(sign::SUMS), &sums).unwrap();
+    fs::write(
+        release.join(sign::SIGNATURE),
+        key.sign(&tag, sums.as_bytes()),
+    )
+    .unwrap();
+
+    let keys = [key.public()];
+    let root_dir = root.path();
+    let stub_rust = |_: &str, target: &str, cargo_home: PathBuf| {
+        Ok(Unpacked {
+            dir: root_dir.into(),
+            target: target.into(),
+            cargo_home,
+            cargo_config: Vec::new(),
+            c_bin: None,
+        })
+    };
+
+    for round in 0..4 {
+        let cache = root.path().join(format!("cache-{round}"));
+        let metadata_start = std::sync::Barrier::new(2);
+        let sdks: Vec<NativeSdk> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..2)
+                .map(|_| {
+                    scope.spawn(|| {
+                        metadata_start.wait();
+                        let sdk = native_sdk_from(
+                            &cache,
+                            Base::Folder(base_dir.clone()),
+                            &keys,
+                            HOST,
+                            BUILD,
+                            stub_rust,
+                        )
+                        .unwrap();
+                        assert_eq!(sdk.index.build.commit, BUILD);
+                        assert_eq!(fs::read(sdk.surface()).unwrap(), SURFACE_BYTES);
+                        sdk
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect()
+        });
+        assert_eq!(sdks[0].dir, sdks[1].dir);
+
+        let slices_start = std::sync::Barrier::new(2);
+        let outputs: Vec<(NativeSdk, prebuilt::Package)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = sdks
+                .into_iter()
+                .map(|sdk| {
+                    let slices_start = &slices_start;
+                    scope.spawn(move || {
+                        slices_start.wait();
+                        let slices = sdk.slices(sdk::Side::Client, Route::Engine).unwrap();
+                        assert_eq!(
+                            fs::read(slices.runtime.join("sunrise-prebuilt.json")).unwrap(),
+                            RUNTIME_BYTES
+                        );
+                        assert_eq!(
+                            fs::read(slices.api.join("internals.json")).unwrap(),
+                            API_BYTES
+                        );
+                        assert_eq!(
+                            fs::read(slices.engine.join("functions.json")).unwrap(),
+                            ENGINE_BYTES
+                        );
+                        (sdk, slices)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect()
+        });
+
+        let (sdk, slices) = &outputs[0];
+        assert_eq!(slices, &outputs[1].1);
+        let locks_dir = sdk.dir.join("locks");
+        let mut lock_count = 0;
+        for entry in fs::read_dir(&locks_dir).unwrap() {
+            let path = entry.unwrap().path();
+            assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some("lock"));
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            file.try_lock().expect("cache lock must be released");
+            lock_count += 1;
+        }
+        assert_eq!(lock_count, 2);
+
+        // Refreshing metadata must not remove unpacked slices in use.
+        fs::write(sdk.surface(), b"{}").unwrap();
+        let refreshed = native_sdk_from(
+            &cache,
+            Base::Folder(base_dir.clone()),
+            &keys,
+            HOST,
+            BUILD,
+            stub_rust,
+        )
+        .unwrap();
+        assert_eq!(fs::read(refreshed.surface()).unwrap(), SURFACE_BYTES);
+        assert_eq!(
+            fs::read(slices.runtime.join("sunrise-prebuilt.json")).unwrap(),
+            RUNTIME_BYTES
+        );
+        assert_eq!(
+            fs::read(slices.api.join("internals.json")).unwrap(),
+            API_BYTES
+        );
+        assert_eq!(
+            fs::read(slices.engine.join("functions.json")).unwrap(),
+            ENGINE_BYTES
+        );
+    }
 }

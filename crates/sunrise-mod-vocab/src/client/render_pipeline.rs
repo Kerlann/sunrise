@@ -33,8 +33,6 @@ pub struct RenderPipeline {
     /// Each `name` must be a valid non-`GL_` ASCII GLSL identifier, and each `value` (when
     /// present) a non-empty single-line token without comments, backslashes, or `#`.
     pub defines: Vec<(String, Option<String>)>,
-    /// What the pipeline's draws are made of.
-    pub vertex_format: PipelineVertexFormat,
     /// Custom per-binding vertex formats (`withVertexBinding(bindingIndex, format)`). Empty by
     /// default, meaning binding 0 uses [`VertexFormat::position_tex_color`] (stride 24:
     /// `Position: Float32x3`, `UV0: Float32x2`, `Color: Unorm8x4`).
@@ -85,7 +83,7 @@ pub struct RenderPipeline {
     pub push_constant_size: u32,
 }
 impl RenderPipeline {
-    /// Describe a required pipeline that draws [`PipelineVertexFormat::PositionTexColor`]
+    /// Describe a required pipeline that draws [`VertexFormat::position_tex_color`]
     /// geometry with the GLSL core program `shader` (`ns:core/path` ->
     /// `assets/<ns>/shaders/core/<path>.vsh` and `.fsh`).
     pub fn new(
@@ -100,7 +98,6 @@ impl RenderPipeline {
             fragment: shader,
             vertex_shader: None,
             defines: Vec::new(),
-            vertex_format: PipelineVertexFormat::PositionTexColor,
             vertex_bindings: Vec::new(),
             state: PipelineState::new(blend, depth),
             color_targets: Vec::new(),
@@ -238,8 +235,9 @@ impl RenderPipeline {
         }
     }
 
-    /// Whether this pipeline uses the default single `PositionTexColor` vertex binding
-    /// (compatible with the [`crate::WorldDrawContext::pipeline_quads`] shorthand).
+    /// Whether this pipeline uses the default single vertex binding,
+    /// [`VertexFormat::position_tex_color`] (compatible with the
+    /// [`crate::WorldDrawContext::pipeline_quads`] shorthand).
     pub fn uses_default_vertex_format(&self) -> bool {
         self.vertex_bindings.is_empty()
             || (self.vertex_bindings.len() == 1
@@ -320,8 +318,9 @@ impl RenderPipeline {
         self
     }
 
-    /// Set whether fragments write to the depth buffer (`DepthStencilState.writeDepth`).
-    /// Default: `false`.
+    /// Set whether fragments that pass the comparison write to the depth buffer
+    /// (`DepthStencilState.writeDepth`). Default: `false`. See [`PackDepthTarget`] for which
+    /// attachments a linked shader-pack pass can write.
     pub fn depth_write(mut self, write: bool) -> Self {
         match &mut self.state.depth_stencil {
             Some(ds) => ds.write = write,
@@ -713,10 +712,8 @@ pub struct PackBinding {
     /// `GL_`-prefixed) and `value`, when present, must be a non-empty single-line token.
     /// Toggling active defines triggers at most one shader-pack reload.
     pub defines: Vec<(String, Option<String>)>,
-    /// Optional depth target the pipeline draws into: an auxiliary depth plane
-    /// ([`PackDepthTarget::new`]), allocated and populated only while an active pack is bound and
-    /// samples one of its declared samplers, or the pack's main depth ([`PackDepthTarget::Main`]),
-    /// which the pipeline's vertex stage fills with the world's projection of its geometry.
+    /// Optional depth target for non-shadow slots. See [`PackDepthTarget`] for attachment
+    /// selection and write rules.
     pub depth_target: Option<PackDepthTarget>,
     /// Per-frame pack uniforms supplied by the mod under pack-side GLSL names. If a pack
     /// declares a uniform with a different GLSL type, the engine leaves it unbound and logs
@@ -759,8 +756,7 @@ impl PackBinding {
         self
     }
 
-    /// Attach the depth target the pipeline draws into: [`PackDepthTarget::Main`], or an
-    /// auxiliary depth plane shared by pipelines using the same target ID.
+    /// Declare a [`PackDepthTarget`] for the pipeline's non-shadow slot.
     pub fn depth_target(mut self, target: PackDepthTarget) -> Self {
         self.depth_target = Some(target);
         self
@@ -902,14 +898,23 @@ impl PackBinding {
     }
 }
 
-/// The depth target a [`PackBinding`]'s pipeline draws into under a shader pack.
+/// Depth attachment selection for a linked shader-pack pass.
 ///
-/// A pipeline with no depth target draws into the pack's main depth (`depthtex0`) too, but
-/// [`Self::Main`] also enables depth writes there (when the pipeline is depth-tested). The depth
-/// comes from the pipeline's vertex stage: a pass naming [`Self::Main`] writes the depth its
-/// vertex stage's position gives in the world's projection, including geometry the mod projects
-/// itself, so a mod needs no separate copy into it. Under a pack the fragment stage is the
-/// pack's, so `gl_FragDepth` is not the mod's to write.
+/// Writes require an explicit request such as [`RenderPipeline::depth_write`] with `true`.
+/// The comparison is mapped to standard-Z as described by [`DepthCompare`], independently
+/// of writes.
+///
+/// [`PackPassSlot::Shadow`] compares against and, when requested, writes to the pack's shadow
+/// depth (`shadowtex0`), regardless of whether [`Self::Main`] or [`Self::Aux`] is declared.
+///
+/// In non-shadow slots, an explicit target permits writes. Without a target, the pass compares
+/// against the pack's main depth (`depthtex0`), and only [`PackPassSlot::AfterOpaqueGbuffers`]
+/// can write it. Choose [`Self::Main`] to allow writes to main depth in other non-shadow slots,
+/// or [`Self::Aux`] to declare a separate depth plane.
+///
+/// When targeting main depth, a mod's own vertex stage can emit depth in the world's projection
+/// directly, so a mod projecting its own geometry needs no separate depth copy. The fragment
+/// stage is the pack's, so `gl_FragDepth` is not the mod's to write.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 // no wire: local client shader-pack depth target descriptor.
@@ -917,9 +922,16 @@ pub enum PackDepthTarget {
     /// The pack's main depth (`depthtex0`), which the pack's later passes read as the world's.
     Main,
     /// An auxiliary `Depth32Float` attachment shared by pipelines of the same mod using the same
-    /// [`Self::id`] (cleared to OpenGL depth `1.0`, matching `depthtex0`). Allocated and
-    /// populated only while an active pack is bound and samples one of its declared samplers;
-    /// until then the pipeline draws into the pack's main depth.
+    /// `id` (cleared to OpenGL depth `1.0`, matching `depthtex0`).
+    ///
+    /// The engine can select this attachment for a linked non-shadow pass when a loaded pack
+    /// program references one of its samplers. It can retain the attachment even if no built
+    /// pass samples it, so the linked pass can sample pack world depth without attaching
+    /// `depthtex0`.
+    ///
+    /// If the auxiliary attachment is not used, the linked non-shadow pass compares against
+    /// `depthtex0` and can still write it when requested, even in slots that are read-only
+    /// without an explicit target.
     #[non_exhaustive]
     Aux {
         /// Mod-namespaced key identifying the shared depth attachment.
@@ -1244,15 +1256,6 @@ impl std::fmt::Display for PipelineTextureError {
 }
 
 impl std::error::Error for PipelineTextureError {}
-
-/// The vertex data a pipeline's draws carry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-// no wire: local client render-pipeline vertex format.
-pub enum PipelineVertexFormat {
-    /// A position, a texture coordinate and a colour: what [`PipelineQuad`] gives.
-    PositionTexColor,
-}
 
 /// Required byte alignment for vertex strides (`VertexFormat.VERTEX_ALIGNMENT = 4`).
 pub const VERTEX_ALIGNMENT: u32 = 4;
@@ -1603,7 +1606,8 @@ impl VertexFormat {
         }
     }
 
-    /// Default binding 0 matching [`PipelineVertexFormat::PositionTexColor`] (`Position: Float32x3`
+    /// The default binding 0 of a pipeline, and what [`PipelineQuad`] gives: a position, a texture
+    /// coordinate and a colour (`Position: Float32x3`
     /// at 0, `UV0: Float32x2` at 12, `Color: Unorm8x4` at 20, stride 24).
     pub fn position_tex_color() -> Self {
         Self {

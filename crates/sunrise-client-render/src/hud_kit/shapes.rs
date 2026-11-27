@@ -85,6 +85,16 @@ impl HudBatch {
         self.triangle_shaded(white(atlas), corners, [color; 3]);
     }
 
+    /// A triangle, each corner its own colour blended across it (GUI px corners, any winding).
+    pub fn fill_triangle_shaded(
+        &mut self,
+        atlas: &HudAtlas,
+        corners: [[f32; 2]; 3],
+        colors: [u32; 3],
+    ) {
+        self.triangle_shaded(white(atlas), corners, colors);
+    }
+
     /// An annular sector in one colour: between radii `r0` and `r1` (GUI px, snapped to whole
     /// px) from `angles[0]` to `angles[1]` (radians from up, clockwise), cut into
     /// [`arc_segments`]. With `r0` 0 it is a pie slice; a span of `TAU` is a whole ring.

@@ -101,7 +101,8 @@ fn register_render_pipelines(
   tokens without comments, backslashes, or `#`; invalid defines fail startup registration.
 - `PipelineBlend::Translucent` lays the result over the frame by its alpha, and `Additive` adds
   it, scaled by its alpha. `WorldDepth::Tested` hides the quads behind nearer world surfaces, and
-  `ThroughWalls` draws them over everything. No pipeline writes depth.
+  `ThroughWalls` draws them over everything. Neither preset enables depth writes; use
+  `.depth_write(true)` to request them.
 
 Any valid `Identifier` is accepted. Use a unique ID for every mod pipeline, regardless of its
 required or optional policy. A mod ID collision fails startup. Collisions with vanilla are checked
@@ -148,6 +149,11 @@ resource load remains the authority. Because the tool does not execute your Rust
 code, a `.fsh` with no `.vsh` beside it is checked against `minecraft:core/position_tex_color`,
 and a program referencing `sampleSprite`, `pipeline_sprite.glsl`, `SpriteRect`, or `Sampler0` is
 checked as textured.
+
+The check reads the vertex `in`s your `.vsh` declares, each on its own: it does not assume the
+default format's three. It refuses only an `in` of a type no vertex attribute can have (a
+`mat4`, say). Which inputs the game binds, and from which vertex bindings, the format your
+pipeline registers decides when your mod registers it; the check does not run that code.
 
 ## 3. Resolve and draw
 
@@ -399,13 +405,9 @@ fails, or the device cannot hold your bind groups after the pack's (the adapter'
 shaders draw. Your bind groups go after the pack's, which are left as the pack declared them; a
 vertex shader that uses push constants is left unbound.
 
-`PackBinding::depth_target(PackDepthTarget::Main)` makes the pipeline draw into the pack's main
-depth (`depthtex0`) with depth writes on (when the pipeline is depth-tested). The depth comes
-from your vertex stage's position output: a pipeline whose geometry is in another projection (far
-terrain) emits the depth the world's projection gives, so no copy of an auxiliary depth plane into
-the pack's depth is needed; the same works when the projections match. Under a pack the fragment
-stage is the pack's, so `gl_FragDepth` is not yours to write. `PackDepthTarget::new(id)` is the
-auxiliary plane as before.
+For example, to write world depth from `AfterTranslucentGbuffers`, use `.depth_write(true)` and
+`PackBinding::depth_target(PackDepthTarget::Main)`. See `PackDepthTarget` in the
+[mod API rustdoc](../../reference/api.md) for attachment selection and write rules.
 
 A stencil test inside a pack pass is not part of this: the pack's main depth has no stencil plane.
 

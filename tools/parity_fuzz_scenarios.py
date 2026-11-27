@@ -7,12 +7,13 @@ change those fields' values, keeping each value's NBT type.
 import json
 import re
 
-try:
-    from . import lab
-    from .parity_fuzz import read_data
-except ImportError:
-    import lab
-    from parity_fuzz import read_data
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab
+from tools.parity_fuzz import read_data
 
 # Not summonable alone (a player, a bobber without its owner), gone at once (lightning), or whole fights that
 # break the area (dragon, wither).

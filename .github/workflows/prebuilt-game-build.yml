@@ -112,6 +112,17 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.commit }}
+      - name: Build in the runner's persistent target
+        # Dyna's runner points CARGO_TARGET_DIR at its persistent build folder; the steps below read target/.
+        if: env.CROSS == 'on'
+        run: |
+          mkdir -p "${CARGO_TARGET_DIR:?}"
+          if [ ! -e target ] && [ ! -L target ]; then
+            ln -s "$CARGO_TARGET_DIR" target
+          elif [ ! target -ef "$CARGO_TARGET_DIR" ]; then
+            echo '::error::Existing target path does not point to CARGO_TARGET_DIR; refusing to replace it.'
+            exit 1
+          fi
       - name: The launcher's pinned Rust
         id: rust
         run: |
@@ -172,6 +183,16 @@ jobs:
         run: python3 tools/ci/cargo_jobs.py --job-mib 3072 --cap
       - name: Build and collect
         run: python tools/prebuilt_game.py build prebuilt ${{ matrix.server && '--server' || '' }}
+      # zig links its own static libunwind for Rust's -lgcc_s unless tools/ci/cross/zld-linux maps it to the system's
+      # libgcc_s.so.1. A library with its own unwinder aborts a panic from libstd that unwinds through it, so the mod
+      # host could not catch a mod's panic.
+      - name: The cross-built libraries share libgcc_s's unwinder
+        if: env.CROSS == 'on' && (matrix.name == 'linux' || matrix.name == 'linux-server')
+        run: |
+          host=$(find prebuilt -name libsunrise_mod_host.so)
+          readelf -d "$host" | grep -q 'NEEDED.*\[libgcc_s\.so\.1\]' || { echo "::error::$host does not link libgcc_s.so.1"; exit 1; }
+          own=$(find prebuilt -type f \( -name '*.so' -o -path '*/bin/*' \) -exec grep -l 'libunwind: ' {} + || true)
+          [ -z "$own" ] || { echo "::error::these carry their own libunwind: $own"; exit 1; }
       # The staging pass on a clean checkout, with the sunrise-stage `build` compiled from this commit: HEAD's build
       # data, each file headed with its commit, listed internals, and the tracked source
       # untouched. A failure is its own daily issue (tools/ci/daily_summary.py SDK_CHECKS), and the leg's assets
@@ -235,6 +256,17 @@ jobs:
       - name: A native mod builds through the shipped route
         if: matrix.name == 'macos' && env.CROSS != 'on'
         run: python tools/ci/native_build_route.py --sdk prebuilt --tool target/release/cargo-sunrise-mod --work "$RUNNER_TEMP/native-route"
+      # macOS's system openssl is LibreSSL, whose `pkeyutl` has no -rawin (daily run 45879175792), which sign_release.sh
+      # needs for the throwaway key below: it reads the OpenSSL it signs with from OPENSSL.
+      - name: OpenSSL 3 for tools/ci/sign_release.sh
+        if: inputs.c_source_test && matrix.name == 'macos'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+        run: |
+          brew list openssl@3 > /dev/null 2>&1 || brew install openssl@3
+          openssl="$(brew --prefix openssl@3)/bin/openssl"
+          "$openssl" version
+          echo "OPENSSL=$openssl" >> "$GITHUB_ENV"
       # The mod tool builds a native mod whose build script compiles a C file with `cc`, against this leg's own SDK laid out
       # as a signed release folder (the Linux legs' run of the same test is book-quickstart.yml's). `cc` must find the
       # compiler of the leg's target: MinGW's GCC for windows-gnu, the system's clang on macOS.

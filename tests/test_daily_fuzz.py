@@ -4,7 +4,6 @@ import io
 import json
 import os
 import subprocess
-import sys
 import tempfile
 import unittest
 from dataclasses import asdict
@@ -14,10 +13,10 @@ from unittest.mock import patch
 
 from tests.os_support import needs_runner_shell
 from tools.ci import daily_fuzz as fuzz
+from tools.ci import vendored_yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / 'tools/ci/vendor/pyyaml-6.0.3.zip'))
-import yaml
+yaml = vendored_yaml.load()
 
 COMMIT = 'ab0123456789'
 URL = 'https://github.com/example/project/actions/runs/1'

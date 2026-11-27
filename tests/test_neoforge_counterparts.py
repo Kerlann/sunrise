@@ -18,8 +18,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 PAGE = "reference/neoforge-counterparts.md"
 
-with patch.object(sys, "path", [*sys.path, str(ROOT / "tools")]):
-    import modding_hook_notes as notes
+from tools import modding_hook_notes as notes
 
 
 class Counterparts(unittest.TestCase):

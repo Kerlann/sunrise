@@ -6,15 +6,16 @@ import json
 import os
 import re
 import subprocess
-import sys
 import time
 import unittest
 from pathlib import Path
 
 from tests.os_support import needs_runner_shell
+from tools.ci import vendored_yaml
+
+yaml = vendored_yaml.load()
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools/ci/vendor/pyyaml-6.0.3.zip"))
 spec = importlib.util.spec_from_file_location("pr_gate", ROOT / "tools/ci/pr_gate.py")
 pr_gate = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pr_gate)
@@ -191,8 +192,6 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("|| needs.changes.outputs.trusted != 'true' && 'github' ||", static)
 
     def test_windows_jobs_run_daily_and_by_dispatch_only(self):
-        import yaml
-
         workflow = yaml.safe_load((ROOT / ".github/workflows/windows-runtime-leases.yml").read_text())
         # GitHub's Windows runners: no push, pull request, rollup or sync waits on them; the daily run calls it.
         self.assertEqual(set(workflow[True]), {"workflow_call", "workflow_dispatch"})
@@ -209,16 +208,12 @@ class WorkflowTests(unittest.TestCase):
                     self.assertIn(f"if: {SAME_REPO}\n", body)
 
     def test_the_mod_tool_build_is_only_called(self):
-        import yaml
-
         workflow = yaml.safe_load((ROOT / ".github/workflows/cargo-sunrise-mod-build.yml").read_text())
         # Every other archive is the daily run's (and a tag's): a pull request push holds no macOS or Windows runner.
         self.assertEqual(set(workflow[True]), {"workflow_call"})
 
     @needs_runner_shell
     def test_a_pull_request_builds_the_mod_tool_for_linux_only(self):
-        import yaml
-
         workflow = yaml.safe_load((ROOT / ".github/workflows/cargo-sunrise-mod-build.yml").read_text())
         step = next(step for step in workflow["jobs"]["plan"]["steps"] if step.get("id") == "platforms")
         def targets(event):
@@ -233,8 +228,6 @@ class WorkflowTests(unittest.TestCase):
 
 
     def test_only_a_version_tag_push_publishes_the_mod_tool_archives(self):
-        import yaml
-
         build = yaml.safe_load((ROOT / ".github/workflows/cargo-sunrise-mod-build.yml").read_text())
         entry = yaml.safe_load((ROOT / ".github/workflows/cargo-sunrise-mod.yml").read_text())
         daily = yaml.safe_load((ROOT / ".github/workflows/daily.yml").read_text())

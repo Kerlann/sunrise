@@ -35,18 +35,10 @@ import sys
 import tempfile
 from pathlib import Path
 
-if __package__:
-    from . import anvil_dump, datafix_paths, datafix_seeds, datafix_worlds, file_lock, parity_shard
-else:
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    import anvil_dump
-    import datafix_paths
-    import datafix_seeds
-    import datafix_worlds
-    import file_lock
-    import parity_shard
-
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from tools import anvil_dump, datafix_paths, datafix_seeds, datafix_worlds, file_lock, parity_shard
+
 
 LOCAL = datafix_paths.writable_root()
 WORLDS = LOCAL / 'worlds'
@@ -89,9 +81,7 @@ def world_path(name):
 
 
 def java_classpath():
-    import oracle_harness as harness
-    import test_rust_parity as base
-    import test_model_baking_parity as baking
+    from tools import oracle_harness as harness, test_rust_parity as base, test_model_baking_parity as baking
     lock, jars, _ = base.verify_artifacts()
     libraries = baking.client_libraries()
     build = LOCAL / 'build' / parity_shard.label()  # shards compile apart

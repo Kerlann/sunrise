@@ -8,8 +8,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.test_ci_concurrency import ROOT, yaml
+from tests.test_ci_concurrency import ROOT
 from tools.ci import nightly
+from tools.ci import vendored_yaml
+
+yaml = vendored_yaml.load()
 
 WORKFLOWS = ROOT / ".github/workflows"
 

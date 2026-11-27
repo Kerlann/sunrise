@@ -246,7 +246,7 @@ pub(super) fn significant(t: &str) -> bool {
     !t.trim().is_empty()
 }
 
-/// An error at token `at` of `tokens`, the lexed `pp.code`: the output line is the number of line
+/// An error at token `at` of `tokens`, the lexed `pp.code()`: the output line is the number of line
 /// breaks before it, and [`Preprocessed::error_at_line`] names where that line came from.
 pub(super) fn error_at_token(
     pp: &Preprocessed,
@@ -453,7 +453,7 @@ impl<'p> Stage<'p> {
         let mut s = Stage {
             kind,
             pp,
-            tokens: lex(&pp.code),
+            tokens: lex(pp.code()),
             removed: Vec::new(),
             uniforms: Vec::new(),
             defaults: Vec::new(),

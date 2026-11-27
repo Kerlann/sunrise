@@ -1,7 +1,10 @@
 """The mod SDK is published in one file, sdk-publish.yml, which every publisher calls (#4022, #4108)."""
 import unittest
 
-from tests.test_ci_concurrency import ROOT, yaml
+from tests.test_ci_concurrency import ROOT
+from tools.ci import vendored_yaml
+
+yaml = vendored_yaml.load()
 
 WORKFLOWS = ROOT / ".github/workflows"
 

@@ -305,20 +305,6 @@ const GBUFFERS_MATRICES: &str = "    hz_ModelViewMatrix = gbufferModelView;\n   
      mat4 hz_light = mat4(vec4(1.0 / 256.0, 0.0, 0.0, 0.0), vec4(0.0, 1.0 / 256.0, 0.0, 0.0), vec4(0.0, 0.0, 1.0, 0.0), vec4(1.0 / 32.0, 1.0 / 32.0, 0.0, 1.0));\n    \
      hz_TextureMatrix = mat4[8](mat4(1.0), hz_light, hz_light, mat4(1.0), mat4(1.0), mat4(1.0), mat4(1.0), mat4(1.0));\n";
 
-/// `pp` with `declaration` after its leading directives (`#version`, `#extension`...).
-fn with_declaration(pp: &Preprocessed, declaration: &str) -> Preprocessed {
-    let mut at = 0;
-    for line in pp.code.split_inclusive('\n') {
-        let t = line.trim_start();
-        if !(t.is_empty() || t.starts_with('#')) {
-            break;
-        }
-        at += line.len();
-    }
-    let code = format!("{}{declaration}\n{}", &pp.code[..at], &pp.code[at..]);
-    Preprocessed { code, ..pp.clone() }
-}
-
 /// The type of a game input a vertex stage may read without declaring it: terrain's
 /// `mc_chunkFade`, and the core-profile vertex attributes (`vaPosition`...) that a
 /// `#version 130` line program reads as it would in a core-profile one (Complementary
@@ -350,7 +336,7 @@ fn implicit_inputs<'a>(
             Some((name.as_str(), value.as_str(), implicit_input_type(name)?))
         })
         .filter(|(name, _, _)| {
-            uses_name(&vertex.code, name)
+            uses_name(vertex.code(), name)
                 && !scanned.globals.contains(*name)
                 && !scanned.declared.contains(*name)
         })
@@ -390,14 +376,9 @@ fn translate(
     );
     let vertex = vertex_bools.as_ref().unwrap_or(vertex);
     let fragment = fragment_bools.as_ref().unwrap_or(fragment);
-    // The boats' water patches' depth, read by our `main` (`GbuffersInputs::water_mask`).
-    let masked = gbuffers
-        .filter(|g| g.water_mask)
-        .map(|_| with_declaration(fragment, &format!("uniform sampler2D {WATER_MASK};")));
-    let fragment = masked.as_ref().unwrap_or(fragment);
-    // The boats' water patches (`GbuffersInputs::water_patches`): the vertex's camera-relative
-    // place to the fragment, and the patches' boxes.
-    let patches = gbuffers.is_some_and(|g| g.water_patches);
+    // The declarations each stage gets, put in once: the boats' water patches (`GbuffersInputs::
+    // water_patches`), the vertex's camera-relative place to the fragment and the patches' boxes,
+    // then the patches' depth (`GbuffersInputs::water_mask`) that our `main` reads.
     let varying = |pp: &Preprocessed, dir: &str| {
         let old = pp.version.as_ref().is_none_or(|(v, _)| *v < 130);
         format!(
@@ -405,18 +386,25 @@ fn translate(
             if old { "varying" } else { dir }
         )
     };
-    let patch_vertex = patches.then(|| with_declaration(vertex, &varying(vertex, "out")));
+    let patches = gbuffers.is_some_and(|g| g.water_patches);
+    let mut vertex_declarations: Vec<String> = Vec::new();
+    let mut fragment_declarations: Vec<String> = Vec::new();
+    if patches {
+        vertex_declarations.push(varying(vertex, "out"));
+        fragment_declarations.push(varying(fragment, "in"));
+        fragment_declarations.push("uniform int sunriseWaterPatchCount;".to_owned());
+        fragment_declarations
+            .extend((0..2 * WATER_PATCHES).map(|k| format!("uniform vec4 sunriseWaterPatch{k};")));
+    }
+    if gbuffers.is_some_and(|g| g.water_mask) {
+        fragment_declarations.push(format!("uniform sampler2D {WATER_MASK};"));
+    }
+    let declared = |pp: &Preprocessed, declarations: &[String]| {
+        (!declarations.is_empty()).then(|| pp.with_declaration(&declarations.join("\n")))
+    };
+    let patch_vertex = declared(vertex, &vertex_declarations);
     let vertex = patch_vertex.as_ref().unwrap_or(vertex);
-    let patch_fragment = patches.then(|| {
-        let uniforms: String = std::iter::once("uniform int sunriseWaterPatchCount;".to_owned())
-            .chain((0..2 * WATER_PATCHES).map(|k| format!("uniform vec4 sunriseWaterPatch{k};")))
-            .collect::<Vec<_>>()
-            .join("\n");
-        with_declaration(
-            fragment,
-            &format!("{}\n{uniforms}", varying(fragment, "in")),
-        )
-    });
+    let patch_fragment = declared(fragment, &fragment_declarations);
     let fragment = patch_fragment.as_ref().unwrap_or(fragment);
     let mut v = Stage::scan(vertex, ShaderStage::Vertex);
     let mut f = Stage::scan(fragment, ShaderStage::Fragment);
@@ -558,7 +546,7 @@ fn translate(
             && !uniforms.contains_key(item)
             && [vertex, fragment]
                 .iter()
-                .any(|pp| uses_name(&pp.code, item));
+                .any(|pp| uses_name(pp.code(), item));
     }
     let samplers: Vec<Sampler> = samplers
         .into_iter()
@@ -1000,10 +988,7 @@ fn resources(
 
 /// Translates a compute program (`.csh`).
 pub fn translate_compute(compute: &Preprocessed) -> Result<ComputeProgram, Vec<Error>> {
-    let named = anonymous_structs::name(&compute.code).map(|code| Preprocessed {
-        code,
-        ..compute.clone()
-    });
+    let named = anonymous_structs::name(compute.code()).map(|code| compute.with_code(code));
     let compute = named.as_ref().unwrap_or(compute);
     let split = atomic_vectors::rewrite(compute);
     let compute = split.as_ref().unwrap_or(compute);
@@ -1452,13 +1437,11 @@ fn compile(
     };
     let locate = |line: usize| match line
         .checked_sub(header_lines)
-        .and_then(|l| stage.pp.lines.get(l))
+        .and_then(|l| stage.pp.origin_at(l))
     {
-        Some(o) => sunrise_glsl::Location {
-            file: (stage.pp.files.get(o.file as usize))
-                .cloned()
-                .unwrap_or_default(),
-            line: o.line,
+        Some((file, line)) => sunrise_glsl::Location {
+            file: file.to_owned(),
+            line,
         },
         None => sunrise_glsl::Location {
             file: "<sunrise>".into(),
@@ -1535,6 +1518,31 @@ mod tests {
             game,
             InterfaceLimits::WGPU_DEFAULT,
         )
+    }
+
+    /// `with_declaration` puts the water mask's sampler after `#version`; an error on a later
+    /// line still names the pack's line (an inserted line used to be left out of `lines`, so
+    /// the error moved one line up).
+    #[test]
+    fn an_error_after_an_inserted_declaration_names_the_packs_line() {
+        let game = GbuffersInputs {
+            water_mask: true,
+            ..item_game()
+        };
+        let Err(errors) = item_program(
+            "gbuffers_basic",
+            "layout(location = 1, component = 4) out float x;",
+            "x",
+            &game,
+        ) else {
+            panic!("a component past the location's four is refused");
+        };
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.file.ends_with("gbuffers_basic.fsh") && e.line == 2),
+            "{errors:?}"
+        );
     }
 
     fn item_game() -> GbuffersInputs {

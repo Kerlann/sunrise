@@ -15,6 +15,7 @@ import hashlib
 import json
 import math
 import os
+import platform as host
 import queue
 import re
 import shutil
@@ -30,16 +31,11 @@ import zipfile
 import zlib
 from pathlib import Path
 
-if __package__:
-    from . import datafix_paths, datafix_scene as scene, datafix_scene_12 as scene12
-    from .lab import free_port, offline_uuid, parse_varint, varint
-else:
-    import datafix_paths
-    import datafix_scene as scene
-    import datafix_scene_12 as scene12
-    from lab import free_port, offline_uuid, parse_varint, varint
-
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from tools import datafix_paths, datafix_scene as scene, datafix_scene_12 as scene12
+from tools.lab import free_port, offline_uuid, parse_varint, varint
+
 LOCAL = datafix_paths.writable_root()
 
 
@@ -74,6 +70,10 @@ BOT = 'Upgrader'
 # Versions whose default world also gets every block state the server can save, on a grid beside the scene.
 STATE_GRID = {'1.13.2'}
 UUID_BASE = 0x6000
+# The clientbound configuration packet id of select_known_packs, by protocol: 14 from 1.20.5 (766) to 26.2 (776); 26.3 (777)
+# puts post_effects before it, which makes it 15 (crates/sunrise-protocol/src/ids.rs). The older ids are those of the
+# per-version packet tables removed in 9dd33d4e1b2 (crates/sunrise-protocol/src/adapter/v*.rs, from the packets reports).
+SELECT_KNOWN_PACKS_ID = {**dict.fromkeys(range(766, 777), 14), 777: 15}
 
 
 def fetch(path, url, sha1, what):
@@ -123,25 +123,47 @@ OLD_VERSIONS = {
 }
 
 
+# Mojang's runtime platform names (the keys of its java runtime manifest), by Windows machine.
+WINDOWS_PLATFORMS = {'AMD64': 'windows-x64', 'ARM64': 'windows-arm64', 'x86': 'windows-x86'}
+# and by Linux machine: its manifest has no arm64 Linux runtime, so such a machine is refused.
+LINUX_PLATFORMS = {'x86_64': 'linux', 'i386': 'linux-i386', 'i686': 'linux-i386'}
+
+
 def platform():
-    import platform as p
+    """Mojang's name for this machine in its Java runtime manifest."""
     if sys.platform == 'darwin':
-        return 'mac-os-arm64' if p.machine() == 'arm64' else 'mac-os'
-    return 'linux'
+        return 'mac-os-arm64' if host.machine() == 'arm64' else 'mac-os'
+    if sys.platform == 'win32':
+        if host.machine() not in WINDOWS_PLATFORMS:
+            raise ValueError(f'no Mojang Java runtime platform for Windows machine {host.machine()}')
+        return WINDOWS_PLATFORMS[host.machine()]
+    if host.machine() not in LINUX_PLATFORMS:
+        raise ValueError(f'no Mojang Java runtime platform for Linux machine {host.machine()}')
+    return LINUX_PLATFORMS[host.machine()]
+
+
+def pinned_runtimes(plat):
+    """The components research-lock.json pins for a platform; a platform it does not pin is refused by name."""
+    if plat not in LOCK:
+        raise ValueError(f'research-lock.json java_runtimes pins no runtime for platform {plat}; pin its components '
+                         f'(manifest_url and manifest_sha1, from Mojang\'s runtime manifest for {plat}) under java_runtimes.{plat}')
+    return LOCK[plat]
 
 
 def java(version):
     """The java executable for a server version: Mojang's runtime of the version's
     component (pinned in research-lock.json), installed in the private writable root."""
-    meta = version_meta(version)
-    component = meta.get('javaVersion', {}).get('component', 'jre-legacy')
+    plat = platform()
+    runtimes = pinned_runtimes(plat)   # before version_meta, which may download
+    component = version_meta(version).get('javaVersion', {}).get('component', 'jre-legacy')
     if component in ('java-runtime-delta', 'java-runtime-epsilon'):
         return 'java'  # 1.20.5 on: the JDK that runs 26.3 runs them
-    runtimes = LOCK[platform()]
+    if component not in {name for other, names in LOCK.items() if other != 'note' for name in names}:
+        raise ValueError(f'{version}: javaVersion component {component} is in no platform of research-lock.json java_runtimes')
     if component not in runtimes:
-        component = 'java-runtime-gamma'
+        component = 'java-runtime-gamma'  # research-lock.json java_runtimes note: a component this platform lacks falls back to gamma
     pin = runtimes[component]
-    home = LOCAL / 'java' / f'{component}-{platform()}'
+    home = LOCAL / 'java' / f'{component}-{plat}'
     stamp = home / '.complete'
     if not stamp.exists() or stamp.read_text() != pin['manifest_sha1']:
         install_runtime(pin, home)
@@ -225,14 +247,18 @@ class Server:
         out = self.wait(marker, timeout)
         return [re.sub(r'^\[[0-9:]+\] \[[^\]]*\]: ', '', l) for l in out[:-1]]
 
-    def stop(self):
+    def stop(self, *, save=True):
+        """Stop the server; with save=False, keep the last explicit save instead of making another."""
         try:
-            self.process.stdin.write('stop\n')
-            self.process.stdin.flush()
-            self.process.wait(120)
-        except Exception:
-            self.process.kill()
-            self.process.wait()   # the world folder and port are reused only once the process is gone
+            if save and self.process.poll() is None:
+                self.process.stdin.write('stop\n')
+                self.process.stdin.flush()
+                self.process.wait(120)
+        finally:
+            if self.process.poll() is None:
+                self.process.kill()
+                self.process.wait()   # the world folder and port are reused only once the process is gone
+            self.process.stdin.close()
 
 
 def failed(lines):
@@ -252,37 +278,44 @@ class Bot:
 
     def __init__(self, port, protocol, name):
         self.sock = socket.create_connection(('127.0.0.1', port), timeout=30)
-        self.threshold = -1
-        self.buffer = b''
-        self.protocol = protocol
-        self.stop = threading.Event()
-        self.send(0, varint(protocol) + mcstring('127.0.0.1') + struct.pack('>H', port) + varint(2))
-        if protocol <= 758:  # 1.18.2: the name only
-            self.send(0, mcstring(name))
-        elif protocol == 759:  # 1.19: no signature data
-            self.send(0, mcstring(name) + b'\x00')
-        elif protocol == 760:  # 1.19.2: no signature data, optional UUID
-            self.send(0, mcstring(name) + b'\x00' + b'\x01' + offline_uuid(name).bytes)
-        elif protocol <= 763:  # 1.19.3 - 1.20.1: optional UUID
-            self.send(0, mcstring(name) + b'\x01' + offline_uuid(name).bytes)
-        else:
-            self.send(0, mcstring(name) + offline_uuid(name).bytes)
-        while True:
-            pid, data = self.receive()
-            if pid == 3:
-                self.threshold = parse_varint(data, 0)[1]
-            elif pid == 2:
-                break
-            elif pid == 0:
-                raise RuntimeError(f'login refused: {data!r}')
-        if protocol >= 764:
-            self.send(3)  # login acknowledged -> configuration
-            self.configure()
+        try:
+            self.threshold = -1
+            self.buffer = b''
+            self.protocol = protocol
+            self.stop = threading.Event()
+            self.send(0, varint(protocol) + mcstring('127.0.0.1') + struct.pack('>H', port) + varint(2))
+            if protocol <= 758:  # 1.18.2: the name only
+                self.send(0, mcstring(name))
+            elif protocol == 759:  # 1.19: no signature data
+                self.send(0, mcstring(name) + b'\x00')
+            elif protocol == 760:  # 1.19.2: no signature data, optional UUID
+                self.send(0, mcstring(name) + b'\x00' + b'\x01' + offline_uuid(name).bytes)
+            elif protocol <= 763:  # 1.19.3 - 1.20.1: optional UUID
+                self.send(0, mcstring(name) + b'\x01' + offline_uuid(name).bytes)
+            else:
+                self.send(0, mcstring(name) + offline_uuid(name).bytes)
+            while True:
+                pid, data = self.receive()
+                if pid == 3:
+                    self.threshold = parse_varint(data, 0)[1]
+                elif pid == 2:
+                    break
+                elif pid == 0:
+                    raise RuntimeError(f'login refused: {data!r}')
+            if protocol >= 764:
+                self.send(3)  # login acknowledged -> configuration
+                self.configure()
+        except BaseException:
+            self.sock.close()   # the caller never gets the bot, so nothing else would close it
+            raise
         threading.Thread(target=self.idle, daemon=True).start()
 
     def configure(self):
         old = self.protocol < 766  # 1.20.2 - 1.20.4 packet ids
         finish, keep_alive, ping, disconnect = (2, 3, 4, 1) if old else (3, 4, 5, 2)
+        known_packs = SELECT_KNOWN_PACKS_ID.get(self.protocol)   # None before 1.20.5: no known packs
+        if not old and known_packs is None:
+            raise ValueError(f'protocol {self.protocol}: the id of select_known_packs is not in SELECT_KNOWN_PACKS_ID')
         while True:
             pid, data = self.receive()
             if pid == finish:
@@ -294,19 +327,8 @@ class Bot:
                 self.send(4 if old else 5, data)
             elif pid == disconnect:
                 raise RuntimeError(f'disconnected during configuration: {data!r}')
-            elif not old and self.known_packs(data):
+            elif pid == known_packs:
                 self.send(7, varint(0))  # claim no packs: the server sends full registries
-
-    @staticmethod
-    def known_packs(data):
-        try:
-            pos, count = parse_varint(data, 0)
-            if count < 1:
-                return False
-            pos, n = parse_varint(data, pos)
-            return data[pos:pos + n] == b'minecraft'
-        except IndexError:
-            return False
 
     def idle(self):
         self.sock.settimeout(1.0)
@@ -319,6 +341,8 @@ class Bot:
                 break
 
     def leave(self):
+        if self.stop.is_set():
+            return
         self.stop.set()
         time.sleep(1.5)
         self.sock.close()
@@ -409,7 +433,7 @@ def place_states(run, states):
 
 
 def build_scene(server, run, Bot, port, protocol, props, era, data_version, states=()):
-    """The scene of the generic generator; returns the bot that stays joined."""
+    """The scene of the generic generator; its bot stays joined until the caller closes it."""
     if not props:  # variants only differ in their world type
         run('forceload add -48 -48 79 79')
         run('fill 0 99 0 47 99 47 minecraft:stone')
@@ -427,7 +451,7 @@ def build_scene(server, run, Bot, port, protocol, props, era, data_version, stat
             place_states(run, states)
     if not props:
         run('setworldspawn 20 101 20')
-    bot = Bot(port, protocol, BOT)
+    Bot(port, protocol, BOT)
     time.sleep(3)
     for command in scene.player_commands(era, BOT, data_version):
         run(command)
@@ -437,7 +461,15 @@ def build_scene(server, run, Bot, port, protocol, props, era, data_version, stat
         time.sleep(wait)
     run('save-all flush')
     time.sleep(2)
-    return bot
+
+
+def tracked_bot(bots):
+    """A Bot class that appends each bot that joined to `bots` once __init__ returns (a failed join closes its own socket)."""
+    class JoinedBot(Bot):
+        def __init__(self, *args):
+            super().__init__(*args)
+            bots.append(self)
+    return JoinedBot
 
 
 def build(name, force=False):
@@ -452,8 +484,9 @@ def build(name, force=False):
     work = LOCAL / 'gen' / name
     shutil.rmtree(work, ignore_errors=True)
     port = free_port()
-    states = block_states(jar, java(version)) if version in STATE_GRID and not props else ()
-    server = Server(work, jar, port, scene.experiments(data_version), java(version), props)
+    java_exe = java(version)
+    states = block_states(jar, java_exe) if version in STATE_GRID and not props else ()
+    server = Server(work, jar, port, scene.experiments(data_version), java_exe, props)
     if props and props.get('level-type') == 'debug_all_block_states':
         # The debug world's grid (DebugLevelSource.getBlockStateFor: every block state at odd x and z from 1 to
         # 2 * GRID_WIDTH + 1, 187 for 1.13.2's 8,599 states) holds the twelve moving_piston states. Their block has a
@@ -468,8 +501,10 @@ def build(name, force=False):
             raise RuntimeError(f'{name}: setworldspawn was refused, so the grid would be saved: {out}')
         server.stop()
         shutil.rmtree(work / 'world' / 'region')
-        server = Server(work, jar, port, scene.experiments(data_version), java(version), props)
+        server = Server(work, jar, port, scene.experiments(data_version), java_exe, props)
     problems = []
+    bots = []   # every bot that joined, so that the finally below closes it whatever fails
+    JoinedBot = tracked_bot(bots)
 
     def run(command):
         out = server.run(command)
@@ -478,14 +513,23 @@ def build(name, force=False):
             problems.append((command[:160], bad[:2]))
         return out
 
-    if data_version < 1631 and not props:   # 1.12 and older: tools/datafix_scene_12.py builds the scene and saves the world itself
-        bot = scene12.populate(server, Bot, port, protocol, BOT, problems)
-    else:
-        bot = build_scene(server, run, Bot, port, protocol, props, era, data_version, states)
-    bot.leave()
-    time.sleep(2)
-    server.stop()
-    if data_version < 1631 and not props:
+    legacy_scene = data_version < 1631 and not props
+    save_on_stop = True
+    try:
+        try:
+            if legacy_scene:
+                scene12.populate(server, JoinedBot, port, protocol, BOT, problems, mcstring=mcstring)
+                save_on_stop = False  # a second save would overwrite the transient states in the last explicit save
+            else:
+                build_scene(server, run, JoinedBot, port, protocol, props, era, data_version, states)
+        finally:
+            for bot in bots:
+                bot.leave()
+        if save_on_stop:
+            time.sleep(2)
+    finally:
+        server.stop(save=save_on_stop)
+    if legacy_scene:
         scene12.fixtures(work / 'world')   # the few statistics a passive bot cannot cause, written by hand
     # Copy aside, then rename: an interrupted copy must not look like a finished world.
     partial = target.with_name(target.name + '.partial')

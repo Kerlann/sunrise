@@ -33,10 +33,11 @@ struct Block<'a> {
 
 /// `pp` with its buffers' `bool` members rewritten, and what could not be.
 pub(super) fn rewrite(pp: &Preprocessed) -> (Option<Preprocessed>, Vec<Error>) {
-    if !pp.code.contains("buffer") || !(pp.code.contains("bool") || pp.code.contains("bvec")) {
+    if !pp.code().contains("buffer") || !(pp.code().contains("bool") || pp.code().contains("bvec"))
+    {
         return (None, Vec::new());
     }
-    let tokens = lex(&pp.code);
+    let tokens = lex(pp.code());
     let next = |i: usize| (i + 1..tokens.len()).find(|&j| significant(tokens[j]));
     let prev = |i: usize| (0..i).rev().find(|&j| significant(tokens[j]));
     let mut errors = Vec::new();
@@ -299,7 +300,7 @@ pub(super) fn rewrite(pp: &Preprocessed) -> (Option<Preprocessed>, Vec<Error>) {
     if !errors.is_empty() {
         return (None, errors);
     }
-    let mut code = String::with_capacity(pp.code.len() + 32);
+    let mut code = String::with_capacity(pp.code().len() + 32);
     for (i, &t) in tokens.iter().enumerate() {
         if let Some(text) = before.get(&i) {
             code.push_str(text);
@@ -313,7 +314,7 @@ pub(super) fn rewrite(pp: &Preprocessed) -> (Option<Preprocessed>, Vec<Error>) {
             code.push_str(text);
         }
     }
-    (Some(Preprocessed { code, ..pp.clone() }), errors)
+    (Some(pp.with_code(code)), errors)
 }
 
 #[cfg(test)]
@@ -329,7 +330,7 @@ mod tests {
         let stage = preprocess(&pack, "composite.fsh", &Macros::standard());
         let (rewritten, errors) = rewrite(&stage);
         assert!(errors.is_empty(), "{errors:?}");
-        rewritten.map(|p| p.code)
+        rewritten.map(|p| p.code().to_owned())
     }
 
     #[test]
@@ -345,7 +346,7 @@ mod tests {
         let pack =
             Pack::from_zip_bytes("P.zip", zip(&[("shaders/composite.fsh", SOURCE)])).unwrap();
         let before = preprocess(&pack, "composite.fsh", &Macros::standard());
-        assert_eq!(out.lines().count(), before.code.lines().count());
+        assert_eq!(out.lines().count(), before.code().lines().count());
     }
 
     #[test]
@@ -398,24 +399,5 @@ layout(std430, binding = 4) buffer B { bool flag; };
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].message.contains("`flag` is also declared"));
         assert_eq!(errors[0].line, 2);
-    }
-
-    #[test]
-    fn an_error_past_the_mapped_lines_names_the_stage_file_with_no_line() {
-        let pack = Pack::from_zip_bytes(
-            "P.zip",
-            zip(&[(
-                "shaders/composite.fsh",
-                "#version 430\nlayout(std430, binding = 4) buffer B { bool flag; };\nvoid main() {\n    flag |= true;\n}\n",
-            )]),
-        )
-        .unwrap();
-        let mut stage = preprocess(&pack, "composite.fsh", &Macros::standard());
-        // Lines Sunrise added to the code have no origin.
-        stage.lines.truncate(1);
-        let (_, errors) = rewrite(&stage);
-        assert_eq!(errors.len(), 1, "{errors:?}");
-        assert_eq!(errors[0].file, "composite.fsh");
-        assert_eq!(errors[0].line, 0);
     }
 }

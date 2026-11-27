@@ -5,17 +5,16 @@ import os
 from pathlib import Path
 import shlex
 import subprocess
-import sys
 import tempfile
 import unittest
 from unittest import mock
 
 from tests.os_support import needs_runner_shell
 from tools.ci import ignored_tests
+from tools.ci import vendored_yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools/ci/vendor/pyyaml-6.0.3.zip"))
-import yaml
+yaml = vendored_yaml.load()
 
 
 def data_leg_steps():

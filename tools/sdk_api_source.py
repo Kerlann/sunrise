@@ -36,12 +36,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 # Beside this file: a module of the `tools` package when imported, a plain module when run as a script.
-if __package__:
-    from . import prebuilt_game
-else:
-    import prebuilt_game
-
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from tools import prebuilt_game
+
 API = "sunrise-mod-api"
 GENERATED = "generated"
 ROOT_TOKEN = "{sunrise-api-source-root}"

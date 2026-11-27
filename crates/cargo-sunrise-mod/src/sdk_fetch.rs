@@ -32,6 +32,10 @@ const BASE: &str = sunrise_addresses::SDK_RELEASES;
 /// The build and signing policy a folder was verified under. Write this stamp last, so an old
 /// commit-only stamp or an incomplete fetch is never taken for a verified cache hit.
 const STAMP: &str = "build";
+/// Shared cache lock files, kept outside every directory replaced in place.
+const LOCKS_DIR: &str = "locks";
+/// SDK metadata folder inside a cached build root, kept separate from slice folders.
+pub(crate) const METADATA_DIR: &str = "metadata";
 
 pub(crate) struct CacheStamp(String);
 
@@ -43,6 +47,20 @@ impl CacheStamp {
         Self(format!("{build}:{:x}", Sha256::digest(keys.as_flattened())))
     }
 
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Short path-safe digest of the signing policy, isolating caches under different trust.
+    pub(crate) fn policy_key(&self) -> &str {
+        let policy = self
+            .0
+            .rsplit_once(':')
+            .expect("cache stamp carries a policy digest")
+            .1;
+        &policy[..16]
+    }
+
     fn matches(&self, dir: &Path) -> bool {
         fs::read_to_string(dir.join(STAMP)).is_ok_and(|stamp| stamp == self.0)
     }
@@ -51,6 +69,34 @@ impl CacheStamp {
         let path = dir.join(STAMP);
         fs::write(&path, &self.0).map_err(|e| format!("{}: {e}", path.display()))
     }
+}
+
+/// Shared cache root for `build` under `stamp`'s signing policy.
+pub(crate) fn cache_root(cache: &Path, build: &str, stamp: &CacheStamp) -> PathBuf {
+    cache.join("sdk").join(build).join(stamp.policy_key())
+}
+
+/// Exclusive file lock in `dir/locks`, outside every directory replaced in place, keyed by `parts`.
+pub(crate) fn cache_lock(dir: &Path, parts: &[&str]) -> Result<fs::File, String> {
+    let locks = dir.join(LOCKS_DIR);
+    fs::create_dir_all(&locks).map_err(|e| format!("{}: {e}", locks.display()))?;
+    let mut hasher = Sha256::new();
+    for part in parts {
+        hasher.update((part.len() as u64).to_le_bytes());
+        hasher.update(part.as_bytes());
+    }
+    let digest = format!("{:x}", hasher.finalize());
+    let path = locks.join(format!("{}.lock", &digest[..32]));
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    file.lock()
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(file)
 }
 pub(crate) const SURFACE: &str = "surface.json";
 const API_SOURCE: &str = "api-source.tar.xz";
@@ -374,7 +420,7 @@ pub(crate) fn fetch(
     fetch_index(base, keys, build, dir, api).map(|index| pinned(&index, dir))
 }
 
-fn fetch_index(
+pub(crate) fn fetch_index(
     base: &Base,
     keys: &[PublicKey],
     build: &str,
@@ -494,11 +540,19 @@ pub(crate) fn fetch_slices(
     let names = index
         .route_assets(route.inputs(), target, side)
         .map_err(|e| format!("sdk-{build} has no slices for this computer ({target}): {e}"))?;
-    let into = if route == sunrise_native_build::prebuilt::Route::Api {
-        dir.join("api-slices").join(host)
+    let (route_dir, into) = if route == sunrise_native_build::prebuilt::Route::Api {
+        ("api-slices", dir.join("api-slices").join(&host))
     } else {
-        dir.join(host)
+        ("engine-slices", dir.join(&host))
     };
+    let side_name = match side {
+        sdk::Side::Client => "client",
+        sdk::Side::Server => "server",
+    };
+    let _lock = cache_lock(
+        dir,
+        &["slices", stamp.as_str(), target, side_name, route_dir],
+    )?;
     let package = sunrise_native_build::prebuilt::Package::at(&into);
     if stamp.matches(&into) {
         return Ok(package);

@@ -5,6 +5,8 @@
 //! a public pack defines a macro in its `shaders.properties` and tests it further down. The
 //! lines of custom uniforms and variables (`uniform.*`, `variable.*`) have those macros expanded,
 //! and so do the values of buffer and image sizes (`size.buffer.*`, `image.*`).
+//! The file's expansions spend at most [`MAX_EXPANSION_WORK`](crate::macros::MAX_EXPANSION_WORK):
+//! an `#if` that would spend more reads as false, an entry is dropped, each with a note.
 //! No other escape is read: values are names, numbers and expressions. A later duplicate key
 //! replaces the earlier one, with a note.
 
@@ -37,7 +39,7 @@ impl Properties {
     /// Reads `text`; `#define`/`#undef` change the macros for the lines after them only.
     pub fn parse(text: &str, macros: &Macros) -> Self {
         let mut out = Self::default();
-        let mut macros = macros.clone();
+        let mut macros = macros.for_file();
         let mut conditionals = Conditionals::default();
         let mut lines = text.lines().zip(1u32..);
         while let Some((raw, number)) = lines.next() {
@@ -93,7 +95,8 @@ impl Properties {
                         }
                         Ok::<_, String>((key, value))
                     };
-                    // A call nested past `MAX_ARGUMENT_DEPTH` drops the entry, with a note.
+                    // A call nested past `MAX_ARGUMENT_DEPTH`, or an expansion past the file's
+                    // `MAX_EXPANSION_WORK`, drops the entry, with a note.
                     let (key, value) = match read() {
                         Ok(read) => read,
                         Err(why) => {
@@ -505,6 +508,46 @@ mod tests {
                 note(8, &condition),
                 note(12, &calls_too_deep()),
                 note(14, &calls_too_deep())
+            ]
+        );
+    }
+
+    /// A `.properties` file spends one file's `MAX_EXPANSION_WORK`, as a stage file does (#4135):
+    /// the issue's object-like doubling in an `#if` is a note at its line and reads as false; a
+    /// doubling call in a custom uniform or a buffer size drops the entry, with a note at its
+    /// line. The entries before, and those without macros, read.
+    #[test]
+    fn doubling_macros_stop_at_the_files_work() {
+        let mut text = "#define Q(x) x\nuniform.float.before = Q(2)\n#define FZ_E0 1\n".to_owned();
+        for n in 1..=39 {
+            text += &format!("#define FZ_E{n} (FZ_E{m} + FZ_E{m})\n", m = n - 1);
+        }
+        for n in 4..=23 {
+            text += &format!("#define FZ_D{n}(x) FZ_D{m}(x) FZ_D{m}(x)\n", m = n - 1);
+        }
+        // Line 63.
+        text += "#if FZ_E39 > 0\ntaken=1\n#else\nother=1\n#endif\n\
+                 uniform.float.bomb = FZ_D23(1)\nsize.buffer.colortex5 = FZ_D23(1) 4\nafter=1\n";
+        let p = read(&text);
+        assert_eq!(
+            pairs(&p),
+            [
+                ("uniform.float.before", "2"),
+                ("other", "1"),
+                ("after", "1")
+            ]
+        );
+        let why = sunrise_glsl::macros::work_ran_out(crate::macros::MAX_EXPANSION_WORK);
+        let note = |line: u32, message: &str| Note {
+            line,
+            message: message.to_owned(),
+        };
+        assert_eq!(
+            p.notes,
+            [
+                note(63, &format!("`#if FZ_E39 > 0`: {why}; read as false")),
+                note(68, &why),
+                note(69, &why)
             ]
         );
     }

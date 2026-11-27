@@ -548,7 +548,7 @@ impl BlocksAttacks {
             .data()
             .and_then(|d| d.other("minecraft:blocks_attacks"))
         {
-            let json = sunrise_client_core::scoreboard::tag_to_json(own);
+            let json = sunrise_game_data::scoreboard::tag_to_json(own);
             return Self::parse(&json).map(std::borrow::Cow::Owned);
         }
         item?
@@ -846,7 +846,7 @@ pub struct Items {
     // The item -> its BlockItem block -> effect holder lookup, resolved once at load.
     suspicious_stew_effects: Arc<HashMap<String, StewEffects>>,
     /// Registry snapshot used to validate ingredient component payloads.
-    pub component_registry: Arc<sunrise_client_core::registries::Registries>,
+    pub component_registry: Arc<sunrise_game_data::registries::Registries>,
     /// Loaded component prototypes for concrete ingredient predicates.
     pub component_defaults: Arc<HashMap<String, sunrise_core::nbt::Compound>>,
     /// Default `minecraft:mob_visibility` by item id, with the `equippable`
@@ -1227,6 +1227,21 @@ fn worn_mob_visibility(
 }
 
 impl Items {
+    /// `ItemStack.has(DataComponents.TOOL)`: the stack's own patch first (a `tool` it sets, or
+    /// one it removes), then the item's default components (`AbstractPiglin.isHoldingMeleeWeapon`
+    /// asks it of the main hand).
+    pub fn has_tool(&self, stack: &ItemStack) -> bool {
+        if let Some(data) = stack.data() {
+            if data.other("!minecraft:tool").is_some() {
+                return false;
+            }
+            if data.other("minecraft:tool").is_some() {
+                return true;
+            }
+        }
+        self.get(&stack.item)
+            .is_some_and(|info| info.tool_damage_per_block.is_some())
+    }
     /// Load item data; bind the world's damage catalog before preparing recipes.
     pub fn load(
         root: &Path,
@@ -1338,7 +1353,7 @@ impl Items {
         root: &Path,
         overlay: &PackOverlay,
         defaults: &ItemDefaults,
-        damage: sunrise_client_core::registries::RegistryIds,
+        damage: sunrise_game_data::registries::RegistryIds,
         load_registries: impl FnOnce(&mut Self) -> Result<()>,
     ) -> Result<Self> {
         let mut items = Self::catalog_items(root, overlay, defaults, load_registries)?;
@@ -1532,7 +1547,7 @@ impl Items {
                         .map(|(name, value)| {
                             (
                                 name.clone(),
-                                sunrise_client_core::scoreboard::json_to_tag(value),
+                                sunrise_game_data::scoreboard::json_to_tag(value),
                             )
                         })
                         .collect(),
@@ -1660,11 +1675,6 @@ impl Items {
                 "worldgen/biome",
                 "minecraft:worldgen/biome",
             ),
-            (
-                TagRegistry::Enchantment,
-                "enchantment",
-                "minecraft:enchantment",
-            ),
         ] {
             let exported = self.component_registry.ids(reg_key);
             let fallback = builtin.get(kind);
@@ -1681,6 +1691,9 @@ impl Items {
             })?;
             self.set_tags(registry, tags);
         }
+        // Enchantment tags bind once the enchantments are installed (`bind_enchantment_tags`,
+        // which every load that installs them runs), never against the export here: it lists
+        // vanilla's alone, so a tag naming a mod's enchantment failed to bind (#6129).
         Ok(())
     }
 
@@ -1787,7 +1800,7 @@ impl Items {
     /// registry entry or inline instrument.
     pub fn instrument(&self, stack: &ItemStack) -> Option<Instrument> {
         if let Some(tag) = inline_instrument(stack) {
-            return Instrument::decode(&sunrise_client_core::scoreboard::tag_to_json(tag)).ok();
+            return Instrument::decode(&sunrise_game_data::scoreboard::tag_to_json(tag)).ok();
         }
         self.instruments.get(&instrument_id(stack)?).cloned()
     }
@@ -3597,7 +3610,7 @@ fn apply_components(stack: &mut ItemStack, patch: &Value) {
             } else {
                 (
                     id.as_str().into(),
-                    sunrise_client_core::scoreboard::json_to_tag(value),
+                    sunrise_game_data::scoreboard::json_to_tag(value),
                 )
             }
         })
@@ -4422,6 +4435,91 @@ mod tests {
         assert!(song(5.0, -1.0).is_err());
     }
 
+    /// #6129: a mod's biome, structure and enchantment, merged into the export after vanilla's
+    /// and added to vanilla tags, leave every vanilla tag bound, with the mod members in them.
+    #[test]
+    fn mod_entries_merged_into_the_export_keep_vanilla_tags_bound() {
+        let root = std::env::temp_dir().join(format!("sunrise-6129-tags-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("items.json"), "{}").unwrap();
+        // The order the mod content load leaves: vanilla's sorted ids, then the mods'.
+        let export = json!({
+            "enchantments": ["minecraft:binding_curse"],
+            "by_registry": {
+                "minecraft:worldgen/biome": {"ids": [
+                    "minecraft:badlands", "minecraft:wooded_badlands", "ae2:spatial_storage",
+                ]},
+                "minecraft:worldgen/structure": {"ids": [
+                    "minecraft:village_plains", "minecraft:village_taiga", "ae2:meteorite",
+                ]},
+                "minecraft:enchantment": {"ids": ["minecraft:binding_curse"]},
+            },
+        });
+        fs::write(root.join("command-registries.json"), export.to_string()).unwrap();
+        let tag = |values: &[&str]| vec![json!({ "values": values }).to_string().into_bytes()];
+        let enchantment = || {
+            vec![
+                json!({"description": "curse", "max_level": 1})
+                    .to_string()
+                    .into_bytes(),
+            ]
+        };
+        let files = vec![
+            (
+                "tags/minecraft:worldgen/biome/is_badlands".to_owned(),
+                tag(&[
+                    "minecraft:badlands",
+                    "minecraft:wooded_badlands",
+                    "ae2:spatial_storage",
+                ]),
+            ),
+            (
+                "tags/minecraft:worldgen/structure/village".to_owned(),
+                tag(&["minecraft:village_taiga", "ae2:meteorite"]),
+            ),
+            (
+                "tags/minecraft:enchantment/curse".to_owned(),
+                tag(&["minecraft:binding_curse", "enderio:soulbound"]),
+            ),
+            (
+                "enchantment/minecraft:binding_curse".to_owned(),
+                enchantment(),
+            ),
+            ("enchantment/enderio:soulbound".to_owned(), enchantment()),
+        ];
+        let overlay = PackOverlay {
+            files: &files,
+            ..PackOverlay::default()
+        };
+        let defaults = sunrise_world::item_defaults::read(&root).unwrap();
+        let items = Items::tags_only(&root, &overlay, &defaults).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+        let members = |registry, tag| items.tag_members(registry, tag).map(<[String]>::to_vec);
+        assert_eq!(
+            members(TagRegistry::Biome, "minecraft:is_badlands"),
+            Some(vec![
+                "minecraft:badlands".to_owned(),
+                "minecraft:wooded_badlands".to_owned(),
+                "ae2:spatial_storage".to_owned(),
+            ])
+        );
+        assert_eq!(
+            members(TagRegistry::Structure, "minecraft:village"),
+            Some(vec![
+                "minecraft:village_taiga".to_owned(),
+                "ae2:meteorite".to_owned(),
+            ])
+        );
+        assert_eq!(
+            members(TagRegistry::Enchantment, "minecraft:curse"),
+            Some(vec![
+                "minecraft:binding_curse".to_owned(),
+                "enderio:soulbound".to_owned(),
+            ])
+        );
+    }
+
     #[test]
     fn server_json_conditions_filter_selected_instruments_and_enchantments() {
         let root = std::env::temp_dir().join(format!("sunrise-server-json-{}", std::process::id()));
@@ -4892,7 +4990,7 @@ mod tests {
         });
         sword.data_mut().set_other(
             "minecraft:blocks_attacks",
-            Some(sunrise_client_core::scoreboard::json_to_tag(&component)),
+            Some(sunrise_game_data::scoreboard::json_to_tag(&component)),
         );
         let b = BlocksAttacks::of_stack(&sword, None).expect("the stack's own component");
         assert_eq!(b.delay_seconds, 0.0);
@@ -4906,7 +5004,7 @@ mod tests {
         let mut bare = plain.clone();
         bare.data_mut().set_other(
             "minecraft:blocks_attacks",
-            Some(sunrise_client_core::scoreboard::json_to_tag(&json!({}))),
+            Some(sunrise_game_data::scoreboard::json_to_tag(&json!({}))),
         );
         let b = BlocksAttacks::of_stack(&bare, None).expect("defaults");
         assert_eq!(b.reductions[0].horizontal_angle, 90.0);
@@ -5359,7 +5457,7 @@ mod tests {
         assert_eq!(stack.count, 7);
         assert_eq!(
             stack.data().and_then(|d| d.other("minecraft:custom_data")),
-            Some(&sunrise_client_core::scoreboard::json_to_tag(
+            Some(&sunrise_game_data::scoreboard::json_to_tag(
                 &json!({"machine": "furnace"})
             ))
         );
@@ -6245,7 +6343,7 @@ mod tests {
         let drops = ctx(&items, None, &props, "").evaluate(&table, &mut LegacyRandom::new(1));
         let saved = crate::item_data::encode_components(&drops[0], &Default::default())
             .expect("components");
-        let saved = sunrise_client_core::scoreboard::tag_to_json(&saved);
+        let saved = sunrise_game_data::scoreboard::tag_to_json(&saved);
         assert_eq!(saved["minecraft:custom_name"], "Lucky");
         assert_eq!(saved["minecraft:item_name"]["text"], "Potion of 1-Up");
         let effect = &saved["minecraft:potion_contents"]["custom_effects"][0];
@@ -6486,6 +6584,23 @@ pub fn take_held_drop(
     }
     Some(thrown)
 }
+
+/// How many of `stack` one slot holds: the `minecraft:max_stack_size` patch
+/// when the data carries one (`!minecraft:max_stack_size` pinning it to 1),
+/// else the item's own maximum and 64 for an item the registry does not know.
+pub fn item_max_stack(items: &Items, stack: &ItemStack) -> u32 {
+    let patched = stack.data().and_then(|d| {
+        if d.other("!minecraft:max_stack_size").is_some() {
+            return Some(1);
+        }
+        match d.other("minecraft:max_stack_size") {
+            Some(sunrise_core::nbt::Tag::Int(n)) if (1..=99).contains(n) => Some(*n as u32),
+            _ => None,
+        }
+    });
+    patched.unwrap_or_else(|| items.get(&stack.item).map_or(64, |i| i.max_stack))
+}
+
 #[cfg(test)]
 mod held_drop_tests {
     use super::*;

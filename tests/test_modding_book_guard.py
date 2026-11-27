@@ -11,10 +11,10 @@ import unittest
 from unittest.mock import patch
 
 from tests.os_support import needs_runner_shell
+from tools.ci import vendored_yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / 'tools/ci/vendor/pyyaml-6.0.3.zip'))
-import yaml
+yaml = vendored_yaml.load()
 
 WORKFLOW = ROOT / '.github/workflows/modding-book.yml'
 

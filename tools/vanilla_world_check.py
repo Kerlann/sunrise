@@ -22,10 +22,11 @@ import sys
 import threading
 import time
 
-try:
-    from . import lab
-except ImportError:
-    import lab
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab
 
 SUSPICIOUS = re.compile(
     r'(ERROR|login failed|Exception|Couldn\'t load|Failed to|Skipping|Invalid|Unknown|corrupt|'
@@ -141,8 +142,7 @@ def main():
             time.sleep(float(command.split()[1]))
             continue
         if command.startswith('login '):
-            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-            import vanilla_login
+            from tools import vanilla_login
             _, name, seconds = command.split()
 
             def run(name=name, seconds=float(seconds)):

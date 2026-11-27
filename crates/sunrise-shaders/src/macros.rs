@@ -68,6 +68,17 @@ impl std::ops::DerefMut for Macros {
     }
 }
 
+/// The macro expansion work one file of a pack may spend ([`Macros::for_file`]), in the units
+/// of [`sunrise_glsl::Macros::bound`] (for each token made, read or copied: 1, its bytes and the
+/// names it hides): a stage file with its includes, a `.properties` file, the option values of
+/// `shaders.properties`' sizes. As many as the tokens of work a core shader's directives may
+/// spend ([`sunrise_glsl::MAX_SCANNED`]). A line of code is charged up to twice: telling whether
+/// a call on it goes on past it expands it too ([`sunrise_glsl::Macros::join_call`]). A line of
+/// expansions that reached the bound held 325 MiB at its peak (a release build); the ten packs
+/// measured for #4135 spend at most 74,004 in a stage file and 104 in a `.properties` file, with
+/// their default options.
+pub const MAX_EXPANSION_WORK: usize = sunrise_glsl::MAX_SCANNED;
+
 /// `MC_RENDER_STAGE_*` in the order the stages draw (spec 5.4); each is its index (OQ-7).
 pub const RENDER_STAGES: [&str; 24] = [
     "NONE",
@@ -125,6 +136,14 @@ pub fn render_stage(name: &str) -> u32 {
 }
 
 impl Macros {
+    /// These macros, for one file of the pack: with [`MAX_EXPANSION_WORK`] to spend, whatever
+    /// was spent before. Past it an expansion stops, named at its line by whoever reads the file.
+    pub(crate) fn for_file(&self) -> Self {
+        let mut m = self.clone();
+        m.0.bound(MAX_EXPANSION_WORK);
+        m
+    }
+
     /// The standard macros that need no renderer (spec 1.5.1): `MC_VERSION`, this system's
     /// `MC_OS_*`, the GL and GLSL versions Iris reports, the render stages and the host
     /// settings at their defaults. The GPU vendor and family arrive with the renderer

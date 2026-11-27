@@ -352,7 +352,7 @@ pub fn oversized(dir: &Path, request: &Request) -> Vec<Failure> {
         .map(|f| cases::in_folder(&folder, &f))
         .filter_map(|f| {
             let pp = sunrise_shaders::preprocess(&pack, &f, &macros);
-            (pp.code.len() > request.size_limit).then(|| {
+            (pp.code().len() > request.size_limit).then(|| {
                 let file = f.rsplit('/').next().unwrap_or(&f).to_owned();
                 Failure::new("size", format!("{file}: preprocessed past the limit"))
             })

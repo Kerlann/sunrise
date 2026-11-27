@@ -60,6 +60,11 @@ class DatafixSeedKeyTests(unittest.TestCase):
         params.update(overrides)
         return datafix_seeds.seed_key(**params)
 
+    def test_a_platform_the_lock_does_not_pin_is_refused_by_name(self):
+        for plat in ('windows-x64', 'mac-os'):
+            with self.subTest(plat), self.assertRaisesRegex(ValueError, f'platform {plat};'):
+                self.key(platform_name=plat, runtime_pins=None)
+
     def test_key_is_stable_across_input_ordering(self):
         base = self.key()
         reordered = self.key(

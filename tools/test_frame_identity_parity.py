@@ -66,12 +66,10 @@ import time
 import zlib
 from pathlib import Path
 
-try:
-    from . import lab
-except ImportError:
-    import lab
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab
 
-ROOT = lab.ROOT
 RUN = lab.LOCAL / 'frame-identity'
 BASE_SRC = RUN / 'base-src'
 BASE_TARGET = RUN / 'target-base'

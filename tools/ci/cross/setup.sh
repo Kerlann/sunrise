@@ -39,8 +39,19 @@ path "${CARGO_HOME:-$HOME/.cargo}/bin"
 mkdir -p "$tools/python-shim"
 ln -sf "$(command -v python3)" "$tools/python-shim/python"
 path "$tools/python-shim"
-rustup toolchain install "$(cat "$shims/../rust-version")" --profile minimal --component llvm-tools --target "$target"
+rustup toolchain install "$(cat "$shims/../rust-version")" --profile minimal --component llvm-tools --component clippy --target "$target"
 rustup default "$(cat "$shims/../rust-version")"
+
+# Cargo relinks when the linker's path changes, not its content, and the runner's target persists: the wrappers are
+# used from a folder named by their hash, so a changed wrapper relinks what the target holds.
+hash=$(cat "$shims"/zcc-* "$shims"/zld-* "$shims"/zar-* "$shims"/mingw-gcc | sha256sum | cut -c1-16)
+wrappers="$tools/wrappers-$hash"
+if [[ ! -d "$wrappers" ]]; then
+  staged=$(mktemp -d "$tools/wrappers.XXXXXX")
+  cp "$shims"/zcc-* "$shims"/zld-* "$shims"/zar-* "$shims"/mingw-gcc "$staged/"
+  chmod 755 "$staged"
+  mv -T "$staged" "$wrappers" 2> /dev/null || rm -rf "$staged"
+fi
 
 triple="${target//-/_}"
 upper="$(tr a-z A-Z <<< "$triple")"
@@ -56,10 +67,10 @@ case "$target" in
     path "$tools/zig-0.17.1"
     flavour="${target##*-}"
     [[ "$flavour" == darwin ]] && flavour=macos || flavour=linux
-    env_set "CC_$triple" "$shims/zcc-$flavour"
-    env_set "CARGO_TARGET_${upper}_LINKER" "$shims/zld-$flavour"
+    env_set "CC_$triple" "$wrappers/zcc-$flavour"
+    env_set "CARGO_TARGET_${upper}_LINKER" "$wrappers/zld-$flavour"
     if [[ "$flavour" == macos ]]; then
-      env_set "AR_$triple" "$shims/zar-macos"
+      env_set "AR_$triple" "$wrappers/zar-macos"
     fi
     ;;
   x86_64-pc-windows-msvc)
@@ -118,7 +129,7 @@ PACKAGES
     env_set CROSS_MINGW_STUBS "$stubs"
     env_set CC_x86_64_pc_windows_gnu x86_64-w64-mingw32-clang
     env_set AR_x86_64_pc_windows_gnu llvm-ar
-    env_set CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER "$shims/mingw-gcc"
+    env_set CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER "$wrappers/mingw-gcc"
     ;;
   *)
     echo "::error::no cross tools for $target"

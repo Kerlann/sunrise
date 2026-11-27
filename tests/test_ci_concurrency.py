@@ -2,13 +2,12 @@
 import ast
 from pathlib import Path
 import re
-import sys
 import unittest
 
+from tools.ci import vendored_yaml
+
 ROOT = Path(__file__).resolve().parents[1]
-# Use the same offline parser as the repository guard, not a runner package.
-sys.path.insert(0, str(ROOT / "tools/ci/vendor/pyyaml-6.0.3.zip"))
-import yaml
+yaml = vendored_yaml.load()
 
 WORKFLOWS = [ROOT / ".github/workflows/dyna-ci.yml"]
 # The daily run's legs: called by daily.yml or dispatched by hand, never on pull requests or main pushes (owner,

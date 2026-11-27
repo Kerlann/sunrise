@@ -140,6 +140,17 @@ jobs:
             tools/ci/game_smoke.sh
             tools/ci/rust-version
             tools/ci/with_xvfb.py
+      - name: Build in the runner's persistent target
+        # Dyna's runner points CARGO_TARGET_DIR at its persistent build folder; the steps below read target/.
+        if: env.CROSS == 'on'
+        run: |
+          mkdir -p "${CARGO_TARGET_DIR:?}"
+          if [ ! -e target ] && [ ! -L target ]; then
+            ln -s "$CARGO_TARGET_DIR" target
+          elif [ ! target -ef "$CARGO_TARGET_DIR" ]; then
+            echo '::error::Existing target path does not point to CARGO_TARGET_DIR; refusing to replace it.'
+            exit 1
+          fi
       - name: The pinned Rust (tools/ci/rust-version)
         id: rust
         shell: bash

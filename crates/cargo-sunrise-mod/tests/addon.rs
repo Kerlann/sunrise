@@ -95,7 +95,9 @@ impl Addon {
     // type-check the linkage without either linking mod libraries or fetching an engine slice.
     let offline = Some("http://127.0.0.1:1");
     passed(tool(&addon, &["check", "--with", path], offline));
-    let sdk_cache = root.join("cache/sdk").join(&pin);
+    let mut policies = fs::read_dir(root.join("cache/sdk").join(&pin)).unwrap();
+    let sdk_cache = policies.next().unwrap().unwrap().path();
+    assert!(policies.next().is_none());
     let mut hosts = fs::read_dir(sdk_cache.join("api-slices")).unwrap();
     let host = hosts.next().unwrap().unwrap();
     assert!(hosts.next().is_none());

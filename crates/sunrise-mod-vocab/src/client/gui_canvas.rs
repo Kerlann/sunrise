@@ -25,6 +25,17 @@ impl GuiSpriteRegion {
     }
 }
 
+/// One corner of a [`GuiCanvas::triangles`] triangle, as vanilla's `POSITION_COLOR` GUI vertex.
+// no wire: arguments to an in-process GUI draw
+// exhaustive: plain vertex built by struct literal
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GuiVertex {
+    /// `x, y` in the canvas's local GUI pixels, before its pose.
+    pub pos: [f32; 2],
+    /// Straight-alpha ARGB (`0xAARRGGBB`), blended across the triangle towards its other corners.
+    pub argb: u32,
+}
+
 /// A source rectangle for `blit`, in the texture's logical pixel units.
 // no wire: arguments to an in-process GUI draw
 // exhaustive: plain texture source rectangle coordinates built by struct literal
@@ -136,6 +147,15 @@ pub trait GuiCanvas {
     /// on exactly one axis draws nothing; inverting both axes keeps the colours on their input
     /// edges.
     fn fill_gradient(&mut self, rect: [f32; 4], top: u32, bottom: u32) -> Result<(), GuiDrawError>;
+
+    /// Draw untextured triangles from the mod's own corners, in order, for shapes a rectangle
+    /// cannot make: rounded panels, discs and rings, line icons, arrows. This is what a mod's
+    /// own `GuiElementRenderState` with `POSITION_COLOR` triangles draws when submitted through
+    /// NeoForge's `GuiGraphicsExtractor.submitGuiElementRenderState`. Each corner takes the
+    /// current pose and scissor like the other draws, its colour is blended across the
+    /// triangle, and either winding draws. A corner that is not finite, before or after the
+    /// pose, refuses the whole call with [`GuiDrawError::NotFinite`].
+    fn triangles(&mut self, triangles: &[[GuiVertex; 3]]) -> Result<(), GuiDrawError>;
 
     /// Draw styled text, including legacy formatting, with `argb` as the default colour.
     fn text(

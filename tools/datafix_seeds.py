@@ -27,13 +27,10 @@ import tempfile
 import time
 import urllib.request
 
-try:
-    from . import datafix_paths, file_lock
-except ImportError:
-    import datafix_paths
-    import file_lock
-
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from tools import datafix_paths, file_lock
+
 KEEP_VARIABLE = 'SUNRISE_DATAFIX_SEED_KEEP'
 MANIFEST_VARIABLE = 'SUNRISE_DATAFIX_MANIFEST'
 OUTCOME_VARIABLE = 'SUNRISE_DATAFIX_SEEDS_OUTCOME'
@@ -60,8 +57,8 @@ LAB = 'tools/lab.py'
 
 
 def _sibling(name):
-    """A module of tools/, by package name when this module is part of the package, else by bare name (script)."""
-    return importlib.import_module(f'{__package__}.{name}' if __package__ else name)
+    """A module of tools/, imported when first needed."""
+    return importlib.import_module(f'tools.{name}')
 
 
 def seed_modules():
@@ -178,13 +175,8 @@ def default_java_identity():
         raise RuntimeError(f'java ({program}) is not JAVA_HOME direct launcher; cannot key JDK by content')
     resolved = os.path.realpath(program)
 
-    class _FileHasher:
-        @staticmethod
-        def file(path):
-            with open(path, 'rb') as stream:
-                return hashlib.file_digest(stream, 'sha256').hexdigest()
-
-    identity = shim.toolchain(resolved, _FileHasher())
+    lab = _sibling('lab')
+    identity = shim.toolchain(resolved, argparse.Namespace(file=lambda path: lab.digest(Path(path), 'sha256')))
     if len(identity) <= 1:
         raise RuntimeError(f'java ({resolved}) lacks JDK runtime files ({", ".join(shim.JDK_FILES)})')
     return identity
@@ -200,7 +192,7 @@ def seed_key(root=ROOT, *, version_pins=None, platform_name=None, runtime_pins=N
         'expected_worlds': sorted([subdir, name] for subdir, name in (expected_worlds() if expected is None else expected)),
         'versions': dict(sorted((resolve_version_pins() if version_pins is None else version_pins).items())),
         'platform': plat,
-        'java_runtimes': worlds.LOCK[plat] if runtime_pins is None else runtime_pins,
+        'java_runtimes': worlds.pinned_runtimes(plat) if runtime_pins is None else runtime_pins,
         'default_java': default_java_identity() if default_java is None else default_java,
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()
@@ -387,10 +379,8 @@ def prepare(dest_root, keep_dir, *, key=None, manifest=None, expected=None, gene
             os.rename(staging, snapshot_dir)
             copy_snapshot(snapshot_dir, dest)
             prune_seed_keep(keep)
-        except Exception:
-            shutil.rmtree(staging, ignore_errors=True)
-            raise
         finally:
+            shutil.rmtree(staging, ignore_errors=True)  # already renamed away on success
             shutil.rmtree(scratch, ignore_errors=True)
     return {'key': key, 'status': 'miss', 'worlds': len(expected), 'elapsed': time.monotonic() - started}
 

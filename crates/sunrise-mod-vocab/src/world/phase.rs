@@ -162,6 +162,10 @@ pub trait ReloadContext:
     fn effect_category(&self, _key: crate::EffectKey) -> Option<crate::EffectCategory> {
         None
     }
+    /// `EntityType.getCategory()` for `key`.
+    fn entity_type_category(&self, _key: crate::EntityTypeKey) -> Option<crate::MobCategory> {
+        None
+    }
     /// Borrow the canonical fluid id for `key`.
     fn fluid_key_id(&self, _key: crate::FluidKey) -> Option<&str> {
         None

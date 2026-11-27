@@ -212,8 +212,10 @@ NeoForge's `IClientFluidTypeExtensions`; the fluid needs no block, and a recipe 
 object makes it exist in the world: `{"world": {}}` adds the block `<id>:<path>`, a copy of `minecraft:water` that flows
 with vanilla's fluid simulation, and the bucket item `<id>:<path>_bucket`, which needs its model as any item does. `world`
 takes `tick_delay` (1 or more, default 5), `drop_off` (1 to 7, default 1), `slope_find_distance` (1 to 4, default 4),
-`source_conversion` (default false), `bucket` (default true) and `flowing`, the flowing form's id in the fluid's
-namespace and not the fluid's own id (default `<id>:flowing_<path>`). Beside `world`, `bucket_item` names the item that
+`source_conversion` (default false), `bucket` (default true), `flowing`, the flowing form's id in the fluid's
+namespace and not the fluid's own id (default `<id>:flowing_<path>`), and `block`, the liquid block's id in the fluid's
+namespace and not the flowing form's (NeoForge's `BaseFlowingFluid.Properties.block`; default the fluid's own id), which
+commands, data packs and structure files then name. Code passes the same through `WorldFluid::block`. Beside `world`, `bucket_item` names the item that
 holds a bucket of the fluid (`Fluid.getBucket`): the generated bucket's id, in the fluid's namespace, or, for a tank-only
 fluid or one with `"bucket": false`, an item the mod declares itself, which keeps the fluid through its own parts. An
 empty bucket fills to that item from any fluid handler, with the bucket's fill sound, and a generated bucket empties
@@ -674,7 +676,9 @@ published shape, is read without a call. It reverses the rule above for those bl
 `event.query` is a `CollisionQuery`, vanilla's `EntityCollisionContext` as it was when the query
 was made: `entity()` (the entity's id, `None` for the empty, position and cache contexts),
 `kind()`, `is_descending()`, `is_placement()`, `always_collide_with_fluid()`,
-`is_above(shape, pos, default)`, `is_holding_item(item)` and `can_stand_on_fluid(above, fluid)`.
+`is_above(shape, pos, default)`, `is_holding_item(item)` and `can_stand_on_fluid(above, fluid)`;
+and `dimension()`, the dimension id of the level the query is in (the `level` vanilla's
+`getCollisionShape` gets), `None` only for a query a mod built by hand.
 
 - **Ordering.** `None`, the starting value, keeps whatever the block would otherwise have: its
   declared shape, a context-keyed one, or the one its block entity published. `Some` replaces
@@ -695,7 +699,9 @@ was made: `entity()` (the entity's id, `None` for the empty, position and cache 
 - **No `Host`.** A move holds the level's collision data and cannot lend a `Host`, as for
   `entity_move`. The part answers from the query and from state it keeps itself. A
   rule that needs more (a belt's set of carried entities; powder snow's fall distance) tracks that
-  state in the mod, keyed by `query.entity()`. If a mod needs an entity read it cannot track, one
+  state in the mod, keyed by `query.entity()`. State kept by position (a block whose shape
+  depends on data the mod stores for that spot) is keyed by `event.pos` and `query.dimension()`,
+  since one position exists in every dimension. If a mod needs an entity read it cannot track, one
   captured field is added to `CollisionQuery`; the `Host` is not reopened.
 - **The client must sync that state.** The client asks the same question for its own prediction,
   so a mod whose rule reads its own state must send it to the client. If the two disagree the
@@ -1475,7 +1481,7 @@ load order.
 
 Paths use vanilla's resource characters, at most 65,536 files, 16 MiB each and 512 MiB in all. A mod whose
 content is refused is left out, with the reason in the log. The game reads this content into its block and item
-tables (`sunrise_client::mod_content`, [modpacks.md](https://github.com/sunrise-org/sunrise/blob/main/docs/modpacks.md)). A tag entry
+tables (`sunrise_sim::mod_content`, [modpacks.md](https://github.com/sunrise-org/sunrise/blob/main/docs/modpacks.md)). A tag entry
 naming an id nobody registers (a block a port left out, another mod's item) is dropped, so the rest of the tag
 loads; vanilla would drop the whole tag. In a block or item tag, an entry naming a `#minecraft:…` tag that neither
 vanilla nor an installed mod defines is also dropped. The warning names the entry and its file; an optional
@@ -1629,7 +1635,7 @@ file and attribute. A client plays these from the biome data the server sends. I
 three ambient sound fields together make the one `ambient_sounds` value, and a value out of range refuses the mods at
 startup.
 
-**When they apply.** Modifiers are applied while the world's worldgen data is loaded, before any chunk is generated: the content build writes the modified biomes into the content root, and when a world opens, `sunrise_client::vanillagen::biome_modifiers_over_packs` applies them again over the world's data packs (`shared_data_with` for the generator, `packed_biomes` for the game's biome table), so a pack that replaces a vanilla biome keeps the mods' changes and a pack's own biome a tag selects gets them. Modifiers a mod declares in code (`Registrar::declare_biome_modifier`) register before any world opens and are read at the same moment. The generator's data is loaded once per bundle and set of packs and shared by the world's dimensions, so a modifier never applies halfway through a world. The dedicated server is the same game run headless (`sunrise-client --dedicated`, [server.md](https://github.com/sunrise-org/sunrise/blob/main/docs/server.md)), so it takes this path too; `sunrise-server` only supervises it.
+**When they apply.** Modifiers are applied while the world's worldgen data is loaded, before any chunk is generated: the content build writes the modified biomes into the content root, and when a world opens, `sunrise_sim::vanillagen::biome_modifiers_over_packs` applies them again over the world's data packs (`shared_data_with` for the generator, `packed_biomes` for the game's biome table), so a pack that replaces a vanilla biome keeps the mods' changes and a pack's own biome a tag selects gets them. Modifiers a mod declares in code (`Registrar::declare_biome_modifier`) register before any world opens and are read at the same moment. The generator's data is loaded once per bundle and set of packs and shared by the world's dimensions, so a modifier never applies halfway through a world. The dedicated server is the same game run headless (`sunrise-client --dedicated`, [server.md](https://github.com/sunrise-org/sunrise/blob/main/docs/server.md)), so it takes this path too; `sunrise-server` only supervises it.
 
 A biome holder set can also use Sunrise's own `sunrise:climate` type, alone or nested in those boolean sets; it is not
 a NeoForge format. It filters each biome's base `temperature` and `downfall` (the names in

@@ -23,6 +23,11 @@ static REGISTERED_RENDER_TYPES: OnceLock<Vec<RenderSetup>> = OnceLock::new();
 static REGISTERED_MODIFIERS: OnceLock<Vec<PipelineModifier>> = OnceLock::new();
 static PACK_UNIFORMS: OnceLock<HashMap<&'static str, PackUniformType>> = OnceLock::new();
 
+#[cfg(any(test, feature = "test-support"))]
+pub fn has_registered() -> bool {
+    REGISTERED.get().is_some_and(|v| !v.is_empty())
+}
+
 /// The built-in tables exported by `RenderPipelines.requiredPipelines` and `optionalPipelines`.
 #[derive(serde::Deserialize)]
 struct VanillaPipelines {
@@ -906,7 +911,7 @@ pub struct Built {
     pub color_targets: Vec<Option<ColorTargetState>>,
     /// Effective vertex buffer bindings sorted by binding index.
     pub vertex_bindings: Vec<(u8, mod_api::VertexFormat)>,
-    /// Whether this pipeline uses the default `PositionTexColor` vertex format.
+    /// Whether this pipeline uses the default vertex format (`VertexFormat::position_tex_color`).
     pub uses_default_vertex_format: bool,
     /// Whether the pipeline opted in to OIT (`RenderPipeline::order_independent()`).
     pub order_independent: bool,
@@ -1253,8 +1258,8 @@ impl Pipelines {
             .is_some_and(|b| b.state.depth_stencil.is_some_and(|d| d.write))
     }
 
-    /// Whether `slot` uses the default `PositionTexColor` vertex format (eligible for
-    /// `pipeline_quads`).
+    /// Whether `slot` uses the default vertex format (`VertexFormat::position_tex_color`), which
+    /// makes it eligible for `pipeline_quads`.
     pub fn uses_default_vertex_format(&self, slot: u32) -> bool {
         self.built
             .get(slot as usize)
@@ -1795,6 +1800,20 @@ pub(crate) fn pack_program_requests_of(
     out
 }
 
+pub(crate) fn wgpu_compare(compare: DepthCompare) -> wgpu::CompareFunction {
+    match compare {
+        DepthCompare::Always => wgpu::CompareFunction::Always,
+        DepthCompare::Less => wgpu::CompareFunction::Less,
+        DepthCompare::LessEqual => wgpu::CompareFunction::LessEqual,
+        DepthCompare::Equal => wgpu::CompareFunction::Equal,
+        DepthCompare::NotEqual => wgpu::CompareFunction::NotEqual,
+        DepthCompare::GreaterEqual => wgpu::CompareFunction::GreaterEqual,
+        DepthCompare::Greater => wgpu::CompareFunction::Greater,
+        DepthCompare::Never => wgpu::CompareFunction::Never,
+        _ => wgpu::CompareFunction::GreaterEqual,
+    }
+}
+
 /// Owned runtime descriptors (`depth_targets`, `uniforms`, `pipelines`) for `PackPost`.
 pub fn pack_runtime_specs() -> sunrise_render_shaderpack::pack_post::OwnedModPackRuntime {
     pack_runtime_specs_of(registered())
@@ -1858,10 +1877,10 @@ pub(crate) fn pack_runtime_specs_of(
                 // The pack's main depth: no auxiliary plane.
                 _ => None,
             });
-        let depth_test = pipeline
-            .state
-            .depth_stencil
-            .is_some_and(|ds| ds.compare != DepthCompare::Always);
+        let depth_state = pipeline.state.depth_stencil;
+        let depth_compare = depth_state.map_or(wgpu::CompareFunction::Always, |ds| {
+            wgpu_compare(ds.compare.flip_for_standard_z())
+        });
         let names_main_depth = matches!(
             pipeline
                 .pack_binding
@@ -1869,7 +1888,7 @@ pub(crate) fn pack_runtime_specs_of(
                 .and_then(|b| b.depth_target.as_ref()),
             Some(mod_api::PackDepthTarget::Main)
         );
-        let depth_write = depth_test
+        let depth_write = depth_state.is_some_and(|ds| ds.write)
             && (depth_target.is_some()
                 || names_main_depth
                 || matches!(
@@ -1880,8 +1899,8 @@ pub(crate) fn pack_runtime_specs_of(
             slot,
             pass_slot: mod_pass_slot(pass_slot),
             depth_target,
+            depth_compare,
             depth_write,
-            depth_test,
             cull: pipeline.state.cull,
             program_mode: pipeline
                 .pack_binding
@@ -2638,6 +2657,7 @@ void main() {
             PipelineBlend::Translucent,
             WorldDepth::Tested,
         )
+        .depth_write(true)
         .geometry_class(PipelineGeometryClass::Terrain)
         .pack_binding(
             PackBinding::new()
@@ -2661,6 +2681,7 @@ void main() {
             PipelineBlend::Translucent,
             WorldDepth::Tested,
         )
+        .depth_write(true)
         .geometry_class(PipelineGeometryClass::Translucent)
         .pack_binding(
             PackBinding::new()
@@ -2738,7 +2759,7 @@ void main() {
     }
 
     #[test]
-    fn the_main_depth_target_enables_depth_writes_in_any_slot_and_cull_reaches_the_pack_spec() {
+    fn an_explicit_main_depth_target_allows_requested_writes_and_cull_reaches_the_pack_spec() {
         use mod_api::{PackBinding, PackDepthTarget, PackProgramMode, PipelineGeometryClass};
         use sunrise_render_shaderpack::pack_post::ModProgramMode;
         let translucent = |name: &str, binding: PackBinding, cull: bool| {
@@ -2749,11 +2770,12 @@ void main() {
                 WorldDepth::Tested,
             )
             .geometry_class(PipelineGeometryClass::Translucent)
+            .depth_write(true)
             .cull(cull)
             .pack_binding(binding)
         };
         let list = [
-            // A translucent slot writes no depth by default.
+            // A translucent slot without an explicit target cannot write depth.
             translucent("example:plain", PackBinding::new(), false),
             translucent(
                 "example:main",
@@ -2772,7 +2794,7 @@ void main() {
         };
         assert!(!plain.depth_write && !plain.cull);
         assert_eq!(plain.program_mode, ModProgramMode::PackVertexAndFragment);
-        assert!(main.depth_write && main.depth_test);
+        assert!(main.depth_write);
         assert_eq!(main.depth_target, None);
         assert!(main.cull);
         assert_eq!(main.program_mode, ModProgramMode::PackVertexAndFragment);

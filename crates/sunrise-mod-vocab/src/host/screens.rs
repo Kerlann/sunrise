@@ -133,7 +133,8 @@ pub trait ScreensClientHost {
     /// Returns `true` when the pointer is (or, for `false`, is no longer) held by this mod's
     /// screen. Returns `false` and changes nothing when the open screen belongs to another
     /// mod, when no screen is open, or, for a grab, when the window does not have focus
-    /// (`MouseHandler.grabMouse` never grabs an inactive window). A grab the system then
+    /// (`MouseHandler.grabMouse` never grabs an inactive window) or while a context menu is
+    /// open ([`open_context_menu`](Self::open_context_menu)). A grab the system then
     /// refuses shows as `pointer_grabbed` false. Releasing a screen that holds no grab returns `true`.
     ///
     /// The grab ends by itself when the screen closes by any route, when the window loses
@@ -146,6 +147,22 @@ pub trait ScreensClientHost {
     /// ([`set_pointer_grab`](Self::set_pointer_grab)). `false` once the grab has ended by
     /// itself, and `false` for a mod whose screen is not the open one.
     fn pointer_grabbed(&self) -> bool;
+    /// Side: client.
+    /// Opens a context menu of `entries` with its top left at `at` (GUI pixels, usually the
+    /// pointer of the right-click that asked for it), over the open screen: drawn above every
+    /// widget, tooltip and clip, moved left or up to stay inside the window, and taking all
+    /// mouse and keyboard input until it closes. A click on a row picks it, a click elsewhere
+    /// or Escape closes it; the arrow keys move between rows, Right or Enter opens a nested
+    /// menu, Left closes one. Picking an action closes the menu, then runs it. Replaces a menu
+    /// already open. Returns false, with nothing opened, when no screen is open, for an empty
+    /// list, while a pointer grab is active or pending ([`set_pointer_grab`](Self::set_pointer_grab)),
+    /// or outside a mod's call; while a menu is open, `set_pointer_grab(true)` returns false
+    /// until the menu closes. Closes with the screen. Vanilla and NeoForge have no such widget;
+    /// this is Sunrise's.
+    fn open_context_menu(&mut self, at: [f32; 2], entries: Vec<ContextMenuEntry>) -> bool;
+    /// Side: client.
+    /// Closes the open context menu without picking anything; false when none is open.
+    fn close_context_menu(&mut self) -> bool;
     /// Side: client.
     /// Closes the open screen as its Escape key does: a container screen
     /// closes as the player's container close (`ServerboundContainerClosePacket`

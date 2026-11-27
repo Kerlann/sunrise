@@ -65,12 +65,14 @@ class LockFileTests(unittest.TestCase):
         local_root.mkdir()
         (local_root / "generate.lock").write_text("held")
         environment = {datafix_paths.VARIABLE: str(local_root), datafix_seeds.KEEP_VARIABLE: str(self.root / "keep")}
-        with mock.patch.object(sys, "path", [str(ROOT / "tools"), *sys.path]), \
+        # The harness reads its environment when imported: a fresh import, whose sys.path and sys.modules
+        # entries are undone on the way out.
+        with mock.patch.object(sys, "path", list(sys.path)), \
                 mock.patch.dict(os.environ, environment, clear=True), \
-                mock.patch.dict(sys.modules, {"datafix_paths": datafix_paths, "datafix_seeds": datafix_seeds}), \
+                mock.patch.dict(sys.modules), \
                 mock.patch.object(datafix_paths, "ROOT", self.root):
-            sys.modules.pop("test_datafix_parity", None)
-            harness = importlib.import_module("test_datafix_parity")
+            sys.modules.pop("tools.test_datafix_parity", None)
+            harness = importlib.import_module("tools.test_datafix_parity")
             with mock.patch.object(sys, "argv", ["test_datafix_parity.py", "--vanilla-only"]), \
                     mock.patch.object(datafix_seeds, "snapshot_complete", return_value=True), \
                     mock.patch.object(harness, "java_classpath", return_value=""), \

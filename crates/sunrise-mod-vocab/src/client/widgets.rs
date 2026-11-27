@@ -26,7 +26,7 @@
 //! assert!(done.state().active);
 //! ```
 
-use crate::{ClientHost, DrawContext, Text};
+use crate::{ClientHost, DrawContext, ItemStack, Text};
 use std::fmt;
 
 #[path = "widgets_text_edit.rs"]
@@ -343,6 +343,106 @@ impl fmt::Debug for TextField {
             .field("has_on_change", &self.on_change.is_some())
             .field("has_on_submit", &self.on_submit.is_some())
             .finish()
+    }
+}
+
+/// What a context menu entry runs when the player picks it (`ClientHost::open_context_menu`).
+// no wire: in-process callback invoked by the client when a context menu action is picked.
+pub type ContextMenuAction = dyn FnOnce(&mut dyn ClientHost) + Send + 'static;
+
+/// One row of a context menu: an action, a nested menu, or a separator line.
+// no wire: the entries hold the mod's closures and stay in this process.
+#[non_exhaustive]
+pub enum ContextMenuEntry {
+    /// A row the player can pick: the menu closes, then `on_select` runs.
+    Action {
+        /// The row's text.
+        label: Text,
+        /// An item drawn before the label.
+        icon: Option<ItemStack>,
+        /// A disabled row is drawn greyed and can't be picked.
+        enabled: bool,
+        /// Runs once when the player picks the row, after the menu closed.
+        on_select: Box<ContextMenuAction>,
+    },
+    /// A row that opens `entries` beside it (hover, the right arrow key, or Enter).
+    Submenu {
+        /// The row's text, drawn with an arrow after it.
+        label: Text,
+        /// An item drawn before the label.
+        icon: Option<ItemStack>,
+        /// A disabled row is drawn greyed and doesn't open.
+        enabled: bool,
+        /// The nested menu's rows; an empty list doesn't open.
+        entries: Vec<ContextMenuEntry>,
+    },
+    /// A thin line between groups of rows.
+    Separator,
+}
+
+impl ContextMenuEntry {
+    /// An enabled action with no icon.
+    pub fn action(
+        label: impl Into<Text>,
+        on_select: impl FnOnce(&mut dyn ClientHost) + Send + 'static,
+    ) -> Self {
+        Self::Action {
+            label: label.into(),
+            icon: None,
+            enabled: true,
+            on_select: Box::new(on_select),
+        }
+    }
+    /// An enabled nested menu with no icon.
+    pub fn submenu(label: impl Into<Text>, entries: Vec<ContextMenuEntry>) -> Self {
+        Self::Submenu {
+            label: label.into(),
+            icon: None,
+            enabled: true,
+            entries,
+        }
+    }
+    /// A separator line.
+    pub fn separator() -> Self {
+        Self::Separator
+    }
+    /// The same row with `stack` drawn before its label (nothing for a separator).
+    pub fn icon(mut self, stack: ItemStack) -> Self {
+        if let Self::Action { icon, .. } | Self::Submenu { icon, .. } = &mut self {
+            *icon = Some(stack);
+        }
+        self
+    }
+    /// The same row enabled or disabled (nothing for a separator).
+    pub fn enabled(mut self, on: bool) -> Self {
+        if let Self::Action { enabled, .. } | Self::Submenu { enabled, .. } = &mut self {
+            *enabled = on;
+        }
+        self
+    }
+}
+
+impl std::fmt::Debug for ContextMenuEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Action { label, enabled, .. } => f
+                .debug_struct("Action")
+                .field("label", label)
+                .field("enabled", enabled)
+                .finish_non_exhaustive(),
+            Self::Submenu {
+                label,
+                enabled,
+                entries,
+                ..
+            } => f
+                .debug_struct("Submenu")
+                .field("label", label)
+                .field("enabled", enabled)
+                .field("entries", entries)
+                .finish_non_exhaustive(),
+            Self::Separator => f.write_str("Separator"),
+        }
     }
 }
 

@@ -58,13 +58,10 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-if __package__:  # imported as tools.ci.nightly (the tests)
-    from . import nightly_set as ns
-    from .. import release_train as train
-else:  # run as tools/ci/nightly.py: its folder is on the path
-    import nightly_set as ns
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    import release_train as train
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from tools import release_train as train
+from tools.ci import nightly_set as ns
 
 DATED = re.compile(r"^nightly-(\d{4}-\d{2}-\d{2})$")
 TITLE_DATE = re.compile(r"Nightly (\d{4}-\d{2}-\d{2})")

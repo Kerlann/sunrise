@@ -19,14 +19,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-try:
-    from . import lab, parity_fuzz_corpus as corpus, test_command_exec_parity as harness
-except ImportError:
-    import lab
-    import parity_fuzz_corpus as corpus
-    import test_command_exec_parity as harness
-
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, parity_fuzz_corpus as corpus, test_command_exec_parity as harness
+
 CORPUS = ROOT / 'tools' / 'fuzz_corpus'
 
 # Far from the player (8.5 230 8.5) and its view distance, above any terrain; one chunk per scenario, three apart.
@@ -453,10 +449,7 @@ SMOKE = [{'family': 'smoke', 'seed': 1, 'steps': [
 
 
 def main():
-    try:
-        from . import parity_fuzz_scenarios as families
-    except ImportError:
-        import parity_fuzz_scenarios as families
+    from tools import parity_fuzz_scenarios as families
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('family', choices=sorted(families.FAMILIES), nargs='?', default='persist')
     parser.add_argument('--seed', type=int, default=1, help='first scenario seed')

@@ -235,6 +235,7 @@ forward! {
     pub fn resolve_mod_render_target_color_mips(&self, owner: Option<&'static str>, view: mod_api::RenderTargetMipView, filterable: bool) -> Result<(u64, wgpu::TextureView, TargetMips), PipelineDrawError>;
     pub fn resolve_mod_storage_image(&self, owner: Option<&'static str>, access: StorageImageAccess, image: StorageImageBinding) -> Result<(u64, wgpu::TextureView, wgpu::TextureFormat, TargetMips), PipelineDrawError>;
     pub fn resolve_mod_render_target_depth(&self, owner: Option<&'static str>, target: RenderTargetRef, filterable: bool) -> Result<(u64, wgpu::TextureView), PipelineDrawError>;
+    pub fn check_mod_render_target_level(&self, owner: Option<&'static str>, target: RenderTargetRef, mip_level: u32) -> Result<(), RenderTargetError>;
     pub fn resolve_mod_render_target(&self, owner: Option<&'static str>, target: RenderTargetRef, mip_level: u32) -> Result<ResolvedOffscreenTarget, RenderTargetError>;
     pub(super) fn take_released_mod_render_targets(&self) -> Vec<u64>;
 }

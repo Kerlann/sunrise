@@ -1,15 +1,23 @@
 //! Read-only client session and local-player status.
 
-use crate::{BlockPos, GameMode, Identifier, Text, TextFormError};
+use crate::{BlockPos, GameMode, Identifier, Text, TextFormError, Vec3};
 use core::ops::ControlFlow;
 
 /// Why a client-session read could not run.
 // no wire: this refusal is returned by in-process client-session reads.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ClientSessionReadError {
     /// The current phase or backend does not allow this read.
     Unavailable,
+    /// A text in the read could not be carried to the API (`TextFormError`).
+    Text(TextFormError),
+}
+
+impl From<TextFormError> for ClientSessionReadError {
+    fn from(error: TextFormError) -> Self {
+        Self::Text(error)
+    }
 }
 
 impl crate::NoBackend for ClientSessionReadError {
@@ -77,6 +85,52 @@ pub struct ClientFrameStats {
     /// The most recent completed frame's wall interval in nanoseconds, including
     /// waits. `None` before a frame sample exists or after the chart was reset.
     pub frame_time_ns: Option<u64>,
+}
+
+/// The title, subtitle and action bar on screen now, read with
+/// `ClientSession::client_titles`: what this client has been sent, changing as the server
+/// sends titles.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+#[derive(sunrise_mod_api_macros::Wire)]
+pub struct ClientTitles {
+    /// The title; `None` once its timer has run out.
+    pub title: Option<Text>,
+    /// The subtitle; shown only with a title.
+    pub subtitle: Option<Text>,
+    /// The action bar; `None` once its timer has run out.
+    pub action_bar: Option<Text>,
+}
+
+impl ClientTitles {
+    /// Titles from their parts.
+    pub fn new(title: Option<Text>, subtitle: Option<Text>, action_bar: Option<Text>) -> Self {
+        Self {
+            title,
+            subtitle,
+            action_bar,
+        }
+    }
+}
+
+/// One boss bar the window shows, read with `ClientSession::client_boss_bars`. Unlike
+/// `ClientBossBar`, the bar a `customize_boss_event_progress` event hands a mod, this is the
+/// bar as the window holds it: name and progress only.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+#[derive(sunrise_mod_api_macros::Wire)]
+pub struct ClientBossBarEntry {
+    /// The bar's name.
+    pub name: Text,
+    /// 0 to 1, as drawn (the lerped value).
+    pub progress: f32,
+}
+
+impl ClientBossBarEntry {
+    /// A boss bar entry from its parts.
+    pub fn new(name: Text, progress: f32) -> Self {
+        Self { name, progress }
+    }
 }
 
 /// The local player's current block-breaking operation. An unavailable player
@@ -259,5 +313,24 @@ impl ClientPlayerSkin {
     /// A player's skin from its parts.
     pub fn new(uuid: u128, skin: String, slim: bool) -> Self {
         Self { uuid, skin, slim }
+    }
+}
+
+/// The local player's fishing hook, read with `ClientSession::client_fishing_hook`:
+/// its position and whether a fish is biting.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+#[derive(sunrise_mod_api_macros::Wire)]
+pub struct ClientFishingHook {
+    /// The bobber's position, as the client tracks it.
+    pub position: Vec3,
+    /// A fish is biting (`FishingHook.biting`): the server's DATA_BITING.
+    pub biting: bool,
+}
+
+impl ClientFishingHook {
+    /// A fishing hook from its parts.
+    pub fn new(position: Vec3, biting: bool) -> Self {
+        Self { position, biting }
     }
 }

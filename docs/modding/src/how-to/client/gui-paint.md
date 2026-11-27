@@ -39,6 +39,30 @@ building a replay list. If a scaled offset or dimension is not finite, the call
 returns `GuiDrawError::TextLayout(TextLayoutError::GeometryNotFinite)` without drawing, even
 for a blank or fully transparent label.
 
+## Shapes a rectangle can't make
+
+Call `canvas.triangles` with your own corners for rounded panels, discs and rings, line icons
+or arrows. Each `GuiVertex` is a point in the scope's local pixels and an ARGB colour, blended
+across its triangle. The triangles take the scope's pose and scissor like the other draws.
+A disc, as a fan of triangles about its centre:
+
+```rust,ignore
+use mod_api::GuiVertex;
+use std::f32::consts::TAU;
+
+const SEGMENTS: usize = 32;
+let at = |i: usize| {
+    let angle = TAU * i as f32 / SEGMENTS as f32;
+    GuiVertex { pos: [cx + r * angle.cos(), cy + r * angle.sin()], argb: 0xFF2E_7D32 }
+};
+let centre = GuiVertex { pos: [cx, cy], argb: 0xFF2E_7D32 };
+let fan: Vec<[GuiVertex; 3]> = (0..SEGMENTS).map(|i| [centre, at(i), at(i + 1)]).collect();
+draw.draw_gui(&mut |canvas| canvas.triangles(&fan))?;
+```
+
+Build the corners once and keep them while the shape doesn't change. A corner that isn't
+finite, before or after the pose, refuses the whole call with `GuiDrawError::NotFinite`.
+
 ## Items
 
 Call `canvas.item(&stack, at, seed)` to draw a stack's model in a 16-pixel slot, passing the seed to

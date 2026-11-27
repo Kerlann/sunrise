@@ -129,10 +129,10 @@ import zlib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import lab  # noqa: E402
-
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab  # noqa: E402
+
 EXE = '.exe' if os.name == 'nt' else ''
 SETTLE = 0.5
 # Between quick taps of a button: a few of the game's polls, well inside a paced craft (`PLACE_GAP`).
@@ -3258,7 +3258,7 @@ PROPERTIES = {
 
 
 def craft_dedicated(args, name):
-    from server_bench import DONE, Server
+    from tools.server_bench import DONE, Server
     check = Check()
     folder = Path(tempfile.mkdtemp(prefix=f'pad-menu-{name}-server-'))
     port = lab.free_port()
