@@ -1007,12 +1007,13 @@ impl TextField {
             self.width as f32,
             self.height as f32,
         ];
+        let msg_text = (!self.message.is_empty()).then(|| Text::literal(self.message.as_str()));
         let (rect, active, alpha, tab_order_group, tooltip_narration) =
             match crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
                 bucket: crate::widgets::WidgetBucket::Field,
                 rect: orig_rect,
-                label: None,
-                explicit_key: (!self.message.is_empty()).then_some(self.message.as_str()),
+                label: msg_text.as_ref(),
+                explicit_key: None,
                 active: true,
                 hovered: false,
                 focused: self.focused,
@@ -1748,6 +1749,78 @@ mod max_length_tests {
             .map(|t| t.rect)
             .collect();
         assert_eq!(targets, [[120.0, 20.0, 20.0, 20.0]]);
+        crate::widgets::put(saved);
+    }
+
+    #[test]
+    fn unlabelled_button_collected_moved_and_hidden_via_override_table() {
+        let atlas = atlas();
+        let m = Measure(&atlas.font);
+        let saved = crate::widgets::take();
+        let draw_two = |out: &mut Vec<Draw>| {
+            button(out, &m, &Text::empty(), 10, 20, 20, 20, true, false, 0);
+            button(out, &m, &Text::empty(), 40, 20, 20, 20, true, false, 0);
+        };
+
+        let mut scratch = Vec::new();
+        let ((), collected) = crate::widgets::with_widget_collector(|| draw_two(&mut scratch));
+        assert_eq!(collected.len(), 2);
+        assert_eq!(collected[0].key.key, "");
+        assert_eq!(collected[0].key.occurrence, 0);
+        assert!(collected[0].message.is_none());
+        assert_eq!(collected[1].key.key, "");
+        assert_eq!(collected[1].key.occurrence, 1);
+        assert!(collected[1].message.is_none());
+
+        let mut maps = crate::widgets::EngineOverrideMaps::default();
+        maps.overrides.insert(
+            collected[0].key.clone(),
+            crate::widgets::EngineWidgetOverride {
+                visible: Some(false),
+                ..Default::default()
+            },
+        );
+        let moved_rect = [180.0, 60.0, 20.0, 20.0];
+        maps.overrides.insert(
+            collected[1].key.clone(),
+            crate::widgets::EngineWidgetOverride {
+                rect: Some(moved_rect),
+                ..Default::default()
+            },
+        );
+        crate::widgets::end_frame(820);
+        let mut out = Vec::new();
+        let ((), output) = crate::widgets::with_widget_overrides(
+            &mut maps,
+            (185.0, 65.0),
+            std::time::Instant::now(),
+            || draw_two(&mut out),
+        );
+        crate::widgets::end_frame(821);
+
+        assert_eq!(output.hits.len(), 2);
+        assert!(!output.hits[0].interactive && output.hits[0].blocks_original);
+        assert!(output.hits[1].interactive && output.hits[1].blocks_original);
+        assert_eq!(output.hits[1].resolved_rect, moved_rect);
+        let targets: Vec<[f32; 4]> = crate::widgets::last_targets()
+            .iter()
+            .map(|t| t.rect)
+            .collect();
+        assert_eq!(targets, [moved_rect]);
+        assert!(out.iter().any(|draw| matches!(
+            draw,
+            Draw::Sprite {
+                x: 180,
+                y: 60,
+                w: 20,
+                h: 20,
+                ..
+            }
+        )));
+        assert!(
+            !out.iter()
+                .any(|draw| matches!(draw, Draw::Sprite { x: 10, y: 20, .. }))
+        );
         crate::widgets::put(saved);
     }
 }

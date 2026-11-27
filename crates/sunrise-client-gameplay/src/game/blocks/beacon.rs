@@ -344,14 +344,15 @@ impl crate::game::ClientGame<'_> {
                       active: bool,
                       selected: bool,
                       icon: &str,
-                      key: &str| {
+                      key: &str,
+                      label: Option<&Text>| {
             let hover = inside(local, x, y, 22.0, 22.0);
             let rect = [bx + x, by + y, 22.0, 22.0];
             match sunrise_client::widgets::resolve_engine_widget(
                 sunrise_client::widgets::EngineWidgetInput {
                     bucket: sunrise_client::widgets::WidgetBucket::Button,
                     rect,
-                    label: None,
+                    label,
                     explicit_key: Some(key),
                     active,
                     hovered: hover,
@@ -434,7 +435,7 @@ impl crate::game::ClientGame<'_> {
                 if primary { "primary" } else { "secondary" },
                 EFFECTS[e].0
             );
-            button(batch, x, y, active, selected, &icon, &key);
+            button(batch, x, y, active, selected, &icon, &key, None);
         }
         if let Some(p) = sel[0] {
             let (x, y) = upgrade_button();
@@ -447,8 +448,10 @@ impl crate::game::ClientGame<'_> {
                 sel[1] == Some(p),
                 &icon,
                 "beacon/upgrade",
+                None,
             );
         }
+        let confirm_label = Text::translate("gui.done", &[]);
         button(
             batch,
             164.0,
@@ -457,7 +460,9 @@ impl crate::game::ClientGame<'_> {
             false,
             "container/beacon/confirm",
             "gui.done",
+            Some(&confirm_label),
         );
+        let cancel_label = Text::translate("gui.cancel", &[]);
         button(
             batch,
             190.0,
@@ -466,6 +471,7 @@ impl crate::game::ClientGame<'_> {
             false,
             "container/beacon/cancel",
             "gui.cancel",
+            Some(&cancel_label),
         );
         let slots: Vec<usize> = (0..36).chain([INPUT]).collect();
         self.draw_hovered_slot_highlight(batch, false, ox, oy);

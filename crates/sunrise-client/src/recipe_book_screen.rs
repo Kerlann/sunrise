@@ -98,16 +98,28 @@ pub struct Drawn {
     pub pose: [f32; 6],
 }
 
+/// Vanilla `AbstractWidget.getMessage()` payload carried by a [`BookWidget`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BookWidgetMessage {
+    /// `CommonComponents.EMPTY` (unlabelled `ImageButton`, `RecipeButton`, `OverlayRecipeButton`).
+    None,
+    /// `Component.translatable(key)` (search `EditBox`, page forward/backward `ImageButton`s).
+    Translate(String),
+    /// `CommonComponents.optionNameValue(CommonComponents.EMPTY, Component.translatable(key))`
+    /// (`RecipeBookComponent`'s craftable filter `CycleButton`).
+    OptionValue(String),
+}
+
 /// One interactive widget inside [`DrawnBook`], pairing its collector/override identity with the
 /// contiguous slice of [`Drawn`] calls it emitted in vanilla draw order.
 #[derive(Clone, Debug)]
 pub struct BookWidget {
     pub range: Range<usize>,
     pub bucket: WidgetBucket,
-    /// Stable screen-local key (e.g. `"itemGroup.search"`, `"recipe_book/filter"`).
+    /// Stable internal screen-local key (never exposed as `ScreenChild::message`).
     pub explicit_key: String,
-    /// Vanilla translation key for `ScreenChild::message`, when the widget carries a message.
-    pub label_key: Option<String>,
+    /// Vanilla `AbstractWidget.getMessage()` value for `ScreenChild::message`.
+    pub message: BookWidgetMessage,
     /// Vanilla hover tooltip translation key, when the widget paints its own hover tooltip.
     pub tooltip_key: Option<String>,
     /// Unmodified widget bounds in GUI pixels (`[x, y, w, h]`).
@@ -314,7 +326,7 @@ pub fn draw_grouped(s: &Screen) -> DrawnBook {
         range: search_start..out.len(),
         bucket: WidgetBucket::Field,
         explicit_key: "itemGroup.search".to_owned(),
-        label_key: Some("itemGroup.search".to_owned()),
+        message: BookWidgetMessage::Translate("itemGroup.search".to_owned()),
         tooltip_key: None,
         rect: [(xo + 25) as f32, (yo + 13) as f32, 81.0, 14.0],
         hovered: s.hovered(xo + 25, yo + 13, 81, 14),
@@ -334,7 +346,7 @@ pub fn draw_grouped(s: &Screen) -> DrawnBook {
             range: start..out.len(),
             bucket: WidgetBucket::Button,
             explicit_key: format!("recipe_book/tab:{}", tab.icons.0),
-            label_key: None,
+            message: BookWidgetMessage::None,
             tooltip_key: None,
             rect: [x as f32, y as f32, 35.0, 27.0],
             hovered: s.hovered(x, y, 35, 27),
@@ -393,7 +405,7 @@ pub fn draw_grouped(s: &Screen) -> DrawnBook {
         range: filter_start..out.len(),
         bucket: WidgetBucket::Button,
         explicit_key: "recipe_book/filter".to_owned(),
-        label_key: Some(filter_key.to_owned()),
+        message: BookWidgetMessage::OptionValue(filter_key.to_owned()),
         tooltip_key: Some(filter_key.to_owned()),
         rect: [fx as f32, fy as f32, 26.0, 16.0],
         hovered: hover,
@@ -468,7 +480,7 @@ pub fn draw_grouped(s: &Screen) -> DrawnBook {
             range: start..out.len(),
             bucket: WidgetBucket::Button,
             explicit_key: "recipe_book/slot".to_owned(),
-            label_key: None,
+            message: BookWidgetMessage::None,
             tooltip_key: None,
             rect: [x as f32, y as f32, 25.0, 25.0],
             hovered: btn_hover,
@@ -519,7 +531,7 @@ pub fn draw_grouped(s: &Screen) -> DrawnBook {
             range: start..out.len(),
             bucket: WidgetBucket::Button,
             explicit_key: sprite.to_owned(),
-            label_key: Some(key.to_owned()),
+            message: BookWidgetMessage::Translate(key.to_owned()),
             tooltip_key: Some(key.to_owned()),
             rect: [x as f32, (yo + 137) as f32, 12.0, 17.0],
             hovered: hover,
@@ -891,7 +903,7 @@ fn overlay(s: &Screen, o: &OverlayView, out: &mut Vec<Drawn>, widgets: &mut Vec<
             range: start..out.len(),
             bucket: WidgetBucket::Button,
             explicit_key: "recipe_book/overlay_recipe".to_owned(),
-            label_key: None,
+            message: BookWidgetMessage::None,
             tooltip_key: None,
             rect: [bx as f32, by as f32, 24.0, 24.0],
             hovered: hover,
@@ -1049,10 +1061,10 @@ mod tab_column_tests {
         };
         let grouped = draw_grouped(&screen);
         assert_eq!(grouped.calls.len(), draw(&screen).len());
-        let keys: Vec<(&str, WidgetBucket, [f32; 4])> = grouped
+        let keys: Vec<(&str, WidgetBucket, [f32; 4], &super::BookWidgetMessage)> = grouped
             .widgets
             .iter()
-            .map(|w| (w.explicit_key.as_str(), w.bucket, w.rect))
+            .map(|w| (w.explicit_key.as_str(), w.bucket, w.rect, &w.message))
             .collect();
         assert_eq!(
             keys,
@@ -1060,42 +1072,52 @@ mod tab_column_tests {
                 (
                     "itemGroup.search",
                     WidgetBucket::Field,
-                    [79.0, 50.0, 81.0, 14.0]
+                    [79.0, 50.0, 81.0, 14.0],
+                    &super::BookWidgetMessage::Translate("itemGroup.search".into()),
                 ),
                 (
                     "recipe_book/tab:minecraft:compass",
                     WidgetBucket::Button,
-                    [24.0, 40.0, 35.0, 27.0]
+                    [24.0, 40.0, 35.0, 27.0],
+                    &super::BookWidgetMessage::None,
                 ),
                 (
                     "recipe_book/tab:minecraft:iron_axe",
                     WidgetBucket::Button,
-                    [24.0, 67.0, 35.0, 27.0]
+                    [24.0, 67.0, 35.0, 27.0],
+                    &super::BookWidgetMessage::None,
                 ),
                 (
                     "recipe_book/filter",
                     WidgetBucket::Button,
-                    [164.0, 49.0, 26.0, 16.0]
+                    [164.0, 49.0, 26.0, 16.0],
+                    &super::BookWidgetMessage::OptionValue(
+                        "gui.recipebook.toggleRecipes.all".into()
+                    ),
                 ),
                 (
                     "recipe_book/slot",
                     WidgetBucket::Button,
-                    [65.0, 68.0, 25.0, 25.0]
+                    [65.0, 68.0, 25.0, 25.0],
+                    &super::BookWidgetMessage::None,
                 ),
                 (
                     "recipe_book/page_forward",
                     WidgetBucket::Button,
-                    [147.0, 174.0, 12.0, 17.0]
+                    [147.0, 174.0, 12.0, 17.0],
+                    &super::BookWidgetMessage::Translate("gui.recipebook.next_page".into()),
                 ),
                 (
                     "recipe_book/page_backward",
                     WidgetBucket::Button,
-                    [92.0, 174.0, 12.0, 17.0]
+                    [92.0, 174.0, 12.0, 17.0],
+                    &super::BookWidgetMessage::Translate("gui.recipebook.previous_page".into()),
                 ),
                 (
                     "recipe_book/overlay_recipe",
                     WidgetBucket::Button,
-                    [74.0, 75.0, 24.0, 24.0]
+                    [74.0, 75.0, 24.0, 24.0],
+                    &super::BookWidgetMessage::None,
                 ),
             ]
         );

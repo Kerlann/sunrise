@@ -2269,10 +2269,21 @@ impl crate::game::ClientGame<'_> {
                 }
             }
             cursor_call = widget.range.end;
-            let label = widget
-                .label_key
-                .as_deref()
-                .map(|key| sunrise_game_data::text::Text::translate(key, &[]));
+            let label = match &widget.message {
+                screen::BookWidgetMessage::None => None,
+                screen::BookWidgetMessage::Translate(key) => {
+                    Some(sunrise_game_data::text::Text::translate(key, &[]))
+                }
+                screen::BookWidgetMessage::OptionValue(key) => {
+                    Some(sunrise_game_data::text::Text::translate(
+                        "options.generic_value",
+                        &[
+                            sunrise_game_data::text::Text::literal(""),
+                            sunrise_game_data::text::Text::translate(key, &[]),
+                        ],
+                    ))
+                }
+            };
             match sunrise_client::widgets::resolve_engine_widget(
                 sunrise_client::widgets::EngineWidgetInput {
                     bucket: widget.bucket,

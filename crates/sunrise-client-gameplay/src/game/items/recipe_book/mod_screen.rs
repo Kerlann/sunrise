@@ -137,7 +137,7 @@ fn draw_registered_book(
                 range: start..drawn.calls.len(),
                 bucket: sunrise_client::widgets::WidgetBucket::Button,
                 explicit_key: format!("recipe_book/category_{name}"),
-                label_key: Some(key.to_owned()),
+                message: screen::BookWidgetMessage::Translate(key.to_owned()),
                 tooltip_key: Some(key.to_owned()),
                 rect: [x, y, w, h],
                 hovered: hover,
@@ -712,14 +712,14 @@ mod tests {
             }),
             ..ModRecipeUi::default()
         };
-        let (calls, first_category_arrow) =
+        let (drawn, first_category_arrow) =
             draw_registered_book(&layout, &ui, (54.0, 37.0), (0.0, 0.0));
-        assert!(calls.iter().any(|drawn| {
-            matches!(&drawn.call, Call::Sprite { id, x: 147, .. }
+        assert!(drawn.calls.iter().any(|call| {
+            matches!(&call.call, Call::Sprite { id, x: 147, .. }
                 if id == "recipe_book/page_forward")
         }));
         assert_eq!(
-            registered_book_tab_bounds(&calls, first_category_arrow),
+            registered_book_tab_bounds(&drawn.calls, first_category_arrow),
             Some([22.0, 40.0, 35.0, 157.0])
         );
     }

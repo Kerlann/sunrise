@@ -74,11 +74,12 @@ impl Screen {
         if notification.dismissable {
             let hovered =
                 crate::ui::hovered(cursor, dismiss[0], dismiss[1], dismiss[2], dismiss[3]);
-            let dismiss_label = Text::translate("mco.notification.dismiss", &[]);
+            // Vanilla `RealmsMainScreen.CrossButton` uses 6-arg `ImageButton` (`CommonComponents.EMPTY`);
+            // the dismiss tooltip is not `getMessage()`.
             match crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
                 bucket: crate::widgets::WidgetBucket::Button,
                 rect: dismiss,
-                label: Some(&dismiss_label),
+                label: None,
                 explicit_key: Some("mco.notification.dismiss"),
                 active: true,
                 hovered,

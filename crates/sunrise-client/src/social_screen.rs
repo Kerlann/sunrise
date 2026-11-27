@@ -422,14 +422,21 @@ pub fn draw_contents(
             } else {
                 "mute_button"
             };
-            // The button's narration (`PlayerEntry`: `narration.hide` / `narration.show`).
-            let key = if e.hidden {
+            // Vanilla `PlayerEntry` constructs the mute/unmute `ImageButton` with `HIDE_TEXT` / `SHOW_TEXT`
+            // as `getMessage()` and narrates with `gui.socialInteractions.narration.{hide,show}`.
+            let narration_key = if e.hidden {
                 "gui.socialInteractions.narration.show"
             } else {
                 "gui.socialInteractions.narration.hide"
             };
+            let msg_key = if e.hidden {
+                "gui.socialInteractions.show"
+            } else {
+                "gui.socialInteractions.hide"
+            };
             let hide_rect = [hide[0], hide[1], 20.0, 20.0];
-            let hide_label = Text::translate(key, &[Text::literal(e.name.clone())]);
+            let narration_label = Text::translate(narration_key, &[Text::literal(e.name.clone())]);
+            let hide_label = Text::translate(msg_key, &[]);
             let hide_hover = hovered(hide);
             match crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
                 bucket: crate::widgets::WidgetBucket::Button,
@@ -443,7 +450,7 @@ pub fn draw_contents(
             }) {
                 crate::widgets::ResolvedEngineWidget::Skip => {}
                 crate::widgets::ResolvedEngineWidget::Unchanged => {
-                    crate::widgets::record(&hide_label.plain(), hide_rect, true);
+                    crate::widgets::record(&narration_label.plain(), hide_rect, true);
                     batch.sprite_scaled(
                         atlas,
                         &sprite(base, hide_hover),
@@ -455,7 +462,7 @@ pub fn draw_contents(
                     );
                 }
                 crate::widgets::ResolvedEngineWidget::Draw(props) => {
-                    let draw_label = props.message.as_ref().unwrap_or(&hide_label);
+                    let draw_label = props.message.as_ref().unwrap_or(&narration_label);
                     crate::widgets::record(&draw_label.plain(), props.rect, props.active);
                     let lit = props
                         .override_render_highlighted_sprite

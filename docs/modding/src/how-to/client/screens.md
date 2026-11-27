@@ -387,7 +387,9 @@ Read `widgets.children()` for the ordered child list (`ScreenChild`) on any open
 `set_visible`, `set_alpha`, `set_label_text_color`, `set_tooltip`, `set_tooltip_delay`,
 `set_tab_order_group`, `set_sprites`, `set_override_render_highlighted_sprite`, `remove`, `clear`,
 and `press`) to change or activate built-in and mounted widgets by `ScreenWidgetId`. Stale ids
-return `false`. Use `widgets.set_initial_focus(id)` to focus a mounted widget on open
+return `false`. Each `ScreenChild.message` carries vanilla's `AbstractWidget.getMessage()` (`None`
+when empty, such as unlabelled image or icon widgets; tooltips and internal identity keys are
+never placed in `message`). Use `widgets.set_initial_focus(id)` to focus a mounted widget on open
 (`Screen.setInitialFocus`). A later `screen_init_*` listener sees your edits only if your callback
 completes normally. See the rustdoc of `ScreenWidgets`, `ScreenChild`, and `ScreenWidget` for the
 full contract.

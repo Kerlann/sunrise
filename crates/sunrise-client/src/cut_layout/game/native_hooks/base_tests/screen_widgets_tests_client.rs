@@ -3530,55 +3530,119 @@ fn press_id_and_mutating_widgets_from_screen_input_hooks_and_lazy_discovery() {
                 "clicking moved PauseScreen Options must open Options"
             );
 
-            // InventoryScreen + open RecipeBookComponent exposes toggle, search box, tabs, and filter.
+            // InventoryScreen + RecipeBookComponent: unlabelled ImageButtons (`message == None`)
+            // appear in `children()` with stable IDs and can be moved and hidden, while labelled
+            // sub-components carry vanilla `AbstractWidget.getMessage()`.
             game.common.creative = false;
             game.set_screen(Screen::Inventory);
             game.observe_screen();
-            let toggle_label = ApiText::literal("recipe_book/button");
-            let toggle_id = {
+            let search_msg = ApiText::translate("itemGroup.search", vec![]);
+            let (toggle_id, orig_toggle_rect) = {
                 let widgets = game.screen_widgets().unwrap();
-                widgets
+                let toggle = widgets
                     .children()
                     .iter()
-                    .find(|c| c.message.as_ref() == Some(&toggle_label))
-                    .expect("closed inventory exposes recipe book toggle button")
-                    .id
+                    .find(|c| {
+                        c.message.is_none()
+                            && (c.rect[2] - 20.0).abs() < 0.5
+                            && (c.rect[3] - 18.0).abs() < 0.5
+                    })
+                    .expect("closed inventory exposes unlabelled recipe book toggle ImageButton");
+                (toggle.id, toggle.rect)
             };
+            // Move the unlabelled toggle button: clicking its original rect is blocked, while
+            // clicking its moved rect opens RecipeBookComponent.
+            let moved_toggle = [18.0, 18.0, 20.0, 18.0];
             assert!(
-                game.screen_widgets().unwrap().press(toggle_id),
-                "pressing recipe book toggle must open RecipeBookComponent"
+                game.screen_widgets()
+                    .unwrap()
+                    .set_bounds(toggle_id, moved_toggle)
             );
-            let search_msg = ApiText::translate("itemGroup.search", vec![]);
-            let compass_tab = ApiText::literal("recipe_book/tab:minecraft:compass");
-            let filter_all = ApiText::translate("gui.recipebook.toggleRecipes.all", vec![]);
-            let filter_craftable =
-                ApiText::translate("gui.recipebook.toggleRecipes.craftable", vec![]);
-            let (search_id, filter_id) = {
+            let _ = game.hud_layers([640, 480]);
+            sunrise_client::widgets::end_frame(52_003);
+            move_mouse(
+                game,
+                win_id,
+                f64::from(orig_toggle_rect[0] + orig_toggle_rect[2] * 0.5),
+                f64::from(orig_toggle_rect[1] + orig_toggle_rect[3] * 0.5),
+            );
+            send_mouse_button(game, win_id, MouseButton::Left, true);
+            send_mouse_button(game, win_id, MouseButton::Left, false);
+            assert!(
+                !game
+                    .screen_widgets()
+                    .unwrap()
+                    .children()
+                    .iter()
+                    .any(|c| c.message.as_ref() == Some(&search_msg)),
+                "clicking moved-away unlabelled toggle's original rect must be blocked"
+            );
+            move_mouse(game, win_id, 28.0, 27.0);
+            send_mouse_button(game, win_id, MouseButton::Left, true);
+            send_mouse_button(game, win_id, MouseButton::Left, false);
+            let filter_all = ApiText::translate(
+                "options.generic_value",
+                vec![
+                    ApiText::literal(""),
+                    ApiText::translate("gui.recipebook.toggleRecipes.all", vec![]),
+                ],
+            );
+            let filter_craftable = ApiText::translate(
+                "options.generic_value",
+                vec![
+                    ApiText::literal(""),
+                    ApiText::translate("gui.recipebook.toggleRecipes.craftable", vec![]),
+                ],
+            );
+            let (search_id, tab_id, filter_id) = {
                 let widgets = game.screen_widgets().unwrap();
                 let children = widgets.children();
-                assert!(
-                    children.iter().any(|c| c.id == toggle_id),
-                    "toggle keeps stable id after opening book"
-                );
+                let toggle_after = children
+                    .iter()
+                    .find(|c| c.id == toggle_id)
+                    .expect("unlabelled toggle keeps stable id after opening book");
+                assert_eq!(toggle_after.message, None);
                 let search_id = children
                     .iter()
                     .find(|c| c.message.as_ref() == Some(&search_msg))
-                    .expect("open recipe book exposes search EditBox")
+                    .expect("clicking moved unlabelled toggle opens RecipeBookComponent with search EditBox")
                     .id;
-                assert!(
-                    children
-                        .iter()
-                        .any(|c| c.message.as_ref() == Some(&compass_tab)),
-                    "open recipe book exposes search category tab"
-                );
+                let tab_id = children
+                    .iter()
+                    .find(|c| {
+                        c.message.is_none()
+                            && (c.rect[2] - 35.0).abs() < 0.5
+                            && (c.rect[3] - 27.0).abs() < 0.5
+                    })
+                    .expect("open recipe book exposes unlabelled RecipeBookTabButton")
+                    .id;
                 let filter_id = children
                     .iter()
                     .find(|c| c.message.as_ref() == Some(&filter_all))
-                    .expect("open recipe book exposes craftable filter button")
+                    .expect("open recipe book exposes craftable filter CycleButton")
                     .id;
-                (search_id, filter_id)
+                (search_id, tab_id, filter_id)
             };
-            // Pressing the craftable filter toggles its message while keeping the same stable id.
+            // Unlabelled RecipeBookTabButton can also be moved and hidden with a stable ID.
+            assert!(
+                game.screen_widgets()
+                    .unwrap()
+                    .set_bounds(tab_id, [18.0, 50.0, 35.0, 27.0])
+            );
+            assert!(game.screen_widgets().unwrap().set_visible(tab_id, false));
+            {
+                let widgets = game.screen_widgets().unwrap();
+                let tab = widgets
+                    .children()
+                    .iter()
+                    .find(|c| c.id == tab_id)
+                    .expect("hidden unlabelled tab keeps stable id");
+                assert_eq!(tab.message, None);
+                assert!(!tab.visible);
+                assert_eq!(tab.rect, [18.0, 50.0, 35.0, 27.0]);
+            }
+            // Pressing the craftable filter toggles its vanilla optionNameValue message while
+            // keeping the same stable id.
             assert!(game.screen_widgets().unwrap().press(filter_id));
             {
                 let widgets = game.screen_widgets().unwrap();
@@ -3588,10 +3652,28 @@ fn press_id_and_mutating_widgets_from_screen_input_hooks_and_lazy_discovery() {
                     .find(|c| c.id == filter_id)
                     .expect("filter button keeps stable id across toggle");
                 assert_eq!(filter_after.message.as_ref(), Some(&filter_craftable));
+                // Hiding the unlabelled toggle blocks both press(id) and clicks at its moved rect.
+                assert!(widgets.set_visible(toggle_id, false));
+                assert!(!widgets.press(toggle_id));
+            }
+            let _ = game.hud_layers([640, 480]);
+            sunrise_client::widgets::end_frame(52_004);
+            move_mouse(game, win_id, 28.0, 27.0);
+            send_mouse_button(game, win_id, MouseButton::Left, true);
+            send_mouse_button(game, win_id, MouseButton::Left, false);
+            {
+                let widgets = game.screen_widgets().unwrap();
+                assert!(
+                    widgets
+                        .children()
+                        .iter()
+                        .any(|c| c.message.as_ref() == Some(&search_msg)),
+                    "clicking hidden unlabelled toggle must not close RecipeBookComponent"
+                );
                 assert!(widgets.set_visible(search_id, false));
             }
             let _ = game.hud_layers([640, 480]);
-            sunrise_client::widgets::end_frame(52_003);
+            sunrise_client::widgets::end_frame(52_005);
         });
     });
 }

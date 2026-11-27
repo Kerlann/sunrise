@@ -394,12 +394,10 @@ pub fn resolve_engine_widget(input: EngineWidgetInput<'_>) -> ResolvedEngineWidg
                 *count = current.saturating_add(1);
                 current
             };
-            let message = input.label.cloned().or_else(|| {
-                input
-                    .explicit_key
-                    .filter(|k| !k.is_empty())
-                    .map(Text::literal)
-            });
+            let message = input
+                .label
+                .filter(|t| !t.is_empty() || t.translation_key_hint().is_some())
+                .cloned();
             state.widgets.push(CollectedWidget {
                 key: EngineWidgetKey {
                     key: key_str,
@@ -433,12 +431,10 @@ pub fn resolve_engine_widget(input: EngineWidgetInput<'_>) -> ResolvedEngineWidg
             bucket: input.bucket,
             occurrence,
         };
-        let message = input.label.cloned().or_else(|| {
-            input
-                .explicit_key
-                .filter(|k| !k.is_empty())
-                .map(Text::literal)
-        });
+        let message = input
+            .label
+            .filter(|t| !t.is_empty() || t.translation_key_hint().is_some())
+            .cloned();
         pass.output.seen.push(CollectedWidget {
             key: key.clone(),
             rect: input.rect,
@@ -677,6 +673,51 @@ mod tests {
         assert_eq!(collected[0].key.occurrence, 0);
         assert_eq!(collected[0].rect, [10.0, 20.0, 100.0, 20.0]);
         assert_eq!(collected[0].tab_order_group, 2);
+        assert_eq!(
+            collected[0]
+                .message
+                .as_ref()
+                .and_then(Text::translation_key_hint)
+                .as_deref(),
+            Some("gui.done")
+        );
+
+        // Explicit identity keys stay internal and never leak into `message`; empty labels also
+        // normalize to `None` while keeping distinct occurrence keys.
+        let ((), unlabelled) = with_widget_collector(|| {
+            let empty = Text::empty();
+            let _ = resolve_engine_widget(EngineWidgetInput {
+                bucket: WidgetBucket::Button,
+                rect: [1.0, 2.0, 20.0, 18.0],
+                label: None,
+                explicit_key: Some("recipe_book/button"),
+                active: true,
+                hovered: false,
+                focused: false,
+                tab_order_group: 0,
+            });
+            for idx in 0..2 {
+                let _ = resolve_engine_widget(EngineWidgetInput {
+                    bucket: WidgetBucket::Button,
+                    rect: [10.0 + idx as f32 * 24.0, 2.0, 20.0, 20.0],
+                    label: Some(&empty),
+                    explicit_key: None,
+                    active: true,
+                    hovered: false,
+                    focused: false,
+                    tab_order_group: 0,
+                });
+            }
+        });
+        assert_eq!(unlabelled.len(), 3);
+        assert_eq!(unlabelled[0].key.key, "recipe_book/button");
+        assert!(unlabelled[0].message.is_none());
+        assert_eq!(unlabelled[1].key.key, "");
+        assert_eq!(unlabelled[1].key.occurrence, 0);
+        assert!(unlabelled[1].message.is_none());
+        assert_eq!(unlabelled[2].key.key, "");
+        assert_eq!(unlabelled[2].key.occurrence, 1);
+        assert!(unlabelled[2].message.is_none());
 
         // Live cursor and widget buffers were restored untouched.
         assert_eq!(widgets::take_cursor(), Cursor::PointingHand);

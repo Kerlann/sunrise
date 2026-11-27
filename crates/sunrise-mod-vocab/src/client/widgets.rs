@@ -794,7 +794,9 @@ pub struct ScreenChild {
     pub id: ScreenWidgetId,
     /// `[x, y, width, height]` in GUI pixels, reflecting any live bounds override.
     pub rect: [f32; 4],
-    /// The child's logical message (`AbstractWidget.getMessage`), or `None` when it has none.
+    /// The child's vanilla message (`AbstractWidget.getMessage`), or `None` when the widget has
+    /// `CommonComponents.EMPTY` (such as an unlabelled `ImageButton`, `RecipeButton`, or
+    /// `OverlayRecipeButton`). Tooltips and internal identity keys are never placed in `message`.
     pub message: Option<Text>,
     /// Whether the child accepts input (`AbstractWidget.active`).
     pub active: bool,

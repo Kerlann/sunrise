@@ -2487,11 +2487,12 @@ impl EditBox {
         skin: Option<&str>,
     ) {
         let orig_rect = [self.x, self.y, self.width, self.height];
+        let msg_text = (!self.message.is_empty()).then(|| Text::literal(self.message.as_str()));
         let resolved = crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
             bucket: crate::widgets::WidgetBucket::Field,
             rect: orig_rect,
-            label: None,
-            explicit_key: (!self.message.is_empty()).then_some(self.message.as_str()),
+            label: msg_text.as_ref(),
+            explicit_key: None,
             active: true,
             hovered: false,
             focused: self.focused,
@@ -3302,6 +3303,83 @@ mod tests {
         assert_eq!(narration.items[0].hovered, Some(false));
         assert_eq!(narration.items[1].hovered, Some(true));
         crate::widgets::set_narrating(false);
+        crate::widgets::put(saved);
+    }
+
+    #[test]
+    fn unlabelled_button_collected_moved_and_hidden_via_override_table() {
+        let atlas = atlas();
+        let saved = crate::widgets::take();
+        let draw_two = |batch: &mut HudBatch| {
+            for (x, name) in [(10.0, "First"), (40.0, "Second")] {
+                button_decorated(
+                    batch,
+                    &atlas,
+                    [x, 20.0, 20.0, 20.0],
+                    &Text::empty(),
+                    ButtonVisualState {
+                        active: true,
+                        hovered: false,
+                        focused: false,
+                    },
+                    None,
+                    None,
+                    None,
+                    |rect| crate::widgets::Narratable::button(name, rect, true),
+                );
+            }
+        };
+
+        let mut scratch = HudBatch::scratch([640, 480]);
+        let ((), collected) = crate::widgets::with_widget_collector(|| draw_two(&mut scratch));
+        assert_eq!(collected.len(), 2);
+        assert_eq!(collected[0].key.key, "");
+        assert_eq!(collected[0].key.occurrence, 0);
+        assert!(collected[0].message.is_none());
+        assert_eq!(collected[1].key.key, "");
+        assert_eq!(collected[1].key.occurrence, 1);
+        assert!(collected[1].message.is_none());
+
+        let mut maps = crate::widgets::EngineOverrideMaps::default();
+        maps.overrides.insert(
+            collected[0].key.clone(),
+            crate::widgets::EngineWidgetOverride {
+                visible: Some(false),
+                ..Default::default()
+            },
+        );
+        let moved_rect = [200.0, 80.0, 20.0, 20.0];
+        maps.overrides.insert(
+            collected[1].key.clone(),
+            crate::widgets::EngineWidgetOverride {
+                rect: Some(moved_rect),
+                ..Default::default()
+            },
+        );
+        crate::widgets::end_frame(9_010);
+        crate::widgets::set_narrating(true);
+        let mut batch = HudBatch::scratch([640, 480]);
+        let ((), output) = crate::widgets::with_widget_overrides(
+            &mut maps,
+            (205.0, 85.0),
+            std::time::Instant::now(),
+            || draw_two(&mut batch),
+        );
+        crate::widgets::end_frame(9_011);
+        crate::widgets::set_narrating(false);
+
+        assert_eq!(output.hits.len(), 2);
+        assert!(!output.hits[0].interactive && output.hits[0].blocks_original);
+        assert!(output.hits[1].interactive && output.hits[1].blocks_original);
+        assert_eq!(output.hits[1].resolved_rect, moved_rect);
+        let targets: Vec<[f32; 4]> = crate::widgets::last_targets()
+            .iter()
+            .map(|t| t.rect)
+            .collect();
+        assert_eq!(targets, [moved_rect]);
+        let narration = crate::widgets::take_last_narration();
+        assert_eq!(narration.items.len(), 1);
+        assert_eq!(narration.items[0].rect, moved_rect);
         crate::widgets::put(saved);
     }
 
