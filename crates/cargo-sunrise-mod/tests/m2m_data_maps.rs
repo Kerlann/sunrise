@@ -25,9 +25,14 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::Command,
 };
 use sunrise_mod_package::Package;
+
+#[path = "support/own_sdk.rs"]
+mod own_sdk;
+
+use own_sdk::{passed, run_game, server_profile, write_file};
 
 const CHEMLIB_SOURCE: &str = r#"
 use mod_api::{
@@ -237,75 +242,6 @@ impl Hooks for Boiler {
     }
 }
 "#;
-
-fn write_file(path: &Path, content: &str) {
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(path, content).unwrap();
-}
-
-fn passed(output: Output) -> String {
-    assert!(
-        output.status.success(),
-        "command failed ({:?})\nstdout:\n{}\nstderr:\n{}",
-        output.status.code(),
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap()
-}
-
-fn run_game(
-    root: &Path,
-    run_name: &str,
-    server_profile: &Path,
-    app: &Path,
-    program: &str,
-) -> String {
-    let game_dir = root.join("runs").join(run_name);
-    fs::create_dir_all(&game_dir).unwrap();
-    fs::write(game_dir.join("eula.txt"), "eula=true\n").unwrap();
-    fs::write(
-        game_dir.join("server.properties"),
-        "online-mode=false\nserver-ip=127.0.0.1\nserver-port=0\nspawn-protection=0\nview-distance=2\nsimulation-distance=2\n",
-    )
-    .unwrap();
-    let mut cmd = Command::new(app.join(program));
-    cmd.current_dir(&game_dir)
-        .env("LD_LIBRARY_PATH", app)
-        .env("SUNRISE_HOME", root.join("home").join(run_name))
-        .env(
-            "SUNRISE_LAUNCHER_HOME",
-            root.join("launcher").join(run_name),
-        )
-        .env("SUNRISE_LAUNCHER_NO_SELF_UPDATE", "1")
-        .env("SUNRISE_NO_AUDIO", "1")
-        .env("XDG_DATA_HOME", root.join("data").join(run_name))
-        .env("XDG_CONFIG_HOME", root.join("config").join(run_name))
-        .args([
-            "--game-dir",
-            game_dir.to_str().unwrap(),
-            "--resources",
-            server_profile.to_str().unwrap(),
-            "--dedicated",
-            "--nogui",
-            "--port",
-            "0",
-        ]);
-    passed(cmd.output().unwrap())
-}
-
-fn server_profile() -> PathBuf {
-    let path = PathBuf::from(
-        std::env::var_os("SUNRISE_TEST_SERVER_PROFILE")
-            .expect("set SUNRISE_TEST_SERVER_PROFILE to prepared 26.3 dedicated server resources"),
-    );
-    assert!(
-        path.join("sunrise-resources.json").is_file(),
-        "SUNRISE_TEST_SERVER_PROFILE={} has no sunrise-resources.json",
-        path.display()
-    );
-    path
-}
 
 #[test]
 #[ignore = "daily"]
