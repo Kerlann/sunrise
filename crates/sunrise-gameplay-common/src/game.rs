@@ -681,7 +681,6 @@ pub use api_values::{block_jump_factor, block_speed_factor, is_ladder};
 pub use held_items::interact_location;
 pub use hit::Hit;
 pub use launch_options::Options;
-pub use mod_api::game::DataMapType;
 pub use native_hooks::{PhantomSpawnResult, SleepProblem};
 #[allow(unused_imports)]
 pub use std::{

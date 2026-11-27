@@ -810,8 +810,6 @@ impl crate::game::ServerGame<'_> {
         // RegistryDataLoader.RELOADABLE_REGISTRIES: providers are staged and
         // published with the other reloadable data, including on /reload.
         let providers = Providers::load_with(root, &overlay);
-        let mut data_map_types = Vec::new();
-        self.native_data_map_types(&mut data_map_types);
         // Visit independently readable registries before consuming any result.
         // One rejected winner must not hide the other entries' diagnostics.
         let loot = sunrise_world::loot::LootData::load_candidate_with_damage(
@@ -991,12 +989,16 @@ impl crate::game::ServerGame<'_> {
         let gameplay = Arc::new(sunrise_sim::patrol::GameplayAttributes::load(
             root, &overlay,
         )?);
-        let data_maps = DataMaps::load(&data_map_types, &overlay, &registries)
-            .with_builtins(builtin)
-            .with_biome_keys(mod_api::__private::BiomeKeys::new(
-                next_biome_keys_session(),
-                biomes.table.registered_keys().iter().cloned(),
-            ));
+        let data_maps = DataMaps::load(
+            mod_api::__private::installed_data_maps(),
+            &overlay,
+            &registries,
+        )
+        .with_builtins(builtin)
+        .with_biome_keys(mod_api::__private::BiomeKeys::new(
+            next_biome_keys_session(),
+            biomes.table.registered_keys().iter().cloned(),
+        ));
         drop(registries);
         // Vanilla reads tags of these registries too: `LootTable.LIST_CODEC` (advancement
         // rewards, the loot table trigger) and `Recipe.LIST_CODEC` (the recipe triggers).
