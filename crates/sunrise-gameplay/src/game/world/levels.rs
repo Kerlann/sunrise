@@ -616,7 +616,6 @@ pub struct Levels {
     tick_order: Vec<Dim>,
     incarnations: Vec<LevelIncarnation>,
     reset_generation: u64,
-    closed_active_incarnation: Option<Dim>,
     pub(in crate::game) active_closed: bool,
     /// The levels a mod asked to have saved (`level_request_save`), each once, saved at the start
     /// of the next server tick.
@@ -647,9 +646,6 @@ impl Levels {
 
     #[inline(always)]
     pub(in crate::game) fn open_incarnation(&mut self, dim: Dim) {
-        if self.closed_active_incarnation == Some(dim) {
-            self.closed_active_incarnation = None;
-        }
         if let Some(level) = self.incarnations.iter_mut().find(|level| level.dim == dim) {
             level.generation += 1;
             level.open = true;
@@ -726,18 +722,18 @@ impl Levels {
         self.order.clear();
         self.reset_generation += 1;
         self.incarnations.clear();
-        self.closed_active_incarnation = None;
         self.tick_order.clear();
         self.active_closed = false;
         self.requested_saves.clear();
         self.runtime.clear();
     }
 
-    #[cfg(feature = "test-support")]
-    pub fn reset_active_closed_for_test(&mut self) {
+    #[cfg(any(test, feature = "test-support"))]
+    #[inline(always)]
+    pub fn reset_active_closed_for_test(&mut self, active: Dim) {
         self.active_closed = false;
-        if let Some(dim) = self.closed_active_incarnation.take() {
-            self.open_incarnation(dim);
+        if self.incarnation(active).is_none() {
+            self.open_incarnation(active);
         }
     }
 
@@ -2277,7 +2273,6 @@ impl crate::game::ServerGame<'_> {
         }
         self.server.levels.0.close_incarnation(dim);
         if dim == self.common.dim {
-            self.server.levels.0.closed_active_incarnation = Some(dim);
             self.common.world.water_tickets.clear();
         } else if let Some(world) = self.server.levels.0.parked_world_mut_of(dim.id()) {
             world.water_tickets.clear();
