@@ -395,7 +395,9 @@ impl Kept {
             )),
             health: (!has("health")).then_some((
                 g.health,
-                g.saved_absorption,
+                g.motion
+                    .as_deref()
+                    .map_or(g.saved_absorption, |body| Some(body.health.absorption())),
                 g.food,
                 g.saturation,
             )),
@@ -416,7 +418,7 @@ impl Kept {
             )),
             spawn: (!has("spawn_point")).then(|| (g.spawn, g.respawn_elsewhere.clone())),
             recipes: (!has("recipe_book")).then(|| g.recipe_book.clone()),
-            body: g.loaded_body,
+            body: g.motion.as_deref().map(SavedBody::of).or(g.loaded_body),
             other: (!all).then(|| {
                 (
                     g.saved.clone(),
@@ -605,6 +607,7 @@ pub fn import_player(
         {
             body.velocity = velocity;
         }
+        g.apply_loaded_motion(request.parts.len() == PARTS.len());
     });
     // Everything the import changed reaches the client now, so that a proxy sees the
     // player as it will be; the player stays held until it is placed or dropped.
