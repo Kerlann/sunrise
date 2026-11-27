@@ -22,7 +22,7 @@ use super::{
     minecarts,
     nether_portal::PortalLevelState,
     ominous_item_spawner_common::OminousItemSpawner,
-    raids::Raiding,
+    raids::RaidLevelState,
     sculk_server::SculkState,
     tnt_common::PrimedTnt,
 };
@@ -215,7 +215,7 @@ pub struct Parked {
     lan_states: sunrise_sim::lan::entity::States,
     /// Only the per-level parts of these are used (`swap_level`).
     anims: BlockEntityLevelTicks,
-    pub raiding: Raiding,
+    pub raiding: RaidLevelState,
     chunk_spawn_enemies: bool,
     sculk: SculkState,
     creaking: CreakingLevelState,
