@@ -65,9 +65,9 @@ pub(crate) mod tests {
             game.update_chunk_tickets();
             assert!(game.entity_ticking_area()(0, 0));
             game.set_portal_cooldown(leaf);
-            let cooldown = game.server.portals.entities[&leaf].cooldown;
+            let cooldown = game.server.portals.level.entities[&leaf].cooldown;
             game.handle_entity_portals();
-            assert_eq!(game.server.portals.entities[&leaf].cooldown, cooldown);
+            assert_eq!(game.server.portals.level.entities[&leaf].cooldown, cooldown);
             game.send_through_portal(root, BlockPos::new(0, 64, 0));
             assert!(game.mob_object(root).is_none());
             assert!(game.mob_object(child).is_none());
@@ -106,7 +106,7 @@ pub(crate) mod tests {
             assert!(game.mobs_below_off_level().contains(&new_child));
             assert!(game.mobs_below_off_level().contains(&new_leaf));
             assert_eq!(
-                game.server.portals.entities[&new_root].cooldown,
+                game.server.portals.level.entities[&new_root].cooldown,
                 ENTITY_DELAY
             );
             assert!(

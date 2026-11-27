@@ -134,11 +134,17 @@ pub struct Arrival {
     pub transferred: Option<TransferredArrivalState>,
 }
 
+/// Per-level entity portal processes and cooldowns exchanged on level swap.
+#[derive(Default)]
+pub struct PortalLevelState {
+    /// Items and mobs, by entity id.
+    pub entities: HashMap<u32, PortalState>,
+}
+
 /// The server's entity portal state.
 #[derive(Default)]
 pub struct Portals {
-    /// Items and mobs, by entity id.
-    pub entities: HashMap<u32, PortalState>,
+    pub level: PortalLevelState,
     /// Positions before this tick's moves, by entity id.
     pub(in crate::game) before: FxHashMap<u32, Vec3>,
     pub arrivals: Vec<Arrival>,
@@ -159,6 +165,14 @@ pub struct Portals {
     pub(in crate::game) carried_at: HashMap<u32, Vec3>,
     pub(in crate::game) loaded: bool,
     pub(in crate::game) dirty: bool,
+}
+
+impl Portals {
+    /// Exchange the per-level entity portal states with another level's
+    /// (game/world/levels.rs).
+    pub(in crate::game::server_side) fn swap_level(&mut self, other: &mut PortalLevelState) {
+        std::mem::swap(&mut self.level, other);
+    }
 }
 
 pub(in crate::game::server_side) fn rotate_y(v: Vec3, degrees: f32) -> Vec3 {
@@ -794,7 +808,7 @@ impl crate::game::ServerGame<'_> {
         // states while their entities are outside the simulation distance.
         let entity_ticking = self.entity_ticking_area();
         let frozen = self.mobs_below_off_level();
-        let tracked = &self.server.portals.entities;
+        let tracked = &self.server.portals.level.entities;
         let mut present = std::collections::HashSet::new();
         for_each_entity!(entity_lists_of!(self), entity => {
             let can_sweep = entity.sweeps_portals();
@@ -827,6 +841,7 @@ impl crate::game::ServerGame<'_> {
         self.server.portals.before = before;
         self.server
             .portals
+            .level
             .entities
             .retain(|id, _| present.contains(id));
         // SulfurCube.tickFuse runs before Entity.handlePortal. A cube removed
@@ -843,14 +858,14 @@ impl crate::game::ServerGame<'_> {
             if removed_before_portal.contains(&id) {
                 continue;
             }
-            let Some(state) = self.server.portals.entities.get_mut(&id) else {
+            let Some(state) = self.server.portals.level.entities.get_mut(&id) else {
                 continue;
             };
             if let Some(entry) = state.handle(allowed, 0, delay) {
                 leaving.push((id, entry));
             }
             if state.cooldown == 0 && state.process.is_none() {
-                self.server.portals.entities.remove(&id);
+                self.server.portals.level.entities.remove(&id);
             }
         }
         for (id, entry) in leaving {
@@ -866,6 +881,7 @@ impl crate::game::ServerGame<'_> {
                 let cooldown = self
                     .server
                     .portals
+                    .level
                     .entities
                     .get(&id)
                     .map_or(0, |s| s.cooldown);
@@ -895,7 +911,7 @@ impl crate::game::ServerGame<'_> {
             .and_then(sunrise_game_data::nbt_path::int_value)
             && cooldown != 0
         {
-            self.server.portals.entities.insert(
+            self.server.portals.level.entities.insert(
                 id,
                 PortalState {
                     cooldown,
@@ -907,7 +923,7 @@ impl crate::game::ServerGame<'_> {
     /// `Entity.load` on a live entity (`/data merge`): `portalCooldown` is the
     /// compound's (0 when it has none), and the portal process is kept.
     pub(in crate::game::server_side) fn merge_portal_cooldown(&mut self, id: u32, tag: &Tag) {
-        if let Some(portal) = self.server.portals.entities.get_mut(&id) {
+        if let Some(portal) = self.server.portals.level.entities.get_mut(&id) {
             portal.cooldown = tag
                 .get("PortalCooldown")
                 .and_then(sunrise_game_data::nbt_path::int_value)
@@ -924,7 +940,7 @@ impl crate::game::ServerGame<'_> {
     pub(in crate::game::server_side) fn save_portal_cooldown(&self, id: u32, tag: &mut Tag) {
         sunrise_sim::nether_portal::put_portal_cooldown(
             tag,
-            sunrise_sim::nether_portal::portal_cooldown(&self.server.portals.entities, id),
+            sunrise_sim::nether_portal::portal_cooldown(&self.server.portals.level.entities, id),
         );
     }
     /// `Entity.saveWithoutId`: the modeled non-arrow projectile codecs
@@ -940,6 +956,7 @@ impl crate::game::ServerGame<'_> {
             let cooldown = self
                 .server
                 .portals
+                .level
                 .entities
                 .get(&projectile.id)
                 .map_or(0, |portal| portal.cooldown);
@@ -983,6 +1000,7 @@ impl crate::game::ServerGame<'_> {
         if self
             .server
             .portals
+            .level
             .entities
             .get(&id)
             .is_some_and(|state| state.cooldown > 0)
@@ -997,7 +1015,13 @@ impl crate::game::ServerGame<'_> {
     /// leaving the existing portal process intact.
     pub fn set_portal_cooldown(&mut self, id: u32) {
         let delay = self.dimension_changing_delay(id);
-        self.server.portals.entities.entry(id).or_default().cooldown = delay;
+        self.server
+            .portals
+            .level
+            .entities
+            .entry(id)
+            .or_default()
+            .cooldown = delay;
     }
     /// The rest of `NetherPortalBlock.randomTick` after a won roll: with a
     /// player close enough for spawning, a zombified piglin spawns on the block
@@ -1211,6 +1235,7 @@ impl crate::game::ServerGame<'_> {
         for (id, pos, delay) in inside {
             self.server
                 .portals
+                .level
                 .entities
                 .entry(id)
                 .or_default()
@@ -2036,7 +2061,7 @@ pub mod tests {
         entry: BlockPos,
         expected: i32,
     ) {
-        game.server.portals.entities.insert(
+        game.server.portals.level.entities.insert(
             id,
             PortalState {
                 cooldown: 0,
@@ -2048,7 +2073,7 @@ pub mod tests {
             },
         );
         game.set_portal_cooldown(id);
-        let state = game.server.portals.entities.get_mut(&id).unwrap();
+        let state = game.server.portals.level.entities.get_mut(&id).unwrap();
         assert_eq!(state.cooldown, expected);
         let process = state.process.unwrap();
         assert_eq!(process.entry, entry);
@@ -2056,13 +2081,107 @@ pub mod tests {
         assert!(process.inside);
         state.cooldown = 1;
         assert!(game.restart_portal_cooldown(id));
-        assert_eq!(game.server.portals.entities[&id].cooldown, expected);
+        assert_eq!(game.server.portals.level.entities[&id].cooldown, expected);
         let delay = game.dimension_changing_delay(id);
-        let state = game.server.portals.entities.get_mut(&id).unwrap();
+        let state = game.server.portals.level.entities.get_mut(&id).unwrap();
         assert_eq!(state.handle(true, 0, delay), Some(entry));
         assert_eq!(state.cooldown, expected);
         assert_eq!(state.handle(true, 0, delay), None);
         assert_eq!(state.cooldown, expected - 1);
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn swap_level_exchanges_per_level_fields_only() {
+        let mut portals = Portals {
+            level: PortalLevelState {
+                entities: [(
+                    10,
+                    PortalState {
+                        cooldown: 300,
+                        process: Some(sunrise_sim::nether_portal::Process {
+                            entry: BlockPos::new(1, 64, 2),
+                            time: 4,
+                            inside: true,
+                        }),
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            },
+            before: [(11, Vec3::new(1.0, 2.0, 3.0))].into_iter().collect(),
+            arrivals: vec![Arrival {
+                tnt_used_portal: true,
+                plan: Plan::end_portal(
+                    Dim::Overworld,
+                    Dim::Overworld,
+                    BlockPos::new(0, 64, 0),
+                    0.6,
+                    1.8,
+                ),
+                tag: Tag::Int(9),
+                transferred: None,
+            }],
+            carrying: vec![(Dim::Overworld, 12, BlockPos::new(3, 65, 4))],
+            carried_motion: [(12, Vec3::new(0.25, 0.5, 0.75))].into_iter().collect(),
+            carried_cooldown: [(12, 7)].into_iter().collect(),
+            carried_at: [(12, Vec3::new(10.0, 20.0, 30.0))].into_iter().collect(),
+            loaded: true,
+            dirty: true,
+        };
+        let mut parked = PortalLevelState {
+            entities: [(
+                20,
+                PortalState {
+                    cooldown: 15,
+                    process: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+
+        let check_global = |p: &Portals| {
+            assert_eq!(p.before.get(&11), Some(&Vec3::new(1.0, 2.0, 3.0)));
+            assert_eq!(p.arrivals.len(), 1);
+            assert!(p.arrivals[0].tnt_used_portal);
+            assert_eq!(p.arrivals[0].tag, Tag::Int(9));
+            assert_eq!(
+                p.carrying,
+                vec![(Dim::Overworld, 12, BlockPos::new(3, 65, 4))]
+            );
+            assert_eq!(p.carried_motion.get(&12), Some(&Vec3::new(0.25, 0.5, 0.75)));
+            assert_eq!(p.carried_cooldown.get(&12), Some(&7));
+            assert_eq!(p.carried_at.get(&12), Some(&Vec3::new(10.0, 20.0, 30.0)));
+            assert!(p.loaded);
+            assert!(p.dirty);
+        };
+
+        portals.swap_level(&mut parked);
+        check_global(&portals);
+        assert_eq!(portals.level.entities.len(), 1);
+        assert_eq!(portals.level.entities[&20].cooldown, 15);
+        assert!(portals.level.entities[&20].process.is_none());
+        assert_eq!(parked.entities.len(), 1);
+        assert_eq!(parked.entities[&10].cooldown, 300);
+        let proc10 = parked.entities[&10].process.unwrap();
+        assert_eq!(
+            (proc10.entry, proc10.time, proc10.inside),
+            (BlockPos::new(1, 64, 2), 4, true)
+        );
+
+        portals.swap_level(&mut parked);
+        check_global(&portals);
+        assert_eq!(portals.level.entities.len(), 1);
+        assert_eq!(portals.level.entities[&10].cooldown, 300);
+        let proc10 = portals.level.entities[&10].process.unwrap();
+        assert_eq!(
+            (proc10.entry, proc10.time, proc10.inside),
+            (BlockPos::new(1, 64, 2), 4, true)
+        );
+        assert_eq!(parked.entities.len(), 1);
+        assert_eq!(parked.entities[&20].cooldown, 15);
+        assert!(parked.entities[&20].process.is_none());
     }
 
     #[cfg(test)]

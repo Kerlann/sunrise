@@ -20,6 +20,7 @@ use super::{
     fireworks,
     lightning_common::Bolt,
     minecarts,
+    nether_portal::PortalLevelState,
     ominous_item_spawner_common::OminousItemSpawner,
     raids::Raiding,
     sculk_server::SculkState,
@@ -174,7 +175,7 @@ pub struct Parked {
     random_tick_sections: RandomTickSections,
     level_events: Vec<LevelEvent>,
     /// Entity portal processes and cooldowns belong to this level's entities.
-    pub portal_states: HashMap<u32, sunrise_sim::nether_portal::PortalState>,
+    pub portal_states: PortalLevelState,
     falling: sunrise_sim::join_seq::JoinList<FallingBlock, false>,
     paintings: sunrise_sim::join_seq::JoinList<sunrise_sim::entities::Painting>,
     item_frames: sunrise_sim::join_seq::JoinList<sunrise_sim::entities::ItemFrame>,
@@ -959,7 +960,7 @@ fn box_parked(
         tickets: Default::default(),
         random_tick_sections: Default::default(),
         level_events: Vec::new(),
-        portal_states: HashMap::new(),
+        portal_states: Default::default(),
         falling: Default::default(),
         paintings: Default::default(),
         item_frames: Default::default(),
@@ -1272,7 +1273,7 @@ impl crate::game::ServerGame<'_> {
             &mut p.random_tick_sections,
         );
         swap(&mut self.common.level_events, &mut p.level_events);
-        swap(&mut self.server.portals.entities, &mut p.portal_states);
+        self.server.portals.swap_level(&mut p.portal_states);
         swap(&mut self.common.falling, &mut p.falling);
         swap(&mut self.common.paintings, &mut p.paintings);
         swap(&mut self.common.item_frames, &mut p.item_frames);
@@ -1458,8 +1459,8 @@ impl crate::game::ServerGame<'_> {
             if id == root {
                 continue;
             }
-            if let Some(state) = p.portal_states.remove(&id) {
-                self.server.portals.entities.insert(id, state);
+            if let Some(state) = p.portal_states.entities.remove(&id) {
+                self.server.portals.level.entities.insert(id, state);
             }
             let mob = if let Some(index) = p.mobs.iter().position(|m| m.id == id) {
                 Some(p.mobs.remove_for_transfer(index))

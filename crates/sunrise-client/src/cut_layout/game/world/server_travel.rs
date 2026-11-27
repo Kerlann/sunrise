@@ -263,6 +263,7 @@ pub(crate) mod tests {
                 // It left with 7; the source level has run it down to 3 since.
                 game.server
                     .portals
+                    .level
                     .entities
                     .entry(base + 1)
                     .or_default()
@@ -281,7 +282,7 @@ pub(crate) mod tests {
                     game.mob_object(base + 10).is_some(),
                     "natural carrier arrival must transfer retained passenger"
                 );
-                assert_eq!(game.server.portals.entities[&(base + 1)].cooldown, 7);
+                assert_eq!(game.server.portals.level.entities[&(base + 1)].cooldown, 7);
                 assert!(
                     !game
                         .server
@@ -290,6 +291,7 @@ pub(crate) mod tests {
                         .parked_mut(source)
                         .unwrap()
                         .portal_states
+                        .entities
                         .contains_key(&(base + 1))
                 );
                 game.native_joins_flush(false, 0);
@@ -368,6 +370,7 @@ pub(crate) mod tests {
                     game.persist.forced_meta.insert(leaf, [5, 6, 7, 8]);
                     game.server
                         .portals
+                        .level
                         .entities
                         .entry(leaf)
                         .or_default()
@@ -413,7 +416,7 @@ pub(crate) mod tests {
                         Vec3::new(32.0, 91.0, 48.0)
                     );
                     assert_eq!(game.persist.forced_meta.get(&leaf), Some(&[5, 6, 7, 8]));
-                    assert_eq!(game.server.portals.entities[&leaf].cooldown, 19);
+                    assert_eq!(game.server.portals.level.entities[&leaf].cooldown, 19);
                     assert_eq!(state.get(game, Holder::Entity(leaf), Clone::clone), Ok(77));
                     if !conflict {
                         assert_eq!(state.get(game, Holder::Entity(held), Clone::clone), Ok(41));
@@ -534,6 +537,7 @@ pub(crate) mod tests {
             let delay = sunrise_sim::nether_portal::ENTITY_DELAY;
             game.server
                 .portals
+                .level
                 .entities
                 .entry(root)
                 .or_default()

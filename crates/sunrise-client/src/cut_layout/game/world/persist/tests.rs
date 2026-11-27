@@ -1410,7 +1410,12 @@ fn an_orb_saves_its_live_portal_cooldown() {
         assert_eq!(game.orbs[0].fire_ticks, 39, "one tick of Fire");
         assert_eq!(game.orbs[0].air, 299, "the stored air does not tick");
         assert_eq!(
-            game.server.portals.entities.get(&id).map(|p| p.cooldown),
+            game.server
+                .portals
+                .level
+                .entities
+                .get(&id)
+                .map(|p| p.cooldown),
             Some(19),
             "the tick's portal cooldown"
         );

@@ -2013,6 +2013,7 @@ impl crate::game::ServerGame<'_> {
                         && source_mob.is_some_and(|id| {
                             self.server
                                 .portals
+                                .level
                                 .entities
                                 .get(&id)
                                 .is_some_and(|p| p.cooldown > 0)

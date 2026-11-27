@@ -1519,6 +1519,7 @@ impl crate::game::ServerGame<'_> {
         };
         let left = parked
             .portal_states
+            .entities
             .remove(&id)
             .map_or(0, |state| state.cooldown);
         // All object-owned metadata moves, including rejected intermediate bodies;
@@ -1542,7 +1543,13 @@ impl crate::game::ServerGame<'_> {
         }
         self.admit_transferred_object(vehicle);
         // The source may have ticked while the player's destination was loading.
-        self.server.portals.entities.entry(id).or_default().cooldown = carried.unwrap_or(left);
+        self.server
+            .portals
+            .level
+            .entities
+            .entry(id)
+            .or_default()
+            .cooldown = carried.unwrap_or(left);
     }
 
     /// Tells the mods of the teleports a command made inside a level, with

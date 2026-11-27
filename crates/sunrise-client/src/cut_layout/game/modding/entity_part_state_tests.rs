@@ -683,6 +683,7 @@ fn a_lone_mob_or_general_row_moves_under_a_new_id_and_a_ridden_pig_keeps_its_han
         game.update_chunk_tickets();
         game.server
             .portals
+            .level
             .entities
             .entry(pig.id())
             .or_default()
