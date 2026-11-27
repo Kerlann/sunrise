@@ -23,7 +23,7 @@ use super::{
     nether_portal::PortalLevelState,
     ominous_item_spawner_common::OminousItemSpawner,
     raids::RaidLevelState,
-    sculk_server::SculkLevelState,
+    sculk_server::{SculkLevelState, SculkState},
     tnt_common::PrimedTnt,
 };
 use mod_api::DimensionKey;
@@ -1000,7 +1000,8 @@ fn box_parked(
         lan_states: Default::default(),
         anims: Default::default(),
         raiding: Default::default(),
-        sculk: Default::default(),
+        // Run SculkState's HashSet defaults in order so thread-local RandomState stays aligned.
+        sculk: SculkState::default().level,
         creaking: Default::default(),
         spawn_scratch: Default::default(),
         border,
