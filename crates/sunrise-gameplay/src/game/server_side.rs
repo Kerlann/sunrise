@@ -1049,7 +1049,6 @@ pub struct ServerState {
     pub shield_cooldown: u32,
     /// The source of a command run through /execute (the player otherwise).
     pub command_source: Option<commands::execute::Source>,
-    pub(in crate::game) command_origin: Option<super::state_seam::CommandOrigin>,
     pub(in crate::game::server_side) native_command_filter: bool,
     /// Public chat broadcasts a `chat_recipient` listener's commands start while one runs.
     pub(in crate::game) chat_broadcasts: lan_chat::ChatBroadcasts,
@@ -1440,7 +1439,6 @@ impl ServerState {
             crossbow_sounds: [false; 2],
             shield_cooldown: 0,
             command_source: None,
-            command_origin: None,
             native_command_filter: false,
             chat_broadcasts: Default::default(),
             // `computeNextAutosaveInterval` at the clock's 20 ticks a second.

@@ -297,9 +297,6 @@ impl crate::game::ServerGame<'_> {
         finder: &mut Option<PlayerSpawnFinder>,
     ) -> Result<Option<(Vec3, [Option<f32>; 2])>> {
         if entering {
-            let actor = (self.server.lan_acting.is_some() && self.common.spectator())
-                .then(|| crate::game::state_seam::ActorInLevel::acting(self))
-                .flatten();
             // EndPlatformFeature.createEndPlatform below the spawn point.
             let origin = [END_SPAWN[0], END_SPAWN[1] - 1, END_SPAWN[2]];
             for dz in -2..=2 {
@@ -321,13 +318,7 @@ impl crate::game::ServerGame<'_> {
                                     true,
                                 );
                             });
-                            if actor.is_some_and(|actor| !actor.still_acting(self)) {
-                                return Ok(None);
-                            }
                             self.set_state_named(p, name, &[])?;
-                            if actor.is_some_and(|actor| !actor.still_acting(self)) {
-                                return Ok(None);
-                            }
                         }
                     }
                 }

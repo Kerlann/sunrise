@@ -552,13 +552,6 @@ impl crate::game::ServerGame<'_> {
         let placer = (has_part && by_player)
             .then(|| self.placement_placer())
             .flatten();
-        let actor = (by_player
-            && matches!(
-                self.server.guest_use,
-                Some(sunrise_gameplay_common::game::GuestUse::OnBlock { .. })
-            ))
-        .then(|| crate::game::state_seam::ActorInLevel::acting(self))
-        .flatten();
         let Some((decision, preview)) = self.with_level(|b, level, ticks| {
             b.decide_placement(level, ticks, ctx, stack_state, |level, context| {
                 has_part
@@ -568,9 +561,6 @@ impl crate::game::ServerGame<'_> {
         }) else {
             return Ok(None);
         };
-        if actor.is_some_and(|actor| !actor.still_acting(self)) {
-            return Ok(None);
-        }
         let veto = mod_api::__private::listened(mod_api::HookId::EntityPlace);
         if veto {
             let against_pos = decision.placed_against_pos();
@@ -602,7 +592,6 @@ impl crate::game::ServerGame<'_> {
                 self.common.transactions.writes(),
             );
             if self.placement_canceled(placer, preview.pos, preview.state, against, extra)
-                || actor.is_some_and(|actor| !actor.still_acting(self))
                 || level
                     != (
                         self.common.dim,

@@ -1,5 +1,5 @@
 use super::*;
-use crate::game::state_seam::{ActorInLevel, LevelId, LevelView, PlayerId, PlayerView};
+use crate::game::state_seam::{LevelId, LevelView, PlayerId};
 
 fn snap_use_item_rotation(yaw: &mut f32, pitch: &mut f32, target_yaw: f32, target_pitch: f32) {
     let target_yaw = sunrise_gameplay_common::game::remote::wrap_degrees(target_yaw);
@@ -668,19 +668,16 @@ impl crate::game::ServerGame<'_> {
             }
         };
         let (mut consumed, mut block_fell_through) = (false, false);
-        let level = LevelId::loaded(self, self.common.dim).ok_or(ActionRefused::Stale)?;
+        let level = LevelId::loaded(self, self.common.dim);
         let Some(host) = self.server.lan.as_mut() else {
             return Err(ActionRefused::Stale);
         };
-        let guest = host.hub.guests.get(gi).ok_or(ActionRefused::Stale)?;
-        if guest.conn != conn {
-            return Err(ActionRefused::Stale);
-        }
-        let state = ActorInLevel {
-            player: PlayerId::guest(guest),
-            level,
-        };
-        let command_origin = self.server.command_origin;
+        let actor = host
+            .hub
+            .guests
+            .get(gi)
+            .filter(|g| g.conn == conn)
+            .map(PlayerId::guest);
         // handleUseItemOn: within reach, then the hit point within
         // a block of the block's centre (logged when it isn't).
         let context = &host.hub.loop_context;
@@ -709,10 +706,10 @@ impl crate::game::ServerGame<'_> {
             return Err(ActionRefused::OutOfReach);
         }
         let spectator = self.server.lan.as_ref().is_some_and(|host| {
-            let view = PlayerView {
-                guest: &host.hub.guests[gi],
-            };
-            view.guest.spectator()
+            let guest = || &host.hub.guests[gi];
+            actor
+                .and_then(|actor| actor.view_at(self, gi))
+                .map_or_else(|| guest().spectator(), |view| view.guest.spectator())
         });
         let face = hit.face;
         // handleUseItemOn: above or below the world nothing is used and
@@ -720,12 +717,10 @@ impl crate::game::ServerGame<'_> {
         // under spawn protection nothing is used or placed; the player
         // is told and the blocks below go back. mayInteract: nothing is
         // used on a block outside the world border either.
-        let view = LevelView {
-            world: &self.common.world,
-            border: &self.common.border,
-        };
-        let min_y = view.world.shape.min_y;
-        let max_y = view.world.shape.max_y() - 1;
+        let (min_y, max_y) = level
+            .and_then(|id| id.view(self))
+            .unwrap_or_else(|| LevelView::active(self))
+            .build_limits();
         if hit.pos[1] > max_y {
             self.build_limit_message(conn, true, max_y);
             return Err(ActionRefused::Protected);
@@ -738,19 +733,17 @@ impl crate::game::ServerGame<'_> {
         if self.under_spawn_protection(gi, hit.pos) {
             self.spawn_protection_message(conn, hit.pos);
             refused = Some(ActionRefused::Protected);
-        } else if view
-            .border
+        } else if level
+            .and_then(|id| id.view(self))
+            .unwrap_or_else(|| LevelView::active(self))
             .contains(f64::from(hit.pos[0]), f64::from(hit.pos[2]))
         {
             if spectator && self.spectator_use_portal(conn, gi, hit.pos) {
-                if state.player.live_index(self).is_some() {
-                    reply(self, UseOnOutcome::default());
-                }
+                reply(self, UseOnOutcome::default());
                 return Ok(true);
             }
             let logged = self.common.world.block_log.as_ref().map_or(0, Vec::len);
             let heard = self.server.pending_sounds.len();
-            let gi = state.index(self).ok_or(ActionRefused::Stale)?;
             let used = self.as_guest_at(gi, conn, |g| {
                 let attempt = g.was_block_placement_attempt(hand);
                 let saved = (g.server.forced_hit, g.server.guest_use);
@@ -760,11 +753,7 @@ impl crate::game::ServerGame<'_> {
                 let predicted = g.server.predicted_swings;
                 let result = g.with_block_use_original(hand, |g| {
                     let result = g.use_item();
-                    if matches!(result, Ok(Some(_)))
-                        && !g.server.use_failed
-                        && state.still_acting(g)
-                        && g.server.command_origin == command_origin
-                    {
+                    if matches!(result, Ok(Some(_))) && !g.server.use_failed {
                         g.finish_block_use(hit.pos, hand);
                     }
                     result
@@ -790,15 +779,9 @@ impl crate::game::ServerGame<'_> {
                 )
             });
             let (swung, result, attempt, fell_through) = used.map_err(|_| ActionRefused::Stale)?;
-            if !state.in_place(self) {
-                return Err(ActionRefused::Stale);
-            }
             block_fell_through = fell_through;
             self.lan_swing_back(conn, Some(swung));
             self.guest_use_sounds(conn, logged, heard);
-            if !state.in_place(self) {
-                return Err(ActionRefused::Stale);
-            }
             // A placement that did nothing at the top or bottom of the
             // world says why. Vanilla asks twice for the top (once
             // before the swing, once in the check that also has the

@@ -615,6 +615,8 @@ pub struct Levels {
     order: Vec<Dim>,
     tick_order: Vec<Dim>,
     incarnations: Vec<LevelIncarnation>,
+    reset_generation: u64,
+    closed_active_incarnation: Option<Dim>,
     pub(in crate::game) active_closed: bool,
     /// The levels a mod asked to have saved (`level_request_save`), each once, saved at the start
     /// of the next server tick.
@@ -633,21 +635,21 @@ struct LevelIncarnation {
 }
 
 impl Levels {
-    pub(in crate::game) fn incarnation(&self, dim: Dim) -> Option<u64> {
-        self.incarnations
+    #[inline(always)]
+    pub(in crate::game) fn incarnation(&self, dim: Dim) -> Option<(u64, u64)> {
+        let generation = self
+            .incarnations
             .iter()
             .find(|level| level.dim == dim)
-            .map_or(Some(0), |level| level.open.then_some(level.generation))
+            .map_or(Some(0), |level| level.open.then_some(level.generation))?;
+        Some((self.reset_generation, generation))
     }
 
-    pub(in crate::game) fn next_incarnation(&self, dim: Dim) -> u64 {
-        self.incarnations
-            .iter()
-            .find(|level| level.dim == dim)
-            .map_or(1, |level| level.generation + 1)
-    }
-
-    fn open_incarnation(&mut self, dim: Dim) {
+    #[inline(always)]
+    pub(in crate::game) fn open_incarnation(&mut self, dim: Dim) {
+        if self.closed_active_incarnation == Some(dim) {
+            self.closed_active_incarnation = None;
+        }
         if let Some(level) = self.incarnations.iter_mut().find(|level| level.dim == dim) {
             level.generation += 1;
             level.open = true;
@@ -656,6 +658,19 @@ impl Levels {
                 dim,
                 generation: 1,
                 open: true,
+            });
+        }
+    }
+
+    #[inline(always)]
+    fn close_incarnation(&mut self, dim: Dim) {
+        if let Some(level) = self.incarnations.iter_mut().find(|level| level.dim == dim) {
+            level.open = false;
+        } else {
+            self.incarnations.push(LevelIncarnation {
+                dim,
+                generation: 0,
+                open: false,
             });
         }
     }
@@ -709,9 +724,9 @@ impl Levels {
     pub fn clear(&mut self) {
         self.parked.clear();
         self.order.clear();
-        for level in &mut self.incarnations {
-            level.open = false;
-        }
+        self.reset_generation += 1;
+        self.incarnations.clear();
+        self.closed_active_incarnation = None;
         self.tick_order.clear();
         self.active_closed = false;
         self.requested_saves.clear();
@@ -721,6 +736,9 @@ impl Levels {
     #[cfg(feature = "test-support")]
     pub fn reset_active_closed_for_test(&mut self) {
         self.active_closed = false;
+        if let Some(dim) = self.closed_active_incarnation.take() {
+            self.open_incarnation(dim);
+        }
     }
 
     pub(in crate::game::server_side) fn abort_parked_generation(&mut self) {
@@ -2257,17 +2275,9 @@ impl crate::game::ServerGame<'_> {
             self.native_level_unload(dim.id());
             self.server.levels.0.order.remove(index);
         }
-        if let Some(level) = self
-            .server
-            .levels
-            .0
-            .incarnations
-            .iter_mut()
-            .find(|level| level.dim == dim)
-        {
-            level.open = false;
-        }
+        self.server.levels.0.close_incarnation(dim);
         if dim == self.common.dim {
+            self.server.levels.0.closed_active_incarnation = Some(dim);
             self.common.world.water_tickets.clear();
         } else if let Some(world) = self.server.levels.0.parked_world_mut_of(dim.id()) {
             world.water_tickets.clear();
