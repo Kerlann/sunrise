@@ -94,6 +94,8 @@ pub(in crate::game) struct DialogState {
     revision: u64,
     /// `WaitingForResponseScreen`, since when.
     waiting: Option<Instant>,
+    /// Whether `WaitingForResponseScreen.tick` already narrated the close button turning active.
+    waiting_narrated: bool,
     /// `DialogScreen.WarningScreen`, over the dialog.
     warning: bool,
 }
@@ -367,6 +369,7 @@ impl ClientGame<'_> {
                 selecting: None,
             });
             game.client.dialogs.0.waiting = None;
+            game.client.dialogs.0.waiting_narrated = false;
             game.clear_device_keys();
             game.client.physical_keys.clear();
             game.set_mapping_held("key.attack", false);
@@ -417,6 +420,7 @@ impl ClientGame<'_> {
             game.client.dialogs.0.revision = game.client.dialogs.0.revision.wrapping_add(1);
             game.client.dialogs.0.open = Some(*dialog.0);
             game.client.dialogs.0.waiting = None;
+            game.client.dialogs.0.waiting_narrated = false;
         });
     }
 
@@ -520,6 +524,7 @@ impl ClientGame<'_> {
             let start_waiting = |game: &mut Self| {
                 game.client.dialogs.0.open = None;
                 game.client.dialogs.0.waiting = Some(Instant::now());
+                game.client.dialogs.0.waiting_narrated = false;
             };
             if self.client.command_prompt.0.is_some() || self.client.link_prompt.is_some() {
                 // The confirmation already became the receiver. Stage only
@@ -592,6 +597,20 @@ impl ClientGame<'_> {
         ))
     }
 
+    /// `WaitingForResponseScreen.tick` (`WaitingForResponseScreen.java:53-64`):
+    /// narrates once when the close button turns active after five seconds.
+    pub(in crate::game::client_side) fn tick_waiting_dialog(&mut self) {
+        let Some(since) = self.client.dialogs.0.waiting else {
+            self.client.dialogs.0.waiting_narrated = false;
+            return;
+        };
+        let ticks = (since.elapsed().as_millis() / 50) as u32;
+        if waiting_button(ticks).2 && !self.client.dialogs.0.waiting_narrated {
+            self.client.dialogs.0.waiting_narrated = true;
+            widgets::narrate_now();
+        }
+    }
+
     pub(in crate::game::client_side) fn draw_dialog(&mut self, batch: &mut HudBatch) {
         if !self.dialog_open() {
             return;
@@ -623,11 +642,6 @@ impl ClientGame<'_> {
             let (label, visible, active) = waiting_button(ticks);
             let title = Text::translate("gui.waitingForResponse.title", &[]);
             widgets::begin_screen(|| ScreenInfo::new("dialog/waiting", title.plain()));
-            // WaitingForResponseScreen.tick: the close button turning active
-            // after five seconds is narrated at once.
-            if active && ticks < 102 {
-                widgets::narrate_now();
-            }
             let top = ((h - 53.0) / 2.0).trunc();
             let tw = atlas.font.width_text(&title);
             batch.text_styled(
@@ -1485,6 +1499,7 @@ mod pause_tests {
             }),
             revision: 1,
             waiting: None,
+            waiting_narrated: false,
             warning: false,
         }
     }

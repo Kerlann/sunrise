@@ -51,6 +51,8 @@ impl crate::game::ClientGame<'_> {
                 self.tick_friends();
             }
             self.tick_options();
+            self.tick_advancements();
+            self.tick_waiting_dialog();
             self.tick_win_screen()?;
             self.native_configs_tick_client();
             // Gui.tick runs ChatListener.tick paused or not; Hud.tickCount advances
