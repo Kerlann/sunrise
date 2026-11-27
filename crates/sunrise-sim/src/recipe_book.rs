@@ -704,13 +704,13 @@ impl PacketNames<'_> {
         &self,
         sent: &[(HolderSet, SlotDisplay)],
         decode_stack: impl Fn(&sunrise_protocol::item::Stack) -> Option<ItemStack>,
-    ) -> Vec<crate::stations::Stonecutting> {
+    ) -> Vec<crate::crafting::Stonecutting> {
         sent.iter()
             .enumerate()
             .map(|(index, (input, result))| {
                 let mut shown = Vec::new();
                 self.stacks(result, &mut shown, &decode_stack, None);
-                crate::stations::Stonecutting {
+                crate::crafting::Stonecutting {
                     id: format!("server:{index}"),
                     input: Ingredient::of(self.holder_set(input)),
                     result: shown
