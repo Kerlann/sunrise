@@ -8,7 +8,9 @@
 use crate::{
     items::ItemStack,
     recipe_book::{Book, BookType, Display, Entry},
+    widgets::WidgetBucket,
 };
+use std::ops::Range;
 
 /// A styled run of text: its characters, colour (`-1` for the call's own) and italics.
 #[derive(Clone, Debug, PartialEq)]
@@ -94,6 +96,39 @@ pub enum Call {
 pub struct Drawn {
     pub call: Call,
     pub pose: [f32; 6],
+}
+
+/// One interactive widget inside [`DrawnBook`], pairing its collector/override identity with the
+/// contiguous slice of [`Drawn`] calls it emitted in vanilla draw order.
+#[derive(Clone, Debug)]
+pub struct BookWidget {
+    pub range: Range<usize>,
+    pub bucket: WidgetBucket,
+    /// Stable screen-local key (e.g. `"itemGroup.search"`, `"recipe_book/filter"`).
+    pub explicit_key: String,
+    /// Vanilla translation key for `ScreenChild::message`, when the widget carries a message.
+    pub label_key: Option<String>,
+    /// Vanilla hover tooltip translation key, when the widget paints its own hover tooltip.
+    pub tooltip_key: Option<String>,
+    /// Unmodified widget bounds in GUI pixels (`[x, y, w, h]`).
+    pub rect: [f32; 4],
+    pub hovered: bool,
+    pub focused: bool,
+    pub active: bool,
+    /// Whether the widget's primary sprite has a `_highlighted` variant driven by hover/focus.
+    pub highlightable: bool,
+}
+
+/// Recipe book GUI calls paired with the interactive widgets (`EditBox`, category tabs,
+/// craftable filter, recipe buttons, page arrows, and overlay buttons) that produced them.
+#[derive(Clone, Debug)]
+pub struct DrawnBook {
+    pub calls: Vec<Drawn>,
+    pub widgets: Vec<BookWidget>,
+    /// Index in `widgets` of the hovered recipe button whose tooltip is at `item_tooltip_call`.
+    pub hovered_recipe_widget: Option<usize>,
+    /// Index in `calls` of the trailing `Call::ItemTooltip`, if emitted.
+    pub item_tooltip_call: Option<usize>,
 }
 
 pub const IDENTITY: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
@@ -208,47 +243,57 @@ fn draw_tabs_for_test(origin: (i32, i32), tabs: &[TabView]) -> Vec<Drawn> {
 }
 
 /// `updateTabs`' tabs, and each one's icons: what `draw` puts for them.
+#[cfg(test)]
 fn put_tabs(xo: i32, yo: i32, tabs: &[TabView], put: &mut impl FnMut(Call, [f32; 6])) {
     let tab_x = xo - 30;
     let tab_y = yo + 3;
     for (n, tab) in tabs.iter().enumerate() {
-        let (x, y) = (tab_x, tab_y + 27 * n as i32);
-        let mut pose = IDENTITY;
-        if tab.anim > 0.0 {
-            let squeeze = squeeze(tab.anim);
-            let (cx, cy) = ((x + 8) as f32, (y + 12) as f32);
-            pose = translate(scale(translate(pose, cx, cy), 1.0, squeeze), -cx, -cy);
+        put_tab(tab_x, tab_y + 27 * n as i32, tab, put);
+    }
+}
+
+fn put_tab(x: i32, y: i32, tab: &TabView, put: &mut impl FnMut(Call, [f32; 6])) {
+    let mut pose = IDENTITY;
+    if tab.anim > 0.0 {
+        let squeeze = squeeze(tab.anim);
+        let (cx, cy) = ((x + 8) as f32, (y + 12) as f32);
+        pose = translate(scale(translate(pose, cx, cy), 1.0, squeeze), -cx, -cy);
+    }
+    let sprite = if tab.selected {
+        "recipe_book/tab_selected"
+    } else {
+        "recipe_book/tab"
+    };
+    let left = if tab.selected { -2 } else { 0 };
+    put(sprite_call(sprite, x + left, y, 35, 27), pose);
+    let fake = |id: &str, x: i32| Call::Item {
+        call: ItemCall::Fake,
+        stack: ItemStack::new(id, 1),
+        x,
+        y: y + 5,
+    };
+    match &tab.icons.1 {
+        Some(second) => {
+            put(fake(&tab.icons.0, x + 3 + left), pose);
+            put(fake(second, x + 14 + left), pose);
         }
-        let sprite = if tab.selected {
-            "recipe_book/tab_selected"
-        } else {
-            "recipe_book/tab"
-        };
-        let left = if tab.selected { -2 } else { 0 };
-        put(sprite_call(sprite, x + left, y, 35, 27), pose);
-        let fake = |id: &str, x: i32| Call::Item {
-            call: ItemCall::Fake,
-            stack: ItemStack::new(id, 1),
-            x,
-            y: y + 5,
-        };
-        match &tab.icons.1 {
-            Some(second) => {
-                put(fake(&tab.icons.0, x + 3 + left), pose);
-                put(fake(second, x + 14 + left), pose);
-            }
-            None => put(fake(&tab.icons.0, x + 9 + left), pose),
-        }
+        None => put(fake(&tab.icons.0, x + 9 + left), pose),
     }
 }
 
 /// The recipe book's calls, in vanilla's order.
 pub fn draw(s: &Screen) -> Vec<Drawn> {
+    draw_grouped(s).calls
+}
+
+/// The recipe book's calls in vanilla's order, grouped by the interactive widgets of
+/// `RecipeBookComponent`, `RecipeBookPage`, and `OverlayRecipeComponent`.
+pub fn draw_grouped(s: &Screen) -> DrawnBook {
     let mut out = Vec::new();
-    let mut put = |call: Call, pose: [f32; 6]| out.push(Drawn { call, pose });
+    let mut widgets = Vec::new();
     let (xo, yo) = s.origin();
-    put(
-        Call::Blit {
+    out.push(Drawn {
+        call: Call::Blit {
             texture: "textures/gui/recipe_book.png",
             x: xo,
             y: yo,
@@ -259,12 +304,46 @@ pub fn draw(s: &Screen) -> Vec<Drawn> {
             tw: 256,
             th: 256,
         },
-        IDENTITY,
-    );
-    search_box(s, xo + 25, yo + 13, &mut put);
-    // updateTabs.
-    put_tabs(xo, yo, s.tabs, &mut put);
-    // The craftable filter.
+        pose: IDENTITY,
+    });
+    let search_start = out.len();
+    search_box(s, xo + 25, yo + 13, &mut |call, pose| {
+        out.push(Drawn { call, pose });
+    });
+    widgets.push(BookWidget {
+        range: search_start..out.len(),
+        bucket: WidgetBucket::Field,
+        explicit_key: "itemGroup.search".to_owned(),
+        label_key: Some("itemGroup.search".to_owned()),
+        tooltip_key: None,
+        rect: [(xo + 25) as f32, (yo + 13) as f32, 81.0, 14.0],
+        hovered: s.hovered(xo + 25, yo + 13, 81, 14),
+        focused: s.search.focused,
+        active: true,
+        highlightable: true,
+    });
+    // updateTabs (`RecipeBookTabButton`s).
+    let (tab_x, tab_y) = (xo - 30, yo + 3);
+    for (n, tab) in s.tabs.iter().enumerate() {
+        let (x, y) = (tab_x, tab_y + 27 * n as i32);
+        let start = out.len();
+        put_tab(x, y, tab, &mut |call, pose| {
+            out.push(Drawn { call, pose });
+        });
+        widgets.push(BookWidget {
+            range: start..out.len(),
+            bucket: WidgetBucket::Button,
+            explicit_key: format!("recipe_book/tab:{}", tab.icons.0),
+            label_key: None,
+            tooltip_key: None,
+            rect: [x as f32, y as f32, 35.0, 27.0],
+            hovered: s.hovered(x, y, 35, 27),
+            focused: false,
+            active: true,
+            highlightable: false,
+        });
+    }
+    // The craftable filter (`CycleButton<Boolean>`).
     let (fx, fy) = (xo + 110, yo + 12);
     let hover = s.hovered(fx, fy, 26, 16);
     let highlight = if hover { "_highlighted" } else { "" };
@@ -289,39 +368,55 @@ pub fn draw(s: &Screen) -> Vec<Drawn> {
             format!("{prefix}{state}{highlight}")
         }
     };
-    put(sprite_call(&sprite, fx, fy, 26, 16), IDENTITY);
+    let filter_key = match (s.filtering, s.filter_look) {
+        (false, _) => "gui.recipebook.toggleRecipes.all",
+        (true, Some(look)) => look.tooltip.as_str(),
+        (true, None) => match s.book {
+            BookType::Crafting => "gui.recipebook.toggleRecipes.craftable",
+            BookType::Furnace => "gui.recipebook.toggleRecipes.smeltable",
+            BookType::BlastFurnace => "gui.recipebook.toggleRecipes.blastable",
+            BookType::Smoker => "gui.recipebook.toggleRecipes.smokable",
+        },
+    };
+    let filter_start = out.len();
+    out.push(Drawn {
+        call: sprite_call(&sprite, fx, fy, 26, 16),
+        pose: IDENTITY,
+    });
     if hover {
-        let key = match (s.filtering, s.filter_look) {
-            (false, _) => "gui.recipebook.toggleRecipes.all",
-            (true, Some(look)) => look.tooltip.as_str(),
-            (true, None) => match s.book {
-                BookType::Crafting => "gui.recipebook.toggleRecipes.craftable",
-                BookType::Furnace => "gui.recipebook.toggleRecipes.smeltable",
-                BookType::BlastFurnace => "gui.recipebook.toggleRecipes.blastable",
-                BookType::Smoker => "gui.recipebook.toggleRecipes.smokable",
-            },
-        };
-        put(
-            Call::Tooltip(vec![vec![Run::plain((s.translate)(key))]]),
-            IDENTITY,
-        );
+        out.push(Drawn {
+            call: Call::Tooltip(vec![vec![Run::plain((s.translate)(filter_key))]]),
+            pose: IDENTITY,
+        });
     }
+    widgets.push(BookWidget {
+        range: filter_start..out.len(),
+        bucket: WidgetBucket::Button,
+        explicit_key: "recipe_book/filter".to_owned(),
+        label_key: Some(filter_key.to_owned()),
+        tooltip_key: Some(filter_key.to_owned()),
+        rect: [fx as f32, fy as f32, 26.0, 16.0],
+        hovered: hover,
+        focused: false,
+        active: true,
+        highlightable: true,
+    });
     // RecipeBookPage.extractRenderState.
     if s.pages > 1 {
         let text = (s.translate)("gui.recipebook.page")
             .replacen("%s", &(s.page + 1).to_string(), 1)
             .replacen("%s", &s.pages.to_string(), 1);
         let w = (s.text_width)(&text);
-        put(
-            Call::Text {
+        out.push(Drawn {
+            call: Call::Text {
                 runs: vec![Run::plain(text)],
                 x: xo - w / 2 + 73,
                 y: yo + 141,
                 color: -1,
                 shadow: true,
             },
-            IDENTITY,
-        );
+            pose: IDENTITY,
+        });
     }
     let mut hovered = None;
     for (i, b) in s.buttons.iter().enumerate().take(20) {
@@ -339,32 +434,50 @@ pub fn draw(s: &Screen) -> Vec<Drawn> {
             let (cx, cy) = ((x + 8) as f32, (y + 12) as f32);
             pose = translate(scale(translate(pose, cx, cy), squeeze, squeeze), -cx, -cy);
         }
-        put(sprite_call(sprite, x, y, 25, 25), pose);
+        let start = out.len();
+        out.push(Drawn {
+            call: sprite_call(sprite, x, y, 25, 25),
+            pose,
+        });
         let stack = display_stack(&b.entries, s.index);
         let mut offset = 4;
         if many && same_result_display(&b.entries) {
-            put(
-                Call::Item {
+            out.push(Drawn {
+                call: Call::Item {
                     call: ItemCall::Item,
                     stack: stack.clone(),
                     x: x + offset + 1,
                     y: y + offset + 1,
                 },
                 pose,
-            );
+            });
             offset -= 1;
         }
-        put(
-            Call::Item {
+        out.push(Drawn {
+            call: Call::Item {
                 call: ItemCall::Fake,
                 stack: stack.clone(),
                 x: x + offset,
                 y: y + offset,
             },
             pose,
-        );
-        if s.hovered(x, y, 25, 25) {
-            hovered = Some((stack, many));
+        });
+        let btn_hover = s.hovered(x, y, 25, 25);
+        let widget_idx = widgets.len();
+        widgets.push(BookWidget {
+            range: start..out.len(),
+            bucket: WidgetBucket::Button,
+            explicit_key: "recipe_book/slot".to_owned(),
+            label_key: None,
+            tooltip_key: None,
+            rect: [x as f32, y as f32, 25.0, 25.0],
+            hovered: btn_hover,
+            focused: false,
+            active: true,
+            highlightable: false,
+        });
+        if btn_hover {
+            hovered = Some((stack, many, widget_idx));
         }
     }
     let arrows = [
@@ -391,28 +504,59 @@ pub fn draw(s: &Screen) -> Vec<Drawn> {
         } else {
             sprite.to_owned()
         };
-        put(sprite_call(&id, x, yo + 137, 12, 17), IDENTITY);
+        let start = out.len();
+        out.push(Drawn {
+            call: sprite_call(&id, x, yo + 137, 12, 17),
+            pose: IDENTITY,
+        });
         if hover {
-            put(
-                Call::Tooltip(vec![vec![Run::plain((s.translate)(key))]]),
-                IDENTITY,
-            );
+            out.push(Drawn {
+                call: Call::Tooltip(vec![vec![Run::plain((s.translate)(key))]]),
+                pose: IDENTITY,
+            });
         }
+        widgets.push(BookWidget {
+            range: start..out.len(),
+            bucket: WidgetBucket::Button,
+            explicit_key: sprite.to_owned(),
+            label_key: Some(key.to_owned()),
+            tooltip_key: Some(key.to_owned()),
+            rect: [x as f32, (yo + 137) as f32, 12.0, 17.0],
+            hovered: hover,
+            focused: false,
+            active: true,
+            highlightable: true,
+        });
     }
-    put(Call::Stratum, IDENTITY);
+    out.push(Drawn {
+        call: Call::Stratum,
+        pose: IDENTITY,
+    });
     if let Some(o) = s.overlay {
-        overlay(s, o, &mut put);
+        overlay(s, o, &mut out, &mut widgets);
     }
     // RecipeBookPage.extractTooltip.
-    if let Some((stack, more)) = hovered
+    let mut hovered_recipe_widget = None;
+    let mut item_tooltip_call = None;
+    if let Some((stack, more, widget_idx)) = hovered
         && s.overlay.is_none()
     {
-        put(Call::ItemTooltip { stack, more }, IDENTITY);
+        hovered_recipe_widget = Some(widget_idx);
+        item_tooltip_call = Some(out.len());
+        out.push(Drawn {
+            call: Call::ItemTooltip { stack, more },
+            pose: IDENTITY,
+        });
     }
     if let Some((left, top, big, ghosts)) = s.ghost {
         out.extend(ghost(s.index, left, top, big, ghosts));
     }
-    out
+    DrawnBook {
+        calls: out,
+        widgets,
+        hovered_recipe_widget,
+        item_tooltip_call,
+    }
 }
 
 /// `GhostSlots.extractRenderState` for a container whose corner is `(left, top)`.
@@ -673,22 +817,22 @@ pub fn overlay_origin(button_x: i32, button_y: i32, total: usize, xo: i32, yo: i
 }
 
 /// `OverlayRecipeComponent.extractRenderState`.
-fn overlay(s: &Screen, o: &OverlayView, put: &mut impl FnMut(Call, [f32; 6])) {
+fn overlay(s: &Screen, o: &OverlayView, out: &mut Vec<Drawn>, widgets: &mut Vec<BookWidget>) {
     let total = o.recipes.len() as i32;
     let max_row = if total <= 16 { 4 } else { 5 };
     let (x, y) = (o.x, o.y);
     let columns = total.min(max_row);
     let height = (total as f32 / max_row as f32).ceil() as i32;
-    put(
-        sprite_call(
+    out.push(Drawn {
+        call: sprite_call(
             "recipe_book/overlay_recipe",
             x,
             y,
             columns * 25 + 8,
             height * 25 + 8,
         ),
-        IDENTITY,
-    );
+        pose: IDENTITY,
+    });
     let family = if s.book == BookType::Crafting {
         "crafting"
     } else {
@@ -703,7 +847,11 @@ fn overlay(s: &Screen, o: &OverlayView, put: &mut impl FnMut(Call, [f32; 6])) {
             if r.craftable { "" } else { "_disabled" },
             if hover { "_highlighted" } else { "" }
         );
-        put(sprite_call(&id, bx, by, 24, 24), IDENTITY);
+        let start = out.len();
+        out.push(Drawn {
+            call: sprite_call(&id, bx, by, 24, 24),
+            pose: IDENTITY,
+        });
         let (gx, gy) = ((bx + 2) as f32, (by + 2) as f32);
         // Vanilla's three cells occupy 20 pixels (two 7-pixel steps and
         // a 6-pixel item). Larger custom grids share those same inner bounds.
@@ -729,16 +877,28 @@ fn overlay(s: &Screen, o: &OverlayView, put: &mut impl FnMut(Call, [f32; 6])) {
                 -8.0,
                 -8.0,
             );
-            put(
-                Call::Item {
+            out.push(Drawn {
+                call: Call::Item {
                     call: ItemCall::Item,
                     stack: items[s.index % items.len()].clone(),
                     x: 0,
                     y: 0,
                 },
                 pose,
-            );
+            });
         }
+        widgets.push(BookWidget {
+            range: start..out.len(),
+            bucket: WidgetBucket::Button,
+            explicit_key: "recipe_book/overlay_recipe".to_owned(),
+            label_key: None,
+            tooltip_key: None,
+            rect: [bx as f32, by as f32, 24.0, 24.0],
+            hovered: hover,
+            focused: false,
+            active: true,
+            highlightable: true,
+        });
     }
 }
 
@@ -833,5 +993,119 @@ mod tab_column_tests {
             sprite_bounds(&lone, |_, _| true),
             Some([1.0, 2.0, 12.0, 17.0])
         );
+    }
+
+    #[test]
+    fn draw_grouped_registers_search_tabs_filter_recipes_arrows_and_overlay() {
+        use super::{
+            BookType, ButtonView, ItemStack, OverlayRecipe, OverlayView, Screen, Search,
+            WidgetBucket, draw, draw_grouped,
+        };
+
+        let search = Search::default();
+        let tabs = [
+            TabView {
+                icons: ("minecraft:compass".into(), None),
+                selected: true,
+                anim: 0.0,
+            },
+            TabView {
+                icons: ("minecraft:iron_axe".into(), None),
+                selected: false,
+                anim: 0.0,
+            },
+        ];
+        let buttons = [ButtonView {
+            has_craftable: true,
+            entries: vec![vec![ItemStack::new("minecraft:stick", 4)]],
+            anim: 0.0,
+        }];
+        let overlay = OverlayView {
+            x: 70,
+            y: 70,
+            recipes: vec![OverlayRecipe {
+                craftable: true,
+                cells: vec![(0, 0, vec![ItemStack::new("minecraft:oak_planks", 1)])],
+            }],
+        };
+        let translate = |k: &str| k.to_owned();
+        let text_width = |s: &str| (s.len() * 6) as i32;
+        let screen = Screen {
+            book: BookType::Crafting,
+            origin: (54, 37),
+            mouse: (0, 0),
+            index: 0,
+            filtering: false,
+            filter_look: None,
+            search: &search,
+            tabs: &tabs,
+            buttons: &buttons,
+            page: 1,
+            pages: 3,
+            overlay: Some(&overlay),
+            ghost: None,
+            translate: &translate,
+            text_width: &text_width,
+        };
+        let grouped = draw_grouped(&screen);
+        assert_eq!(grouped.calls.len(), draw(&screen).len());
+        let keys: Vec<(&str, WidgetBucket, [f32; 4])> = grouped
+            .widgets
+            .iter()
+            .map(|w| (w.explicit_key.as_str(), w.bucket, w.rect))
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                (
+                    "itemGroup.search",
+                    WidgetBucket::Field,
+                    [79.0, 50.0, 81.0, 14.0]
+                ),
+                (
+                    "recipe_book/tab:minecraft:compass",
+                    WidgetBucket::Button,
+                    [24.0, 40.0, 35.0, 27.0]
+                ),
+                (
+                    "recipe_book/tab:minecraft:iron_axe",
+                    WidgetBucket::Button,
+                    [24.0, 67.0, 35.0, 27.0]
+                ),
+                (
+                    "recipe_book/filter",
+                    WidgetBucket::Button,
+                    [164.0, 49.0, 26.0, 16.0]
+                ),
+                (
+                    "recipe_book/slot",
+                    WidgetBucket::Button,
+                    [65.0, 68.0, 25.0, 25.0]
+                ),
+                (
+                    "recipe_book/page_forward",
+                    WidgetBucket::Button,
+                    [147.0, 174.0, 12.0, 17.0]
+                ),
+                (
+                    "recipe_book/page_backward",
+                    WidgetBucket::Button,
+                    [92.0, 174.0, 12.0, 17.0]
+                ),
+                (
+                    "recipe_book/overlay_recipe",
+                    WidgetBucket::Button,
+                    [74.0, 75.0, 24.0, 24.0]
+                ),
+            ]
+        );
+        // Ranges are non-empty, sorted, non-overlapping, and within `calls`.
+        let mut prev_end = 0;
+        for w in &grouped.widgets {
+            assert!(!w.range.is_empty());
+            assert!(w.range.start >= prev_end);
+            assert!(w.range.end <= grouped.calls.len());
+            prev_end = w.range.end;
+        }
     }
 }

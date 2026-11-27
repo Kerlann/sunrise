@@ -6736,58 +6736,21 @@ impl Screen {
                     let x = bar_x + i as f32 * tab_w;
                     let selected = which == tab;
                     let hover = crate::ui::hovered(cursor, x, 0.0, tab_w, TAB_HEIGHT);
-                    // Painted by hand: the bumpers look for these.
-                    crate::widgets::target_as(
-                        [x, 0.0, tab_w, TAB_HEIGHT],
-                        crate::widgets::Kind::Tab(selected),
-                    );
-                    let sprite = match (selected, hover) {
-                        (true, true) => "widget/tab_selected_highlighted",
-                        (true, false) => "widget/tab_selected",
-                        (false, true) => "widget/tab_highlighted",
-                        (false, false) => "widget/tab",
-                    };
-                    crate::ui::nine_slice(
+                    let label = Text::translate(which.title(), &[]);
+                    crate::ui::tab_button(
                         batch,
                         atlas,
-                        sprite,
-                        x,
-                        0.0,
-                        tab_w,
-                        TAB_HEIGHT,
-                        u32::MAX,
-                    );
-                    if selected {
-                        crate::ui::menu_background(
-                            batch,
-                            atlas,
-                            x + 2.0,
-                            2.0,
-                            tab_w - 4.0,
-                            22.0,
-                            false,
-                        );
-                        // The underline is the label's width, at most tabWidth - 4,
-                        // centred in the tab.
-                        let label_w =
-                            HudBatch::text_width(atlas, &t(which.title())).min(tab_w - 4.0);
-                        batch.fill(
-                            atlas,
-                            x + ((tab_w - label_w) / 2.0).floor(),
-                            22.0,
-                            label_w,
-                            1.0,
-                            u32::MAX,
-                        );
-                    }
-                    crate::ui::menu_tab_label(
-                        batch,
-                        atlas,
-                        &Text::translate(which.title(), &[]),
-                        (x, 0.0, tab_w, TAB_HEIGHT),
-                        selected,
-                        which.enabled(server.expired),
-                        now,
+                        crate::ui::TabButtonSpec {
+                            rect: [x, 0.0, tab_w, TAB_HEIGHT],
+                            label: &label,
+                            selected,
+                            active: which.enabled(server.expired),
+                            hovered: hover,
+                            now_ms: now,
+                            header_bar: true,
+                            record_label: false,
+                            target_when_inactive: true,
+                        },
                     );
                     // `setTabTooltip(3, mco.configure.world.settings.expired)` is drawn by
                     // `draw_tooltip`, after every widget and the scrollbar.
@@ -6943,6 +6906,53 @@ impl Screen {
                                         entry.is_some_and(|slot| slot.is_hardcore()),
                                     )
                                 };
+                                let switchable = !active && !(server.expired && empty);
+                                let raw_name = if slot == 4 {
+                                    t("mco.worldSlot.minigame")
+                                } else {
+                                    entry
+                                        .map(|entry| slot_name(&entry.options, slot))
+                                        .unwrap_or_else(|| t("mco.configure.world.slot.empty"))
+                                };
+                                let slot_label = Text::literal(raw_name.clone());
+                                let slot_key = format!("mco.configure.world.slot.{slot}");
+                                let slot_rect = [x, y, size, size];
+                                let orig_hover = crate::ui::hovered(cursor, x, y, size, size);
+                                let (
+                                    [rx, ry, rw, rh],
+                                    override_name,
+                                    slot_hovered,
+                                    slot_alpha,
+                                    slot_label_color,
+                                    override_hl,
+                                ) = match crate::widgets::resolve_engine_widget(
+                                    crate::widgets::EngineWidgetInput {
+                                        bucket: crate::widgets::WidgetBucket::Button,
+                                        rect: slot_rect,
+                                        label: Some(&slot_label),
+                                        explicit_key: Some(&slot_key),
+                                        active: true,
+                                        hovered: orig_hover,
+                                        focused: false,
+                                        tab_order_group: 0,
+                                    },
+                                ) {
+                                    crate::widgets::ResolvedEngineWidget::Skip => {
+                                        x += size + 16.0;
+                                        continue;
+                                    }
+                                    crate::widgets::ResolvedEngineWidget::Unchanged => {
+                                        (slot_rect, None, orig_hover, 1.0, None, None)
+                                    }
+                                    crate::widgets::ResolvedEngineWidget::Draw(props) => (
+                                        props.rect,
+                                        props.message,
+                                        props.hovered,
+                                        props.alpha,
+                                        props.label_text_color,
+                                        props.override_render_highlighted_sprite,
+                                    ),
+                                };
                                 // `RealmsWorldSlotButton.State`'s picture: the minigame's
                                 // image or `isles.png`, the empty frame, the slot's own
                                 // template image, or the slot's panorama (the atlas keeps
@@ -6956,16 +6966,19 @@ impl Screen {
                                             .flatten()
                                     })
                                 };
-                                let tint = if active { u32::MAX } else { 0xFF8E_8E8E };
+                                let tint = crate::widgets::scale_abgr_alpha(
+                                    if active { u32::MAX } else { 0xFF8E_8E8E },
+                                    slot_alpha,
+                                );
                                 match slot_picture(slot, empty, image) {
                                     SlotPicture::Empty => crate::ui::nine_slice(
                                         batch,
                                         atlas,
                                         "gui/realms/empty_frame",
-                                        x + 1.0,
-                                        y + 1.0,
-                                        size - 2.0,
-                                        size - 2.0,
+                                        rx + 1.0,
+                                        ry + 1.0,
+                                        rw - 2.0,
+                                        rh - 2.0,
                                         tint,
                                     ),
                                     SlotPicture::Image(encoded) => {
@@ -6982,10 +6995,10 @@ impl Screen {
                                             batch.sprite_scaled(
                                                 atlas,
                                                 &sprite,
-                                                x + 1.0,
-                                                y + 1.0,
-                                                size - 2.0,
-                                                size - 2.0,
+                                                rx + 1.0,
+                                                ry + 1.0,
+                                                rw - 2.0,
+                                                rh - 2.0,
                                                 tint,
                                             );
                                         }
@@ -6993,42 +7006,44 @@ impl Screen {
                                     SlotPicture::Preset => batch.picture(
                                         atlas,
                                         "gui/presets/isles",
-                                        x + 1.0,
-                                        y + 1.0,
-                                        size - 2.0,
-                                        size - 2.0,
+                                        rx + 1.0,
+                                        ry + 1.0,
+                                        rw - 2.0,
+                                        rh - 2.0,
                                         tint,
                                     ),
                                     SlotPicture::Panorama(panorama) => batch.picture(
                                         atlas,
                                         &format!("gui/title/background/{panorama}"),
-                                        x + 1.0,
-                                        y + 1.0,
-                                        size - 2.0,
-                                        size - 2.0,
+                                        rx + 1.0,
+                                        ry + 1.0,
+                                        rw - 2.0,
+                                        rh - 2.0,
                                         tint,
                                     ),
                                 }
                                 // `RealmsWorldSlotButton.extractContents`: a switchable slot
                                 // shows the white frame while hovered, the active one its
                                 // 0.8 grey, the rest 0.56 grey.
-                                let switchable = !active && !(server.expired && empty);
-                                let frame =
-                                    if switchable && crate::ui::hovered(cursor, x, y, size, size) {
+                                let lit = override_hl.unwrap_or(switchable && slot_hovered);
+                                let frame = crate::widgets::scale_abgr_alpha(
+                                    if lit {
                                         u32::MAX
                                     } else if active {
                                         0xFFCC_CCCC
                                     } else {
                                         0xFF8E_8E8E
-                                    };
+                                    },
+                                    slot_alpha,
+                                );
                                 crate::ui::nine_slice(
                                     batch,
                                     atlas,
                                     "widget/slot_frame",
-                                    x,
-                                    y,
-                                    size,
-                                    size,
+                                    rx,
+                                    ry,
+                                    rw,
+                                    rh,
                                     frame,
                                 );
                                 // `RealmsWorldSlotButton.extractContents`: the hardcore
@@ -7038,31 +7053,34 @@ impl Screen {
                                         batch,
                                         atlas,
                                         "hud/heart/hardcore_full",
-                                        x + 3.0,
-                                        y + 4.0,
+                                        rx + 3.0,
+                                        ry + 4.0,
                                         9.0,
                                         8.0,
-                                        u32::MAX,
+                                        crate::widgets::white_abgr_alpha(slot_alpha),
                                     );
                                 }
-                                let name = if slot == 4 {
-                                    t("mco.worldSlot.minigame")
-                                } else {
-                                    entry
-                                        .map(|entry| slot_name(&entry.options, slot))
-                                        .unwrap_or_else(|| t("mco.configure.world.slot.empty"))
-                                };
+                                let draw_name =
+                                    override_name.as_ref().map_or(raw_name, Text::plain);
                                 // `slotNameWidget.setMaxWidth(width - (active ? 2 : 0))`:
                                 // a long name never leaves its frame.
-                                let name =
-                                    clamp_text(atlas, &name, size - if active { 2.0 } else { 0.0 });
+                                let name = clamp_text(
+                                    atlas,
+                                    &draw_name,
+                                    rw - if active { 2.0 } else { 0.0 },
+                                );
                                 let tw = HudBatch::text_width(atlas, &name);
+                                let name_color = crate::widgets::label_abgr_color(
+                                    true,
+                                    slot_label_color,
+                                    slot_alpha,
+                                );
                                 batch.text(
                                     atlas,
                                     &name,
-                                    x + ((size - tw) / 2.0).floor(),
-                                    y + size - 14.0,
-                                    u32::MAX,
+                                    rx + ((rw - tw) / 2.0).floor(),
+                                    ry + rh - 14.0,
+                                    name_color,
                                     true,
                                 );
                                 if active
@@ -7072,17 +7090,20 @@ impl Screen {
                                     let version = &entry.options.version;
                                     // `RealmsMainScreen.getVersionComponent`: grey when
                                     // COMPATIBLE, -2142128 otherwise.
-                                    let color = if entry.options.compatibility == "COMPATIBLE" {
-                                        GREY
-                                    } else {
-                                        0xFF50_50DF
-                                    };
+                                    let color = crate::widgets::scale_abgr_alpha(
+                                        if entry.options.compatibility == "COMPATIBLE" {
+                                            GREY
+                                        } else {
+                                            0xFF50_50DF
+                                        },
+                                        slot_alpha,
+                                    );
                                     let vw = HudBatch::text_width(atlas, version);
                                     batch.text(
                                         atlas,
                                         version,
-                                        x + ((size - vw) / 2.0).floor(),
-                                        y + size + 2.0,
+                                        rx + ((rw - vw) / 2.0).floor(),
+                                        ry + rh + 2.0,
                                         color,
                                         true,
                                     );

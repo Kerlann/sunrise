@@ -202,40 +202,59 @@ pub fn button_with_room(
     (hover, live, focused): (bool, bool, bool),
     room: f32,
 ) {
-    let (rect, message, hover, live, alpha, label_text_color, sprites, override_hl) =
-        match crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
-            bucket: crate::widgets::WidgetBucket::Button,
-            rect,
-            label: Some(label),
-            explicit_key: None,
-            active: live,
-            hovered: hover,
-            focused,
-            tab_order_group: 0,
-        }) {
-            crate::widgets::ResolvedEngineWidget::Skip => return,
-            crate::widgets::ResolvedEngineWidget::Unchanged => {
-                (rect, None, hover, live, 1.0, None, None, None)
-            }
-            crate::widgets::ResolvedEngineWidget::Draw(props) => (
+    match crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
+        bucket: crate::widgets::WidgetBucket::Button,
+        rect,
+        label: Some(label),
+        explicit_key: None,
+        active: live,
+        hovered: hover,
+        focused,
+        tab_order_group: 0,
+    }) {
+        crate::widgets::ResolvedEngineWidget::Skip => {}
+        crate::widgets::ResolvedEngineWidget::Unchanged => {
+            button_with_room_resolved(batch, atlas, rect, label, (hover, live), room, None);
+        }
+        crate::widgets::ResolvedEngineWidget::Draw(props) => {
+            button_with_room_resolved(
+                batch,
+                atlas,
                 props.rect,
-                props.message,
-                props.hovered,
-                props.active,
-                props.alpha,
-                props.label_text_color,
-                props.sprites,
-                props.override_render_highlighted_sprite,
-            ),
-        };
-    let label = message.as_ref().unwrap_or(label);
+                props.message.as_ref().unwrap_or(label),
+                (props.hovered, props.active),
+                room,
+                Some(&props),
+            );
+        }
+    }
+}
+
+pub(crate) fn button_with_room_resolved(
+    batch: &mut HudBatch,
+    atlas: &HudAtlas,
+    rect: [f32; 4],
+    label: &Text,
+    (hover, live): (bool, bool),
+    room: f32,
+    props: Option<&crate::widgets::ResolvedWidgetProps>,
+) {
+    let (alpha, label_text_color, sprites, override_hl) = match props {
+        None => (1.0, None, None, None),
+        Some(p) => (
+            p.alpha,
+            p.label_text_color,
+            p.sprites.as_ref(),
+            p.override_render_highlighted_sprite,
+        ),
+    };
     let [x, y, w, h] = rect;
     let highlighted = match override_hl {
         Some(forced) => live && forced,
         None => live && hover,
     };
     let sprite_tint = crate::widgets::white_abgr_alpha(alpha);
-    let custom = sprites.as_ref().and_then(|sprites| {
+    let custom = sprites.and_then(|sprites| {
         let state = if !live {
             sprites.disabled.as_deref()
         } else if highlighted {

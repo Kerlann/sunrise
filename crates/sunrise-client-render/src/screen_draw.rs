@@ -1737,18 +1737,11 @@ mod max_length_tests {
         );
         crate::widgets::end_frame(811);
         let recorded = crate::widgets::last();
-        assert_eq!(recorded.len(), 3);
+        // `widgets::record` stores labelled widgets only; active empty-label buttons register as focus targets.
+        assert_eq!(recorded.len(), 1);
         assert_eq!(
             (recorded[0].label.as_str(), recorded[0].enabled),
             ("Done", true)
-        );
-        assert_eq!(
-            (recorded[1].label.as_str(), recorded[1].enabled),
-            ("", true)
-        );
-        assert_eq!(
-            (recorded[2].label.as_str(), recorded[2].enabled),
-            ("", false)
         );
         let targets: Vec<[f32; 4]> = crate::widgets::last_targets()
             .iter()

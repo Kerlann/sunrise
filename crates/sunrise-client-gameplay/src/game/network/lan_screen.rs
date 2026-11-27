@@ -1057,19 +1057,61 @@ impl crate::game::ClientGame<'_> {
                 header("options.worldOptions.multiplayer.title");
             }
             if b == Button::Lock {
-                widgets::narratable(|| o.narration(b, [bx, by, 20.0, 20.0], tr).hovered(hover));
+                let lock_rect = [bx, by, 20.0, 20.0];
+                let lock_label = o.label(b);
+                let (rect, active, hover, alpha, override_hl, tab_order_group, tooltip_hint, msg) =
+                    match widgets::resolve_engine_widget(widgets::EngineWidgetInput {
+                        bucket: widgets::WidgetBucket::Button,
+                        rect: lock_rect,
+                        label: Some(&lock_label),
+                        explicit_key: Some("difficulty.lock.title"),
+                        active,
+                        hovered: hover,
+                        focused: is_focused,
+                        tab_order_group: 0,
+                    }) {
+                        widgets::ResolvedEngineWidget::Skip => continue,
+                        widgets::ResolvedEngineWidget::Unchanged => {
+                            (lock_rect, active, hover, 1.0, None, 0, None, None)
+                        }
+                        widgets::ResolvedEngineWidget::Draw(props) => (
+                            props.rect,
+                            props.active,
+                            props.hovered,
+                            props.alpha,
+                            props.override_render_highlighted_sprite,
+                            props.tab_order_group,
+                            props.tooltip_narration,
+                            props.message.map(|m| m.plain()),
+                        ),
+                    };
+                widgets::narratable(|| {
+                    let mut n = o.narration(b, rect, tr).hovered(hover);
+                    widgets::apply_narration_overrides(
+                        &mut n,
+                        rect,
+                        active,
+                        hover,
+                        msg.as_deref(),
+                        tab_order_group,
+                        tooltip_hint.clone(),
+                    );
+                    n
+                });
                 // An icon, but a button: the D-pad and Tab stop on it as on the others.
                 if active {
-                    widgets::target([bx, by, 20.0, 20.0]);
+                    widgets::target(rect);
                 }
                 let lock = if o.locked { "locked" } else { "unlocked" };
-                let state = match (active, hover) {
+                let lit = override_hl.unwrap_or(hover);
+                let state = match (active, lit) {
                     (false, _) => "_disabled",
                     (true, true) => "_highlighted",
                     (true, false) => "",
                 };
                 let sprite = format!("widget/{lock}_button{state}");
-                batch.sprite_scaled(atlas, &sprite, bx, by, 20.0, 20.0, u32::MAX);
+                let tint = widgets::white_abgr_alpha(alpha);
+                batch.sprite_scaled(atlas, &sprite, rect[0], rect[1], rect[2], rect[3], tint);
                 continue;
             }
             ui::button_as(

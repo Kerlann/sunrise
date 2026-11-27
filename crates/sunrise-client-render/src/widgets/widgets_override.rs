@@ -724,7 +724,7 @@ mod tests {
 
         let lit_70 = Text::literal("FOV: 70");
         let lit_90 = Text::literal("FOV: 90");
-        assert_eq!(stable_key_from_text(&lit_70), "FOV:");
+        assert_eq!(stable_key_from_text(&lit_70), "FOV");
         assert_eq!(stable_key_from_text(&lit_70), stable_key_from_text(&lit_90));
     }
 
@@ -815,9 +815,10 @@ mod tests {
                 }
                 other => panic!("expected Draw, got {other:?}"),
             }
-            // Mounted widget rendering bypasses engine overrides completely.
+            // Mounted widget rendering bypasses engine overrides while keeping the outer override
+            // pass active so nested `with_widget_overrides` calls stay guarded.
             without_engine_overrides(|| {
-                assert!(!in_override_pass());
+                assert!(in_override_pass());
                 assert!(matches!(
                     resolve_engine_widget(EngineWidgetInput {
                         bucket: WidgetBucket::Button,
@@ -834,6 +835,16 @@ mod tests {
             });
         });
         assert!(!in_override_pass());
+        // Panic inside an override pass still clears `in_override_pass()` and restores `maps`.
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = with_widget_overrides(&mut maps, (0.0, 0.0), t0, || {
+                assert!(in_override_pass());
+                panic!("simulated override pass failure");
+            });
+        }));
+        assert!(panicked.is_err());
+        assert!(!in_override_pass());
+        assert!(maps.overrides.contains_key(&done_key_1));
         // Tooltip delay has not elapsed yet on frame 0.
         assert!(out0.pending_tooltip.is_none());
         assert_eq!(out0.hits.len(), 2);

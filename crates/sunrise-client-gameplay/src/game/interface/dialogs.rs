@@ -696,29 +696,96 @@ impl ClientGame<'_> {
         );
         let [wx, wy, ww, wh] = layout.warning;
         let warn_hover = ui::hovered(cursor, wx, wy, ww, wh);
-        sunrise_client::widgets::record("warning", layout.warning, true);
-        // The warning ImageButton: its narration message and tooltip, first
-        // in tab order (group -10).
-        widgets::narratable(|| {
-            let t = |key: &str| Text::translate(key, &[]).plain();
-            widgets::Narratable::button(
-                t("menu.custom_screen_info.button_narration"),
-                layout.warning,
-                true,
-            )
-            .hovered(warn_hover)
-            .hint(t("menu.custom_screen_info.tooltip"))
-            .order(-10)
-        });
-        batch.sprite_scaled(
-            atlas,
-            WARNING_SPRITES[if warn_hover { 2 } else { 0 }],
-            wx,
-            wy,
-            ww,
-            wh,
-            u32::MAX,
-        );
+        let warn_label = Text::translate("menu.custom_screen_info.button_narration", &[]);
+        match widgets::resolve_engine_widget(widgets::EngineWidgetInput {
+            bucket: widgets::WidgetBucket::Button,
+            rect: layout.warning,
+            label: Some(&warn_label),
+            explicit_key: Some("menu.custom_screen_info.button_narration"),
+            active: true,
+            hovered: warn_hover,
+            focused: false,
+            tab_order_group: -10,
+        }) {
+            widgets::ResolvedEngineWidget::Skip => {}
+            widgets::ResolvedEngineWidget::Unchanged => {
+                sunrise_client::widgets::record("warning", layout.warning, true);
+                // The warning ImageButton: its narration message and tooltip, first
+                // in tab order (group -10).
+                widgets::narratable(|| {
+                    let t = |key: &str| Text::translate(key, &[]).plain();
+                    widgets::Narratable::button(
+                        t("menu.custom_screen_info.button_narration"),
+                        layout.warning,
+                        true,
+                    )
+                    .hovered(warn_hover)
+                    .hint(t("menu.custom_screen_info.tooltip"))
+                    .order(-10)
+                });
+                batch.sprite_scaled(
+                    atlas,
+                    WARNING_SPRITES[if warn_hover { 2 } else { 0 }],
+                    wx,
+                    wy,
+                    ww,
+                    wh,
+                    u32::MAX,
+                );
+            }
+            widgets::ResolvedEngineWidget::Draw(props) => {
+                let msg_plain = props.message.as_ref().map(Text::plain);
+                sunrise_client::widgets::record(
+                    msg_plain.as_deref().unwrap_or("warning"),
+                    props.rect,
+                    props.active,
+                );
+                let props_active = props.active;
+                let props_hovered = props.hovered;
+                let tab_order_group = props.tab_order_group;
+                let tooltip_hint = props.tooltip_narration.clone();
+                widgets::narratable(|| {
+                    let t = |key: &str| Text::translate(key, &[]).plain();
+                    let mut n = widgets::Narratable::button(
+                        msg_plain
+                            .clone()
+                            .unwrap_or_else(|| t("menu.custom_screen_info.button_narration")),
+                        props.rect,
+                        props_active,
+                    )
+                    .hovered(props_hovered)
+                    .hint(
+                        tooltip_hint
+                            .clone()
+                            .unwrap_or_else(|| t("menu.custom_screen_info.tooltip")),
+                    )
+                    .order(tab_order_group);
+                    widgets::apply_narration_overrides(
+                        &mut n,
+                        props.rect,
+                        props_active,
+                        props_hovered,
+                        msg_plain.as_deref(),
+                        tab_order_group,
+                        tooltip_hint.clone(),
+                    );
+                    n
+                });
+                let lit = props
+                    .override_render_highlighted_sprite
+                    .unwrap_or(props.active && props.hovered);
+                let tint = widgets::white_abgr_alpha(props.alpha);
+                batch.sprite_scaled(
+                    atlas,
+                    WARNING_SPRITES[if lit { 2 } else { 0 }],
+                    props.rect[0],
+                    props.rect[1],
+                    props.rect[2],
+                    props.rect[3],
+                    tint,
+                );
+            }
+        }
         let buttons = open.dialog.buttons();
         let in_area = |y: f32| y >= ay && y < ay + ah;
         let mut tooltip = None;

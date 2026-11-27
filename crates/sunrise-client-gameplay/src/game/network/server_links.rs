@@ -154,39 +154,108 @@ impl crate::game::ClientGame<'_> {
         let tx = ((w - tw - 30.0) / 2.0).floor();
         batch.text_styled(atlas, &title, tx, 12.0, u32::MAX, true);
         let (wx, wy) = warning_button(w, h, tw);
+        let warn_rect = [wx, wy, WARNING_BUTTON, WARNING_BUTTON];
         let wh = ui::hovered(self.client.cursor, wx, wy, WARNING_BUTTON, WARNING_BUTTON);
+        let warn_label = Text::translate("menu.custom_screen_info.button_narration", &[]);
         // DialogScreen.createWarningButton: an ImageButton with its own
         // message and its tooltip.
-        sunrise_client::widgets::narratable(|| {
-            sunrise_client::widgets::Narratable::button(
-                super::screen_info::tr("menu.custom_screen_info.button_narration", &[]),
-                [wx, wy, WARNING_BUTTON, WARNING_BUTTON],
-                true,
-            )
-            .hovered(wh)
-            .hint(super::screen_info::tr(
-                "menu.custom_screen_info.tooltip",
-                &[],
-            ))
-        });
-        sunrise_client::widgets::record(
-            "menu.custom_screen_info.tooltip",
-            [wx, wy, WARNING_BUTTON, WARNING_BUTTON],
-            true,
-        );
-        batch.sprite_scaled(
-            atlas,
-            if wh {
-                "dialog/warning_button_highlighted"
-            } else {
-                "dialog/warning_button"
+        match sunrise_client::widgets::resolve_engine_widget(
+            sunrise_client::widgets::EngineWidgetInput {
+                bucket: sunrise_client::widgets::WidgetBucket::Button,
+                rect: warn_rect,
+                label: Some(&warn_label),
+                explicit_key: Some("menu.custom_screen_info.button_narration"),
+                active: true,
+                hovered: wh,
+                focused: false,
+                tab_order_group: -10,
             },
-            wx,
-            wy,
-            WARNING_BUTTON,
-            WARNING_BUTTON,
-            u32::MAX,
-        );
+        ) {
+            sunrise_client::widgets::ResolvedEngineWidget::Skip => {}
+            sunrise_client::widgets::ResolvedEngineWidget::Unchanged => {
+                sunrise_client::widgets::narratable(|| {
+                    sunrise_client::widgets::Narratable::button(
+                        super::screen_info::tr("menu.custom_screen_info.button_narration", &[]),
+                        warn_rect,
+                        true,
+                    )
+                    .hovered(wh)
+                    .hint(super::screen_info::tr(
+                        "menu.custom_screen_info.tooltip",
+                        &[],
+                    ))
+                });
+                sunrise_client::widgets::record("menu.custom_screen_info.tooltip", warn_rect, true);
+                batch.sprite_scaled(
+                    atlas,
+                    if wh {
+                        "dialog/warning_button_highlighted"
+                    } else {
+                        "dialog/warning_button"
+                    },
+                    wx,
+                    wy,
+                    WARNING_BUTTON,
+                    WARNING_BUTTON,
+                    u32::MAX,
+                );
+            }
+            sunrise_client::widgets::ResolvedEngineWidget::Draw(props) => {
+                let msg_plain = props.message.as_ref().map(Text::plain);
+                let props_active = props.active;
+                let props_hovered = props.hovered;
+                let tab_order_group = props.tab_order_group;
+                let tooltip_hint = props.tooltip_narration.clone();
+                sunrise_client::widgets::narratable(|| {
+                    let mut n = sunrise_client::widgets::Narratable::button(
+                        msg_plain.clone().unwrap_or_else(|| {
+                            super::screen_info::tr("menu.custom_screen_info.button_narration", &[])
+                        }),
+                        props.rect,
+                        props_active,
+                    )
+                    .hovered(props_hovered)
+                    .hint(tooltip_hint.clone().unwrap_or_else(|| {
+                        super::screen_info::tr("menu.custom_screen_info.tooltip", &[])
+                    }))
+                    .order(tab_order_group);
+                    sunrise_client::widgets::apply_narration_overrides(
+                        &mut n,
+                        props.rect,
+                        props_active,
+                        props_hovered,
+                        msg_plain.as_deref(),
+                        tab_order_group,
+                        tooltip_hint.clone(),
+                    );
+                    n
+                });
+                sunrise_client::widgets::record(
+                    msg_plain
+                        .as_deref()
+                        .unwrap_or("menu.custom_screen_info.tooltip"),
+                    props.rect,
+                    props.active,
+                );
+                let lit = props
+                    .override_render_highlighted_sprite
+                    .unwrap_or(props.active && props.hovered);
+                let tint = sunrise_client::widgets::white_abgr_alpha(props.alpha);
+                batch.sprite_scaled(
+                    atlas,
+                    if lit {
+                        "dialog/warning_button_highlighted"
+                    } else {
+                        "dialog/warning_button"
+                    },
+                    props.rect[0],
+                    props.rect[1],
+                    props.rect[2],
+                    props.rect[3],
+                    tint,
+                );
+            }
+        }
         let first = batch.vertices.len();
         let inside = self.client.cursor.1 >= HEADER && self.client.cursor.1 < h - FOOTER;
         for (link, (x, y)) in links.iter().zip(link_buttons(w, top, links.len())) {

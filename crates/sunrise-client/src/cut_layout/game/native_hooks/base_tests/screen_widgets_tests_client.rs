@@ -3443,7 +3443,7 @@ fn press_id_and_mutating_widgets_from_screen_input_hooks_and_lazy_discovery() {
 
     with_mods(mods, || {
         with_client_game(|game| {
-            let (_el, _win_id) = attach_offscreen_window(game);
+            let (_el, win_id) = attach_offscreen_window(game);
             game.client.pause_menu = true;
             game.set_screen(Screen::Paused);
             game.observe_screen();
@@ -3480,7 +3480,7 @@ fn press_id_and_mutating_widgets_from_screen_input_hooks_and_lazy_discovery() {
             assert!(!game.screen_widgets().unwrap().press(custom_id));
             assert_eq!(custom_pressed.load(Ordering::SeqCst), 1);
 
-            // press(id) on an engine widget activates Pause -> Options.
+            // Moving a PauseScreen button still allows press(id) to activate Pause -> Options.
             let options_id = game
                 .screen_widgets()
                 .unwrap()
@@ -3489,10 +3489,109 @@ fn press_id_and_mutating_widgets_from_screen_input_hooks_and_lazy_discovery() {
                 .find(|c| c.message == Some(ApiText::literal("Config")))
                 .unwrap()
                 .id;
+            assert!(
+                game.screen_widgets()
+                    .unwrap()
+                    .set_bounds(options_id, [18.0, 18.0, 96.0, 20.0])
+            );
+            let _ = game.hud_layers([640, 480]);
+            sunrise_client::widgets::end_frame(52_001);
             assert!(game.screen_widgets().unwrap().press(options_id));
             assert_eq!(game.client.screen, Screen::Options);
             // Old id is now stale.
             assert!(!game.screen_widgets().unwrap().press(options_id));
+
+            // Clicking a moved PauseScreen button directly at its new bounds also activates it.
+            game.client.pause_menu = true;
+            game.set_screen(Screen::Paused);
+            game.observe_screen();
+            let options_key = ApiText::translate("menu.options", vec![]);
+            let moved_pause_opt = [18.0, 18.0, 96.0, 20.0];
+            let pause_opt_id = {
+                let widgets = game.screen_widgets().unwrap();
+                let id = widgets
+                    .children()
+                    .iter()
+                    .find(|c| c.message.as_ref() == Some(&options_key))
+                    .unwrap()
+                    .id;
+                assert!(widgets.set_bounds(id, moved_pause_opt));
+                id
+            };
+            let _ = pause_opt_id;
+            let _ = game.hud_layers([640, 480]);
+            sunrise_client::widgets::end_frame(52_002);
+            move_mouse(game, win_id, 50.0, 28.0);
+            send_mouse_button(game, win_id, MouseButton::Left, true);
+            send_mouse_button(game, win_id, MouseButton::Left, false);
+            assert_eq!(
+                game.client.screen,
+                Screen::Options,
+                "clicking moved PauseScreen Options must open Options"
+            );
+
+            // InventoryScreen + open RecipeBookComponent exposes toggle, search box, tabs, and filter.
+            game.common.creative = false;
+            game.set_screen(Screen::Inventory);
+            game.observe_screen();
+            let toggle_label = ApiText::literal("recipe_book/button");
+            let toggle_id = {
+                let widgets = game.screen_widgets().unwrap();
+                widgets
+                    .children()
+                    .iter()
+                    .find(|c| c.message.as_ref() == Some(&toggle_label))
+                    .expect("closed inventory exposes recipe book toggle button")
+                    .id
+            };
+            assert!(
+                game.screen_widgets().unwrap().press(toggle_id),
+                "pressing recipe book toggle must open RecipeBookComponent"
+            );
+            let search_msg = ApiText::translate("itemGroup.search", vec![]);
+            let compass_tab = ApiText::literal("recipe_book/tab:minecraft:compass");
+            let filter_all = ApiText::translate("gui.recipebook.toggleRecipes.all", vec![]);
+            let filter_craftable =
+                ApiText::translate("gui.recipebook.toggleRecipes.craftable", vec![]);
+            let (search_id, filter_id) = {
+                let widgets = game.screen_widgets().unwrap();
+                let children = widgets.children();
+                assert!(
+                    children.iter().any(|c| c.id == toggle_id),
+                    "toggle keeps stable id after opening book"
+                );
+                let search_id = children
+                    .iter()
+                    .find(|c| c.message.as_ref() == Some(&search_msg))
+                    .expect("open recipe book exposes search EditBox")
+                    .id;
+                assert!(
+                    children
+                        .iter()
+                        .any(|c| c.message.as_ref() == Some(&compass_tab)),
+                    "open recipe book exposes search category tab"
+                );
+                let filter_id = children
+                    .iter()
+                    .find(|c| c.message.as_ref() == Some(&filter_all))
+                    .expect("open recipe book exposes craftable filter button")
+                    .id;
+                (search_id, filter_id)
+            };
+            // Pressing the craftable filter toggles its message while keeping the same stable id.
+            assert!(game.screen_widgets().unwrap().press(filter_id));
+            {
+                let widgets = game.screen_widgets().unwrap();
+                let filter_after = widgets
+                    .children()
+                    .iter()
+                    .find(|c| c.id == filter_id)
+                    .expect("filter button keeps stable id across toggle");
+                assert_eq!(filter_after.message.as_ref(), Some(&filter_craftable));
+                assert!(widgets.set_visible(search_id, false));
+            }
+            let _ = game.hud_layers([640, 480]);
+            sunrise_client::widgets::end_frame(52_003);
         });
     });
 }

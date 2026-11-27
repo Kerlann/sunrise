@@ -1110,10 +1110,12 @@ impl crate::game::ClientGame<'_> {
         batch: &mut HudBatch,
         ox: f32,
         oy: f32,
+        has_input: bool,
     ) {
         if self.common.station.is_none() {
             return;
         }
+        let message = self.translate_with_fallback("container.repair", "Repair & Name");
         let Some(ui) = self.client.station_ui.as_mut() else {
             debug_assert!(false, "open client station missing StationUi");
             return;
@@ -1124,7 +1126,9 @@ impl crate::game::ClientGame<'_> {
         edit.width = 103.0;
         edit.height = 12.0;
         edit.bordered = false;
-        edit.focused = true;
+        edit.editable = has_input;
+        edit.focused = has_input;
+        edit.message = message;
         edit.text_color = u32::MAX;
         edit.max_length = anvil::NAME_CHARS;
         edit.draw(batch, &self.client.gui.atlas, None);

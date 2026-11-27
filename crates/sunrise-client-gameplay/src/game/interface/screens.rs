@@ -626,7 +626,7 @@ impl crate::game::ClientGame<'_> {
             .buttons
             .iter()
             .copied()
-            .filter(|b| b.5 && !self.engine_rect_blocked([b.0, b.1, b.2, 20.0]))
+            .filter(|b| b.5 && !self.engine_rect_suppressed([b.0, b.1, b.2, 20.0]))
             .collect();
         let icons = layout.icons;
         let mut active_ids: Vec<u8> = buttons.iter().map(|b| b.4).collect();
@@ -637,7 +637,7 @@ impl crate::game::ClientGame<'_> {
             } else {
                 usize::from(id - 12)
             };
-            !self.engine_rect_blocked([icons[idx].0, icons[idx].1, 20.0, 20.0])
+            !self.engine_rect_suppressed([icons[idx].0, icons[idx].1, 20.0, 20.0])
         }));
         if active_ids.is_empty() {
             return Ok(false);
@@ -682,7 +682,7 @@ impl crate::game::ClientGame<'_> {
                 let friends = self.friends_shown();
                 for (i, &(x, y, _)) in icons.iter().enumerate() {
                     let id = if i == FRIENDS_ICON { 10 } else { 12 + i as u8 };
-                    if icon_active(i, friends) && !self.engine_rect_blocked([x, y, 20.0, 20.0]) {
+                    if icon_active(i, friends) && !self.engine_rect_suppressed([x, y, 20.0, 20.0]) {
                         rects.push((id, x, y, 20.0));
                     }
                 }

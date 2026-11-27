@@ -1485,7 +1485,7 @@ impl crate::game::ClientGame<'_> {
                         if self.client.screen_state.0.screen_instance != initial_instance {
                             return Ok(());
                         }
-                        if delta != [0.0; 2] && self.observed_screen_view().is_some() {
+                        if self.observed_screen_view().is_some() {
                             self.mounted_widget_mouse_moved(self.cursor());
                             if self.client.screen_state.0.screen_instance != initial_instance {
                                 return Ok(());

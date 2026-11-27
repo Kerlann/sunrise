@@ -703,6 +703,26 @@ pub fn menu_tab_label(
     active: bool,
     now_ms: i64,
 ) {
+    menu_tab_label_colored(
+        batch,
+        atlas,
+        label,
+        (x, y, width, height),
+        selected,
+        now_ms,
+        if active { u32::MAX } else { 0xFFA0_A0A0 },
+    );
+}
+
+fn menu_tab_label_colored(
+    batch: &mut HudBatch,
+    atlas: &HudAtlas,
+    label: &Text,
+    (x, y, width, height): (f32, f32, f32, f32),
+    selected: bool,
+    now_ms: i64,
+    color: u32,
+) {
     let top = y + if selected { 0.0 } else { 3.0 };
     let bottom = y + height;
     scrolling_text_at(
@@ -714,8 +734,113 @@ pub fn menu_tab_label(
         top,
         bottom,
         now_ms,
-        if active { u32::MAX } else { 0xFFA0_A0A0 },
+        color,
     );
+}
+
+/// Layout and visual flags for [`tab_button`] (`TabNavigationBar`'s `TabButton`).
+pub struct TabButtonSpec<'a> {
+    pub rect: [f32; 4],
+    pub label: &'a Text,
+    pub selected: bool,
+    pub active: bool,
+    pub hovered: bool,
+    pub now_ms: i64,
+    /// `true` for `CreateWorldScreen` and `RealmsConfigureWorldScreen` (fills selected tab with
+    /// `menu_background` and draws a centred label-width underline at `y + h - 2`), `false` for
+    /// `StatsScreen` (draws a full-width underline at `y + h - 3` after the label).
+    pub header_bar: bool,
+    /// Whether to record the tab in the frame's labelled widgets list.
+    pub record_label: bool,
+    /// Whether to register a focus target even when inactive.
+    pub target_when_inactive: bool,
+}
+
+/// `TabButton`: draws one tab of a `TabNavigationBar`, resolving through the engine widget
+/// collector and override table.
+pub fn tab_button(batch: &mut HudBatch, atlas: &HudAtlas, spec: TabButtonSpec<'_>) {
+    let (rect, message, active, hovered, alpha, label_text_color, override_hl) =
+        match crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
+            bucket: crate::widgets::WidgetBucket::Button,
+            rect: spec.rect,
+            label: Some(spec.label),
+            explicit_key: None,
+            active: spec.active,
+            hovered: spec.hovered,
+            focused: false,
+            tab_order_group: 0,
+        }) {
+            crate::widgets::ResolvedEngineWidget::Skip => return,
+            crate::widgets::ResolvedEngineWidget::Unchanged => {
+                (spec.rect, None, spec.active, spec.hovered, 1.0, None, None)
+            }
+            crate::widgets::ResolvedEngineWidget::Draw(props) => (
+                props.rect,
+                props.message,
+                props.active,
+                props.hovered,
+                props.alpha,
+                props.label_text_color,
+                props.override_render_highlighted_sprite,
+            ),
+        };
+    let [x, y, w, h] = rect;
+    let label = message.as_ref().unwrap_or(spec.label);
+    if spec.record_label {
+        crate::widgets::record(&label.plain(), rect, active);
+    }
+    if active || spec.target_when_inactive {
+        crate::widgets::target_as(rect, crate::widgets::Kind::Tab(spec.selected));
+    }
+    let lit = override_hl.unwrap_or(hovered);
+    let sprite = match (spec.selected, lit) {
+        (true, true) => "widget/tab_selected_highlighted",
+        (true, false) => "widget/tab_selected",
+        (false, true) => "widget/tab_highlighted",
+        (false, false) => "widget/tab",
+    };
+    let sprite_tint = crate::widgets::white_abgr_alpha(alpha);
+    nine_slice(batch, atlas, sprite, x, y, w, h, sprite_tint);
+    let label_color = crate::widgets::label_abgr_color(active, label_text_color, alpha);
+    if spec.header_bar {
+        if spec.selected {
+            if alpha > 0.0 {
+                menu_background(batch, atlas, x + 2.0, y + 2.0, w - 4.0, h - 2.0, false);
+            }
+            let lw = atlas.font.width_text(label).floor();
+            let uw = lw.min(w - 4.0);
+            batch.fill(
+                atlas,
+                x + ((w - uw) / 2.0).floor(),
+                y + h - 2.0,
+                uw,
+                1.0,
+                sprite_tint,
+            );
+        }
+        menu_tab_label_colored(
+            batch,
+            atlas,
+            label,
+            (x, y, w, h),
+            spec.selected,
+            spec.now_ms,
+            label_color,
+        );
+    } else {
+        menu_tab_label_colored(
+            batch,
+            atlas,
+            label,
+            (x, y, w, h),
+            spec.selected,
+            spec.now_ms,
+            label_color,
+        );
+        if spec.selected {
+            batch.fill(atlas, x + 2.0, y + h - 3.0, w - 4.0, 1.0, sprite_tint);
+        }
+    }
 }
 
 /// Button (AbstractButton): nine-slice sprite plus the centred label.
@@ -3164,9 +3289,9 @@ mod tests {
         );
         crate::widgets::end_frame(9_002);
         let widgets = crate::widgets::last();
-        assert_eq!(widgets.len(), 2);
-        assert_eq!(widgets[0].label, "");
-        assert_eq!(widgets[1].label, "Options");
+        // `widgets::record` records labelled buttons only; the empty-label icon button registers as a focus target.
+        assert_eq!(widgets.len(), 1);
+        assert_eq!(widgets[0].label, "Options");
         let targets: Vec<[f32; 4]> = crate::widgets::last_targets()
             .iter()
             .map(|t| t.rect)

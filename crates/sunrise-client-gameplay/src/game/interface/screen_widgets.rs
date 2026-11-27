@@ -57,6 +57,7 @@ pub(in crate::game) enum EngineClickRoute {
 pub(in crate::game) struct MountedWidgetsInner {
     pub(in crate::game) order: Vec<ScreenWidgetId>,
     pub(in crate::game) engine_children: Vec<EngineChildSlot>,
+    pub(in crate::game) engine_id_by_key: HashMap<widgets::EngineWidgetKey, ScreenWidgetId>,
     pub(in crate::game) engine_overrides: widgets::EngineOverrideMaps,
     pub(in crate::game) engine_hits: Vec<widgets::EngineHitEntry>,
     pub(in crate::game) engine_hovered: HashMap<widgets::EngineWidgetKey, bool>,
@@ -64,6 +65,7 @@ pub(in crate::game) struct MountedWidgetsInner {
     pub(in crate::game) mounted_hover_since: HashMap<ScreenWidgetId, Instant>,
     pub(in crate::game) entries: Vec<Option<MountedWidgetEntry>>,
     pub(in crate::game) discovered: bool,
+    pub(in crate::game) needs_engine_resync: bool,
     pub(in crate::game) overrides_active: bool,
     pub(in crate::game) focused: Option<usize>,
     pub(in crate::game) dragging: Option<(usize, i32)>,
@@ -78,6 +80,12 @@ pub struct MountedScreenWidgets {
     pub(in crate::game) inner: RefCell<MountedWidgetsInner>,
 }
 
+thread_local! {
+    /// True while dispatching a redirected or programmatic (`press`) click at an engine widget's
+    /// original coordinates, so moved widgets still pass screen-local hit checks.
+    static REDIRECTING_ENGINE_CLICK: Cell<bool> = const { Cell::new(false) };
+}
+
 impl Default for MountedScreenWidgets {
     fn default() -> Self {
         Self {
@@ -87,6 +95,7 @@ impl Default for MountedScreenWidgets {
             inner: RefCell::new(MountedWidgetsInner {
                 order: Vec::new(),
                 engine_children: Vec::new(),
+                engine_id_by_key: HashMap::new(),
                 engine_overrides: widgets::EngineOverrideMaps::default(),
                 engine_hits: Vec::new(),
                 engine_hovered: HashMap::new(),
@@ -94,6 +103,7 @@ impl Default for MountedScreenWidgets {
                 mounted_hover_since: HashMap::new(),
                 entries: Vec::new(),
                 discovered: false,
+                needs_engine_resync: false,
                 overrides_active: false,
                 focused: None,
                 dragging: None,
@@ -171,6 +181,7 @@ impl MountedScreenWidgets {
             let mut inner = self.inner.borrow_mut();
             inner.order.clear();
             inner.engine_children.clear();
+            inner.engine_id_by_key.clear();
             inner.engine_overrides = widgets::EngineOverrideMaps::default();
             inner.engine_hits.clear();
             inner.engine_hovered.clear();
@@ -178,6 +189,7 @@ impl MountedScreenWidgets {
             inner.mounted_hover_since.clear();
             inner.dragging = None;
             inner.discovered = false;
+            inner.needs_engine_resync = false;
             inner.overrides_active = false;
             (std::mem::take(&mut inner.entries), inner.focused.take())
         };
@@ -1133,17 +1145,106 @@ impl crate::game::ClientGame<'_> {
         self.client.screen_state.0.widgets.children_cache = snapshot;
     }
 
+    /// Reconcile `engine_children` and `order` with the latest observed engine widgets (`seen`),
+    /// preserving stable `ScreenWidgetId`s for existing keys, adding newly revealed sub-component
+    /// widgets (such as an opened recipe book or switched tab), and pruning gone ones without
+    /// disturbing mounted mod widgets.
+    fn reconcile_engine_children(&mut self, seen: Vec<widgets::CollectedWidget>) {
+        let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+        inner.needs_engine_resync = false;
+        if inner.engine_overrides.suppress_all {
+            return;
+        }
+        let mut new_slots = Vec::with_capacity(seen.len());
+        let mut new_ids = Vec::with_capacity(seen.len());
+        for item in seen {
+            if inner
+                .engine_overrides
+                .overrides
+                .get(&item.key)
+                .is_some_and(|ov| ov.removed)
+            {
+                continue;
+            }
+            let id = if let Some(&existing) = inner.engine_id_by_key.get(&item.key) {
+                existing
+            } else {
+                let fresh = self.alloc_widget_id();
+                inner.engine_id_by_key.insert(item.key.clone(), fresh);
+                fresh
+            };
+            let default_message = item.message.as_ref().and_then(|t| t.try_into_api().ok());
+            new_ids.push(id);
+            new_slots.push(EngineChildSlot {
+                id,
+                key: item.key,
+                default_rect: item.rect,
+                default_message,
+                default_active: item.active,
+                default_tab_order_group: item.tab_order_group,
+            });
+        }
+        let old_ids: Vec<ScreenWidgetId> = inner.engine_children.iter().map(|s| s.id).collect();
+        if old_ids != new_ids {
+            inner
+                .order
+                .retain(|id| !old_ids.contains(id) || new_ids.contains(id));
+            for (idx, &id) in new_ids.iter().enumerate() {
+                if inner.order.contains(&id) {
+                    continue;
+                }
+                let insert_at = new_ids[..idx]
+                    .iter()
+                    .rev()
+                    .find_map(|prev| {
+                        inner
+                            .order
+                            .iter()
+                            .position(|cid| cid == prev)
+                            .map(|p| p + 1)
+                    })
+                    .or_else(|| {
+                        new_ids[idx + 1..]
+                            .iter()
+                            .find_map(|next| inner.order.iter().position(|cid| cid == next))
+                    })
+                    .unwrap_or(inner.order.len());
+                inner.order.insert(insert_at, id);
+            }
+        }
+        inner.engine_children = new_slots;
+    }
+
+    fn with_redirecting_engine_click<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        struct Guard(bool);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                REDIRECTING_ENGINE_CLICK.set(self.0);
+            }
+        }
+        let _guard = Guard(REDIRECTING_ENGINE_CLICK.replace(true));
+        f(self)
+    }
+
     /// Live widget collection for the currently open screen (`ClientHost::screen_widgets`).
     pub fn screen_widgets(&mut self) -> Option<&mut dyn ScreenWidgets> {
         self.observed_screen_view()?;
-        let needs_discover = !self.client.screen_state.0.widgets.inner.borrow().discovered;
+        let (needs_discover, needs_resync) = {
+            let inner = self.client.screen_state.0.widgets.inner.borrow();
+            (
+                !inner.discovered,
+                inner.discovered && inner.needs_engine_resync,
+            )
+        };
         if needs_discover {
             let collected = self.discover_screen_widgets();
             let mut new_slots = Vec::with_capacity(collected.len());
             let mut new_ids = Vec::with_capacity(collected.len());
+            let mut id_by_key = HashMap::with_capacity(collected.len());
             for item in collected {
                 let id = self.alloc_widget_id();
                 let default_message = item.message.as_ref().and_then(|t| t.try_into_api().ok());
+                id_by_key.insert(item.key.clone(), id);
                 new_ids.push(id);
                 new_slots.push(EngineChildSlot {
                     id,
@@ -1159,10 +1260,19 @@ impl crate::game::ClientGame<'_> {
             inner.order = new_ids;
             inner.order.extend(existing_order);
             inner.engine_children = new_slots;
+            inner.engine_id_by_key = id_by_key;
             inner.engine_hits = build_engine_hits(&inner.engine_children, &inner.engine_overrides);
             inner.discovered = true;
+            inner.needs_engine_resync = false;
             inner.overrides_active = true;
         } else {
+            if needs_resync && !widgets::in_override_pass() {
+                let collected = self.discover_screen_widgets();
+                self.reconcile_engine_children(collected);
+                let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+                inner.engine_hits =
+                    build_engine_hits(&inner.engine_children, &inner.engine_overrides);
+            }
             self.client
                 .screen_state
                 .0
@@ -1175,9 +1285,35 @@ impl crate::game::ClientGame<'_> {
         Some(self)
     }
 
+    /// Whether an engine widget whose original rectangle matches `rect` is non-interactive
+    /// (removed, hidden, disabled, or suppressed by `screen_init_pre` cancellation), regardless
+    /// of whether it has been moved.
+    pub(in crate::game) fn engine_rect_suppressed(&self, rect: [f32; 4]) -> bool {
+        let inner = self.client.screen_state.0.widgets.inner.borrow();
+        if !inner.overrides_active {
+            return false;
+        }
+        if inner.engine_overrides.suppress_all {
+            return true;
+        }
+        inner.engine_hits.iter().any(|hit| {
+            !hit.interactive
+                && hit
+                    .original_rect
+                    .iter()
+                    .zip(rect)
+                    .all(|(a, b)| (a - b).abs() < 0.5)
+        })
+    }
+
     /// Whether an engine widget whose original rectangle matches `rect` is currently blocked
     /// (removed, hidden, disabled, moved away, or suppressed by `screen_init_pre` cancellation).
+    /// During redirected or programmatic (`press`) engine clicks, moved-but-interactive widgets
+    /// remain clickable.
     pub(in crate::game) fn engine_rect_blocked(&self, rect: [f32; 4]) -> bool {
+        if REDIRECTING_ENGINE_CLICK.get() {
+            return self.engine_rect_suppressed(rect);
+        }
         let inner = self.client.screen_state.0.widgets.inner.borrow();
         if !inner.overrides_active {
             return false;
@@ -1307,14 +1443,8 @@ impl crate::game::ClientGame<'_> {
         };
         if should_rediscover {
             let collected = self.discover_screen_widgets();
+            self.reconcile_engine_children(collected);
             let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
-            for seen in collected {
-                if let Some(slot) = inner.engine_children.iter_mut().find(|s| s.key == seen.key) {
-                    slot.default_rect = seen.rect;
-                    slot.default_active = seen.active;
-                    slot.default_tab_order_group = seen.tab_order_group;
-                }
-            }
             inner.engine_hits = build_engine_hits(&inner.engine_children, &inner.engine_overrides);
         }
         self.sync_children_cache();
@@ -1350,21 +1480,16 @@ impl crate::game::ClientGame<'_> {
                 .engine_overrides,
         );
         let (result, output) = widgets::with_widget_overrides(&mut maps, cursor, now, || f(self));
-        let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
-        inner.engine_overrides = maps;
-        inner.engine_hits = output.hits;
-        inner.engine_hovered = output.hovered;
-        if output.pending_tooltip.is_some() {
-            inner.pending_tooltip = output.pending_tooltip;
-        }
-        // Keep engine_children default_rect/default_active synchronized after reposition-only resizes.
-        for seen in output.seen {
-            if let Some(slot) = inner.engine_children.iter_mut().find(|s| s.key == seen.key) {
-                slot.default_rect = seen.rect;
-                slot.default_active = seen.active;
-                slot.default_tab_order_group = seen.tab_order_group;
+        {
+            let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+            inner.engine_overrides = maps;
+            inner.engine_hits = output.hits;
+            inner.engine_hovered = output.hovered;
+            if output.pending_tooltip.is_some() {
+                inner.pending_tooltip = output.pending_tooltip;
             }
         }
+        self.reconcile_engine_children(output.seen);
         result
     }
 
@@ -1425,7 +1550,8 @@ impl crate::game::ClientGame<'_> {
         if !pressed {
             return self.route_screen_button(button, code, false, double_click);
         }
-        match self.resolve_engine_click_cursor(self.client.cursor) {
+        let generation = self.client.screen_state.0.widgets.generation();
+        let res = match self.resolve_engine_click_cursor(self.client.cursor) {
             EngineClickRoute::PassThrough => {
                 self.route_screen_button(button, code, true, double_click)
             }
@@ -1433,11 +1559,21 @@ impl crate::game::ClientGame<'_> {
             EngineClickRoute::Redirect(mapped) => {
                 let prev = self.client.cursor;
                 self.client.cursor = mapped;
-                let res = self.route_screen_button(button, code, true, double_click);
+                let res = self.with_redirecting_engine_click(|game| {
+                    game.route_screen_button(button, code, true, double_click)
+                });
                 self.client.cursor = prev;
                 res
             }
+        };
+        if matches!(res, Ok(true)) && self.client.screen_state.0.widgets.generation() == generation
+        {
+            let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+            if inner.discovered {
+                inner.needs_engine_resync = true;
+            }
         }
+        res
     }
 
     /// Paint any deferred tooltip scheduled by an overridden engine widget or mounted widget
@@ -1673,13 +1809,19 @@ impl crate::game::ClientGame<'_> {
         });
         let order: Vec<ScreenWidgetId> = mount.children.iter().map(|c| c.id).collect();
         let engine_hits = build_engine_hits(&engine_children, &engine_overrides);
+        let engine_id_by_key: HashMap<widgets::EngineWidgetKey, ScreenWidgetId> = engine_children
+            .iter()
+            .map(|slot| (slot.key.clone(), slot.id))
+            .collect();
         let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
         inner.order = order;
         inner.engine_children = engine_children;
+        inner.engine_id_by_key = engine_id_by_key;
         inner.engine_overrides = engine_overrides;
         inner.engine_hits = engine_hits;
         inner.entries = entries.into_iter().map(Some).collect();
         inner.discovered = true;
+        inner.needs_engine_resync = false;
         inner.overrides_active = true;
         drop(inner);
         self.sync_children_cache();
@@ -3587,11 +3729,32 @@ impl ScreenWidgets for crate::game::ClientGame<'_> {
                 let prev_cursor = self.client.cursor;
                 self.client.cursor = (ox + ow * 0.5, oy + oh * 0.5);
                 let handled = self
-                    .route_screen_button(MouseButton::Left, 0, true, false)
+                    .with_redirecting_engine_click(|game| {
+                        game.route_screen_button(MouseButton::Left, 0, true, false)
+                    })
                     .unwrap_or(false);
                 self.settle_title_mode();
                 self.client.cursor = prev_cursor;
                 if self.client.screen_state.0.widgets.generation() == generation {
+                    if handled {
+                        let discovered =
+                            self.client.screen_state.0.widgets.inner.borrow().discovered;
+                        if discovered && !widgets::in_override_pass() {
+                            let collected = self.discover_screen_widgets();
+                            self.reconcile_engine_children(collected);
+                            let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+                            inner.engine_hits =
+                                build_engine_hits(&inner.engine_children, &inner.engine_overrides);
+                        } else if discovered {
+                            self.client
+                                .screen_state
+                                .0
+                                .widgets
+                                .inner
+                                .borrow_mut()
+                                .needs_engine_resync = true;
+                        }
+                    }
                     self.sync_children_cache();
                 }
                 handled

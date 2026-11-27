@@ -1882,25 +1882,15 @@ impl crate::game::ClientGame<'_> {
 
     // ---- drawing ----
 
-    /// The book button, ghost recipe and open book, returning its deferred tooltip.
-    pub(in crate::game::client_side) fn draw_recipe_book(
+    /// The recipe book's toggle `ImageButton` (`AbstractRecipeBookScreen`), shared by vanilla
+    /// and mod-menu books.
+    pub(in crate::game) fn draw_recipe_book_toggle(
         &mut self,
         batch: &mut HudBatch,
-    ) -> Option<Vec<(Text, u32)>> {
-        // No column until this frame draws one: a closed book draws none.
-        self.client.screen_state.0.drawn_book_tabs.set(None);
-        if self.native_screen_shown() {
-            return self.draw_mod_book(batch);
-        }
-        let book_type = self.active_book()?;
-        self.ensure_book();
-        if !self.shift_down_or_ctrl() {
-            self.client.recipe_ui.0.time += self.client.frame_ticks;
-        }
-        let (ox, _) = self.inventory_origin(batch);
-        let cursor = self.client.cursor;
-        let (bx, by) = self.book_button_pos(book_type, ox, batch);
-        let hover = inside(cursor, bx, by, 20.0, 18.0);
+        bx: f32,
+        by: f32,
+    ) {
+        let hover = inside(self.client.cursor, bx, by, 20.0, 18.0);
         let rect = [bx, by, 20.0, 18.0];
         match sunrise_client::widgets::resolve_engine_widget(
             sunrise_client::widgets::EngineWidgetInput {
@@ -1943,6 +1933,26 @@ impl crate::game::ClientGame<'_> {
                 );
             }
         }
+    }
+
+    /// The book button, ghost recipe and open book, returning its deferred tooltip.
+    pub(in crate::game::client_side) fn draw_recipe_book(
+        &mut self,
+        batch: &mut HudBatch,
+    ) -> Option<Vec<(Text, u32)>> {
+        // No column until this frame draws one: a closed book draws none.
+        self.client.screen_state.0.drawn_book_tabs.set(None);
+        if self.native_screen_shown() {
+            return self.draw_mod_book(batch);
+        }
+        let book_type = self.active_book()?;
+        self.ensure_book();
+        if !self.shift_down_or_ctrl() {
+            self.client.recipe_ui.0.time += self.client.frame_ticks;
+        }
+        let (ox, _) = self.inventory_origin(batch);
+        let (bx, by) = self.book_button_pos(book_type, ox, batch);
+        self.draw_recipe_book_toggle(batch, bx, by);
         self.draw_ghost(batch, book_type);
         let tooltip = if self.book_open(book_type) {
             self.refresh_book_view(book_type);
@@ -2213,18 +2223,18 @@ impl crate::game::ClientGame<'_> {
             translate: &translate,
             text_width: &text_width,
         };
-        let calls = screen::draw(&layout);
+        let drawn = screen::draw_grouped(&layout);
         // The tabs as painted are the region `ScreenView::regions` reports (with a subscriber).
         if self.screen_view_listened() {
             self.client
                 .screen_state
                 .0
                 .drawn_book_tabs
-                .set(screen::sprite_bounds(&calls, |_, id| {
+                .set(screen::sprite_bounds(&drawn.calls, |_, id| {
                     screen::is_tab_sprite(id)
                 }));
         }
-        let tooltip = self.paint_book(batch, &calls);
+        let tooltip = self.paint_book_grouped(batch, &drawn);
         // The squeeze animations run down with the frames.
         let frame = self.client.frame_ticks;
         for e in &mut self.client.recipe_ui.0.tab_anim {
@@ -2237,6 +2247,144 @@ impl crate::game::ClientGame<'_> {
         self.client.recipe_ui.0.button_anim.retain(|e| e.1 > 0.0);
         tooltip
     }
+    /// Paints recipe book calls with `ScreenWidgets` collection and override resolution on every
+    /// `RecipeBookComponent` widget (`EditBox`, category tabs, craftable filter, recipe buttons,
+    /// page arrows, and overlay buttons).
+    pub(in crate::game) fn paint_book_grouped(
+        &mut self,
+        batch: &mut HudBatch,
+        drawn: &screen::DrawnBook,
+    ) -> Option<Vec<(sunrise_game_data::text::Text, u32)>> {
+        let collecting = sunrise_client::widgets::is_collecting_widgets();
+        let mut tooltip: Option<Vec<(sunrise_game_data::text::Text, u32)>> = None;
+        let mut cursor_call = 0usize;
+        let mut suppress_item_tooltip = false;
+        for (widget_idx, widget) in drawn.widgets.iter().enumerate() {
+            if !collecting {
+                for call_idx in cursor_call..widget.range.start {
+                    if Some(call_idx) == drawn.item_tooltip_call && suppress_item_tooltip {
+                        continue;
+                    }
+                    self.paint_book_call(batch, &drawn.calls[call_idx], &mut tooltip);
+                }
+            }
+            cursor_call = widget.range.end;
+            let label = widget
+                .label_key
+                .as_deref()
+                .map(|key| sunrise_game_data::text::Text::translate(key, &[]));
+            match sunrise_client::widgets::resolve_engine_widget(
+                sunrise_client::widgets::EngineWidgetInput {
+                    bucket: widget.bucket,
+                    rect: widget.rect,
+                    label: label.as_ref(),
+                    explicit_key: Some(widget.explicit_key.as_str()),
+                    active: widget.active,
+                    hovered: widget.hovered,
+                    focused: widget.focused,
+                    tab_order_group: 0,
+                },
+            ) {
+                sunrise_client::widgets::ResolvedEngineWidget::Skip => {
+                    if drawn.hovered_recipe_widget == Some(widget_idx) {
+                        suppress_item_tooltip = true;
+                    }
+                }
+                sunrise_client::widgets::ResolvedEngineWidget::Unchanged => {
+                    for d in &drawn.calls[widget.range.clone()] {
+                        self.paint_book_call(batch, d, &mut tooltip);
+                    }
+                }
+                sunrise_client::widgets::ResolvedEngineWidget::Draw(props) => {
+                    if drawn.hovered_recipe_widget == Some(widget_idx) && !props.hovered {
+                        suppress_item_tooltip = true;
+                    }
+                    let [ox, oy, ow, oh] = widget.rect;
+                    let [rx, ry, rw, rh] = props.rect;
+                    let (dx, dy) = (rx - ox, ry - oy);
+                    let resized = (rw - ow).abs() > 0.5 || (rh - oh).abs() > 0.5;
+                    let lit = props.override_render_highlighted_sprite.unwrap_or(
+                        if widget.bucket == sunrise_client::widgets::WidgetBucket::Field {
+                            widget.focused && props.active
+                        } else {
+                            props.active && props.hovered
+                        },
+                    );
+                    let v_start = batch.vertices.len();
+                    let mut saw_primary_sprite = false;
+                    let mut emitted_tooltip = false;
+                    for d in &drawn.calls[widget.range.clone()] {
+                        match &d.call {
+                            Call::Tooltip(_) => {
+                                if props.hovered {
+                                    self.paint_book_call(batch, d, &mut tooltip);
+                                    emitted_tooltip = true;
+                                }
+                            }
+                            Call::Sprite { id, x, y, w, h } if !saw_primary_sprite => {
+                                saw_primary_sprite = true;
+                                let eff_id = if widget.highlightable {
+                                    let base = id.strip_suffix("_highlighted").unwrap_or(id);
+                                    if lit {
+                                        format!("{base}_highlighted")
+                                    } else {
+                                        base.to_owned()
+                                    }
+                                } else {
+                                    id.clone()
+                                };
+                                let modified = Drawn {
+                                    call: Call::Sprite {
+                                        id: eff_id,
+                                        x: *x,
+                                        y: *y,
+                                        w: if resized { rw.round() as i32 } else { *w },
+                                        h: if resized { rh.round() as i32 } else { *h },
+                                    },
+                                    pose: d.pose,
+                                };
+                                self.paint_book_call(batch, &modified, &mut tooltip);
+                            }
+                            _ => self.paint_book_call(batch, d, &mut tooltip),
+                        }
+                    }
+                    if props.hovered
+                        && !emitted_tooltip
+                        && tooltip.is_none()
+                        && let Some(key) = widget.tooltip_key.as_deref()
+                    {
+                        tooltip = Some(vec![(
+                            sunrise_game_data::text::Text::literal(
+                                self.translate_with_fallback(key, key),
+                            ),
+                            u32::MAX,
+                        )]);
+                    }
+                    if dx != 0.0 || dy != 0.0 {
+                        for v in &mut batch.vertices[v_start..] {
+                            v.pos[0] += dx;
+                            v.pos[1] += dy;
+                        }
+                    }
+                    if (props.alpha - 1.0).abs() > f32::EPSILON {
+                        for v in &mut batch.vertices[v_start..] {
+                            v.color =
+                                sunrise_client::widgets::scale_abgr_alpha(v.color, props.alpha);
+                        }
+                    }
+                }
+            }
+        }
+        if !collecting {
+            for call_idx in cursor_call..drawn.calls.len() {
+                if Some(call_idx) == drawn.item_tooltip_call && suppress_item_tooltip {
+                    continue;
+                }
+                self.paint_book_call(batch, &drawn.calls[call_idx], &mut tooltip);
+            }
+        }
+        tooltip
+    }
     /// Paints recipe book calls; returns the first tooltip set (vanilla keeps
     /// the first one a frame asks for).
     pub(in crate::game) fn paint_book(
@@ -2246,138 +2394,144 @@ impl crate::game::ClientGame<'_> {
     ) -> Option<Vec<(sunrise_game_data::text::Text, u32)>> {
         let mut tooltip: Option<Vec<(sunrise_game_data::text::Text, u32)>> = None;
         for d in calls {
-            let start = batch.vertices.len();
-            let atlas = &self.client.gui.atlas;
-            match &d.call {
-                Call::Blit {
-                    x, y, w, h, u, v, ..
-                } => {
-                    if let Some(r) = atlas.sprites.get("gui/recipe_book").copied() {
-                        let (w, h) = (*w as f32, *h as f32);
-                        batch.rect_uv(
-                            *x as f32,
-                            *y as f32,
-                            w,
-                            h,
-                            sub_rect(r, [*u, *v, w, h]),
-                            u32::MAX,
-                        );
-                    }
-                }
-                Call::Sprite { id, x, y, w, h } => {
-                    let name = id.as_str();
-                    let native = atlas
-                        .gui_rect(name)
-                        .is_some_and(|r| r.w as i32 == *w && r.h as i32 == *h);
-                    if native {
-                        batch.sprite(atlas, name, *x as f32, *y as f32);
-                    } else {
-                        sunrise_client::ui::nine_slice(
-                            batch,
-                            atlas,
-                            name,
-                            *x as f32,
-                            *y as f32,
-                            *w as f32,
-                            *h as f32,
-                            u32::MAX,
-                        );
-                    }
-                }
-                Call::Fill {
-                    x0,
-                    y0,
-                    x1,
-                    y1,
-                    color,
-                } => batch.fill(
-                    atlas,
-                    *x0 as f32,
-                    *y0 as f32,
-                    (x1 - x0) as f32,
-                    (y1 - y0) as f32,
-                    argb(*color),
-                ),
-                Call::Highlight { x0, y0, x1, y1 } => {
-                    let (a, b) = (*x0.min(x1), *x0.max(x1));
-                    batch.text_highlight(
-                        atlas,
-                        (a as f32, *y0 as f32, (b - a) as f32, (y1 - y0) as f32),
-                        true,
-                    );
-                }
-                Call::Text {
-                    runs,
-                    x,
-                    y,
-                    color,
-                    shadow,
-                } => {
-                    let mut x = *x as f32;
-                    for r in runs {
-                        let style = Style {
-                            color: (r.color >= 0).then_some(r.color as u32),
-                            italic: r.italic.then_some(true),
-                            ..Style::default()
-                        };
-                        let t = Text::styled(r.text.clone(), style);
-                        batch.text_styled(atlas, &t, x, *y as f32, argb(*color), *shadow);
-                        x += atlas.font.width_text(&t);
-                    }
-                }
-                Call::Item { call, stack, x, y } => match call {
-                    ItemCall::Item | ItemCall::Fake => {
-                        self.draw_item_model(batch, stack, *x as f32, *y as f32, 0)
-                    }
-                    ItemCall::Decorations => {
-                        self.draw_item_decorations(batch, stack, *x as f32, *y as f32, None)
-                    }
-                },
-                Call::Tooltip(lines) => {
-                    if tooltip.is_none() {
-                        tooltip = Some(
-                            lines
-                                .iter()
-                                .map(|l| {
-                                    (
-                                        sunrise_game_data::text::Text::literal(
-                                            l.iter().map(|r| r.text.as_str()).collect::<String>(),
-                                        ),
-                                        u32::MAX,
-                                    )
-                                })
-                                .collect(),
-                        );
-                    }
-                }
-                Call::ItemTooltip { stack, more } => {
-                    if tooltip.is_none() {
-                        let mut lines = self.stack_tooltip(stack);
-                        if *more {
-                            lines.push((
-                                sunrise_game_data::text::Text::literal(
-                                    self.translate_with_fallback(
-                                        "gui.recipebook.moreRecipes",
-                                        "Right Click for More",
-                                    ),
-                                ),
-                                u32::MAX,
-                            ));
-                        }
-                        tooltip = Some(lines);
-                    }
-                }
-                Call::Stratum => {}
-            }
-            if d.pose != screen::IDENTITY {
-                let m = d.pose;
-                for v in &mut batch.vertices[start..] {
-                    let [x, y] = v.pos;
-                    v.pos = [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
-                }
-            }
+            self.paint_book_call(batch, d, &mut tooltip);
         }
         tooltip
+    }
+    fn paint_book_call(
+        &mut self,
+        batch: &mut HudBatch,
+        d: &Drawn,
+        tooltip: &mut Option<Vec<(sunrise_game_data::text::Text, u32)>>,
+    ) {
+        let start = batch.vertices.len();
+        let atlas = &self.client.gui.atlas;
+        match &d.call {
+            Call::Blit {
+                x, y, w, h, u, v, ..
+            } => {
+                if let Some(r) = atlas.sprites.get("gui/recipe_book").copied() {
+                    let (w, h) = (*w as f32, *h as f32);
+                    batch.rect_uv(
+                        *x as f32,
+                        *y as f32,
+                        w,
+                        h,
+                        sub_rect(r, [*u, *v, w, h]),
+                        u32::MAX,
+                    );
+                }
+            }
+            Call::Sprite { id, x, y, w, h } => {
+                let name = id.as_str();
+                let native = atlas
+                    .gui_rect(name)
+                    .is_some_and(|r| r.w as i32 == *w && r.h as i32 == *h);
+                if native {
+                    batch.sprite(atlas, name, *x as f32, *y as f32);
+                } else {
+                    sunrise_client::ui::nine_slice(
+                        batch,
+                        atlas,
+                        name,
+                        *x as f32,
+                        *y as f32,
+                        *w as f32,
+                        *h as f32,
+                        u32::MAX,
+                    );
+                }
+            }
+            Call::Fill {
+                x0,
+                y0,
+                x1,
+                y1,
+                color,
+            } => batch.fill(
+                atlas,
+                *x0 as f32,
+                *y0 as f32,
+                (x1 - x0) as f32,
+                (y1 - y0) as f32,
+                argb(*color),
+            ),
+            Call::Highlight { x0, y0, x1, y1 } => {
+                let (a, b) = (*x0.min(x1), *x0.max(x1));
+                batch.text_highlight(
+                    atlas,
+                    (a as f32, *y0 as f32, (b - a) as f32, (y1 - y0) as f32),
+                    true,
+                );
+            }
+            Call::Text {
+                runs,
+                x,
+                y,
+                color,
+                shadow,
+            } => {
+                let mut x = *x as f32;
+                for r in runs {
+                    let style = Style {
+                        color: (r.color >= 0).then_some(r.color as u32),
+                        italic: r.italic.then_some(true),
+                        ..Style::default()
+                    };
+                    let t = Text::styled(r.text.clone(), style);
+                    batch.text_styled(atlas, &t, x, *y as f32, argb(*color), *shadow);
+                    x += atlas.font.width_text(&t);
+                }
+            }
+            Call::Item { call, stack, x, y } => match call {
+                ItemCall::Item | ItemCall::Fake => {
+                    self.draw_item_model(batch, stack, *x as f32, *y as f32, 0)
+                }
+                ItemCall::Decorations => {
+                    self.draw_item_decorations(batch, stack, *x as f32, *y as f32, None)
+                }
+            },
+            Call::Tooltip(lines) => {
+                if tooltip.is_none() {
+                    *tooltip = Some(
+                        lines
+                            .iter()
+                            .map(|l| {
+                                (
+                                    sunrise_game_data::text::Text::literal(
+                                        l.iter().map(|r| r.text.as_str()).collect::<String>(),
+                                    ),
+                                    u32::MAX,
+                                )
+                            })
+                            .collect(),
+                    );
+                }
+            }
+            Call::ItemTooltip { stack, more } => {
+                if tooltip.is_none() {
+                    let mut lines = self.stack_tooltip(stack);
+                    if *more {
+                        lines.push((
+                            sunrise_game_data::text::Text::literal(self.translate_with_fallback(
+                                "gui.recipebook.moreRecipes",
+                                "Right Click for More",
+                            )),
+                            u32::MAX,
+                        ));
+                    }
+                    *tooltip = Some(lines);
+                }
+            }
+            Call::Stratum => {}
+        }
+        if d.pose != screen::IDENTITY {
+            let m = d.pose;
+            for v in &mut batch.vertices[start..] {
+                let [x, y] = v.pos;
+                v.pos = [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
+            }
+        }
     }
 }
 
