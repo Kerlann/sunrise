@@ -40,6 +40,54 @@ const B_UUID: u128 = 343;
 const HIT: [i32; 3] = [3, 64, 4];
 const BESIDE: [i32; 3] = [3, 65, 4];
 
+thread_local! {
+    static ARRIVAL_TICKETS: std::cell::RefCell<Option<Vec<(bool, bool)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+pub(in crate::game) fn record_arrival_ticket(game: &ServerGame<'_>, changed: bool) {
+    ARRIVAL_TICKETS.with_borrow_mut(|observations| {
+        if let Some(observations) = observations {
+            let [x, _, z] = END_SPAWN;
+            let present = game
+                .server
+                .tickets
+                .0
+                .portal_tickets()
+                .iter()
+                .any(|ticket| ticket.chunk == (x >> 4, z >> 4));
+            observations.push((changed, present));
+        }
+    });
+}
+
+fn correction_order(packets: &[C], sequence: i32, expected: [bool; 2], receipt_first: bool) {
+    let receipt = packet_index(packets, |p| receipt(p, sequence) == Some(expected));
+    let hit = packet_index(packets, |p| matches!(p, C::BlockUpdate(p) if p.pos == HIT));
+    let beside = packet_index(
+        packets,
+        |p| matches!(p, C::BlockUpdate(p) if p.pos == BESIDE),
+    );
+    assert!(hit < beside);
+    if receipt_first {
+        assert!(receipt < hit);
+    } else {
+        let warning = packet_index(packets, |p| matches!(p, C::SystemChat(p) if p.overlay));
+        assert!(warning < hit && beside < receipt);
+    }
+}
+
+fn wire_ack(game: &mut ServerGame<'_>, out: &impl Fn() -> Vec<C>, sequence: i32) {
+    let before = out().len();
+    game.tick_lan(true);
+    let after = out();
+    let ack = packet_index(
+        &after,
+        |p| matches!(p, C::BlockChangedAck(p) if p.sequence == sequence),
+    );
+    assert!(before <= ack);
+}
+
 fn add_player(game: &mut ServerGame<'_>, conn: u32) -> impl Fn() -> Vec<C> + use<> {
     let (mut guest, _) = placed_guest(conn, Dim::Overworld, [3.5, 64.0, 6.0]);
     let transport = Transport::capture(Side::Server, record_overhead(&[])).unwrap();
@@ -104,7 +152,14 @@ fn receipt(packet: &C, sequence: i32) -> Option<[bool; 2]> {
 }
 
 fn packet_index(packets: &[C], matches: impl FnMut(&C) -> bool) -> usize {
-    packets.iter().position(matches).expect("expected packet")
+    let mut matches = matches;
+    let mut indexes = packets
+        .iter()
+        .enumerate()
+        .filter(|(_, packet)| matches(packet));
+    let first = indexes.next().expect("expected packet").0;
+    assert!(indexes.next().is_none(), "duplicate matching packet");
+    first
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -112,6 +167,8 @@ enum Travel {
     Allow,
     Refuse,
     Disconnect,
+    DisconnectAtPlatform,
+    ReopenDestination,
 }
 
 struct TravelListener {
@@ -137,7 +194,9 @@ impl Hooks for TravelListener {
         );
         self.events.lock().unwrap().push("travel");
         match self.mode {
-            Travel::Allow => Flow::Continue,
+            Travel::Allow | Travel::DisconnectAtPlatform | Travel::ReopenDestination => {
+                Flow::Continue
+            }
             Travel::Refuse => Flow::Cancel,
             Travel::Disconnect => {
                 assert!(
@@ -166,7 +225,17 @@ impl Hooks for TravelListener {
         let block = level.block_state(host, [x, y - 2, z]).unwrap();
         assert_eq!(block.block().id(host), Some("minecraft:obsidian"));
         assert_eq!(host.players().acting_player().unwrap().uuid(), A_UUID);
+        let cleared = level.block_state(host, [x, y - 1, z]).unwrap();
+        assert_eq!(cleared.block().id(host), Some("minecraft:air"));
         self.events.lock().unwrap().push("platform");
+        if self.mode == Travel::DisconnectAtPlatform {
+            let player = host.players().acting_player().unwrap();
+            assert!(
+                player
+                    .disconnect(host, mod_api::Text::literal("Leaving at the platform"))
+                    .unwrap()
+            );
+        }
     }
 
     fn player_changed_dimension(
@@ -198,7 +267,11 @@ fn spectator_arrival(role: ExecutionRole, mode: Travel) {
             game.server.world_root = scratch.path().to_path_buf();
             if role == ExecutionRole::DedicatedServer {
                 game.options.dedicated = Some(Vec::new());
+                game.common
+                    .native_lifecycle
+                    .begin_open(Some(mod_api::Authority::DedicatedServer));
             }
+            game.native_level_opened(Dim::Overworld);
             open_fixture_hub(game);
             let out = add_player(game, A);
             let watcher = add_player(game, B);
@@ -218,22 +291,26 @@ fn spectator_arrival(role: ExecutionRole, mode: Travel) {
 
             use_on(game, HIT, 7);
             assert_eq!(game.dim, Dim::Overworld);
-            if mode != Travel::Allow {
+            if mode == Travel::Refuse {
                 assert_eq!(*events.lock().unwrap(), ["travel"]);
                 assert!(!game.has_pending_travel(A));
                 assert!(game.server.levels.0.parked_world(Dim::End).is_none());
                 let packets = out();
+                packet_index(&packets, |p| receipt(p, 7) == Some([false, false]));
                 assert!(
                     !packets
                         .iter()
                         .any(|p| matches!(p, C::Respawn(_) | C::PlayerPosition(_)))
                 );
-                if mode == Travel::Refuse {
-                    assert_eq!(
-                        packets.iter().find_map(|p| receipt(p, 7)),
-                        Some([false, false])
-                    );
-                }
+                return;
+            }
+            if mode == Travel::Disconnect {
+                let guest = game.server.lan.as_ref().unwrap().hub.guest(A).unwrap();
+                assert!(guest.disconnect_pending);
+                assert_eq!(guest.dimension, Dim::End.id());
+                assert!(guest.landing && game.has_pending_travel(A));
+                assert_eq!(*events.lock().unwrap(), ["travel", "load"]);
+                assert!(!out().iter().any(|p| receipt(p, 7).is_some()));
                 return;
             }
 
@@ -244,10 +321,27 @@ fn spectator_arrival(role: ExecutionRole, mode: Travel) {
             let before = out();
             let respawn = packet_index(&before, |p| matches!(p, C::Respawn(_)));
             let replied = packet_index(&before, |p| receipt(p, 7) == Some([false, false]));
-            assert!(respawn < replied);
+            let commands = packet_index(&before, |p| matches!(p, C::Commands(_)));
+            let abilities = packet_index(&before, |p| matches!(p, C::PlayerAbilities(_)));
+            let cache = packet_index(&before, |p| matches!(p, C::SetChunkCacheCenter(_)));
+            assert!(
+                respawn < commands && commands < abilities && abilities < cache && cache < replied
+            );
             assert!(!before.iter().any(|p| matches!(p, C::PlayerPosition(_))));
 
             game.enter_level(Dim::End).unwrap();
+            if mode == Travel::ReopenDestination {
+                let index = game.guest_index(A).unwrap();
+                let player =
+                    PlayerId::guest(game.server.lan.as_ref().unwrap().hub.guest(A).unwrap());
+                let level = LevelId::loaded(game, Dim::End).unwrap();
+                let actor = ActorInLevel { player, level };
+                assert!(actor.view_at(game, index).is_some());
+                game.native_level_closed(Dim::End);
+                game.native_level_opened(Dim::End);
+                assert!(actor.view_at(game, index).is_none());
+                assert!(game.has_pending_travel(A));
+            }
             let [x, y, z] = END_SPAWN;
             let (cx, cz) = (x >> 4, z >> 4);
             for dx in -2..=2 {
@@ -261,11 +355,19 @@ fn spectator_arrival(role: ExecutionRole, mode: Travel) {
                 .unwrap();
             game.set_state_named([x, y - 1, z], "minecraft:dirt", &[])
                 .unwrap();
-            game.tick_lan(true);
-            assert_eq!(
-                *events.lock().unwrap(),
-                ["travel", "load", "platform", "changed"]
-            );
+            game.enter_level(Dim::Overworld).unwrap();
+            assert!(game.levels_to_tick().contains(&Dim::End));
+            ARRIVAL_TICKETS.with_borrow_mut(|events| *events = Some(Vec::new()));
+            game.tick_server(true).unwrap();
+            let tickets = ARRIVAL_TICKETS.with_borrow_mut(Option::take).unwrap();
+            assert_eq!(tickets, [(false, false), (true, true)]);
+            game.enter_level(Dim::End).unwrap();
+            let expected: &[_] = if mode == Travel::ReopenDestination {
+                &["travel", "load", "load", "platform", "changed"]
+            } else {
+                &["travel", "load", "platform", "changed"]
+            };
+            assert_eq!(*events.lock().unwrap(), expected);
             assert_eq!(&*game.block_name([x, y - 2, z]), "minecraft:obsidian");
             assert_eq!(&*game.block_name([x, y - 1, z]), "minecraft:air");
             assert!(
@@ -277,6 +379,12 @@ fn spectator_arrival(role: ExecutionRole, mode: Travel) {
                     .any(|ticket| ticket.chunk == (cx, cz))
             );
             assert!(!game.has_pending_travel(A));
+            if mode == Travel::DisconnectAtPlatform {
+                let guest = game.server.lan.as_ref().unwrap().hub.guest(A).unwrap();
+                assert!(guest.disconnect_pending);
+                assert!(!guest.landing);
+                return;
+            }
             let packets = out();
             let position = packet_index(&packets, |p| matches!(p, C::PlayerPosition(_)));
             let ready = packet_index(
@@ -287,7 +395,15 @@ fn spectator_arrival(role: ExecutionRole, mode: Travel) {
                 &packets,
                 |p| matches!(p, C::BlockChangedAck(p) if p.sequence == 7),
             );
-            assert!(replied < ack && ack < position && position < ready);
+            let sound = packet_index(
+                &packets,
+                |p| matches!(p, C::LevelEvent(event) if event.kind == 1032),
+            );
+            assert!(replied < ack && ack < position && position < ready && ready < sound);
+            assert_eq!(
+                packet_index(&packets, |p| matches!(p, C::Respawn(_))),
+                respawn
+            );
             assert!(
                 !watcher()
                     .iter()
@@ -306,7 +422,13 @@ fn spectator_use_packet_opens_and_lands_in_the_end() {
             ExecutionRole::IntegratedServer,
             ExecutionRole::DedicatedServer,
         ] {
-            for mode in [Travel::Allow, Travel::Refuse, Travel::Disconnect] {
+            for mode in [
+                Travel::Allow,
+                Travel::Refuse,
+                Travel::Disconnect,
+                Travel::DisconnectAtPlatform,
+                Travel::ReopenDestination,
+            ] {
                 spectator_arrival(role, mode);
             }
         }
@@ -315,6 +437,7 @@ fn spectator_use_packet_opens_and_lands_in_the_end() {
 
 struct BlockListener {
     suppress: Arc<AtomicBool>,
+    disconnect: Arc<AtomicBool>,
     events: Arc<Mutex<Vec<&'static str>>>,
 }
 
@@ -360,7 +483,7 @@ impl Hooks for BlockListener {
                         (B_UUID, PermissionLevel::Owners)
                     );
                     assert_eq!(command.player(), Some(player));
-                    assert_eq!(command.position, [3.5, 64.0, 6.0]);
+                    assert_eq!(command.position, [4.5, 64.0, 6.5]);
                     assert_eq!(command.dimension, Dim::Overworld.key());
                     assert_eq!(host.players().acting_player(), Some(player));
                     let displaced = mod_api::__private::game::player_ref(
@@ -398,10 +521,12 @@ impl Hooks for BlockListener {
         );
         self.events.lock().unwrap().push("click");
         let b = host.player(B_UUID).unwrap();
-        assert!(
-            b.entity()
-                .run_command(host, "checknested", PermissionLevel::Owners, true)
-        );
+        assert!(b.entity().run_command(
+            host,
+            "execute as @s positioned 4 64 6 run checknested",
+            PermissionLevel::Owners,
+            true
+        ));
         assert_eq!(host.players().acting_player(), Some(actor));
         assert_eq!(actor.level(host).unwrap().dimension(), Dim::Overworld.key());
         assert_eq!(host.level(Dim::Nether.id()), Some(parked));
@@ -418,6 +543,13 @@ impl Hooks for BlockListener {
                 )
                 .unwrap();
         }
+        if self.disconnect.load(Ordering::Relaxed) {
+            assert!(
+                actor
+                    .disconnect(host, mod_api::Text::literal("Leaving during use"))
+                    .unwrap()
+            );
+        }
         Flow::Continue
     }
 }
@@ -430,10 +562,12 @@ fn placement_packet_restores_actor_and_source_and_corrects_prediction() {
             Arc::new(Mutex::new(Vec::new())),
             Arc::new(AtomicBool::new(false)),
         );
+        let disconnect = Arc::new(AtomicBool::new(false));
         let mods = vec![ModEntry::new(
             "observe-placement",
             Box::new(BlockListener {
                 suppress: suppress.clone(),
+                disconnect: disconnect.clone(),
                 events: events.clone(),
             }),
         )]
@@ -447,7 +581,7 @@ fn placement_packet_restores_actor_and_source_and_corrects_prediction() {
                 open_fixture_hub(game);
                 game.register_native_commands();
                 let out = add_player(game, A);
-                let _watcher = add_player(game, B);
+                let watcher = add_player(game, B);
                 game.enter_level(Dim::Nether).unwrap();
                 prepare_entity_ticking_neighborhood(game, ChunkPos::new(0, 0));
                 game.set_state_named(HIT, "minecraft:gold_block", &[])
@@ -465,6 +599,7 @@ fn placement_packet_restores_actor_and_source_and_corrects_prediction() {
                     })
                     .unwrap();
 
+                let first = out().len();
                 use_on(game, [15, 64, 4], 1);
                 assert!(events.lock().unwrap().is_empty());
                 let packets = out();
@@ -472,24 +607,31 @@ fn placement_packet_restores_actor_and_source_and_corrects_prediction() {
                     packets.iter().find_map(|p| receipt(p, 1)),
                     Some([false, false])
                 );
-                assert!(!packets.iter().any(|p| matches!(p, C::BlockUpdate(_))));
+                assert!(
+                    !packets[first..]
+                        .iter()
+                        .any(|p| matches!(p, C::BlockUpdate(_)))
+                );
+                wire_ack(game, &out, 1);
 
                 let size = game.common.border.size();
                 game.common.border.set_size(2.0).unwrap();
+                let start = out().len();
                 use_on(game, HIT, 2);
                 assert!(events.lock().unwrap().is_empty());
-                let packets = out();
-                let correction = packet_index(
-                    &packets,
-                    |p| matches!(p, C::BlockUpdate(p) if p.pos == BESIDE),
-                );
-                assert!(
-                    correction < packet_index(&packets, |p| receipt(p, 2) == Some([false, false]))
-                );
+                correction_order(&out()[start..], 2, [false, false], false);
                 game.common.border.set_size(size).unwrap();
+                wire_ack(game, &out, 2);
 
                 suppress.store(true, Ordering::Relaxed);
+                let start = out().len();
                 use_on(game, HIT, 3);
+                correction_order(&out()[start..], 3, [true, true], true);
+                let guest = game.server.lan.as_ref().unwrap().hub.guest(A).unwrap();
+                assert_eq!(
+                    guest.inventory[0],
+                    Some(ItemStack::new("minecraft:dirt", 2))
+                );
                 assert_eq!(
                     *events.lock().unwrap(),
                     ["click", "nested", "restored", "block"]
@@ -497,7 +639,10 @@ fn placement_packet_restores_actor_and_source_and_corrects_prediction() {
                 assert_eq!(&*game.block_name(BESIDE), "minecraft:air");
                 events.lock().unwrap().clear();
                 suppress.store(false, Ordering::Relaxed);
+                wire_ack(game, &out, 3);
 
+                let start = out().len();
+                let watcher_start = watcher().len();
                 let _recording = Recording::start();
                 let source = game.server_source();
                 game.with_source(source, |game| {
@@ -524,6 +669,20 @@ fn placement_packet_restores_actor_and_source_and_corrects_prediction() {
                     Some(ItemStack::new("minecraft:dirt", 4))
                 );
                 SEEN.with_borrow(|seen| {
+                    let triggers: Vec<_> = seen
+                        .iter()
+                        .filter(|(kind, _)| {
+                            matches!(
+                                kind.as_str(),
+                                "minecraft:placed_block" | "minecraft:any_block_use"
+                            )
+                        })
+                        .map(|(kind, _)| kind.as_str())
+                        .collect();
+                    assert_eq!(
+                        triggers,
+                        ["minecraft:placed_block", "minecraft:any_block_use"]
+                    );
                     let outer = seen
                         .iter()
                         .filter(|(kind, _)| kind == "minecraft:any_block_use")
@@ -533,25 +692,30 @@ fn placement_packet_restores_actor_and_source_and_corrects_prediction() {
                 });
 
                 let before = out();
-                let replied = packet_index(&before, |p| receipt(p, 4) == Some([true, false]));
+                correction_order(&before[start..], 4, [true, false], true);
                 let dirt = game
                     .pack
                     .assets
                     .registry
                     .default_state("minecraft:dirt")
                     .unwrap();
-                let correction = packet_index(
-                    &before,
+                packet_index(
+                    &before[start..],
                     |p| matches!(p, C::BlockUpdate(p) if p.pos == BESIDE && p.state == dirt.0 as i32),
                 );
-                assert!(replied < correction);
-                game.tick_lan(true);
-                let after = out();
-                let ack = packet_index(
-                    &after,
-                    |p| matches!(p, C::BlockChangedAck(p) if p.sequence == 4),
+                assert!(
+                    !watcher()[watcher_start..]
+                        .iter()
+                        .any(|p| receipt(p, 4).is_some()
+                            || matches!(p, C::BlockUpdate(p) if p.pos == HIT || p.pos == BESIDE))
                 );
-                assert!(correction < ack);
+                wire_ack(game, &out, 4);
+                assert!(
+                    !watcher()
+                        .iter()
+                        .any(|p| (1..=4).any(|sequence| receipt(p, sequence).is_some())
+                            || matches!(p, C::BlockChangedAck(_)))
+                );
 
                 game.as_guest(A, |game| {
                     game.as_guest(B, |game| {
@@ -562,6 +726,27 @@ fn placement_packet_restores_actor_and_source_and_corrects_prediction() {
                     assert_eq!(game.server.lan_acting, Some(A));
                 })
                 .unwrap();
+
+                game.set_state_named(BESIDE, "minecraft:air", &[]).unwrap();
+                let index = game.guest_index(A).unwrap();
+                let guest = game.server.lan.as_ref().unwrap().hub.guest(A).unwrap();
+                let actor = PlayerId::guest(guest);
+                assert!(actor.view_at(game, index).is_some());
+                disconnect.store(true, Ordering::Relaxed);
+                use_on(game, HIT, 5);
+                assert!(actor.view_at(game, index).is_none());
+                assert_eq!(&*game.block_name(BESIDE), "minecraft:dirt");
+
+                let old = LevelId::loaded(game, Dim::Overworld).unwrap();
+                game.server.levels.0.clear();
+                assert!(old.view(game).is_none());
+                let reset = LevelId::loaded(game, Dim::Overworld).unwrap();
+                game.native_level_closed(Dim::Overworld);
+                assert!(reset.view(game).is_none());
+                assert!(LevelId::loaded(game, Dim::Overworld).is_none());
+                game.native_level_opened(Dim::Overworld);
+                assert!(reset.view(game).is_none());
+                assert!(LevelId::loaded(game, Dim::Overworld).is_some());
             });
         });
     });
