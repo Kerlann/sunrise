@@ -38,10 +38,9 @@ pub trait Hooks {
     /// it also fires with no text box focused.
     #[hook(
         target = "sunrise_client_gameplay::game::native_hooks::base::ClientGame<'_>::native_screen_char_typed_pre",
-        receiver = "read",
         dispatch = "flat",
         side = "client",
-        version = 2,
+        version = 3,
         contract = "cancel",
         out = "canceled",
         neoforge = "ScreenEvent.CharacterTyped.Pre",

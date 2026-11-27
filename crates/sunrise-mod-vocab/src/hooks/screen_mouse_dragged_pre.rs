@@ -8,10 +8,9 @@ pub trait Hooks {
     /// dialogs, confirmation prompts, books, lecterns and sign editors.
     #[hook(
         target = "sunrise_client_gameplay::game::native_hooks::base::ClientGame<'_>::native_screen_mouse_dragged_pre",
-        receiver = "read",
         dispatch = "flat",
         side = "client",
-        version = 2,
+        version = 3,
         contract = "cancel",
         out = "canceled",
         neoforge = "ScreenEvent.MouseDragged.Pre",

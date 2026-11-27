@@ -1225,7 +1225,7 @@ impl crate::game::ClientGame<'_> {
     }
     /// `ScreenEvent.CharacterTyped.Post` for a character that neither mounted
     /// widgets nor any text box took, on the captured receiving screen.
-    pub(crate) fn screen_chars_post_on(&self, receiver: Option<&ObservedScreen>, c: char) {
+    pub(crate) fn screen_chars_post_on(&mut self, receiver: Option<&ObservedScreen>, c: char) {
         if !mod_api::__private::listened(mod_api::HookId::ScreenCharTypedPost) {
             return;
         }
@@ -1349,7 +1349,7 @@ impl crate::game::ClientGame<'_> {
     /// game's own key handling, which a cancel then skips. False with no
     /// subscriber, no receiving screen, or a key with no vanilla name.
     pub(crate) fn screen_key_post_on(
-        &self,
+        &mut self,
         receiver: Option<&ObservedScreen>,
         key: KeyCode,
         pressed: bool,
@@ -1381,7 +1381,7 @@ impl crate::game::ClientGame<'_> {
     /// control socket's `key` command both ask before a screen acts on a key.
     /// False when no receiving screen is open, and for a key with no vanilla name.
     pub(crate) fn screen_key_pressed_on(
-        &self,
+        &mut self,
         receiver: Option<&ObservedScreen>,
         key: KeyCode,
         repeat: bool,
@@ -1400,7 +1400,7 @@ impl crate::game::ClientGame<'_> {
         canceled
     }
     pub(crate) fn screen_key_released_on(
-        &self,
+        &mut self,
         receiver: Option<&ObservedScreen>,
         key: KeyCode,
     ) -> bool {
@@ -1416,7 +1416,7 @@ impl crate::game::ClientGame<'_> {
         );
         canceled
     }
-    pub(in crate::game) fn screen_mouse_dragged(&self, delta: [f32; 2]) -> ScreenMousePre {
+    pub(in crate::game) fn screen_mouse_dragged(&mut self, delta: [f32; 2]) -> ScreenMousePre {
         if self.pad_synthetic_input() || delta == [0.0; 2] {
             return ScreenMousePre::NotFired;
         }
@@ -1973,7 +1973,7 @@ impl crate::game::ClientGame<'_> {
     }
     /// Button Post sees the original receiver and its answer; return the final handled bit.
     pub(in crate::game) fn screen_button_post(
-        &self,
+        &mut self,
         receiver: &ObservedScreen,
         button: i32,
         pressed: bool,
@@ -2004,7 +2004,7 @@ impl crate::game::ClientGame<'_> {
         result.or(handled)
     }
     /// Unhandled scroll/drag notices go to the receiver captured before handling.
-    pub(in crate::game) fn screen_mouse_post(&self, post: ScreenMousePost) {
+    pub(in crate::game) fn screen_mouse_post(&mut self, post: ScreenMousePost) {
         if post.handled {
             return;
         }

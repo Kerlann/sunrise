@@ -1,11 +1,12 @@
-//! Mounted widgets for vanilla and mod screens (`ScreenEvent.Init.Post`).
+//! Mounted and engine screen widgets (`ScreenEvent.Init.Pre`, `ScreenEvent.Init.Post`, and
+//! `ClientHost::screen_widgets`).
 //!
-//! Mods add buttons ([`Button`]), single-line text fields ([`TextField`]), and custom widgets
-//! ([`ScreenWidget`]) through [`ScreenWidgets`] during `Hooks::screen_init_post`
-//! (`Screen.addRenderableWidget`), rather than drawing widgets manually or forwarding screen input
-//! hooks by hand. The engine owns drawing, hover, focus, Tab traversal, controller navigation,
-//! narration, and mouse/keyboard dispatch for mounted widgets on every screen, clearing and
-//! rebuilding them when the screen initializes or rebuilds its children, not on a layout-only resize.
+//! Mods inspect, mutate, hide, disable, move, remove, press, and replace widgets across every
+//! engine-drawn and mod screen through [`ScreenWidgets`], and mount new buttons ([`Button`]),
+//! single-line text fields ([`TextField`]), and custom widgets ([`ScreenWidget`])
+//! (`Screen.addRenderableWidget`). The engine owns drawing, hover, focus, Tab traversal,
+//! narration, and mouse/keyboard dispatch for mounted widgets and applies mod overrides on top of
+//! engine widgets through the single per-screen override table.
 //!
 //! Built-in buttons and text fields match vanilla's `Button` (`Button.Builder` / `Button.OnPress`)
 //! and `EditBox`, sharing the same editing core ([`TextEdit`]) as the game's own fields.
@@ -26,8 +27,9 @@
 //! assert!(done.state().active);
 //! ```
 
-use crate::{ClientHost, DrawContext, ItemStack, Text};
+use crate::{ClientHost, DrawContext, Identifier, ItemStack, Text, TooltipComponent};
 use std::fmt;
+use std::time::Duration;
 
 #[path = "widgets_text_edit.rs"]
 mod text_edit;
@@ -63,22 +65,71 @@ impl ButtonSprites {
     }
 }
 
-/// Identifier of a child on the current screen during `Hooks::screen_init_post`.
+/// A tooltip attached to a screen widget (`net.minecraft.client.gui.components.Tooltip`).
+///
+/// Shown when the widget is hovered or keyboard-focused after its `tooltip_delay` elapses,
+/// wrapped at 170 GUI pixels (`Tooltip.MAX_WIDTH`), and reported as the widget's narration hint.
+#[derive(Clone, Debug, PartialEq)]
+// no wire: may carry an in-process custom TooltipComponent payload.
+#[non_exhaustive]
+pub struct WidgetTooltip {
+    /// The tooltip text (`Tooltip.create(Component)`).
+    pub message: Text,
+    /// Optional custom narration text (`Tooltip.create(Component, Component)`); defaults to `message`.
+    pub narration: Option<Text>,
+    /// Optional tooltip component shown beneath the text (`Tooltip.component()`).
+    pub component: Option<TooltipComponent>,
+    /// Optional tooltip background/frame style id (`Tooltip.style()`).
+    pub style: Option<Identifier>,
+}
+
+impl WidgetTooltip {
+    /// A tooltip showing `message` and narrating the same text.
+    pub fn new(message: impl Into<Text>) -> Self {
+        Self {
+            message: message.into(),
+            narration: None,
+            component: None,
+            style: None,
+        }
+    }
+
+    /// Set a custom narration hint distinct from the visible tooltip text.
+    pub fn narration(mut self, narration: impl Into<Text>) -> Self {
+        self.narration = Some(narration.into());
+        self
+    }
+
+    /// Attach a [`TooltipComponent`] alongside the tooltip text.
+    pub fn component(mut self, component: TooltipComponent) -> Self {
+        self.component = Some(component);
+        self
+    }
+
+    /// Select a custom tooltip texture style (`Tooltip.style()`).
+    pub fn style(mut self, style: Identifier) -> Self {
+        self.style = Some(style);
+        self
+    }
+}
+
+/// Identifier of a child on the current screen during `Hooks::screen_init_pre`,
+/// `Hooks::screen_init_post`, and live [`ClientHost::screen_widgets`] access.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-// no wire: screen-local widget handle issued by the engine during `screen_init_post`, never serialized.
+// no wire: screen-local widget handle issued by the engine, never serialized.
 // exhaustive: opaque per-screen handle whose inner value is private; mods only compare and pass it back.
 pub struct ScreenWidgetId(u64);
 
 impl ScreenWidgetId {
     /// Build a widget identifier from an engine-assigned raw id.
-    // hidden: only the engine assigns mounted widget identifiers during `screen_init_post`.
+    // hidden: only the engine assigns screen widget identifiers.
     #[doc(hidden)]
     pub const fn from_raw(raw: u64) -> Self {
         Self(raw)
     }
 
     /// Read the engine-assigned raw id.
-    // hidden: only the engine maps widget identifiers back to its mounted widget table.
+    // hidden: only the engine maps widget identifiers back to its screen widget tables.
     #[doc(hidden)]
     pub const fn raw(self) -> u64 {
         self.0
@@ -93,58 +144,96 @@ pub struct ButtonState {
     /// Where it is, `[x, y, width, height]` in GUI pixels (vanilla's are 20 high).
     /// A press callback's non-finite rectangle is ignored, retaining the previous bounds.
     pub rect: [f32; 4],
-    /// Its label, centred and scrolled when it does not fit.
-    pub label: Text,
+    /// Its message (`AbstractWidget.getMessage`), centred and scrolled when it does not fit.
+    pub message: Text,
     /// An inactive button is greyed out, takes no press and is skipped by Tab.
     pub active: bool,
     /// A hidden button is neither drawn nor interactive.
     pub visible: bool,
     /// Custom art; `None` draws vanilla sprites with no label offset.
     pub sprites: Option<ButtonSprites>,
+    /// Opacity multiplier in `0.0..=1.0` (`AbstractWidget.alpha`).
+    pub alpha: f32,
+    /// Optional ARGB override for the label text colour (NeoForge `AbstractWidget.labelTextColor`).
+    pub label_text_color: Option<u32>,
+    /// Optional tooltip displayed on hover or keyboard focus (`AbstractWidget.setTooltip`).
+    pub tooltip: Option<WidgetTooltip>,
+    /// Delay before `tooltip` opens (`AbstractWidget.setTooltipDelay`).
+    pub tooltip_delay: Duration,
+    /// Tab traversal group (`AbstractWidget.getTabOrderGroup`); lower values come first.
+    pub tab_order_group: i32,
+    /// Override for drawing the highlighted button sprite (`AbstractButton.setOverrideRenderHighlightedSprite`).
+    pub override_render_highlighted_sprite: Option<bool>,
 }
 
 /// Press callback for a mounted [`Button`] (`Button.OnPress`).
 // no wire: in-process callback invoked by the client when a mounted button is pressed.
 pub type ButtonPress = dyn FnMut(&mut ButtonState, &mut dyn ClientHost) + Send + 'static;
 
-/// A push button (`Button`) mounted on a screen during `Hooks::screen_init_post`.
+/// A push button (`Button`) mounted on a screen through [`ScreenWidgets::add_button`].
 // no wire: owns an in-process press callback (`ButtonPress`).
 // exhaustive: its fields are private; mods build it with `Button::new` or `Button::inactive`.
 pub struct Button {
     state: ButtonState,
     on_press: Option<Box<ButtonPress>>,
+    narration: Option<Text>,
 }
 
 impl Button {
+    /// `Button.SMALL_WIDTH` (120 GUI pixels).
+    pub const SMALL_WIDTH: f32 = 120.0;
+    /// `Button.DEFAULT_WIDTH` (150 GUI pixels).
+    pub const DEFAULT_WIDTH: f32 = 150.0;
+    /// `Button.BIG_WIDTH` (200 GUI pixels).
+    pub const BIG_WIDTH: f32 = 200.0;
+    /// `Button.DEFAULT_HEIGHT` (20 GUI pixels).
+    pub const DEFAULT_HEIGHT: f32 = 20.0;
+    /// `Button.DEFAULT_SPACING` (8 GUI pixels).
+    pub const DEFAULT_SPACING: f32 = 8.0;
+
     /// An active, visible button with vanilla art and a press callback (`Button.Builder`).
     pub fn new(
         rect: [f32; 4],
-        label: impl Into<Text>,
+        message: impl Into<Text>,
         on_press: impl FnMut(&mut ButtonState, &mut dyn ClientHost) + Send + 'static,
     ) -> Self {
         Self {
             state: ButtonState {
                 rect,
-                label: label.into(),
+                message: message.into(),
                 active: true,
                 visible: true,
                 sprites: None,
+                alpha: 1.0,
+                label_text_color: None,
+                tooltip: None,
+                tooltip_delay: Duration::ZERO,
+                tab_order_group: 0,
+                override_render_highlighted_sprite: None,
             },
             on_press: Some(Box::new(on_press)),
+            narration: None,
         }
     }
 
     /// An inactive, visible button with no press callback and vanilla art.
-    pub fn inactive(rect: [f32; 4], label: impl Into<Text>) -> Self {
+    pub fn inactive(rect: [f32; 4], message: impl Into<Text>) -> Self {
         Self {
             state: ButtonState {
                 rect,
-                label: label.into(),
+                message: message.into(),
                 active: false,
                 visible: true,
                 sprites: None,
+                alpha: 1.0,
+                label_text_color: None,
+                tooltip: None,
+                tooltip_delay: Duration::ZERO,
+                tab_order_group: 0,
+                override_render_highlighted_sprite: None,
             },
             on_press: None,
+            narration: None,
         }
     }
 
@@ -166,16 +255,60 @@ impl Button {
         self
     }
 
+    /// Set the opacity multiplier (`AbstractWidget.setAlpha`).
+    pub fn alpha(mut self, alpha: f32) -> Self {
+        if alpha.is_finite() {
+            self.state.alpha = alpha;
+        }
+        self
+    }
+
+    /// Set a custom ARGB label text colour (NeoForge `AbstractWidget.setLabelTextColor`).
+    pub fn label_text_color(mut self, argb: u32) -> Self {
+        self.state.label_text_color = Some(argb);
+        self
+    }
+
+    /// Attach a tooltip shown on hover or keyboard focus (`Button.Builder.tooltip`).
+    pub fn tooltip(mut self, tooltip: WidgetTooltip) -> Self {
+        self.state.tooltip = Some(tooltip);
+        self
+    }
+
+    /// Set the hover/focus delay before the tooltip opens (`AbstractWidget.setTooltipDelay`).
+    pub fn tooltip_delay(mut self, delay: Duration) -> Self {
+        self.state.tooltip_delay = delay;
+        self
+    }
+
+    /// Set the Tab traversal order group (`AbstractWidget.setTabOrderGroup`).
+    pub fn tab_order_group(mut self, group: i32) -> Self {
+        self.state.tab_order_group = group;
+        self
+    }
+
+    /// Force or suppress the highlighted button sprite (`AbstractButton.setOverrideRenderHighlightedSprite`).
+    pub fn override_render_highlighted_sprite(mut self, highlighted: bool) -> Self {
+        self.state.override_render_highlighted_sprite = Some(highlighted);
+        self
+    }
+
+    /// Override the narration message (`Button.Builder.createNarration`).
+    pub fn narration(mut self, narration: impl Into<Text>) -> Self {
+        self.narration = Some(narration.into());
+        self
+    }
+
     /// Inspect the button's configured state before mounting it.
     pub fn state(&self) -> &ButtonState {
         &self.state
     }
 
-    /// Unpack the button into its state and press callback for the engine's widget store.
+    /// Unpack the button into its state, press callback, and custom narration for the engine's widget store.
     // hidden: only the engine's screen widget store unpacks a `Button` when mounted.
     #[doc(hidden)]
-    pub fn into_parts(self) -> (ButtonState, Option<Box<ButtonPress>>) {
-        (self.state, self.on_press)
+    pub fn into_parts(self) -> (ButtonState, Option<Box<ButtonPress>>, Option<Text>) {
+        (self.state, self.on_press, self.narration)
     }
 }
 
@@ -184,6 +317,7 @@ impl fmt::Debug for Button {
         f.debug_struct("Button")
             .field("state", &self.state)
             .field("has_on_press", &self.on_press.is_some())
+            .field("narration", &self.narration)
             .finish()
     }
 }
@@ -214,15 +348,21 @@ pub struct TextFieldParts {
     pub visible: bool,
     /// Whether the vanilla `widget/text_field` frame is drawn (`EditBox.setBordered`).
     pub bordered: bool,
+    /// Opacity multiplier in `0.0..=1.0` (`AbstractWidget.alpha`).
+    pub alpha: f32,
+    /// Optional tooltip displayed on hover or keyboard focus (`AbstractWidget.setTooltip`).
+    pub tooltip: Option<WidgetTooltip>,
+    /// Delay before `tooltip` opens (`AbstractWidget.setTooltipDelay`).
+    pub tooltip_delay: Duration,
+    /// Tab traversal order group (`AbstractWidget.getTabOrderGroup`).
+    pub tab_order_group: i32,
     /// Called whenever the field's text changes (`EditBox.setResponder`).
     pub on_change: Option<Box<TextFieldCallback>>,
     /// Called when Enter is pressed while the field is focused.
     pub on_submit: Option<Box<TextFieldCallback>>,
 }
 
-/// A single-line text field (`EditBox`) mounted on a screen during `Hooks::screen_init_post`.
-/// The controller keyboard edits the focused field without forwarding completion
-/// or suggestion/history navigation to a native Chat editor behind it.
+/// A single-line text field (`EditBox`) mounted on a screen through [`ScreenWidgets::add_text_field`].
 // no wire: owns in-process change and submit callbacks (`TextFieldCallback`).
 // exhaustive: its fields are private; mods build it with `TextField::new`.
 pub struct TextField {
@@ -234,6 +374,10 @@ pub struct TextField {
     active: bool,
     visible: bool,
     bordered: bool,
+    alpha: f32,
+    tooltip: Option<WidgetTooltip>,
+    tooltip_delay: Duration,
+    tab_order_group: i32,
     on_change: Option<Box<TextFieldCallback>>,
     on_submit: Option<Box<TextFieldCallback>>,
 }
@@ -251,6 +395,10 @@ impl TextField {
             active: true,
             visible: true,
             bordered: true,
+            alpha: 1.0,
+            tooltip: None,
+            tooltip_delay: Duration::ZERO,
+            tab_order_group: 0,
             on_change: None,
             on_submit: None,
         }
@@ -292,6 +440,32 @@ impl TextField {
         self
     }
 
+    /// Set the opacity multiplier (`AbstractWidget.setAlpha`).
+    pub fn alpha(mut self, alpha: f32) -> Self {
+        if alpha.is_finite() {
+            self.alpha = alpha;
+        }
+        self
+    }
+
+    /// Attach a tooltip shown on hover or keyboard focus (`AbstractWidget.setTooltip`).
+    pub fn tooltip(mut self, tooltip: WidgetTooltip) -> Self {
+        self.tooltip = Some(tooltip);
+        self
+    }
+
+    /// Set the hover/focus delay before the tooltip opens (`AbstractWidget.setTooltipDelay`).
+    pub fn tooltip_delay(mut self, delay: Duration) -> Self {
+        self.tooltip_delay = delay;
+        self
+    }
+
+    /// Set the Tab traversal order group (`AbstractWidget.setTabOrderGroup`).
+    pub fn tab_order_group(mut self, group: i32) -> Self {
+        self.tab_order_group = group;
+        self
+    }
+
     /// Install a callback invoked whenever the field's text changes (`EditBox.setResponder`).
     pub fn on_change(
         mut self,
@@ -323,6 +497,10 @@ impl TextField {
             active: self.active,
             visible: self.visible,
             bordered: self.bordered,
+            alpha: self.alpha,
+            tooltip: self.tooltip,
+            tooltip_delay: self.tooltip_delay,
+            tab_order_group: self.tab_order_group,
             on_change: self.on_change,
             on_submit: self.on_submit,
         }
@@ -340,6 +518,10 @@ impl fmt::Debug for TextField {
             .field("active", &self.active)
             .field("visible", &self.visible)
             .field("bordered", &self.bordered)
+            .field("alpha", &self.alpha)
+            .field("tooltip", &self.tooltip)
+            .field("tooltip_delay", &self.tooltip_delay)
+            .field("tab_order_group", &self.tab_order_group)
             .field("has_on_change", &self.on_change.is_some())
             .field("has_on_submit", &self.on_submit.is_some())
             .finish()
@@ -446,7 +628,7 @@ impl std::fmt::Debug for ContextMenuEntry {
     }
 }
 
-/// A custom widget mounted on a screen during `Hooks::screen_init_post`
+/// A custom widget mounted on a screen through [`ScreenWidgets::add_widget`]
 /// (`Renderable` + `GuiEventListener`).
 ///
 /// The engine owns focus, hover, Tab traversal, drawing order, and input dispatch for mounted
@@ -479,6 +661,11 @@ pub trait ScreenWidget: Send + 'static {
         partial_tick: f32,
     ) {
         let _ = (host, draw, mouse, hovered, focused, partial_tick);
+    }
+
+    /// Observe pointer movement over the screen (`GuiEventListener.mouseMoved`).
+    fn mouse_moved(&mut self, host: &mut dyn ClientHost, mouse: [f32; 2]) {
+        let _ = (host, mouse);
     }
 
     /// Handle a mouse button press (`GuiEventListener.mouseClicked`).
@@ -576,6 +763,22 @@ pub trait ScreenWidget: Send + 'static {
         false
     }
 
+    /// Whether clicking this widget should give it keyboard focus
+    /// (`GuiEventListener.shouldTakeFocusAfterInteraction`). Defaults to `true`.
+    fn should_take_focus_after_interaction(&self) -> bool {
+        true
+    }
+
+    /// Tab traversal order group (`TabOrderedElement.getTabOrderGroup`). Defaults to `0`.
+    fn tab_order_group(&self) -> i32 {
+        0
+    }
+
+    /// Optional tooltip displayed while hovered or keyboard-focused. Defaults to `None`.
+    fn tooltip(&self) -> Option<WidgetTooltip> {
+        None
+    }
+
     /// Called when this widget gains or loses keyboard focus (`GuiEventListener.setFocused`).
     fn set_focused(&mut self, focused: bool) {
         let _ = focused;
@@ -587,36 +790,103 @@ pub trait ScreenWidget: Send + 'static {
 // no wire: live screen-local child snapshot containing an opaque ScreenWidgetId.
 #[non_exhaustive]
 pub struct ScreenChild {
-    /// The screen-local handle used to remove the child.
+    /// The screen-local handle used to inspect, mutate, press, or remove the child.
     pub id: ScreenWidgetId,
-    /// `[x, y, width, height]` in GUI pixels at registration.
+    /// `[x, y, width, height]` in GUI pixels, reflecting any live bounds override.
     pub rect: [f32; 4],
-    /// The child's label, if it supplies one.
-    pub label: Option<Text>,
+    /// The child's logical message (`AbstractWidget.getMessage`), or `None` when it has none.
+    pub message: Option<Text>,
+    /// Whether the child accepts input (`AbstractWidget.active`).
+    pub active: bool,
+    /// Whether the child is drawn and interactive (`AbstractWidget.visible`).
+    pub visible: bool,
+    /// Whether the pointer hovered this child on its last drawn frame (`AbstractWidget.isHovered`).
+    pub hovered: bool,
+    /// Opacity multiplier in `0.0..=1.0` (`AbstractWidget.getAlpha`).
+    pub alpha: f32,
+    /// Optional ARGB label text colour override (NeoForge `AbstractWidget.getLabelTextColor`).
+    pub label_text_color: Option<u32>,
+    /// Tab traversal order group (`TabOrderedElement.getTabOrderGroup`).
+    pub tab_order_group: i32,
+    /// Highlighted sprite override (`AbstractButton.setOverrideRenderHighlightedSprite`).
+    pub override_render_highlighted_sprite: Option<bool>,
 }
 
 impl ScreenChild {
-    /// Build the value exposed by the engine's registrar.
+    /// Build the value exposed by the engine's registrar with default widget state.
     // hidden: only the engine issues ScreenWidgetId handles for initialized children.
     #[doc(hidden)]
-    pub fn new(id: ScreenWidgetId, rect: [f32; 4], label: Option<Text>) -> Self {
-        Self { id, rect, label }
+    pub fn new(id: ScreenWidgetId, rect: [f32; 4], message: Option<Text>) -> Self {
+        Self {
+            id,
+            rect,
+            message,
+            active: true,
+            visible: true,
+            hovered: false,
+            alpha: 1.0,
+            label_text_color: None,
+            tab_order_group: 0,
+            override_render_highlighted_sprite: None,
+        }
+    }
+
+    /// Whether the child is both visible and active (`AbstractWidget.isActive`).
+    pub fn is_active(&self) -> bool {
+        self.visible && self.active
+    }
+
+    /// Right edge `x + width` in GUI pixels (`AbstractWidget.getRight`).
+    pub fn right(&self) -> f32 {
+        self.rect[0] + self.rect[2]
+    }
+
+    /// Bottom edge `y + height` in GUI pixels (`AbstractWidget.getBottom`).
+    pub fn bottom(&self) -> f32 {
+        self.rect[1] + self.rect[3]
+    }
+
+    /// Whether `mouse` lies inside this child while it is active and visible
+    /// (`AbstractWidget.isMouseOver`).
+    pub fn is_mouse_over(&self, mouse: [f32; 2]) -> bool {
+        let [mx, my] = mouse;
+        let [x, y, w, h] = self.rect;
+        self.is_active() && w > 0.0 && h > 0.0 && mx >= x && my >= y && mx < x + w && my < y + h
+    }
+
+    /// Effective ARGB colour used for the label text: `label_text_color` when set, otherwise
+    /// white (`0xFFFF_FFFF`) when active or light grey (`0xFFA0_A0A0`) when inactive.
+    pub fn effective_label_text_color(&self) -> u32 {
+        self.label_text_color.unwrap_or(if self.active {
+            0xFFFF_FFFF
+        } else {
+            0xFFA0_A0A0
+        })
     }
 }
 
-/// Screen-scoped widget registrar passed to `Hooks::screen_init_post` (`ScreenEvent.Init.Post`).
+/// Screen-scoped widget collection passed to `Hooks::screen_init_pre`, `Hooks::screen_init_post`,
+/// and [`ClientHost::screen_widgets`].
 ///
-/// Widgets added here live as long as the current screen stays open and are cleared and rebuilt
-/// whenever the screen re-initializes (for example on a resize that rebuilds children).
+/// Covers both the game's own controls on every engine-drawn screen and widgets mounted by mods.
+/// Edits last for the current screen instance and clear when the screen closes, rebuilds, switches
+/// sub-page, or performs a rebuilding resize (a layout-only `repositionElements` resize clears
+/// only bounds overrides on the screen's own widgets and preserves other overrides and mounted mod
+/// widgets).
+///
 /// Mounting a widget with non-finite bounds returns an ID that is not present in the screen.
-// no wire: borrowed registrar scoped to a single `screen_init_post` dispatch.
+/// Calling any mutator with a stale or unknown `ScreenWidgetId` returns `false` without panicking.
+// no wire: borrowed screen widget surface scoped to a hook or live host borrow.
 pub trait ScreenWidgets {
-    /// Registered children in initialization order (`ScreenEvent.Init.getListenersList`).
-    /// Includes earlier listeners' accepted edits and this listener's staged edits. The pause
-    /// screen (`PauseScreen.init`) and the title screen (`TitleScreen.init`, with the engine's
-    /// own buttons after Minecraft Realms and its bottom notice last) list their own controls
-    /// first, each labelled with its translation key.
+    /// Registered children in initialization order (`ScreenEvent.Init.getListenersList` /
+    /// `Screen.children`). Includes the screen's own widgets (unless suppressed by cancelling
+    /// `screen_init_pre`) and mounted mod widgets.
     fn children(&self) -> &[ScreenChild];
+
+    /// Look up one listed child by its identifier.
+    fn child(&self, id: ScreenWidgetId) -> Option<&ScreenChild> {
+        self.children().iter().find(|child| child.id == id)
+    }
 
     /// Mount a vanilla-style push button on the screen (`Screen.addRenderableWidget`).
     fn add_button(&mut self, button: Button) -> ScreenWidgetId;
@@ -629,13 +899,89 @@ pub trait ScreenWidgets {
 
     /// Ask the screen to focus `id` when initialization completes (`Screen.setInitialFocus`).
     ///
-    /// Returns `true` when `id` names a widget this listener mounted that can take focus.
+    /// Returns `true` when `id` names a mounted widget that can take focus.
     fn set_initial_focus(&mut self, id: ScreenWidgetId) -> bool;
 
-    /// Remove a listed child (`ScreenEvent.Init.removeListener`), including one registered by
-    /// the game or mounted by an earlier listener. Returns `true` if the child was present.
-    /// This listener's removals take effect only if it completes normally.
+    /// Remove a listed child (`ScreenEvent.Init.removeListener` / `Screen.removeWidget`),
+    /// including any widget drawn by the game or mounted by a mod. Returns `true` if the child
+    /// was present.
     fn remove(&mut self, id: ScreenWidgetId) -> bool;
+
+    /// Remove every listed child from the screen (`Screen.clearWidgets`).
+    fn clear(&mut self);
+
+    /// Move and resize `id` to `rect` (`[x, y, width, height]` in GUI pixels;
+    /// `AbstractWidget.setRectangle` / `setPosition` / `setSize`).
+    ///
+    /// Rejects non-finite coordinates or negative dimensions (`false`, no change). Sibling
+    /// widgets do not re-layout.
+    fn set_bounds(&mut self, id: ScreenWidgetId, rect: [f32; 4]) -> bool;
+
+    /// Move `id` to `(x, y)` while keeping its current size (`AbstractWidget.setPosition`).
+    fn set_position(&mut self, id: ScreenWidgetId, x: f32, y: f32) -> bool {
+        let Some(rect) = self.child(id).map(|child| child.rect) else {
+            return false;
+        };
+        self.set_bounds(id, [x, y, rect[2], rect[3]])
+    }
+
+    /// Resize `id` to `(width, height)` while keeping its current position (`AbstractWidget.setSize`).
+    fn set_size(&mut self, id: ScreenWidgetId, width: f32, height: f32) -> bool {
+        let Some(rect) = self.child(id).map(|child| child.rect) else {
+            return false;
+        };
+        self.set_bounds(id, [rect[0], rect[1], width, height])
+    }
+
+    /// Replace the displayed message of `id` (`AbstractWidget.setMessage`).
+    ///
+    /// Rejects stale ids or malformed text trees (`false`, no change). Does not change `id`.
+    fn set_message(&mut self, id: ScreenWidgetId, message: Text) -> bool;
+
+    /// Enable or disable `id` (`AbstractWidget.active`).
+    fn set_active(&mut self, id: ScreenWidgetId, active: bool) -> bool;
+
+    /// Show or hide `id` (`AbstractWidget.visible`). Hidden widgets stay in `children()` so a mod
+    /// can make them visible again.
+    fn set_visible(&mut self, id: ScreenWidgetId, visible: bool) -> bool;
+
+    /// Set the opacity multiplier of `id` (`AbstractWidget.setAlpha`). Rejects non-finite values.
+    fn set_alpha(&mut self, id: ScreenWidgetId, alpha: f32) -> bool;
+
+    /// Override the label text colour of `id` (NeoForge `AbstractWidget.setLabelTextColor`).
+    /// Pass `None` to restore vanilla's active/inactive default colour.
+    fn set_label_text_color(&mut self, id: ScreenWidgetId, color: Option<u32>) -> bool;
+
+    /// Set or clear the tooltip of `id` (`AbstractWidget.setTooltip`).
+    fn set_tooltip(&mut self, id: ScreenWidgetId, tooltip: Option<WidgetTooltip>) -> bool;
+
+    /// Set the hover/focus delay before `id`'s tooltip opens (`AbstractWidget.setTooltipDelay`).
+    fn set_tooltip_delay(&mut self, id: ScreenWidgetId, delay: Duration) -> bool;
+
+    /// Set the Tab traversal order group of `id` (`AbstractWidget.setTabOrderGroup`).
+    fn set_tab_order_group(&mut self, id: ScreenWidgetId, group: i32) -> bool;
+
+    /// Set or clear custom button sprites for `id` (`None` restores vanilla sprites).
+    fn set_sprites(&mut self, id: ScreenWidgetId, sprites: Option<ButtonSprites>) -> bool;
+
+    /// Override whether `id` draws its highlighted button sprite
+    /// (`AbstractButton.setOverrideRenderHighlightedSprite`).
+    ///
+    /// `Some(true)` forces the highlighted sprite while active; `Some(false)` suppresses it even
+    /// when hovered; `None` restores vanilla hover/focus selection.
+    fn set_override_render_highlighted_sprite(
+        &mut self,
+        id: ScreenWidgetId,
+        highlighted: Option<bool>,
+    ) -> bool;
+
+    /// Run the screen's own activation for `id` (`AbstractButton.onPress`), through the same path
+    /// a pointer click on its resolved rectangle takes.
+    ///
+    /// Returns `false` when `id` is stale, when the widget is not `visible && active`, or while
+    /// staging inside `screen_init_pre` / `screen_init_post` (invoke live through
+    /// `ClientHost::screen_widgets` from a tick, input, or widget callback).
+    fn press(&mut self, id: ScreenWidgetId) -> bool;
 }
 
 #[cfg(test)]

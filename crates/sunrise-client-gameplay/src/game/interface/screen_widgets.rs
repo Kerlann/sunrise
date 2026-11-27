@@ -6,14 +6,14 @@
 use crate::game::host::draw::GameDrawContext;
 use mod_api::{
     __private::game::CallbackOwner,
-    ScreenView, ScreenWidget, ScreenWidgetId, ScreenWidgets,
+    ScreenView, ScreenWidget, ScreenWidgetId, ScreenWidgets, Text as ApiText,
     client::widgets::{
-        Button, ButtonPress, ButtonState, ScreenChild, TextEdit, TextField, TextFieldCallback,
-        is_allowed_chat_character,
+        Button, ButtonPress, ButtonSprites, ButtonState, ScreenChild, TextEdit, TextField,
+        TextFieldCallback, WidgetTooltip, is_allowed_chat_character,
     },
 };
 use std::cell::{Cell, RefCell};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use sunrise_client::{
     clipboard::EditShortcut,
     hud::HudBatch,
@@ -153,12 +153,17 @@ pub enum MountedWidgetKind {
     Button {
         state: ButtonState,
         on_press: Option<Box<ButtonPress>>,
+        narration: Option<ApiText>,
     },
     TextField {
         edit_box: EditBox,
         hint: Option<Text>,
         active: bool,
         visible: bool,
+        alpha: f32,
+        tooltip: Option<WidgetTooltip>,
+        tooltip_delay: Duration,
+        tab_order_group: i32,
         on_change: Option<Box<TextFieldCallback>>,
         on_submit: Option<Box<TextFieldCallback>>,
     },
@@ -173,7 +178,10 @@ impl MountedWidgetEntry {
 
     #[cfg(feature = "client")]
     pub(in crate::game) fn press_button(&mut self, game: &mut crate::game::ClientGame<'_>) -> bool {
-        let MountedWidgetKind::Button { state, on_press } = &mut self.kind else {
+        let MountedWidgetKind::Button {
+            state, on_press, ..
+        } = &mut self.kind
+        else {
             return false;
         };
         let Some(callback) = on_press.as_mut() else {
@@ -266,25 +274,53 @@ impl ScreenWidgetMount {
             disabled: false,
             kind,
         };
-        let bounds = match &entry.kind {
+        let child = match &entry.kind {
             MountedWidgetKind::Button { state, .. } => {
-                Some((state.rect, Some(state.label.clone())))
+                let mut child = ScreenChild::new(id, state.rect, Some(state.message.clone()));
+                child.active = state.active;
+                child.visible = state.visible;
+                child.alpha = state.alpha;
+                child.label_text_color = state.label_text_color;
+                child.tab_order_group = state.tab_order_group;
+                child.override_render_highlighted_sprite = state.override_render_highlighted_sprite;
+                Some(child)
             }
-            MountedWidgetKind::TextField { edit_box, .. } => Some((
-                [edit_box.x, edit_box.y, edit_box.width, edit_box.height],
-                None,
-            )),
+            MountedWidgetKind::TextField {
+                edit_box,
+                active,
+                visible,
+                alpha,
+                tab_order_group,
+                ..
+            } => {
+                let mut child = ScreenChild::new(
+                    id,
+                    [edit_box.x, edit_box.y, edit_box.width, edit_box.height],
+                    None,
+                );
+                child.active = *active;
+                child.visible = *visible;
+                child.alpha = *alpha;
+                child.tab_order_group = *tab_order_group;
+                Some(child)
+            }
             MountedWidgetKind::Custom(widget) => call_owner(
                 &entry.owner,
                 &mut entry.disabled,
                 "screen_widget_bounds",
-                || (widget.bounds(), None),
+                || {
+                    let mut child = ScreenChild::new(id, widget.bounds(), None);
+                    child.active = widget.active();
+                    child.visible = widget.visible();
+                    child.tab_order_group = widget.tab_order_group();
+                    child
+                },
             ),
         };
-        if let Some((rect, label)) = bounds
-            && valid_widget_rect(rect)
+        if let Some(child) = child
+            && valid_widget_rect(child.rect)
         {
-            self.children.push(ScreenChild::new(id, rect, label));
+            self.children.push(child);
             self.entries.push(entry);
         } else {
             entry.dispose();
@@ -299,8 +335,12 @@ impl ScreenWidgets for ScreenWidgetMount {
     }
 
     fn add_button(&mut self, button: Button) -> ScreenWidgetId {
-        let (state, on_press) = button.into_parts();
-        self.stage(MountedWidgetKind::Button { state, on_press })
+        let (state, on_press, narration) = button.into_parts();
+        self.stage(MountedWidgetKind::Button {
+            state,
+            on_press,
+            narration,
+        })
     }
 
     fn add_text_field(&mut self, field: TextField) -> ScreenWidgetId {
@@ -327,6 +367,10 @@ impl ScreenWidgets for ScreenWidgetMount {
             hint,
             active: parts.active,
             visible: parts.visible,
+            alpha: parts.alpha,
+            tooltip: parts.tooltip,
+            tooltip_delay: parts.tooltip_delay,
+            tab_order_group: parts.tab_order_group,
             on_change: parts.on_change,
             on_submit: parts.on_submit,
         })
@@ -361,6 +405,201 @@ impl ScreenWidgets for ScreenWidgetMount {
             self.removed.push(id);
         }
         true
+    }
+
+    fn clear(&mut self) {
+        let ids: Vec<_> = self.children.iter().map(|child| child.id).collect();
+        for id in ids {
+            self.remove(id);
+        }
+    }
+
+    fn set_bounds(&mut self, id: ScreenWidgetId, rect: [f32; 4]) -> bool {
+        if !valid_widget_rect(rect) || rect[2] < 0.0 || rect[3] < 0.0 {
+            return false;
+        }
+        let Some(child) = self.children.iter_mut().find(|child| child.id == id) else {
+            return false;
+        };
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
+            match &mut entry.kind {
+                MountedWidgetKind::Button { state, .. } => state.rect = rect,
+                MountedWidgetKind::TextField { edit_box, .. } => {
+                    edit_box.x = rect[0];
+                    edit_box.y = rect[1];
+                    edit_box.width = rect[2];
+                    edit_box.height = rect[3];
+                }
+                MountedWidgetKind::Custom(_) => return false,
+            }
+        }
+        child.rect = rect;
+        true
+    }
+
+    fn set_message(&mut self, id: ScreenWidgetId, message: ApiText) -> bool {
+        if TryIntoEngine::<Text>::try_into_engine(&message, &()).is_err() {
+            return false;
+        }
+        let Some(child) = self.children.iter_mut().find(|child| child.id == id) else {
+            return false;
+        };
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
+            match &mut entry.kind {
+                MountedWidgetKind::Button { state, .. } => state.message = message.clone(),
+                MountedWidgetKind::TextField { .. } | MountedWidgetKind::Custom(_) => {}
+            }
+        }
+        child.message = Some(message);
+        true
+    }
+
+    fn set_active(&mut self, id: ScreenWidgetId, active: bool) -> bool {
+        let Some(child) = self.children.iter_mut().find(|child| child.id == id) else {
+            return false;
+        };
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
+            match &mut entry.kind {
+                MountedWidgetKind::Button { state, .. } => state.active = active,
+                MountedWidgetKind::TextField { active: slot, .. } => *slot = active,
+                MountedWidgetKind::Custom(_) => return false,
+            }
+        }
+        child.active = active;
+        true
+    }
+
+    fn set_visible(&mut self, id: ScreenWidgetId, visible: bool) -> bool {
+        let Some(child) = self.children.iter_mut().find(|child| child.id == id) else {
+            return false;
+        };
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
+            match &mut entry.kind {
+                MountedWidgetKind::Button { state, .. } => state.visible = visible,
+                MountedWidgetKind::TextField { visible: slot, .. } => *slot = visible,
+                MountedWidgetKind::Custom(_) => return false,
+            }
+        }
+        child.visible = visible;
+        true
+    }
+
+    fn set_alpha(&mut self, id: ScreenWidgetId, alpha: f32) -> bool {
+        if !alpha.is_finite() {
+            return false;
+        }
+        let Some(child) = self.children.iter_mut().find(|child| child.id == id) else {
+            return false;
+        };
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
+            match &mut entry.kind {
+                MountedWidgetKind::Button { state, .. } => state.alpha = alpha,
+                MountedWidgetKind::TextField { alpha: slot, .. } => *slot = alpha,
+                MountedWidgetKind::Custom(_) => return false,
+            }
+        }
+        child.alpha = alpha;
+        true
+    }
+
+    fn set_label_text_color(&mut self, id: ScreenWidgetId, color: Option<u32>) -> bool {
+        let Some(child) = self.children.iter_mut().find(|child| child.id == id) else {
+            return false;
+        };
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
+            match &mut entry.kind {
+                MountedWidgetKind::Button { state, .. } => state.label_text_color = color,
+                MountedWidgetKind::TextField { .. } | MountedWidgetKind::Custom(_) => {}
+            }
+        }
+        child.label_text_color = color;
+        true
+    }
+
+    fn set_tooltip(&mut self, id: ScreenWidgetId, tooltip: Option<WidgetTooltip>) -> bool {
+        if !self.children.iter().any(|child| child.id == id) {
+            return false;
+        }
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
+            match &mut entry.kind {
+                MountedWidgetKind::Button { state, .. } => state.tooltip = tooltip,
+                MountedWidgetKind::TextField { tooltip: slot, .. } => *slot = tooltip,
+                MountedWidgetKind::Custom(_) => return false,
+            }
+        }
+        true
+    }
+
+    fn set_tooltip_delay(&mut self, id: ScreenWidgetId, delay: Duration) -> bool {
+        if !self.children.iter().any(|child| child.id == id) {
+            return false;
+        }
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
+            match &mut entry.kind {
+                MountedWidgetKind::Button { state, .. } => state.tooltip_delay = delay,
+                MountedWidgetKind::TextField {
+                    tooltip_delay: slot,
+                    ..
+                } => *slot = delay,
+                MountedWidgetKind::Custom(_) => return false,
+            }
+        }
+        true
+    }
+
+    fn set_tab_order_group(&mut self, id: ScreenWidgetId, group: i32) -> bool {
+        let Some(child) = self.children.iter_mut().find(|child| child.id == id) else {
+            return false;
+        };
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
+            match &mut entry.kind {
+                MountedWidgetKind::Button { state, .. } => state.tab_order_group = group,
+                MountedWidgetKind::TextField {
+                    tab_order_group: slot,
+                    ..
+                } => *slot = group,
+                MountedWidgetKind::Custom(_) => return false,
+            }
+        }
+        child.tab_order_group = group;
+        true
+    }
+
+    fn set_sprites(&mut self, id: ScreenWidgetId, sprites: Option<ButtonSprites>) -> bool {
+        if !self.children.iter().any(|child| child.id == id) {
+            return false;
+        }
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
+            match &mut entry.kind {
+                MountedWidgetKind::Button { state, .. } => state.sprites = sprites,
+                MountedWidgetKind::TextField { .. } | MountedWidgetKind::Custom(_) => return false,
+            }
+        }
+        true
+    }
+
+    fn set_override_render_highlighted_sprite(
+        &mut self,
+        id: ScreenWidgetId,
+        highlighted: Option<bool>,
+    ) -> bool {
+        let Some(child) = self.children.iter_mut().find(|child| child.id == id) else {
+            return false;
+        };
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
+            match &mut entry.kind {
+                MountedWidgetKind::Button { state, .. } => {
+                    state.override_render_highlighted_sprite = highlighted;
+                }
+                MountedWidgetKind::TextField { .. } | MountedWidgetKind::Custom(_) => return false,
+            }
+        }
+        child.override_render_highlighted_sprite = highlighted;
+        true
+    }
+
+    fn press(&mut self, _id: ScreenWidgetId) -> bool {
+        false
     }
 }
 
@@ -451,6 +690,11 @@ impl MountedWidgetEntry {
 
 #[cfg(feature = "client")]
 impl crate::game::ClientGame<'_> {
+    /// Live widget collection for the currently open screen (`ClientHost::screen_widgets`).
+    pub fn screen_widgets(&mut self) -> Option<&mut dyn ScreenWidgets> {
+        None
+    }
+
     /// Run `ScreenEvent.Init.Post` to mount widgets on the initialized screen and apply focus.
     pub fn init_screen_widgets(&mut self, view: &ScreenView<'_>) {
         if !mod_api::__private::listened(mod_api::HookId::ScreenInitPost) {
@@ -773,7 +1017,8 @@ impl crate::game::ClientGame<'_> {
                         if state.visible {
                             let mark = widgets::frame_mark();
                             let hovered = point_in_rect(mouse, state.rect);
-                            let label: Text = state.label.try_into_engine(&()).unwrap_or_default();
+                            let label: Text =
+                                state.message.try_into_engine(&()).unwrap_or_default();
                             ui::button_focused_as(
                                 batch,
                                 &self.client.gui.atlas,

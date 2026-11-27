@@ -161,7 +161,7 @@ mod tests {
     impl Hooks for Editor {
         fn screen_char_typed_pre(
             &self,
-            _: &dyn ClientHost,
+            _: &mut dyn ClientHost,
             event: &mut ScreenCharTypedPreEvent<'_>,
         ) -> Flow {
             let c = event.c;

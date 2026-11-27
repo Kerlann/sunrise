@@ -2918,7 +2918,7 @@ impl crate::game::ClientGame<'_> {
     }
     /// Window bookkeeping, shortcuts and overlays before dispatching to the screen. Returns
     /// `true` when an early handler consumed the event.
-    fn screen_mouse_moved(&self, delta: [f32; 2]) -> bool {
+    fn screen_mouse_moved(&mut self, delta: [f32; 2]) -> bool {
         if self.pad_synthetic_input()
             || delta == [0.0; 2]
             || self.client.screen_grab

@@ -555,14 +555,16 @@ impl Hook {
             return Err(CatalogError::OwnerNeedsGlobalListener(name));
         }
         if let Some(field) = &api.staged_surface
-            && (api.contract != Contract::Listen
+            && (!matches!(api.contract, Contract::Listen | Contract::Cancel)
+                || (api.contract == Contract::Cancel
+                    && (scope.is_some() || api.owner.is_some() || api.output_validator.is_some()))
                 || api.owner.as_ref() == Some(field)
                 || scope.as_ref().is_some_and(|scope| scope.key == *field))
         {
             return Err(CatalogError::InvalidHook {
                 hook: name,
                 error:
-                    "staged_surface requires a listener and cannot be its owner filter or Part key"
+                    "staged_surface requires a listener or global cancel hook and cannot be its owner filter or Part key"
                         .into(),
             });
         }

@@ -270,7 +270,7 @@ fn title_hook_requests_one_orderly_quit() {
     impl Hooks for QuitProbe {
         fn screen_key_pressed_pre(
             &self,
-            host: &dyn ClientHost,
+            host: &mut dyn ClientHost,
             event: &mut ScreenKeyPressedPreEvent<'_>,
         ) -> Flow {
             if event.screen.id != "title" {

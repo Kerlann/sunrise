@@ -98,12 +98,12 @@ fn button_on_press_state_mutation_keyboard_and_synchronous_transitions() {
                 [20.0, 20.0, 100.0, 20.0],
                 ApiText::literal("Count 0"),
                 move |state, _host| {
-                    let was_initial = state.label == ApiText::literal("Count 0");
+                    let was_initial = state.message == ApiText::literal("Count 0");
                     log_toggle
                         .lock()
                         .unwrap()
                         .push(format!("toggle:{was_initial}"));
-                    state.label = ApiText::literal("Count 1");
+                    state.message = ApiText::literal("Count 1");
                     state.active = false;
                 },
             ));
@@ -113,12 +113,12 @@ fn button_on_press_state_mutation_keyboard_and_synchronous_transitions() {
                 ApiText::literal("Keyboard"),
                 move |state, _host| {
                     log_kb.lock().unwrap().push("kb_pressed".into());
-                    state.rect[2] = if state.label == ApiText::literal("Keyboard") {
+                    state.rect[2] = if state.message == ApiText::literal("Keyboard") {
                         f32::INFINITY
                     } else {
                         i32::MAX as f32
                     };
-                    state.label = ApiText::literal("KB Done");
+                    state.message = ApiText::literal("KB Done");
                 },
             ));
             let log_switch = self.log.clone();
@@ -723,7 +723,7 @@ fn init_post_edits_ordered_children_and_discards_a_failed_stage() {
             let replacement_label = ApiText::literal("Replacement");
             match self.stage {
                 0 => {
-                    assert_eq!(widgets.children()[0].label.as_ref(), Some(&resume_label));
+                    assert_eq!(widgets.children()[0].message.as_ref(), Some(&resume_label));
                     let prior = widgets.add_button(Button::new(
                         [20.0, 20.0, 80.0, 20.0],
                         prior_label,
@@ -735,7 +735,7 @@ fn init_post_edits_ordered_children_and_discards_a_failed_stage() {
                 1 => {
                     let prior = widgets.children().last().unwrap().id;
                     assert_eq!(
-                        widgets.children().last().unwrap().label.as_ref(),
+                        widgets.children().last().unwrap().message.as_ref(),
                         Some(&prior_label)
                     );
                     let resume = widgets.children()[0].id;
@@ -750,10 +750,10 @@ fn init_post_edits_ordered_children_and_discards_a_failed_stage() {
                 }
                 2 => {
                     let resume = &widgets.children()[0];
-                    assert_eq!(resume.label.as_ref(), Some(&resume_label));
+                    assert_eq!(resume.message.as_ref(), Some(&resume_label));
                     let (id, rect) = (resume.id, resume.rect);
                     assert_eq!(
-                        widgets.children().last().unwrap().label.as_ref(),
+                        widgets.children().last().unwrap().message.as_ref(),
                         Some(&prior_label)
                     );
                     let prior = widgets.children().last().unwrap().id;
@@ -769,12 +769,12 @@ fn init_post_edits_ordered_children_and_discards_a_failed_stage() {
                     let children = widgets.children();
                     assert!(children.iter().all(|child| {
                         child
-                            .label
+                            .message
                             .as_ref()
                             .is_none_or(|label| label != &resume_label && label != &prior_label)
                     }));
                     assert_eq!(
-                        children.last().unwrap().label.as_ref(),
+                        children.last().unwrap().message.as_ref(),
                         Some(&replacement_label)
                     );
                     self.log.lock().unwrap().push("published".into());
@@ -1582,7 +1582,7 @@ fn separate_input_pre_post_parity_and_receiving_screen() {
 
         fn screen_mouse_button_pressed_pre(
             &self,
-            _host: &dyn ClientHost,
+            _host: &mut dyn ClientHost,
             event: &mut ScreenMouseButtonPressedPreEvent<'_>,
         ) -> Flow {
             self.log.lock().unwrap().push(format!(
@@ -1594,7 +1594,7 @@ fn separate_input_pre_post_parity_and_receiving_screen() {
 
         fn screen_mouse_button_pressed_post(
             &self,
-            _host: &dyn ClientHost,
+            _host: &mut dyn ClientHost,
             event: &mut ScreenMouseButtonPressedPostEvent<'_>,
         ) {
             self.log.lock().unwrap().push(format!(
@@ -1612,7 +1612,7 @@ fn separate_input_pre_post_parity_and_receiving_screen() {
 
         fn screen_mouse_button_released_pre(
             &self,
-            _host: &dyn ClientHost,
+            _host: &mut dyn ClientHost,
             event: &mut ScreenMouseButtonReleasedPreEvent<'_>,
         ) -> Flow {
             self.log
@@ -1624,7 +1624,7 @@ fn separate_input_pre_post_parity_and_receiving_screen() {
 
         fn screen_mouse_button_released_post(
             &self,
-            _host: &dyn ClientHost,
+            _host: &mut dyn ClientHost,
             event: &mut ScreenMouseButtonReleasedPostEvent<'_>,
         ) {
             self.log.lock().unwrap().push(format!(
@@ -1642,7 +1642,7 @@ fn separate_input_pre_post_parity_and_receiving_screen() {
 
         fn screen_mouse_dragged_pre(
             &self,
-            _host: &dyn ClientHost,
+            _host: &mut dyn ClientHost,
             event: &mut ScreenMouseDraggedPreEvent<'_>,
         ) -> Flow {
             self.log
@@ -1654,7 +1654,7 @@ fn separate_input_pre_post_parity_and_receiving_screen() {
 
         fn screen_mouse_dragged_post(
             &self,
-            _host: &dyn ClientHost,
+            _host: &mut dyn ClientHost,
             event: &mut ScreenMouseDraggedPostEvent<'_>,
         ) {
             self.log
@@ -1665,7 +1665,7 @@ fn separate_input_pre_post_parity_and_receiving_screen() {
 
         fn screen_mouse_scrolled_pre(
             &self,
-            _host: &dyn ClientHost,
+            _host: &mut dyn ClientHost,
             event: &mut ScreenMouseScrolledPreEvent<'_>,
         ) -> Flow {
             self.log
@@ -1677,7 +1677,7 @@ fn separate_input_pre_post_parity_and_receiving_screen() {
 
         fn screen_mouse_scrolled_post(
             &self,
-            _host: &dyn ClientHost,
+            _host: &mut dyn ClientHost,
             event: &mut ScreenMouseScrolledPostEvent<'_>,
         ) {
             self.log
@@ -1688,7 +1688,7 @@ fn separate_input_pre_post_parity_and_receiving_screen() {
 
         fn screen_key_pressed_pre(
             &self,
-            _host: &dyn ClientHost,
+            _host: &mut dyn ClientHost,
             event: &mut ScreenKeyPressedPreEvent<'_>,
         ) -> Flow {
             self.log
@@ -1700,7 +1700,7 @@ fn separate_input_pre_post_parity_and_receiving_screen() {
 
         fn screen_key_pressed_post(
             &self,
-            _host: &dyn ClientHost,
+            _host: &mut dyn ClientHost,
             event: &mut ScreenKeyPressedPostEvent<'_>,
         ) -> Flow {
             self.log
@@ -1716,7 +1716,7 @@ fn separate_input_pre_post_parity_and_receiving_screen() {
 
         fn screen_key_released_pre(
             &self,
-            _host: &dyn ClientHost,
+            _host: &mut dyn ClientHost,
             event: &mut ScreenKeyReleasedPreEvent<'_>,
         ) -> Flow {
             self.log
@@ -1728,7 +1728,7 @@ fn separate_input_pre_post_parity_and_receiving_screen() {
 
         fn screen_key_released_post(
             &self,
-            _host: &dyn ClientHost,
+            _host: &mut dyn ClientHost,
             event: &mut ScreenKeyReleasedPostEvent<'_>,
         ) -> Flow {
             self.log
@@ -1744,7 +1744,7 @@ fn separate_input_pre_post_parity_and_receiving_screen() {
 
         fn screen_char_typed_pre(
             &self,
-            _host: &dyn ClientHost,
+            _host: &mut dyn ClientHost,
             event: &mut ScreenCharTypedPreEvent<'_>,
         ) -> Flow {
             self.log
@@ -1761,7 +1761,7 @@ fn separate_input_pre_post_parity_and_receiving_screen() {
 
         fn screen_char_typed_post(
             &self,
-            _host: &dyn ClientHost,
+            _host: &mut dyn ClientHost,
             event: &mut ScreenCharTypedPostEvent<'_>,
         ) {
             self.log
@@ -2564,7 +2564,7 @@ fn text_field_editing_ime_and_double_click_word_selection() {
 
         fn screen_mouse_button_pressed_pre(
             &self,
-            _host: &dyn ClientHost,
+            _host: &mut dyn ClientHost,
             event: &mut ScreenMouseButtonPressedPreEvent<'_>,
         ) -> Flow {
             self.pressed_double_clicks
@@ -2702,7 +2702,7 @@ fn title_init_post_lists_and_removes_the_title_screens_own_widgets() {
             *self.seen.lock().unwrap() = widgets
                 .children()
                 .iter()
-                .map(|child| (child.label.clone(), child.rect))
+                .map(|child| (child.message.clone(), child.rect))
                 .collect();
             if self.remove.load(Ordering::SeqCst) {
                 let options = ApiText::translate("menu.options", vec![]);
@@ -2710,8 +2710,8 @@ fn title_init_post_lists_and_removes_the_title_screens_own_widgets() {
                     .children()
                     .iter()
                     .filter(|child| {
-                        child.label.as_ref() == Some(&options)
-                            || child.label
+                        child.message.as_ref() == Some(&options)
+                            || child.message
                                 == Some(ApiText::translate("sunrise.title.not_affiliated", vec![]))
                     })
                     .map(|child| child.id)
