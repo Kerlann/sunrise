@@ -295,31 +295,16 @@ fn run_game(
 }
 
 fn server_profile() -> PathBuf {
-    if let Ok(path) = std::env::var("SUNRISE_TEST_SERVER_PROFILE") {
-        let path = PathBuf::from(path);
-        assert!(
-            path.join("sunrise-resources.json").is_file(),
-            "SUNRISE_TEST_SERVER_PROFILE={} has no sunrise-resources.json",
-            path.display()
-        );
-        return path;
-    }
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap();
-    for candidate in [
-        repo_root.join(".local/sunrise-client/26.3-server"),
-        repo_root.join(".local/sunrise-client/26.3"),
-    ] {
-        if candidate.join("sunrise-resources.json").is_file() {
-            return candidate;
-        }
-    }
-    panic!(
-        "No prepared 26.3 resources found: set SUNRISE_TEST_SERVER_PROFILE or prepare .local/sunrise-client/26.3"
+    let path = PathBuf::from(
+        std::env::var_os("SUNRISE_TEST_SERVER_PROFILE")
+            .expect("set SUNRISE_TEST_SERVER_PROFILE to prepared 26.3 dedicated server resources"),
     );
+    assert!(
+        path.join("sunrise-resources.json").is_file(),
+        "SUNRISE_TEST_SERVER_PROFILE={} has no sunrise-resources.json",
+        path.display()
+    );
+    path
 }
 
 #[test]
