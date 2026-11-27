@@ -23,14 +23,8 @@ impl FluidPredicateBindings {
         mut self,
         tags: &BTreeMap<String, Vec<String>>,
     ) -> Result<Self, DecodeError> {
-        if tags.len() > 8192 {
-            return Err(DecodeError::Field("fluid tag count"));
-        }
         let mut resolved = BTreeMap::new();
         for (tag, names) in tags {
-            if names.len() > 8192 {
-                return Err(DecodeError::Field("fluid tag size"));
-            }
             let mut mask = 0;
             for name in names {
                 mask |= fluid(name)?.mask();
@@ -62,9 +56,6 @@ impl FluidPredicateBindings {
     /// A fluid holder set in any form `crate::holder_set` reads, as a mask.
     pub fn resolve(&self, json: &str) -> Result<BoundFluidSet, DecodeError> {
         let set: serde_json::Value = serde_json::from_str(json)?;
-        if set.as_array().is_some_and(|names| names.len() > 8192) {
-            return Err(DecodeError::Field("fluid holder list"));
-        }
         let mask = crate::holder_set::resolve(&set, self)
             .map_err(DecodeError::Registry)?
             .into_iter()
@@ -120,5 +111,112 @@ impl BoundFluidSet {
         self.table
             .get(state)
             .is_some_and(|value| value.kind().mask() & self.mask != 0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::worldgen::{
+        block_feature::FeatureBlockBindings, block_predicate::BlockPredicate,
+        generator::data::build_tags, overrides::WorldgenOverrides,
+    };
+    use std::collections::BTreeSet;
+
+    /// Air, the two air variants the bindings need, and one source state per fluid
+    /// family, so a tag can name a member and a non-member.
+    fn registry() -> BlockRegistry {
+        let mut rows = Vec::new();
+        let mut defaults = std::collections::BTreeMap::new();
+        for name in ["minecraft:air", "minecraft:cave_air", "minecraft:void_air"] {
+            defaults.insert(name.to_owned(), rows.len() as i64);
+            rows.push(serde_json::json!([name, true, false, "",
+                {"id": name, "properties": {}}]));
+        }
+        for name in ["minecraft:water", "minecraft:lava"] {
+            defaults.insert(name.to_owned(), rows.len() as i64);
+            rows.push(serde_json::json!([name, false, true, "",
+                {"id": name, "properties": {"level": "0"}}]));
+        }
+        BlockRegistry::from_facts_json(
+            serde_json::json!({"states": rows, "defaults": defaults})
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap()
+    }
+
+    /// The tab-complete tags the loader keeps: five fluid ids.
+    fn known(id: &str) -> bool {
+        matches!(
+            id,
+            "minecraft:water"
+                | "minecraft:flowing_water"
+                | "minecraft:lava"
+                | "minecraft:flowing_lava"
+                | "minecraft:empty"
+        )
+    }
+
+    #[test]
+    fn fluid_tags_above_8192_load_and_match_through_the_real_loader() {
+        let registry = registry();
+        let water = registry.default_state("minecraft:water").unwrap();
+        let lava = registry.default_state("minecraft:lava").unwrap();
+
+        // The real loader, `build_tags` with `name == "fluid_tags"`, over more
+        // definitions than `TagDefinitions::build`'s 8,192-tag ceiling.
+        let mut raw = BTreeMap::new();
+        for i in 0..8200 {
+            // The high-numbered tags name a single family so each side of the
+            // match is observable; every other tag names water.
+            let values = if i == 8199 {
+                r#"["minecraft:lava"]"#
+            } else {
+                r#"["minecraft:water"]"#
+            };
+            raw.insert(format!("test:tag_{i}"), format!(r#"{{"values":{values}}}"#));
+        }
+        let mut dropped = Vec::new();
+        let overrides = WorldgenOverrides::default();
+        let tags = build_tags(&raw, &overrides, "fluid_tags", &mut dropped, known)
+            .expect("the real loader accepts past 8,192 fluid tag definitions");
+        assert_eq!(tags.len(), 8200);
+        assert!(dropped.is_empty(), "{dropped:?}");
+
+        let blocks = FeatureBlockBindings::new(&registry, BTreeSet::new())
+            .and_then(|bindings| bindings.with_fluid_tags(&tags))
+            .unwrap();
+
+        // `matching_fluids` decodes the high-numbered tag into a bound set that
+        // then answers membership exactly, through the predicate decoder.
+        let decode = |tag: &str| {
+            let json = format!(r##"{{"type":"minecraft:matching_fluids","fluids":"#{tag}"}}"##);
+            BlockPredicate::from_json_with_blocks(&json, &blocks).unwrap()
+        };
+        for (tag, member, non_member) in [
+            ("test:tag_8198", water, lava),
+            ("test:tag_8199", lava, water),
+        ] {
+            let BlockPredicate::MatchingFluids { fluids, .. } = decode(tag) else {
+                panic!("{tag} did not decode to matching_fluids");
+            };
+            assert!(fluids.contains(member), "{tag} matches its member");
+            assert!(!fluids.contains(non_member), "{tag} rejects a non-member");
+        }
+        assert!(blocks.fluids.resolve("\"#test:8199\"").is_err());
+
+        // An explicit holder list past 8,192 entries still resolves to the same
+        // exact membership as a tag would.
+        let explicit = format!(
+            "[{}]",
+            (0..8200)
+                .map(|_| "\"minecraft:water\"")
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let set = blocks.fluids.resolve(&explicit).unwrap();
+        assert!(set.contains(water));
+        assert!(!set.contains(lava));
     }
 }

@@ -281,9 +281,13 @@ fn build_tags_with_base(
             .apply_json(id, pack, json)
             .map_err(|e| resource(format!("{pack}: tag {id}: {e}")))?;
     }
-    let built = definitions
-        .build(|id, _| known(id).then(|| id.to_owned()))
-        .map_err(|e| resource(format!("tags: {e:?}")))?;
+    let built = if name == "fluid_tags" {
+        definitions.bind(|id, _| known(id).then(|| id.to_owned()))
+    } else {
+        definitions
+            .build(|id, _| known(id).then(|| id.to_owned()))
+            .map_err(|e| resource(format!("tags: {e:?}")))?
+    };
     if overrides.tags(name).next().is_none() && !built.missing.is_empty() {
         return Err(resource(format!(
             "unresolved tag entries in {:?}",
