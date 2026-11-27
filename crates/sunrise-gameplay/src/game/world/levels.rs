@@ -614,6 +614,7 @@ pub struct Levels {
     pub parked: HashMap<Dim, Box<Parked>>,
     order: Vec<Dim>,
     tick_order: Vec<Dim>,
+    incarnations: Vec<LevelIncarnation>,
     pub(in crate::game) active_closed: bool,
     /// The levels a mod asked to have saved (`level_request_save`), each once, saved at the start
     /// of the next server tick.
@@ -625,7 +626,40 @@ pub struct Levels {
     travels: HashMap<u32, (u32, i64)>,
 }
 
+struct LevelIncarnation {
+    dim: Dim,
+    generation: u64,
+    open: bool,
+}
+
 impl Levels {
+    pub(in crate::game) fn incarnation(&self, dim: Dim) -> Option<u64> {
+        self.incarnations
+            .iter()
+            .find(|level| level.dim == dim)
+            .map_or(Some(0), |level| level.open.then_some(level.generation))
+    }
+
+    pub(in crate::game) fn next_incarnation(&self, dim: Dim) -> u64 {
+        self.incarnations
+            .iter()
+            .find(|level| level.dim == dim)
+            .map_or(1, |level| level.generation + 1)
+    }
+
+    fn open_incarnation(&mut self, dim: Dim) {
+        if let Some(level) = self.incarnations.iter_mut().find(|level| level.dim == dim) {
+            level.generation += 1;
+            level.open = true;
+        } else {
+            self.incarnations.push(LevelIncarnation {
+                dim,
+                generation: 1,
+                open: true,
+            });
+        }
+    }
+
     pub(in crate::game) fn parked_target_visible(&self, dim: Dim, target: &Target) -> Option<bool> {
         let parked = self.parked.get(&dim)?;
         Some(
@@ -675,6 +709,9 @@ impl Levels {
     pub fn clear(&mut self) {
         self.parked.clear();
         self.order.clear();
+        for level in &mut self.incarnations {
+            level.open = false;
+        }
         self.tick_order.clear();
         self.active_closed = false;
         self.requested_saves.clear();
@@ -2198,7 +2235,9 @@ impl crate::game::ServerGame<'_> {
             parked.bind_resident_owners(&journal, dim.key(), true);
         }
         self.bind_dimension_attachments(dim);
-        self.server.levels.0.order.push(dim);
+        let levels = &mut self.server.levels.0;
+        levels.order.push(dim);
+        levels.open_incarnation(dim);
         self.init_custom_spawners(dim);
         self.native_level_load(dim.id());
     }
@@ -2217,6 +2256,16 @@ impl crate::game::ServerGame<'_> {
         {
             self.native_level_unload(dim.id());
             self.server.levels.0.order.remove(index);
+        }
+        if let Some(level) = self
+            .server
+            .levels
+            .0
+            .incarnations
+            .iter_mut()
+            .find(|level| level.dim == dim)
+        {
+            level.open = false;
         }
         if dim == self.common.dim {
             self.common.world.water_tickets.clear();

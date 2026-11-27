@@ -1,4 +1,5 @@
 use super::*;
+use crate::game::state_seam::ActorInLevel;
 use sunrise_gameplay_common::game::native_hooks::block_use_item_on::GameHooks as _;
 use sunrise_gameplay_common::game::native_hooks::block_use_without_item::GameHooks as _;
 use sunrise_gameplay_common::game::player_identity::PlayerIdentityGameExt1 as _;
@@ -46,6 +47,7 @@ impl crate::game::ServerGame<'_> {
         use mod_api::InteractionResult as Answer;
         use mod_api::TriState;
         let on_block = matches!(self.server.guest_use, Some(GuestUse::OnBlock { .. }));
+        let actor = on_block.then(|| ActorInLevel::acting(self)).flatten();
         let mut block_hit = block_hit;
         let (mut use_block, mut use_item) = (TriState::Default, TriState::Default);
         let block_phase = sunrise_level::spans::guard("use_block");
@@ -54,6 +56,9 @@ impl crate::game::ServerGame<'_> {
             let answer = sunrise_level::spans::time("use_mods", || {
                 self.right_click_block(hit, self.common.hand, held.as_ref())
             });
+            if actor.is_some_and(|actor| !actor.still_acting(self)) {
+                return Ok(false);
+            }
             match answer {
                 native_hooks::BlockClickAnswer::Go {
                     use_block: block,
@@ -111,6 +116,9 @@ impl crate::game::ServerGame<'_> {
                 self.native_use_item_on(state, &click, &mut block_answer);
             }
             let mut chains_sign = false;
+            if actor.is_some_and(|actor| !actor.still_acting(self)) {
+                return Ok(false);
+            }
             if block_answer.is_none() {
                 // TntBlock.useItemOn belongs to the block phase, before
                 // ItemStack.useOn's adventure can_place_on gate. It reads the
@@ -243,6 +251,9 @@ impl crate::game::ServerGame<'_> {
                     {
                         let click = self.block_click(hit, self.common.hand, snapshot.as_ref());
                         self.native_use_without_item(state, &click, &mut empty_answer);
+                    }
+                    if actor.is_some_and(|actor| !actor.still_acting(self)) {
+                        return Ok(false);
                     }
                     if empty_answer.is_none()
                         && self

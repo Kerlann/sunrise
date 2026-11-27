@@ -144,6 +144,8 @@ impl crate::game::ServerGame<'_> {
         permission: u8,
     ) -> (bool, Vec<Text>) {
         let silent = source.silent;
+        let origin = crate::game::state_seam::CommandOrigin::capture(self, &source);
+        let outer_origin = self.server.command_origin.replace(origin);
         let outer = self.server.command_source.replace(source);
         let filter = std::mem::replace(&mut self.server.native_command_filter, true);
         let console = self.server.console_broadcast.take();
@@ -164,6 +166,7 @@ impl crate::game::ServerGame<'_> {
         self.server.console_broadcast = console;
         self.server.native_command_filter = filter;
         self.server.command_source = outer;
+        self.server.command_origin = outer_origin;
         (ok, lines)
     }
 }

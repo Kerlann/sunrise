@@ -4,6 +4,8 @@ pub mod server_side;
 #[cfg(test)]
 #[path = "game/entities/entity_tick_families_tests.rs"]
 mod entity_tick_families_tests;
+#[path = "game/state_seam.rs"]
+mod state_seam;
 #[allow(unused_imports)]
 pub(in crate::game) use server_side::acting_state;
 #[allow(unused_imports)]

@@ -709,6 +709,11 @@ impl crate::game::ServerGame<'_> {
     /// place for it.
     pub fn with_source<T>(&mut self, source: Source, f: impl FnOnce(&mut Self) -> T) -> T {
         let dim = source.dimension;
+        let origin = self
+            .server
+            .command_origin
+            .unwrap_or_else(|| crate::game::state_seam::CommandOrigin::capture(self, &source));
+        let previous_origin = self.server.command_origin.replace(origin);
         let previous = self.server.command_source.replace(source);
         let back = self.enter_command_level(dim);
         let out = f(self);
@@ -716,6 +721,7 @@ impl crate::game::ServerGame<'_> {
             self.enter_command_level(back);
         }
         self.server.command_source = previous;
+        self.server.command_origin = previous_origin;
         out
     }
 }

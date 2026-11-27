@@ -957,11 +957,13 @@ impl crate::game::ServerGame<'_> {
                     return;
                 };
                 host.hub.ack(conn, p.sequence);
+                let actor = crate::game::state_seam::PlayerId::guest(&host.hub.guests[gi]);
                 let hit = Hit::from_use_item_on(&p);
                 let hand = if p.hand == 1 { Hand::Off } else { Hand::Main };
                 let result = self.guest_use_item_on(conn, gi, hit, hand, receipt);
                 if result.is_err()
                     && let Some(receipt) = receipt
+                    && actor.live_index(self).is_some()
                     && let Some(host) = self.server.lan.as_ref()
                 {
                     host.hub
