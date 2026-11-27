@@ -1818,7 +1818,7 @@ impl crate::game::ClientGame<'_> {
     /// `world_create`, `multiplayer`, `add_server`…), no menu and no menu
     /// title, the whole window as its rectangle and no slots (no menu is
     /// open). None while no title screen is up.
-    pub fn title_screen_view(&self, batch: &HudBatch) -> Option<ScreenView<'_>> {
+    pub fn title_screen_view(&self, batch: &HudBatch) -> Option<ScreenView<'static>> {
         let title = self.client.title.0.as_ref()?;
         Some(ScreenView::from(mod_api::__private::built::ScreenView {
             id: title.mode.id(),
