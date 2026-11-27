@@ -513,8 +513,8 @@ fn draw_creative_page_buttons(
     ox: f32,
     oy: f32,
     cursor: (f32, f32),
-    current_page: usize,
-    pages: usize,
+    current_page: u32,
+    pages: u32,
 ) {
     let y = oy - 50.0;
     for (x, label, step) in [(ox, "<", -1), (ox + Creative::WIDTH - 20.0, ">", 1)] {

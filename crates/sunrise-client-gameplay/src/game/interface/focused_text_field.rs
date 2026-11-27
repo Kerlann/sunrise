@@ -129,7 +129,7 @@ impl crate::game::ClientGame<'_> {
     /// the copy goes back to the box. `hear`'s answer is handed back.
     pub fn with_focused_text_edit(
         &mut self,
-        hear: impl FnOnce(&Self, &mut Option<TextEdit>) -> bool,
+        hear: impl FnOnce(&mut Self, &mut Option<TextEdit>) -> bool,
     ) -> bool {
         let before = self.focused_text_edit(None);
         let mut field = before.clone();

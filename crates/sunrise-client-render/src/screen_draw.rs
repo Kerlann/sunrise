@@ -794,13 +794,6 @@ impl TextField {
     fn text_x(&self) -> i32 {
         self.x + if self.bordered { 4 } else { 0 }
     }
-    fn text_y(&self) -> i32 {
-        if self.bordered {
-            self.y + (self.height - 8) / 2
-        } else {
-            self.y
-        }
-    }
     /// `setValue`.
     pub fn set_value(&mut self, m: &Measure, value: &str) {
         self.value = crate::ui::utf16_prefix(value, self.max_length);

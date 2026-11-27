@@ -6,7 +6,6 @@
 use crate::gamepad::ScrollArea;
 use std::cell::{Cell, RefCell};
 
-#[path = "widgets_override.rs"]
 mod widgets_override;
 pub use widgets_override::{
     CollectedWidget, EngineHitEntry, EngineOverrideMaps, EngineWidgetInput, EngineWidgetKey,
