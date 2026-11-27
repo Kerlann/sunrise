@@ -1962,9 +1962,12 @@ impl NoBackend for WantedPositionError {
 // exhaustive: a closed set the game matches without a wildcard
 #[derive(sunrise_mod_api_macros::Wire)]
 pub enum Hand {
+    /// The entity's primary hand (`InteractionHand.MAIN_HAND`).
     Main,
+    /// The entity's secondary hand (`InteractionHand.OFF_HAND`).
     Off,
 }
 impl Hand {
+    /// Both hands in vanilla's `InteractionHand.values()` order: main hand, then offhand.
     pub const BOTH: [Hand; 2] = [Hand::Main, Hand::Off];
 }

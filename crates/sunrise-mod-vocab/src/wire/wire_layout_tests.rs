@@ -219,10 +219,7 @@ fn handle_records_have_declared_field_bytes() {
 #[test]
 fn payload_enum_cases_have_declared_field_bytes() {
     let pos = [2i32, -4, 6];
-    fields(
-        crate::PositionSource::Block([2, -4, 6]),
-        (0u32, pos),
-    );
+    fields(crate::PositionSource::Block([2, -4, 6]), (0u32, pos));
     fields(
         crate::PositionSource::Entity {
             id: 19,

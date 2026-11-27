@@ -169,6 +169,7 @@ impl ParticleOptions {
             ..Self::simple(ty)
         }
     }
+    /// Block particle options (`BlockParticleOption`) carrying a block-atlas sprite name and RGB tint.
     pub fn block(ty: ParticleKey, sprite: String, tint: u32) -> Self {
         Self {
             block: Some((sprite, tint)),
@@ -183,6 +184,7 @@ impl ParticleOptions {
             ..Self::simple(ty)
         }
     }
+    /// Color-tinted particle options (`ColorParticleOption` / `SpellParticleOption`) with RGBA components.
     pub fn colored(ty: ParticleKey, rgba: [f32; 4]) -> Self {
         Self {
             color: rgba,

@@ -1,4 +1,4 @@
-//! Restricted views for registration, data loading, configuration, reload, and client setup.
+//! Restricted views for registration, data loading, configuration, and reload.
 use std::{collections::BTreeMap, sync::Arc};
 
 /// Owner-bound view for a registered config's initial loading.

@@ -1,4 +1,4 @@
-//! Owned particle requests, with provider identities resolved once when content loads.
+//! Client firework burst requests.
 #[allow(unused_imports)]
 use crate::*;
 

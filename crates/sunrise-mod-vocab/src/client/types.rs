@@ -1261,4 +1261,3 @@ pub struct ClientBossBar {
     /// Whether it thickens the fog (`shouldCreateWorldFog`).
     pub create_world_fog: bool,
 }
-

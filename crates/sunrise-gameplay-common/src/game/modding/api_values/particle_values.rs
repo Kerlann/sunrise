@@ -30,9 +30,7 @@ fn finite(options: &ApiOptions) -> bool {
             at.iter().all(|v| v.is_finite())
                 && match source {
                     mod_api::PositionSource::Block(_) => true,
-                    mod_api::PositionSource::Entity { y_offset, .. } => {
-                        y_offset.is_finite()
-                    }
+                    mod_api::PositionSource::Entity { y_offset, .. } => y_offset.is_finite(),
                     _ => false,
                 }
         })

@@ -1,4 +1,4 @@
-//! `HumanoidModel.ArmPose`: how a humanoid model poses an arm, and the names an item declaration gives them.
+//! Absolute model arm rotations for custom humanoid arm-pose transforms.
 
 /// Absolute model arm rotations in radians. Each non-finite component leaves
 /// that component of the ordinary humanoid pose unchanged.
@@ -11,4 +11,3 @@ pub struct ArmAngles {
     /// Left arm pitch, yaw and roll.
     pub left: [f32; 3],
 }
-
