@@ -13,7 +13,7 @@ use super::entity_residency::{define_resident_access, resident_owners};
 use super::{
     Dim, ExperienceOrb, FallingBlock, ItemEntity, Mob,
     boats_common::Boat,
-    creaking::CreakingState,
+    creaking::CreakingLevelState,
     dragon_common,
     dragon_parts_table::DragonSlot,
     entity_memory::{EntityMemory, OffLevel},
@@ -216,7 +216,7 @@ pub struct Parked {
     pub raiding: Raiding,
     chunk_spawn_enemies: bool,
     sculk: SculkState,
-    creaking: CreakingState,
+    creaking: CreakingLevelState,
     /// Natural spawning's candidate cache: each level keeps its own players' squares.
     spawn_scratch: super::natural_spawning::SpawnScratch,
     /// The level's own world border (`ServerLevel.getWorldBorder`).
