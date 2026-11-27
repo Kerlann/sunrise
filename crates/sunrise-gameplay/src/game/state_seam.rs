@@ -1,5 +1,6 @@
-use super::{Dim, ServerGame, commands::execute::Source};
+use super::{ServerGame, commands::execute::Source};
 use mod_api::WorldEpoch;
+use sunrise_gameplay_common::game::Dim;
 use sunrise_level::{world::World, worldborder::WorldBorder};
 use sunrise_sim::{
     join_seq::JoinSeq,

@@ -14,9 +14,9 @@ use std::sync::{
 };
 use sunrise_core::{position::ChunkPos, vanilla_bytes::Writer};
 use sunrise_gameplay_common::game::{
-    GameGameExt1 as _, TryIntoApi as _, end_state::END_SPAWN, execution_role::ExecutionRole,
-    lan_actions::TurnRefused, server_side::server_travel::credits_respawn_tests::placed_guest,
-    tables::WorldTablesExt as _,
+    GameGameExt1 as _, TryIntoApi as _, chat_common::ChatCommonGameExt1 as _, end_state::END_SPAWN,
+    execution_role::ExecutionRole, lan_actions::TurnRefused,
+    server_side::server_travel::credits_respawn_tests::placed_guest, tables::WorldTablesExt as _,
 };
 use sunrise_items::items::ItemStack;
 use sunrise_level::chunk::Chunk;
