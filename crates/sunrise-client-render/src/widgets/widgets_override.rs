@@ -627,8 +627,261 @@ pub fn scale_argb_alpha(argb: u32, alpha: f32) -> i32 {
     ((argb & 0x00FF_FFFF) | (a << 24)) as i32
 }
 
+/// Whether the current thread is inside an active [`with_widget_overrides`] draw pass.
+#[inline]
+pub fn in_override_pass() -> bool {
+    HAS_OVERRIDES.get()
+}
+
 /// Effective label text colour in packed ARGB (`screen_draw::Draw` format).
 pub fn label_argb_color(active: bool, override_argb: Option<u32>, alpha: f32) -> i32 {
     let base = override_argb.unwrap_or(if active { 0xFFFF_FFFF } else { 0xFFA0_A0A0 });
     scale_argb_alpha(base, alpha)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::widgets;
+
+    #[test]
+    fn collector_captures_widgets_and_restores_live_buffers_including_on_panic() {
+        let saved = widgets::take();
+        widgets::end_frame(9_001);
+        widgets::record("LiveButton", [1.0, 2.0, 30.0, 20.0], true);
+        widgets::target([1.0, 2.0, 30.0, 20.0]);
+        widgets::request_cursor(Cursor::PointingHand);
+
+        let collected = with_widget_collector(|| {
+            assert!(is_collecting_widgets());
+            let label = Text::translate("gui.done", &[]);
+            let resolved = resolve_engine_widget(EngineWidgetInput {
+                bucket: WidgetBucket::Button,
+                rect: [10.0, 20.0, 100.0, 20.0],
+                label: Some(&label),
+                explicit_key: None,
+                active: true,
+                hovered: false,
+                focused: false,
+                tab_order_group: 2,
+            });
+            assert!(matches!(resolved, ResolvedEngineWidget::Skip));
+            widgets::record("Scratch", [0.0, 0.0, 10.0, 10.0], true);
+            widgets::request_cursor(Cursor::Ibeam);
+        });
+        assert!(!is_collecting_widgets());
+        assert_eq!(collected.len(), 1);
+        assert_eq!(collected[0].key.key, "gui.done");
+        assert_eq!(collected[0].key.bucket, WidgetBucket::Button);
+        assert_eq!(collected[0].key.occurrence, 0);
+        assert_eq!(collected[0].rect, [10.0, 20.0, 100.0, 20.0]);
+        assert_eq!(collected[0].tab_order_group, 2);
+
+        // Live cursor and widget buffers were restored untouched.
+        assert_eq!(widgets::take_cursor(), Cursor::PointingHand);
+        widgets::end_frame(9_002);
+        let live = widgets::last_labelled();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].label, "LiveButton");
+
+        // Panic inside collector still clears collecting state and restores live buffers.
+        widgets::record("BeforePanic", [5.0, 6.0, 40.0, 20.0], true);
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = with_widget_collector(|| {
+                widgets::record("InsidePanic", [0.0, 0.0, 1.0, 1.0], true);
+                panic!("simulated collector failure");
+            });
+        }));
+        assert!(panicked.is_err());
+        assert!(!is_collecting_widgets());
+        widgets::end_frame(9_003);
+        let after = widgets::last_labelled();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].label, "BeforePanic");
+
+        widgets::put(saved);
+    }
+
+    #[test]
+    fn stable_key_preserves_translation_keys_and_value_prefixes() {
+        let done = Text::translate("gui.done", &[]);
+        assert_eq!(stable_key_from_text(&done), "gui.done");
+
+        let fov_70 = Text::translate(
+            "options.generic_value",
+            &[Text::translate("options.fov", &[]), Text::literal("70")],
+        );
+        let fov_90 = Text::translate(
+            "options.generic_value",
+            &[Text::translate("options.fov", &[]), Text::literal("90")],
+        );
+        assert_eq!(stable_key_from_text(&fov_70), stable_key_from_text(&fov_90));
+        assert_eq!(
+            stable_key_from_text(&fov_70),
+            "options.generic_value:options.fov"
+        );
+
+        let lit_70 = Text::literal("FOV: 70");
+        let lit_90 = Text::literal("FOV: 90");
+        assert_eq!(stable_key_from_text(&lit_70), "FOV:");
+        assert_eq!(stable_key_from_text(&lit_70), stable_key_from_text(&lit_90));
+    }
+
+    #[test]
+    fn overrides_apply_all_properties_track_occurrences_and_respect_without_overrides() {
+        let mut maps = EngineOverrideMaps::default();
+        let done_key_0 = EngineWidgetKey {
+            key: "gui.done".into(),
+            bucket: WidgetBucket::Button,
+            occurrence: 0,
+        };
+        let done_key_1 = EngineWidgetKey {
+            key: "gui.done".into(),
+            bucket: WidgetBucket::Button,
+            occurrence: 1,
+        };
+        maps.overrides.insert(
+            done_key_0.clone(),
+            EngineWidgetOverride {
+                removed: true,
+                ..Default::default()
+            },
+        );
+        let tip = EngineWidgetTooltip {
+            message: Text::literal("Tip"),
+            narration: "Tip".into(),
+            component: None,
+            style: None,
+        };
+        maps.overrides.insert(
+            done_key_1.clone(),
+            EngineWidgetOverride {
+                rect: Some([50.0, 60.0, 120.0, 20.0]),
+                message: Some(Text::literal("Apply")),
+                active: Some(false),
+                alpha: Some(0.5),
+                label_text_color: Some(Some(0xFF11_2233)),
+                tooltip: Some(Some(tip)),
+                tooltip_delay: Some(Duration::from_millis(200)),
+                tab_order_group: Some(4),
+                override_render_highlighted_sprite: Some(Some(true)),
+                ..Default::default()
+            },
+        );
+
+        let label = Text::translate("gui.done", &[]);
+        let t0 = Instant::now();
+        let ((), out0) = with_widget_overrides(&mut maps, (60.0, 70.0), t0, || {
+            assert!(in_override_pass());
+            // Occurrence 0 is removed -> Skip.
+            assert!(matches!(
+                resolve_engine_widget(EngineWidgetInput {
+                    bucket: WidgetBucket::Button,
+                    rect: [10.0, 10.0, 80.0, 20.0],
+                    label: Some(&label),
+                    explicit_key: None,
+                    active: true,
+                    hovered: false,
+                    focused: false,
+                    tab_order_group: 0,
+                }),
+                ResolvedEngineWidget::Skip
+            ));
+            // Occurrence 1 still resolves to its own key even though occurrence 0 was removed.
+            match resolve_engine_widget(EngineWidgetInput {
+                bucket: WidgetBucket::Button,
+                rect: [10.0, 40.0, 80.0, 20.0],
+                label: Some(&label),
+                explicit_key: None,
+                active: true,
+                hovered: false,
+                focused: false,
+                tab_order_group: 0,
+            }) {
+                ResolvedEngineWidget::Draw(props) => {
+                    assert_eq!(props.rect, [50.0, 60.0, 120.0, 20.0]);
+                    assert_eq!(
+                        props.message.as_ref().map(Text::plain).as_deref(),
+                        Some("Apply")
+                    );
+                    assert!(!props.active);
+                    assert!(props.hovered);
+                    assert_eq!(props.alpha, 0.5);
+                    assert_eq!(props.label_text_color, Some(0xFF11_2233));
+                    assert_eq!(props.tab_order_group, 4);
+                    assert_eq!(props.override_render_highlighted_sprite, Some(true));
+                    assert_eq!(props.tooltip_narration.as_deref(), Some("Tip"));
+                }
+                other => panic!("expected Draw, got {other:?}"),
+            }
+            // Mounted widget rendering bypasses engine overrides completely.
+            without_engine_overrides(|| {
+                assert!(!in_override_pass());
+                assert!(matches!(
+                    resolve_engine_widget(EngineWidgetInput {
+                        bucket: WidgetBucket::Button,
+                        rect: [10.0, 10.0, 80.0, 20.0],
+                        label: Some(&label),
+                        explicit_key: None,
+                        active: true,
+                        hovered: false,
+                        focused: false,
+                        tab_order_group: 0,
+                    }),
+                    ResolvedEngineWidget::Unchanged
+                ));
+            });
+        });
+        assert!(!in_override_pass());
+        // Tooltip delay has not elapsed yet on frame 0.
+        assert!(out0.pending_tooltip.is_none());
+        assert_eq!(out0.hits.len(), 2);
+        assert!(out0.hits[0].blocks_original && !out0.hits[0].interactive);
+        assert!(out0.hits[1].blocks_original && !out0.hits[1].interactive);
+        assert_eq!(out0.hits[1].resolved_rect, [50.0, 60.0, 120.0, 20.0]);
+
+        // After 250 ms hovering, the delayed tooltip schedules.
+        let t1 = t0 + Duration::from_millis(250);
+        let ((), out1) = with_widget_overrides(&mut maps, (60.0, 70.0), t1, || {
+            let _ = resolve_engine_widget(EngineWidgetInput {
+                bucket: WidgetBucket::Button,
+                rect: [10.0, 10.0, 80.0, 20.0],
+                label: Some(&label),
+                explicit_key: None,
+                active: true,
+                hovered: false,
+                focused: false,
+                tab_order_group: 0,
+            });
+            let _ = resolve_engine_widget(EngineWidgetInput {
+                bucket: WidgetBucket::Button,
+                rect: [10.0, 40.0, 80.0, 20.0],
+                label: Some(&label),
+                explicit_key: None,
+                active: true,
+                hovered: false,
+                focused: false,
+                tab_order_group: 0,
+            });
+        });
+        let pending = out1.pending_tooltip.expect("tooltip elapsed after delay");
+        assert_eq!(pending.tooltip.message.plain(), "Tip");
+        assert_eq!(pending.rect, [50.0, 60.0, 120.0, 20.0]);
+    }
+
+    #[test]
+    fn color_and_alpha_helpers_scale_channels_accurately() {
+        assert_eq!(scale_abgr_alpha(0xFFFF_FF00, 1.0), 0xFFFF_FF00);
+        assert_eq!(scale_abgr_alpha(0xFFFF_FF00, 0.0), 0x00FF_FF00);
+        assert_eq!(white_abgr_alpha(0.5) >> 24, 128);
+        assert_eq!(label_abgr_color(true, None, 1.0), 0xFFFF_FFFF);
+        assert_eq!(label_abgr_color(false, None, 1.0), 0xFFA0_A0A0);
+        // ARGB 0xFF112233 -> ABGR 0xFF332211.
+        assert_eq!(label_abgr_color(true, Some(0xFF11_2233), 1.0), 0xFF33_2211);
+        assert_eq!(scale_argb_alpha(0xFFFF_0000, 0.0) as u32, 0x00FF_0000);
+        assert_eq!(
+            label_argb_color(true, Some(0xFF11_2233), 1.0) as u32,
+            0xFF11_2233
+        );
+    }
 }

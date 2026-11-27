@@ -6,12 +6,12 @@ use crate::game::native_hooks::base::screen_widgets_tests::send_mouse_button;
 use crate::game::native_hooks::base::screen_widgets_tests::send_scroll;
 use crate::game::native_hooks::base::screen_widgets_tests::take_log;
 use mod_api::ScreenOpening;
-use mod_api::client::widgets::{Button, TextField};
+use mod_api::client::widgets::{Button, ButtonSprites, TextField, WidgetTooltip};
 use mod_api::{
     ClientHost, DrawContext, Flow, Hooks, ModEntry, ScreenCharTypedPostEvent,
-    ScreenCharTypedPreEvent, ScreenClosingEvent, ScreenInitPostEvent, ScreenKeyPressedPostEvent,
-    ScreenKeyPressedPreEvent, ScreenKeyReleasedPostEvent, ScreenKeyReleasedPreEvent,
-    ScreenMouseButtonPressedPostEvent, ScreenMouseButtonPressedPreEvent,
+    ScreenCharTypedPreEvent, ScreenClosingEvent, ScreenInitPostEvent, ScreenInitPreEvent,
+    ScreenKeyPressedPostEvent, ScreenKeyPressedPreEvent, ScreenKeyReleasedPostEvent,
+    ScreenKeyReleasedPreEvent, ScreenMouseButtonPressedPostEvent, ScreenMouseButtonPressedPreEvent,
     ScreenMouseButtonReleasedPostEvent, ScreenMouseButtonReleasedPreEvent,
     ScreenMouseDraggedPostEvent, ScreenMouseDraggedPreEvent, ScreenMouseScrolledPostEvent,
     ScreenMouseScrolledPreEvent, ScreenOpeningEvent, ScreenPreeditPostEvent, ScreenPreeditPreEvent,
@@ -2823,28 +2823,15 @@ fn title_init_post_lists_and_removes_the_title_screens_own_widgets() {
                 (638.0, 470.0, 10.0)
             );
 
-            let press = |game: &mut sunrise_client_gameplay::game::ClientGame<'_>, key: &str| {
+            let click_rect = |game: &mut sunrise_client_gameplay::game::ClientGame<'_>,
+                              key: &str| {
                 let [x, y, w, h] = rect(key);
-                let title = game.client.title.0.as_mut().unwrap();
-                title.click(x + w / 2.0, y + h / 2.0, (640.0, 480.0)).0
+                move_mouse(game, win_id, f64::from(x + w / 2.0), f64::from(y + h / 2.0));
+                send_mouse_button(game, win_id, MouseButton::Left, true);
+                send_mouse_button(game, win_id, MouseButton::Left, false);
             };
-            use sunrise_client::title::Action;
-            assert_eq!(press(game, "menu.options"), Action::None);
-            assert_eq!(press(game, "menu.quit"), Action::Quit);
-            let drawn = |game: &sunrise_client_gameplay::game::ClientGame<'_>, serial| {
-                let mut batch = sunrise_client::hud::HudBatch::new(
-                    [640, 480],
-                    game.client.settings.gui_scale_inputs(),
-                );
-                assert_eq!((batch.width, batch.height), (640.0, 480.0));
-                let title = game.client.title.0.as_ref().unwrap();
-                title.draw(
-                    &game.client.gui.atlas,
-                    &mut batch,
-                    (0.0, 0.0),
-                    false,
-                    &mut |_, _| {},
-                );
+            let drawn = |game: &mut sunrise_client_gameplay::game::ClientGame<'_>, serial| {
+                let _ = game.hud_layers([640, 480]);
                 sunrise_client::widgets::end_frame(serial);
                 sunrise_client::widgets::last_labelled()
                     .into_iter()
@@ -2856,7 +2843,9 @@ fn title_init_post_lists_and_removes_the_title_screens_own_widgets() {
             assert!(shown.contains(&label("menu.quit")));
             assert!(!shown.contains(&label("menu.options")));
             assert!(!shown.contains(&label("sunrise.title.not_affiliated")));
-            assert_eq!(press(game, "sunrise.title.not_affiliated"), Action::None);
+            // Clicking removed bottom notice is blocked and does not open the credits screen.
+            click_rect(game, "sunrise.title.not_affiliated");
+            assert_eq!(game.client.screen, Screen::Playing);
 
             // The next init starts from the full set again.
             remove.store(false, Ordering::SeqCst);
@@ -2865,16 +2854,17 @@ fn title_init_post_lists_and_removes_the_title_screens_own_widgets() {
             let shown = drawn(game, 2);
             assert!(shown.contains(&label("menu.options")));
             assert!(shown.contains(&label("sunrise.title.not_affiliated")));
-            assert_eq!(press(game, "sunrise.title.not_affiliated"), Action::Credits);
-            assert_eq!(press(game, "menu.options"), Action::Options);
+            // Restored Options... opens Screen::Options via real pointer input.
+            click_rect(game, "menu.options");
+            assert_eq!(game.client.screen, Screen::Options);
+            game.leave_options();
+            assert_eq!(game.client.screen, Screen::Playing);
 
             // The next click uses the rebuilt widgets before the next frame draws them.
             remove.store(true, Ordering::SeqCst);
             game.test_commit_screen_transition();
-            let [x, y, w, h] = rect("menu.options");
-            move_mouse(game, win_id, f64::from(x + w / 2.0), f64::from(y + h / 2.0));
-            send_mouse_button(game, win_id, MouseButton::Left, true);
-            send_mouse_button(game, win_id, MouseButton::Left, false);
+            click_rect(game, "menu.options");
+            assert_eq!(game.client.screen, Screen::Playing);
             assert!(
                 pressed.load(Ordering::SeqCst),
                 "the replacement took the click"
@@ -3061,6 +3051,680 @@ fn sub_page_switch_clears_mounted_widgets_and_refires_init_post() {
             game.observe_screen();
             assert_eq!(inits.load(Ordering::SeqCst), 2);
             assert_eq!(drops.load(Ordering::SeqCst), 1);
+        });
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn engine_screens_enumerate_stable_ids_and_modify_widgets_across_frames() {
+    if run_fresh_cases(
+        "cut_layout::game::client_side::native_hooks_client::base::screen_widgets_tests::engine_screens_enumerate_stable_ids_and_modify_widgets_across_frames",
+        "SUNRISE_WIDGETS_ENUM_MODIFY_CHILD",
+        &["window"],
+    ) {
+        return;
+    }
+
+    with_mods(Vec::new().into(), || {
+        with_client_game(|game| {
+            let (_el, win_id) = attach_offscreen_window(game);
+
+            // Check stable enumeration across two frames without input on multiple screens.
+            let check_two_frames_stable =
+                |game: &mut sunrise_client_gameplay::game::ClientGame<'_>,
+                 serial: u64,
+                 screen_name: &str| {
+                    let ids_before: Vec<ScreenWidgetId> = game
+                        .screen_widgets()
+                        .unwrap_or_else(|| panic!("{screen_name} should expose widgets"))
+                        .children()
+                        .iter()
+                        .map(|c| c.id)
+                        .collect();
+                    assert!(!ids_before.is_empty(), "{screen_name} must list widgets");
+                    let _ = game.hud_layers([640, 480]);
+                    sunrise_client::widgets::end_frame(serial);
+                    let _ = game.hud_layers([640, 480]);
+                    sunrise_client::widgets::end_frame(serial + 1);
+                    let ids_after: Vec<ScreenWidgetId> = game
+                        .screen_widgets()
+                        .unwrap()
+                        .children()
+                        .iter()
+                        .map(|c| c.id)
+                        .collect();
+                    assert_eq!(
+                        ids_before, ids_after,
+                        "{screen_name} widget ids must stay stable across two frames"
+                    );
+                };
+
+            // Pause screen
+            game.client.pause_menu = true;
+            game.set_screen(Screen::Paused);
+            game.observe_screen();
+            check_two_frames_stable(game, 50_000, "paused");
+
+            // Options screen: rename "Done", verify draw + hit-test, and test setters.
+            game.open_options(false);
+            game.observe_screen();
+            check_two_frames_stable(game, 50_010, "options");
+            let done_key = ApiText::translate("gui.done", vec![]);
+            let (done_id, done_rect) = {
+                let widgets = game.screen_widgets().unwrap();
+                let done = widgets
+                    .children()
+                    .iter()
+                    .find(|c| c.message.as_ref() == Some(&done_key))
+                    .expect("options screen lists gui.done");
+                (done.id, done.rect)
+            };
+            {
+                let widgets = game.screen_widgets().unwrap();
+                assert!(widgets.set_message(done_id, ApiText::literal("Apply Now")));
+                assert!(widgets.set_alpha(done_id, 0.75));
+                assert!(widgets.set_label_text_color(done_id, Some(0xFFAA_BBCC)));
+                assert!(widgets.set_tab_order_group(done_id, 3));
+                assert!(widgets.set_tooltip(
+                    done_id,
+                    Some(WidgetTooltip::new(ApiText::literal("Confirm choices")))
+                ));
+                assert!(widgets.set_tooltip_delay(done_id, std::time::Duration::from_millis(50)));
+                assert!(widgets.set_sprites(done_id, Some(ButtonSprites::new("test:btn"))));
+                assert!(widgets.set_override_render_highlighted_sprite(done_id, Some(true)));
+                let updated = widgets.children().iter().find(|c| c.id == done_id).unwrap();
+                assert_eq!(updated.message, Some(ApiText::literal("Apply Now")));
+                assert_eq!(updated.alpha, 0.75);
+                assert_eq!(updated.label_text_color, Some(0xFFAA_BBCC));
+                assert_eq!(updated.tab_order_group, 3);
+                assert_eq!(updated.override_render_highlighted_sprite, Some(true));
+            }
+            let _ = game.hud_layers([640, 480]);
+            sunrise_client::widgets::end_frame(50_020);
+            let drawn_labels: Vec<String> = sunrise_client::widgets::last_labelled()
+                .into_iter()
+                .map(|w| w.label)
+                .collect();
+            assert!(drawn_labels.contains(&"Apply Now".to_owned()));
+            assert!(!drawn_labels.contains(&sunrise_client::lang::get("gui.done")));
+
+            // Moving Done blocks the old rect and redirects clicks from the new rect.
+            let moved_rect = [12.0, 12.0, 120.0, 20.0];
+            assert!(
+                game.screen_widgets()
+                    .unwrap()
+                    .set_bounds(done_id, moved_rect)
+            );
+            let _ = game.hud_layers([640, 480]);
+            sunrise_client::widgets::end_frame(50_021);
+            move_mouse(
+                game,
+                win_id,
+                f64::from(done_rect[0] + done_rect[2] / 2.0),
+                f64::from(done_rect[1] + done_rect[3] / 2.0),
+            );
+            send_mouse_button(game, win_id, MouseButton::Left, true);
+            send_mouse_button(game, win_id, MouseButton::Left, false);
+            assert_eq!(
+                game.client.screen,
+                Screen::Options,
+                "click at old rect must be blocked after set_bounds"
+            );
+
+            // Hiding Done prevents both drawing and clicking at its moved rect.
+            assert!(game.screen_widgets().unwrap().set_visible(done_id, false));
+            let _ = game.hud_layers([640, 480]);
+            sunrise_client::widgets::end_frame(50_022);
+            let hidden_labels: Vec<String> = sunrise_client::widgets::last_labelled()
+                .into_iter()
+                .map(|w| w.label)
+                .collect();
+            assert!(!hidden_labels.contains(&"Apply Now".to_owned()));
+            move_mouse(
+                game,
+                win_id,
+                f64::from(moved_rect[0] + moved_rect[2] / 2.0),
+                f64::from(moved_rect[1] + moved_rect[3] / 2.0),
+            );
+            send_mouse_button(game, win_id, MouseButton::Left, true);
+            send_mouse_button(game, win_id, MouseButton::Left, false);
+            assert_eq!(
+                game.client.screen,
+                Screen::Options,
+                "hidden button must not accept clicks"
+            );
+
+            // Restoring visibility and disabling blocks clicks; re-enabling lets moved click close Options.
+            assert!(game.screen_widgets().unwrap().set_visible(done_id, true));
+            assert!(game.screen_widgets().unwrap().set_active(done_id, false));
+            let _ = game.hud_layers([640, 480]);
+            sunrise_client::widgets::end_frame(50_023);
+            send_mouse_button(game, win_id, MouseButton::Left, true);
+            send_mouse_button(game, win_id, MouseButton::Left, false);
+            assert_eq!(
+                game.client.screen,
+                Screen::Options,
+                "inactive button must not accept clicks"
+            );
+
+            assert!(game.screen_widgets().unwrap().set_active(done_id, true));
+            let _ = game.hud_layers([640, 480]);
+            sunrise_client::widgets::end_frame(50_024);
+            send_mouse_button(game, win_id, MouseButton::Left, true);
+            send_mouse_button(game, win_id, MouseButton::Left, false);
+            assert_ne!(
+                game.client.screen,
+                Screen::Options,
+                "clicking moved Done must close Options"
+            );
+
+            // Stale ID after rebuild/switch returns false on setters, remove, and press.
+            {
+                let widgets = game.screen_widgets().unwrap();
+                assert!(!widgets.set_message(done_id, ApiText::literal("Stale")));
+                assert!(!widgets.set_bounds(done_id, [0.0, 0.0, 20.0, 20.0]));
+                assert!(!widgets.set_active(done_id, false));
+                assert!(!widgets.set_visible(done_id, false));
+                assert!(!widgets.remove(done_id));
+                assert!(!widgets.press(done_id));
+            }
+
+            // Options sub-page (Video), Death screen, Title, and World Select all enumerate stably.
+            game.open_options(false);
+            game.client
+                .chat_ui
+                .options
+                .show(sunrise_client::options_ui::Page::Video);
+            game.observe_screen();
+            check_two_frames_stable(game, 50_030, "options_video");
+
+            game.set_screen(Screen::Dead);
+            game.observe_screen();
+            check_two_frames_stable(game, 50_040, "dead");
+
+            game.set_screen(Screen::Playing);
+            let saves = std::env::temp_dir().join("sunrise-widgets-enum-test-no-saves");
+            game.client.title.0 = Some(game.new_title(saves));
+            game.observe_screen();
+            check_two_frames_stable(game, 50_050, "title");
+
+            game.client
+                .title
+                .0
+                .as_mut()
+                .unwrap()
+                .open_by_id("world_select");
+            game.observe_screen();
+            check_two_frames_stable(game, 50_060, "world_select");
+        });
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn screen_init_pre_cancel_suppresses_engine_widgets_and_still_runs_init_post() {
+    if run_fresh_cases(
+        "cut_layout::game::client_side::native_hooks_client::base::screen_widgets_tests::screen_init_pre_cancel_suppresses_engine_widgets_and_still_runs_init_post",
+        "SUNRISE_WIDGETS_INIT_PRE_CHILD",
+        &["window"],
+    ) {
+        return;
+    }
+
+    struct InitPreMod {
+        cancel: Arc<AtomicBool>,
+        log: Arc<Mutex<Vec<String>>>,
+        post_children: Arc<Mutex<Vec<Option<ApiText>>>>,
+        pre_pressed: Arc<AtomicBool>,
+    }
+
+    #[mod_api::__subscriptions]
+    impl Hooks for InitPreMod {
+        fn screen_init_pre(
+            &self,
+            _host: &dyn ClientHost,
+            event: &mut ScreenInitPreEvent<'_>,
+        ) -> Flow {
+            if event.screen.id != "paused" {
+                return Flow::Continue;
+            }
+            self.log.lock().unwrap().push("pre".into());
+            let pressed = self.pre_pressed.clone();
+            event.widgets.add_button(Button::new(
+                [16.0, 16.0, 90.0, 20.0],
+                ApiText::literal("PreMount"),
+                move |_, _| pressed.store(true, Ordering::SeqCst),
+            ));
+            if self.cancel.load(Ordering::SeqCst) {
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        }
+
+        fn screen_init_post(&self, _host: &dyn ClientHost, event: &mut ScreenInitPostEvent<'_>) {
+            if event.screen.id != "paused" {
+                return;
+            }
+            self.log.lock().unwrap().push("post".into());
+            *self.post_children.lock().unwrap() = event
+                .widgets
+                .children()
+                .iter()
+                .map(|c| c.message.clone())
+                .collect();
+            event.widgets.add_button(Button::new(
+                [16.0, 44.0, 90.0, 20.0],
+                ApiText::literal("PostMount"),
+                |_, _| {},
+            ));
+        }
+    }
+
+    let cancel = Arc::new(AtomicBool::new(true));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let post_children = Arc::new(Mutex::new(Vec::new()));
+    let pre_pressed = Arc::new(AtomicBool::new(false));
+    let mods = vec![ModEntry::new(
+        "init_pre_mod",
+        Box::new(InitPreMod {
+            cancel: cancel.clone(),
+            log: log.clone(),
+            post_children: post_children.clone(),
+            pre_pressed: pre_pressed.clone(),
+        }),
+    )]
+    .into();
+
+    with_mods(mods, || {
+        with_client_game(|game| {
+            let (_el, win_id) = attach_offscreen_window(game);
+            game.client.pause_menu = true;
+            game.set_screen(Screen::Paused);
+            game.observe_screen();
+
+            assert_eq!(take_log(&log), ["pre", "post"]);
+            // Cancelled Init.Pre suppressed all engine widgets; Init.Post sees only PreMount.
+            assert_eq!(
+                *post_children.lock().unwrap(),
+                vec![Some(ApiText::literal("PreMount"))]
+            );
+            let _ = game.hud_layers([640, 480]);
+            sunrise_client::widgets::end_frame(51_000);
+            let labels: Vec<String> = sunrise_client::widgets::last_labelled()
+                .into_iter()
+                .map(|w| w.label)
+                .collect();
+            assert!(labels.contains(&"PreMount".to_owned()));
+            assert!(labels.contains(&"PostMount".to_owned()));
+            assert!(!labels.contains(&sunrise_client::lang::get("menu.returnToGame")));
+            assert!(!labels.contains(&sunrise_client::lang::get("menu.options")));
+
+            // Clicking PreMount activates it.
+            move_mouse(game, win_id, 40.0, 24.0);
+            send_mouse_button(game, win_id, MouseButton::Left, true);
+            send_mouse_button(game, win_id, MouseButton::Left, false);
+            assert!(pre_pressed.load(Ordering::SeqCst));
+
+            // Non-cancelled Init.Pre places PreMount before PauseScreen's own widgets.
+            cancel.store(false, Ordering::SeqCst);
+            game.set_screen(Screen::Playing);
+            game.set_screen(Screen::Paused);
+            game.observe_screen();
+            assert_eq!(take_log(&log), ["pre", "post"]);
+            let seen = post_children.lock().unwrap().clone();
+            assert_eq!(seen[0], Some(ApiText::literal("PreMount")));
+            assert_eq!(
+                seen[1],
+                Some(ApiText::translate("menu.returnToGame", vec![]))
+            );
+        });
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn press_id_and_mutating_widgets_from_screen_input_hooks_and_lazy_discovery() {
+    if run_fresh_cases(
+        "cut_layout::game::client_side::native_hooks_client::base::screen_widgets_tests::press_id_and_mutating_widgets_from_screen_input_hooks_and_lazy_discovery",
+        "SUNRISE_WIDGETS_PRESS_HOOK_CHILD",
+        &["window"],
+    ) {
+        return;
+    }
+
+    struct InputMutator {
+        fired: Arc<AtomicBool>,
+    }
+
+    #[mod_api::__subscriptions]
+    impl Hooks for InputMutator {
+        fn screen_key_pressed_pre(
+            &self,
+            host: &mut dyn ClientHost,
+            event: &mut ScreenKeyPressedPreEvent<'_>,
+        ) -> Flow {
+            if event.screen.id != "paused" || event.key != "key.keyboard.f" {
+                return Flow::Continue;
+            }
+            let Some(widgets) = host.screen_widgets() else {
+                return Flow::Continue;
+            };
+            let options_key = ApiText::translate("menu.options", vec![]);
+            let stats_key = ApiText::translate("gui.stats", vec![]);
+            let options_id = widgets
+                .children()
+                .iter()
+                .find(|c| c.message.as_ref() == Some(&options_key))
+                .map(|c| c.id)
+                .expect("lazy discovery finds menu.options");
+            let stats_id = widgets
+                .children()
+                .iter()
+                .find(|c| c.message.as_ref() == Some(&stats_key))
+                .map(|c| c.id)
+                .expect("lazy discovery finds gui.stats");
+            assert!(widgets.set_message(options_id, ApiText::literal("Config")));
+            assert!(widgets.set_visible(stats_id, false));
+            self.fired.store(true, Ordering::SeqCst);
+            Flow::Cancel
+        }
+    }
+
+    let fired = Arc::new(AtomicBool::new(false));
+    let mods = vec![ModEntry::new(
+        "input_mutator",
+        Box::new(InputMutator {
+            fired: fired.clone(),
+        }),
+    )]
+    .into();
+
+    with_mods(mods, || {
+        with_client_game(|game| {
+            let (_el, _win_id) = attach_offscreen_window(game);
+            game.client.pause_menu = true;
+            game.set_screen(Screen::Paused);
+            game.observe_screen();
+
+            // No Init listener ran, so pressing F triggers lazy discovery + live mutation in input hook.
+            send_key_control(game, "key f down");
+            assert!(fired.load(Ordering::SeqCst));
+            let _ = game.hud_layers([640, 480]);
+            sunrise_client::widgets::end_frame(52_000);
+            let labels: Vec<String> = sunrise_client::widgets::last_labelled()
+                .into_iter()
+                .map(|w| w.label)
+                .collect();
+            assert!(labels.contains(&"Config".to_owned()));
+            assert!(!labels.contains(&sunrise_client::lang::get("gui.stats")));
+
+            // press(id) activates mounted buttons and respects visible/active.
+            let custom_pressed = Arc::new(AtomicUsize::new(0));
+            let counter = custom_pressed.clone();
+            let custom_id = game.screen_widgets().unwrap().add_button(Button::new(
+                [10.0, 10.0, 80.0, 20.0],
+                ApiText::literal("Trigger"),
+                move |_, _| {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                },
+            ));
+            assert!(game.screen_widgets().unwrap().press(custom_id));
+            assert_eq!(custom_pressed.load(Ordering::SeqCst), 1);
+
+            assert!(game.screen_widgets().unwrap().set_visible(custom_id, false));
+            assert!(!game.screen_widgets().unwrap().press(custom_id));
+            assert!(game.screen_widgets().unwrap().set_visible(custom_id, true));
+            assert!(game.screen_widgets().unwrap().set_active(custom_id, false));
+            assert!(!game.screen_widgets().unwrap().press(custom_id));
+            assert_eq!(custom_pressed.load(Ordering::SeqCst), 1);
+
+            // press(id) on an engine widget activates Pause -> Options.
+            let options_id = game
+                .screen_widgets()
+                .unwrap()
+                .children()
+                .iter()
+                .find(|c| c.message == Some(ApiText::literal("Config")))
+                .unwrap()
+                .id;
+            assert!(game.screen_widgets().unwrap().press(options_id));
+            assert_eq!(game.client.screen, Screen::Options);
+            // Old id is now stale.
+            assert!(!game.screen_widgets().unwrap().press(options_id));
+        });
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn resize_rebuilds_default_screens_and_repositions_overriding_screens() {
+    if run_fresh_cases(
+        "cut_layout::game::client_side::native_hooks_client::base::screen_widgets_tests::resize_rebuilds_default_screens_and_repositions_overriding_screens",
+        "SUNRISE_WIDGETS_RESIZE_RULES_CHILD",
+        &["window"],
+    ) {
+        return;
+    }
+
+    struct ResizeProbe {
+        pre_count: Arc<AtomicUsize>,
+        post_count: Arc<AtomicUsize>,
+    }
+
+    #[mod_api::__subscriptions]
+    impl Hooks for ResizeProbe {
+        fn screen_init_pre(
+            &self,
+            _host: &dyn ClientHost,
+            _event: &mut ScreenInitPreEvent<'_>,
+        ) -> Flow {
+            self.pre_count.fetch_add(1, Ordering::SeqCst);
+            Flow::Continue
+        }
+
+        fn screen_init_post(&self, _host: &dyn ClientHost, _event: &mut ScreenInitPostEvent<'_>) {
+            self.post_count.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let pre_count = Arc::new(AtomicUsize::new(0));
+    let post_count = Arc::new(AtomicUsize::new(0));
+    let mods = vec![ModEntry::new(
+        "resize_probe",
+        Box::new(ResizeProbe {
+            pre_count: pre_count.clone(),
+            post_count: post_count.clone(),
+        }),
+    )]
+    .into();
+
+    with_mods(mods, || {
+        with_client_game(|game| {
+            let (_el, win_id) = attach_offscreen_window(game);
+
+            // 1) PauseScreen inherits Screen.repositionElements() -> rebuildWidgets().
+            game.client.pause_menu = true;
+            game.set_screen(Screen::Paused);
+            game.observe_screen();
+            assert_eq!(pre_count.load(Ordering::SeqCst), 1);
+            assert_eq!(post_count.load(Ordering::SeqCst), 1);
+            let options_key = ApiText::translate("menu.options", vec![]);
+            let pause_opt_id = game
+                .screen_widgets()
+                .unwrap()
+                .children()
+                .iter()
+                .find(|c| c.message.as_ref() == Some(&options_key))
+                .unwrap()
+                .id;
+            assert!(
+                game.screen_widgets()
+                    .unwrap()
+                    .set_message(pause_opt_id, ApiText::literal("Renamed"))
+            );
+            game.handle_window_event(
+                &NoLoop,
+                win_id,
+                WindowEvent::Resized(PhysicalSize::new(800, 600)),
+                InputOrigin::User,
+            );
+            assert_eq!(pre_count.load(Ordering::SeqCst), 2);
+            assert_eq!(post_count.load(Ordering::SeqCst), 2);
+            // Old id is stale and message reverted to vanilla translation key.
+            let rebuilt_opt = game
+                .screen_widgets()
+                .unwrap()
+                .children()
+                .iter()
+                .find(|c| c.message.as_ref() == Some(&options_key))
+                .expect("rebuilt pause screen restores menu.options");
+            assert_ne!(rebuilt_opt.id, pause_opt_id);
+
+            // 2) OptionsScreen overrides repositionElements(): clears only engine bounds overrides.
+            game.open_options(false);
+            game.observe_screen();
+            let pre_before = pre_count.load(Ordering::SeqCst);
+            let post_before = post_count.load(Ordering::SeqCst);
+            let done_key = ApiText::translate("gui.done", vec![]);
+            let done_id = game
+                .screen_widgets()
+                .unwrap()
+                .children()
+                .iter()
+                .find(|c| c.message.as_ref() == Some(&done_key))
+                .unwrap()
+                .id;
+            let custom_bounds = [10.0, 10.0, 90.0, 20.0];
+            let mounted_bounds = [15.0, 15.0, 60.0, 20.0];
+            let mounted_id = {
+                let widgets = game.screen_widgets().unwrap();
+                assert!(widgets.set_bounds(done_id, custom_bounds));
+                assert!(widgets.set_message(done_id, ApiText::literal("Finish")));
+                assert!(widgets.set_active(done_id, false));
+                assert!(widgets.set_alpha(done_id, 0.5));
+                widgets.add_button(Button::new(
+                    mounted_bounds,
+                    ApiText::literal("Pinned"),
+                    |_, _| {},
+                ))
+            };
+            game.handle_window_event(
+                &NoLoop,
+                win_id,
+                WindowEvent::Resized(PhysicalSize::new(960, 720)),
+                InputOrigin::User,
+            );
+            assert_eq!(pre_count.load(Ordering::SeqCst), pre_before);
+            assert_eq!(post_count.load(Ordering::SeqCst), post_before);
+            let widgets = game.screen_widgets().unwrap();
+            let done_after = widgets
+                .children()
+                .iter()
+                .find(|c| c.id == done_id)
+                .expect("options Done keeps same id across reposition resize");
+            assert_ne!(
+                done_after.rect, custom_bounds,
+                "engine bounds override clears on reposition resize"
+            );
+            assert_eq!(done_after.message, Some(ApiText::literal("Finish")));
+            assert!(!done_after.active);
+            assert_eq!(done_after.alpha, 0.5);
+            let mounted_after = widgets
+                .children()
+                .iter()
+                .find(|c| c.id == mounted_id)
+                .expect("mounted widget survives reposition resize");
+            assert_eq!(
+                mounted_after.rect, mounted_bounds,
+                "mounted mod widget keeps its own bounds on reposition resize"
+            );
+        });
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn custom_widget_mouse_moved_and_should_take_focus_after_interaction() {
+    if run_fresh_cases(
+        "cut_layout::game::client_side::native_hooks_client::base::screen_widgets_tests::custom_widget_mouse_moved_and_should_take_focus_after_interaction",
+        "SUNRISE_WIDGETS_CUSTOM_HOVER_FOCUS_CHILD",
+        &["window"],
+    ) {
+        return;
+    }
+
+    struct HoverNoFocusWidget {
+        moved: Arc<Mutex<Vec<[f32; 2]>>>,
+        clicked: Arc<AtomicBool>,
+    }
+
+    impl ScreenWidget for HoverNoFocusWidget {
+        fn bounds(&self) -> [f32; 4] {
+            [200.0, 20.0, 80.0, 20.0]
+        }
+
+        fn mouse_moved(&mut self, _host: &mut dyn ClientHost, mouse: [f32; 2]) {
+            self.moved.lock().unwrap().push(mouse);
+        }
+
+        fn mouse_clicked(
+            &mut self,
+            _host: &mut dyn ClientHost,
+            _mouse: [f32; 2],
+            _button: i32,
+            _modifiers: u32,
+            _double_click: bool,
+        ) -> bool {
+            self.clicked.store(true, Ordering::SeqCst);
+            true
+        }
+
+        fn should_take_focus_after_interaction(&self) -> bool {
+            false
+        }
+    }
+
+    with_mods(Vec::new().into(), || {
+        with_client_game(|game| {
+            let (_el, win_id) = attach_offscreen_window(game);
+            game.client.pause_menu = true;
+            game.set_screen(Screen::Paused);
+            game.observe_screen();
+
+            let moved = Arc::new(Mutex::new(Vec::new()));
+            let clicked = Arc::new(AtomicBool::new(false));
+            let field_id = {
+                let widgets = game.screen_widgets().unwrap();
+                let field_id =
+                    widgets.add_text_field(TextField::new([20.0, 20.0, 120.0, 20.0], 32));
+                widgets.add_widget(Box::new(HoverNoFocusWidget {
+                    moved: moved.clone(),
+                    clicked: clicked.clone(),
+                }));
+                assert!(widgets.set_initial_focus(field_id));
+                field_id
+            };
+            assert_eq!(
+                game.client.screen_state.0.widgets.focused_id(),
+                Some(field_id)
+            );
+
+            move_mouse(game, win_id, 220.0, 30.0);
+            assert!(
+                !moved.lock().unwrap().is_empty(),
+                "custom ScreenWidget::mouse_moved must receive pointer movement"
+            );
+
+            send_mouse_button(game, win_id, MouseButton::Left, true);
+            send_mouse_button(game, win_id, MouseButton::Left, false);
+            assert!(clicked.load(Ordering::SeqCst));
+            assert_eq!(
+                game.client.screen_state.0.widgets.focused_id(),
+                Some(field_id),
+                "should_take_focus_after_interaction() == false must leave prior focus intact"
+            );
         });
     });
 }
