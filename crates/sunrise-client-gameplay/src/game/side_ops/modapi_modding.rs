@@ -501,7 +501,7 @@ use mod_api::MenuRef;
 use mod_api::PlayerRef;
 use mod_api::SupportType;
 use mod_api::WorldEpoch;
-use mod_api::client::first_person::Hand;
+use mod_api::Hand;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;

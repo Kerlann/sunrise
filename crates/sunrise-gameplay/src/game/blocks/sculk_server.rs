@@ -2,7 +2,7 @@
 //! sensors, shriekers and wardens (`GameEventDispatcher`), the vibration
 //! ticker, redstone output, resonance, shrieks, warden summoning, and catalysts.
 use super::Result;
-use mod_api::client::particles::PositionSource;
+use mod_api::PositionSource;
 use std::collections::HashSet;
 use sunrise_core::{
     geometry::{Aabb, Direction, Vec3},

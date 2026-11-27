@@ -1956,3 +1956,15 @@ impl NoBackend for WantedPositionError {
         Self::Unavailable
     }
 }
+
+/// `InteractionHand`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// exhaustive: a closed set the game matches without a wildcard
+#[derive(sunrise_mod_api_macros::Wire)]
+pub enum Hand {
+    Main,
+    Off,
+}
+impl Hand {
+    pub const BOTH: [Hand; 2] = [Hand::Main, Hand::Off];
+}

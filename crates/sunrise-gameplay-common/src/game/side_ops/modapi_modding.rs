@@ -6,7 +6,7 @@ use mod_api::{
     BlockCapabilitySite, BlockEntityRef, BlockFace, BlockSide, CollisionFlags, Compound,
     DatapackRegistrySet, DimensionKey, EntityReadError, EntityRef, EntityResidency, EntityTypeKey,
     EquipmentSlot, ItemEntityRef, LevelReadError, LevelRef, LivingRef, MainHand, MenuRef,
-    PlayerRef, SupportType, WorldEpoch, client::first_person::Hand,
+    PlayerRef, SupportType, WorldEpoch, Hand,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
