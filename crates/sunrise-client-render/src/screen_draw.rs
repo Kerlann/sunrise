@@ -562,15 +562,15 @@ pub fn button(
     highlighted: bool,
     now_ms: i64,
 ) {
+    let rect = [x as f32, y as f32, w as f32, h as f32];
+    let plain = label.plain();
+    crate::widgets::record(&plain, rect, active);
+    if active && plain.trim().is_empty() {
+        crate::widgets::target(rect);
+    }
     // Its narration: hovered is the mouse over it (`isHovered`), which the
     // narrator tests.
-    crate::widgets::narratable(|| {
-        crate::widgets::Narratable::button(
-            label.plain(),
-            [x as f32, y as f32, w as f32, h as f32],
-            active,
-        )
-    });
+    crate::widgets::narratable(|| crate::widgets::Narratable::button(plain, rect, active));
     let sprite_id = if !active {
         "widget/button_disabled"
     } else if highlighted {
@@ -1531,5 +1531,71 @@ mod max_length_tests {
         field.max_length = 4;
         field.insert_text(&m, "ab😀");
         assert_eq!(field.value, "ab😀", "four units, both of the emoji's");
+    }
+
+    #[test]
+    fn button_records_widget_and_empty_active_focus_target() {
+        let atlas = atlas();
+        let m = Measure(&atlas.font);
+        let saved = crate::widgets::take();
+        crate::widgets::end_frame(810);
+        let mut out = Vec::new();
+        button(
+            &mut out,
+            &m,
+            &Text::literal("Done"),
+            10,
+            20,
+            100,
+            20,
+            true,
+            false,
+            0,
+        );
+        button(
+            &mut out,
+            &m,
+            &Text::empty(),
+            120,
+            20,
+            20,
+            20,
+            true,
+            false,
+            0,
+        );
+        button(
+            &mut out,
+            &m,
+            &Text::empty(),
+            150,
+            20,
+            20,
+            20,
+            false,
+            false,
+            0,
+        );
+        crate::widgets::end_frame(811);
+        let recorded = crate::widgets::last();
+        assert_eq!(recorded.len(), 3);
+        assert_eq!(
+            (recorded[0].label.as_str(), recorded[0].enabled),
+            ("Done", true)
+        );
+        assert_eq!(
+            (recorded[1].label.as_str(), recorded[1].enabled),
+            ("", true)
+        );
+        assert_eq!(
+            (recorded[2].label.as_str(), recorded[2].enabled),
+            ("", false)
+        );
+        let targets: Vec<[f32; 4]> = crate::widgets::last_targets()
+            .iter()
+            .map(|t| t.rect)
+            .collect();
+        assert_eq!(targets, [[120.0, 20.0, 20.0, 20.0]]);
+        crate::widgets::put(saved);
     }
 }

@@ -984,13 +984,14 @@ impl PackScreen {
     }
     /// The options button of a card: a small button with a sliders glyph.
     fn draw_options_button(out: &mut Vec<Draw>, x: i32, y: i32, hover: bool) {
-        crate::widgets::narratable(|| {
-            crate::widgets::Narratable::button(
-                tr("sunrise.pack.options").plain(),
-                [x as f32, y as f32, OPTIONS_SIZE as f32, OPTIONS_SIZE as f32],
-                true,
-            )
-        });
+        let rect = [x as f32, y as f32, OPTIONS_SIZE as f32, OPTIONS_SIZE as f32];
+        let plain = tr("sunrise.pack.options").plain();
+        crate::widgets::record(&plain, rect, true);
+        if plain.trim().is_empty() {
+            crate::widgets::target(rect);
+        }
+        crate::widgets::widget_cursor(hover, true);
+        crate::widgets::narratable(|| crate::widgets::Narratable::button(plain, rect, true));
         let sprite = if hover {
             "widget/button_highlighted"
         } else {
@@ -1918,5 +1919,27 @@ mod icon_slot_tests {
         let other = self::atlas();
         assert_ne!(other.revision, atlas.revision);
         assert_eq!(frame(&screen, &other).2.len(), 3);
+    }
+
+    #[test]
+    fn options_button_records_widget_and_requests_hand_on_hover() {
+        let saved = crate::widgets::take();
+        crate::widgets::end_frame(820);
+        let _ = crate::widgets::take_cursor();
+        let mut out = Vec::new();
+        PackScreen::draw_options_button(&mut out, 30, 40, true);
+        assert_eq!(
+            crate::widgets::take_cursor(),
+            crate::widgets::Cursor::PointingHand
+        );
+        crate::widgets::end_frame(821);
+        let recorded = crate::widgets::last();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(
+            [recorded[0].x, recorded[0].y, recorded[0].w, recorded[0].h],
+            [30.0, 40.0, OPTIONS_SIZE as f32, OPTIONS_SIZE as f32]
+        );
+        assert!(recorded[0].enabled);
+        crate::widgets::put(saved);
     }
 }
