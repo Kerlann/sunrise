@@ -2243,6 +2243,14 @@ impl crate::game::ClientGame<'_> {
         title_settled
     }
     pub fn hud_layers(&mut self, size: [u32; 2]) -> HudBatch {
+        let standalone = !sunrise_client::widgets::in_override_pass();
+        let mut batch = self.with_screen_widget_overrides(|this| this.hud_layers_body(size));
+        if standalone {
+            self.draw_pending_widget_tooltip(&mut batch);
+        }
+        batch
+    }
+    fn hud_layers_body(&mut self, size: [u32; 2]) -> HudBatch {
         use sunrise_client::gui_layers::VanillaGuiLayer;
 
         self.client.hud_status_heights = Default::default();

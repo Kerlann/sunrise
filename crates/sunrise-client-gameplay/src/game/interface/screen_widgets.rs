@@ -1208,7 +1208,7 @@ impl crate::game::ClientGame<'_> {
             sunrise_client::hud_kit::room::Room::new(batch.width, batch.height),
         );
         let prev_frame_ticks = std::mem::replace(&mut self.client.frame_ticks, 0.0);
-        let collected = widgets::with_widget_collector(|| {
+        let ((), collected) = widgets::with_widget_collector(|| {
             if self.client.command_prompt.0.is_some() {
                 self.draw_command_prompt(&mut batch);
             } else if self.client.link_prompt.is_some() {
@@ -1336,7 +1336,7 @@ impl crate::game::ClientGame<'_> {
             .inner
             .borrow()
             .overrides_active;
-        if !active {
+        if !active || widgets::in_override_pass() {
             return f(self);
         }
         let cursor = self.client.cursor;

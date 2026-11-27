@@ -11,9 +11,10 @@ pub use widgets_override::{
     CollectedWidget, EngineHitEntry, EngineOverrideMaps, EngineWidgetInput, EngineWidgetKey,
     EngineWidgetOverride, EngineWidgetPassOutput, EngineWidgetTooltip, PendingWidgetTooltip,
     ResolvedEngineWidget, ResolvedWidgetProps, WidgetBucket, apply_narration_overrides,
-    is_collecting_widgets, label_abgr_color, label_argb_color, resolve_engine_widget,
-    scale_abgr_alpha, scale_argb_alpha, stable_key_from_text, take_active_pending_tooltip,
-    white_abgr_alpha, with_widget_collector, with_widget_overrides, without_engine_overrides,
+    in_override_pass, is_collecting_widgets, label_abgr_color, label_argb_color,
+    resolve_engine_widget, scale_abgr_alpha, scale_argb_alpha, stable_key_from_text,
+    take_active_pending_tooltip, white_abgr_alpha, with_widget_collector, with_widget_overrides,
+    without_engine_overrides,
 };
 
 /// The mouse cursor a frame's widgets asked for (`CursorTypes`; the others
