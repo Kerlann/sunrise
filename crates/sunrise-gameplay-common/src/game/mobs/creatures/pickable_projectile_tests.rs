@@ -1,5 +1,6 @@
 use super::{pickable_projectile_hit, pickable_projectile_hitboxes};
 use sunrise_core::geometry::{Aabb, Vec3};
+use sunrise_items::items::EntityTypeTags;
 use sunrise_sim::mobs::Who;
 use sunrise_sim::projectiles::{Hit, Projectile, ProjectileKind, ProjectileWorld};
 
@@ -17,16 +18,50 @@ impl ProjectileWorld for Open {
     }
 }
 
-/// Which of `list` another projectile (the one at 0) can strike.
-fn struck(list: &[Projectile]) -> Vec<usize> {
+/// `#minecraft:redirectable_projectile` bound to `members`, over the types these tests throw.
+fn redirectable(members: &[&str]) -> EntityTypeTags {
+    let mut ids: Vec<String> = [
+        "minecraft:breeze_wind_charge",
+        "minecraft:ender_pearl",
+        "minecraft:fireball",
+        "minecraft:small_fireball",
+        "minecraft:wind_charge",
+    ]
+    .map(String::from)
+    .into();
+    ids.sort();
+    EntityTypeTags::from_ordered(
+        [(
+            "minecraft:redirectable_projectile".into(),
+            members.iter().map(|m| m.to_string()).collect(),
+        )]
+        .into(),
+        ids.into(),
+    )
+}
+
+/// Vanilla's default members of the tag.
+const VANILLA: [&str; 3] = [
+    "minecraft:fireball",
+    "minecraft:wind_charge",
+    "minecraft:breeze_wind_charge",
+];
+
+/// Which of `list` another projectile (the one at 0) can strike under `tags`.
+fn struck_under(list: &[Projectile], tags: &EntityTypeTags) -> Vec<usize> {
     let alive = vec![true; list.len()];
-    pickable_projectile_hitboxes(list, &alive, 0)
+    pickable_projectile_hitboxes(list, &alive, 0, tags)
         .iter()
         .map(|(who, _)| match who {
             Who::Mob(id) => pickable_projectile_hit(*id).expect("a pickable projectile id"),
             Who::Player => panic!("not a projectile"),
         })
         .collect()
+}
+
+/// Which of `list` another projectile (the one at 0) can strike under vanilla's tag.
+fn struck(list: &[Projectile]) -> Vec<usize> {
+    struck_under(list, &redirectable(&VANILLA))
 }
 
 /// `Projectile.isPickable` is `#minecraft:redirectable_projectile`: a ghast's
@@ -50,6 +85,30 @@ fn a_ghast_fireball_is_pickable_like_a_wind_charge() {
     assert_eq!(struck(&list), vec![1, 2, 3]);
 }
 
+/// The tag is read as bound: a data pack that takes the wind charge out of it leaves the
+/// wind charge no target, and one that adds the blaze's small fireball makes it one.
+#[test]
+fn a_data_packs_tag_decides_which_projectiles_are_struck() {
+    let at = Vec3::new(0.0, 100.0, 0.0);
+    let fired = |kind| Projectile::fireball(kind, at, None, [1.0, 0.0, 0.0]);
+    let list = vec![
+        Projectile::new(ProjectileKind::EnderPearl, at, Some(Who::Player)),
+        fired(ProjectileKind::WindCharge),
+        fired(ProjectileKind::SmallFireball),
+    ];
+    let without_wind_charge = redirectable(&["minecraft:fireball"]);
+    assert_eq!(
+        struck_under(&list, &without_wind_charge),
+        Vec::<usize>::new()
+    );
+    let with_small_fireball = redirectable(&[
+        "minecraft:fireball",
+        "minecraft:wind_charge",
+        "minecraft:small_fireball",
+    ]);
+    assert_eq!(struck_under(&list, &with_small_fireball), vec![1, 2]);
+}
+
 /// A pearl thrown through a ghast's fireball strikes it (`Projectile.onHit`
 /// then turns the fireball), where it used to fly on through.
 #[test]
@@ -68,7 +127,12 @@ fn a_pearl_thrown_through_a_ghast_fireball_strikes_it() {
     );
     let list = vec![pearl, fireball];
     let alive = vec![true; list.len()];
-    let world = Open(pickable_projectile_hitboxes(&list, &alive, 0));
+    let world = Open(pickable_projectile_hitboxes(
+        &list,
+        &alive,
+        0,
+        &redirectable(&VANILLA),
+    ));
     let mut pearl = list[0].clone();
     let (keep, hit) = pearl.tick(&world);
     assert!(!keep, "the pearl is spent on the hit");

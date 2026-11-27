@@ -633,19 +633,25 @@ pub trait HeldItemsGameExt1<'__sg>: crate::game::SideGame<'__sg> {
         }
     }
 
-    /// Whether `kind` belongs to `#minecraft:redirectable_projectile`.
+    /// Whether `kind` belongs to `#minecraft:redirectable_projectile`, reading the server's synced
+    /// entity-type tags on a remote client when present, else the resolved flag of the bound
+    /// entity tags. A type outside the tag, or a level with no such tag bound, is not in it.
     fn is_redirectable_projectile_type(&self, kind: &str) -> bool {
         if let Some(answer) = self.side_redirectable_projectile_tag(kind) {
             return answer;
         }
-        let tags = &self.items().entity_type_tags;
-        if let Some(members) = tags.members().get("minecraft:redirectable_projectile") {
-            return members.contains(kind);
-        }
-        matches!(
+        self.items().entity_type_tags.has_flag(
             kind,
-            "minecraft:fireball" | "minecraft:wind_charge" | "minecraft:breeze_wind_charge"
+            sunrise_items::items::EntityTypeTags::REDIRECTABLE_PROJECTILE,
         )
+    }
+
+    /// `p.is(EntityTypeTags.REDIRECTABLE_PROJECTILE)` for a projectile still in flight: the
+    /// projectiles `Player.attack` turns (`deflectProjectile`) and a projectile's hit redirects
+    /// (`Projectile.onHit`). A stuck arrow is out of reach, as it is not pickable
+    /// (`AbstractArrow.isPickable`).
+    fn projectile_redirectable(&self, p: &sunrise_sim::projectiles::Projectile) -> bool {
+        !p.stuck && self.is_redirectable_projectile_type(p.entity_type())
     }
 
     /// `Projectile.isPickable` (with `ShulkerBullet` and `AbstractArrow` overrides).

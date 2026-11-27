@@ -39,7 +39,7 @@ use sunrise_gameplay_common::game::creatures::from_loot;
 use sunrise_gameplay_common::game::creatures::killed_by_mob;
 use sunrise_gameplay_common::game::creatures::mob_effect_instance;
 use sunrise_gameplay_common::game::creatures::projectile_targets::{
-    NonMobHit, ProjectileHitInfo, TargetQuery, is_pickable_projectile,
+    NonMobHit, ProjectileHitInfo, TargetQuery,
 };
 use sunrise_gameplay_common::game::creatures::seen;
 use sunrise_gameplay_common::game::creatures::to_loot;
@@ -6355,7 +6355,7 @@ impl crate::game::ServerGame<'_> {
             for (j, q) in projectiles.iter().enumerate() {
                 if j != i
                     && keep_flags[j]
-                    && is_pickable_projectile(q)
+                    && self.projectile_is_pickable(q)
                     && (!skip_wind
                         || !matches!(
                             q.kind,

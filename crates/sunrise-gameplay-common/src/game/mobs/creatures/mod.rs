@@ -11,7 +11,7 @@ pub use living_draw::LivingFrame;
 pub mod player_loot_entity;
 pub mod projectile_targets;
 #[allow(unused_imports)]
-pub use projectile_targets::{NonMobHit, ProjectileHitInfo, TargetQuery, is_pickable_projectile};
+pub use projectile_targets::{NonMobHit, ProjectileHitInfo, TargetQuery};
 #[allow(unused_imports)]
 pub use sunrise_gameplay_common::projectile_world::ProjWorld;
 pub mod pufferfish_player;
@@ -256,16 +256,22 @@ pub fn pickable_projectile_hitboxes_into(
     projectiles: &[Projectile],
     alive: &[bool],
     skip: usize,
+    tags: &sunrise_items::items::EntityTypeTags,
     out: &mut Vec<(Who, Aabb)>,
 ) {
+    let redirectable = |q: &Projectile| {
+        !q.stuck
+            && tags.has_flag(
+                q.entity_type(),
+                sunrise_items::items::EntityTypeTags::REDIRECTABLE_PROJECTILE,
+            )
+    };
     out.clear();
     out.extend(
         projectiles
             .iter()
             .enumerate()
-            .filter(|(j, q)| {
-                *j != skip && alive[*j] && crate::game::deflect_common::redirectable(q)
-            })
+            .filter(|(j, q)| *j != skip && alive[*j] && redirectable(q))
             .map(|(j, q)| (Who::Mob(PICKABLE_PROJECTILE_IDS + j as u32), q.aabb())),
     );
 }
@@ -287,9 +293,10 @@ pub fn pickable_projectile_hitboxes(
     projectiles: &[Projectile],
     alive: &[bool],
     skip: usize,
+    tags: &sunrise_items::items::EntityTypeTags,
 ) -> Vec<(Who, Aabb)> {
     let mut out = Vec::new();
-    pickable_projectile_hitboxes_into(projectiles, alive, skip, &mut out);
+    pickable_projectile_hitboxes_into(projectiles, alive, skip, tags, &mut out);
     out
 }
 
