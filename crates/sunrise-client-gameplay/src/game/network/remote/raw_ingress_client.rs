@@ -433,6 +433,8 @@ impl crate::game::ClientGame<'_> {
                 if let Some(remote) = &mut self.client.remote {
                     remote.datapacks = Default::default();
                     remote.custom_registries = Default::default();
+                    remote.client_data_maps = Default::default();
+                    remote.client_data_maps_received = false;
                     remote.datapack_vanilla_values = None;
                     remote.has_logical_player = false;
                     remote.viewed.clear();
@@ -484,6 +486,8 @@ impl crate::game::ClientGame<'_> {
                 self.clear_waypoints();
                 if let Some(r) = self.client.remote.as_mut() {
                     r.datapacks = Default::default();
+                    r.client_data_maps = Default::default();
+                    r.client_data_maps_received = false;
                     r.datapack_vanilla_values = None;
                     r.clear_attachments();
                     r.players.clear();

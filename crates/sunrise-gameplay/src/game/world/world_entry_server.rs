@@ -72,6 +72,13 @@ impl crate::game::ServerGame<'_> {
             world.pois.clear();
         }
         sunrise_sim::datapack_net::serve(self.common.mods.datapack_registries.clone());
+        sunrise_sim::data_map_net::serve(
+            self.server
+                .world_tables
+                .0
+                .as_ref()
+                .map(|t| Arc::new(t.data_maps.synced_snapshot())),
+        );
         self.refresh_recipe_property_context();
         self.server.structure_spawns = structure_spawns;
         self.refresh_infiniburn();
@@ -194,6 +201,13 @@ impl crate::game::ServerGame<'_> {
         self.share_biome_keys();
         self.sync_test_registry_ids();
         sunrise_sim::datapack_net::serve(self.common.mods.datapack_registries.clone());
+        sunrise_sim::data_map_net::serve(
+            self.server
+                .world_tables
+                .0
+                .as_ref()
+                .map(|t| Arc::new(t.data_maps.synced_snapshot())),
+        );
         Ok(())
     }
 

@@ -538,6 +538,7 @@ pub struct Shared {
     payload_local: Arc<crate::raw_payloads::Local>,
     /// The `sync(true)` custom registries every login of this listener is sent, captured at start.
     custom_registries: Arc<crate::custom_registry_net::Snapshot>,
+    pub data_maps_known: crate::data_map_net::LocalDataMaps,
     /// What the next login is sent; `PlayerList.reloadResources` swaps it.
     sync: Mutex<Arc<data::SyncData>>,
     pub events: crate::raw_payloads::ingress::Producer<NetEvent>,
@@ -841,20 +842,42 @@ impl Lan {
     }
     /// ServerConnectionListener.startTcpServerListener with a configuration.
     pub fn start_with(sync: Arc<data::SyncData>, config: NetConfig) -> io::Result<Self> {
-        Self::start_listener(sync, config, false, false)
+        Self::start_listener(
+            sync,
+            config,
+            false,
+            false,
+            crate::data_map_net::LocalDataMaps::installed(),
+        )
+    }
+    /// Start a listener with an explicit synced data-map inventory (for loopback tests).
+    #[cfg(any(test, feature = "test-publication-scope"))]
+    pub fn start_with_data_maps(
+        sync: Arc<data::SyncData>,
+        config: NetConfig,
+        data_maps_known: crate::data_map_net::LocalDataMaps,
+    ) -> io::Result<Self> {
+        Self::start_listener(sync, config, false, false, data_maps_known)
     }
     /// Start a listener whose game thread runs configuration tasks and prepares each spawn.
     pub fn start_with_spawn_preparation(
         sync: Arc<data::SyncData>,
         config: NetConfig,
     ) -> io::Result<Self> {
-        Self::start_listener(sync, config, true, true)
+        Self::start_listener(
+            sync,
+            config,
+            true,
+            true,
+            crate::data_map_net::LocalDataMaps::installed(),
+        )
     }
     fn start_listener(
         sync: Arc<data::SyncData>,
         config: NetConfig,
         drive_game: bool,
         prepare_spawn: bool,
+        data_maps_known: crate::data_map_net::LocalDataMaps,
     ) -> io::Result<Self> {
         let (tx, events) = event_channel();
         let (request_tx, request_rx) = if drive_game {
@@ -880,6 +903,7 @@ impl Lan {
             payload_local: crate::raw_payloads::Local::capture(crate::raw_payloads::Side::Server)
                 .map_err(io::Error::other)?,
             custom_registries: crate::custom_registry_net::published(),
+            data_maps_known,
             sync: Mutex::new(sync),
             events: tx,
             handoffs: drive_game.then(|| Mutex::new(Vec::new())),

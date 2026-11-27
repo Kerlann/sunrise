@@ -517,6 +517,36 @@ impl Session {
             resources,
             reports,
             custom_registries,
+            crate::data_map_net::LocalDataMaps::installed(),
+            false,
+        )
+    }
+    /// Connect with an explicit synced data-map inventory (for loopback tests).
+    #[cfg(any(test, feature = "test-publication-scope"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn connect_with_data_maps(
+        address: &str,
+        name: &str,
+        auth: Option<Arc<AuthSession>>,
+        info: cfg::ClientInformation,
+        lang: Arc<Language>,
+        resources: Arc<ItemData>,
+        reports: Arc<crate::chunk_io::Reports>,
+        custom_registries: crate::custom_registry_net::LocalRegistries,
+        local_data_maps: crate::data_map_net::LocalDataMaps,
+    ) -> Self {
+        Self::start(
+            address,
+            name,
+            auth,
+            info,
+            lang,
+            None,
+            None,
+            resources,
+            reports,
+            custom_registries,
+            local_data_maps,
             false,
         )
     }
@@ -544,6 +574,7 @@ impl Session {
             resources,
             reports,
             custom_registries,
+            crate::data_map_net::LocalDataMaps::installed(),
             true,
         )
     }
@@ -571,6 +602,7 @@ impl Session {
             resources,
             reports,
             custom_registries,
+            crate::data_map_net::LocalDataMaps::installed(),
             false,
         )
     }
@@ -599,6 +631,7 @@ impl Session {
             resources,
             reports,
             custom_registries,
+            crate::data_map_net::LocalDataMaps::installed(),
             false,
         )
     }
@@ -623,6 +656,7 @@ impl Session {
             payload_output: std::sync::OnceLock::new(),
         }
     }
+    #[allow(clippy::too_many_arguments)]
     fn start(
         address: &str,
         name: &str,
@@ -634,6 +668,7 @@ impl Session {
         resources: Arc<ItemData>,
         reports: Arc<crate::chunk_io::Reports>,
         custom_registries: crate::custom_registry_net::LocalRegistries,
+        local_data_maps: crate::data_map_net::LocalDataMaps,
         lan: bool,
     ) -> Self {
         let (send, events) = event_channel();
@@ -687,6 +722,7 @@ impl Session {
                         &thread_pings,
                         &reports,
                         &custom_registries,
+                        &local_data_maps,
                         &mut after_login,
                     )
                 });
@@ -1501,6 +1537,7 @@ fn run(
     pings: &PingSamples,
     reports: &Arc<crate::chunk_io::Reports>,
     custom_registries: &crate::custom_registry_net::LocalRegistries,
+    local_data_maps: &crate::data_map_net::LocalDataMaps,
     after_login: &mut bool,
 ) -> Result<Reason, Reason> {
     let singleplayer = local.is_some();
@@ -1684,6 +1721,7 @@ fn run(
         resources,
         payloads,
         custom_registries,
+        local_data_maps,
     )?;
     let registries = Arc::new(registries);
     send.send_wait(Event::Joined {
@@ -1708,6 +1746,7 @@ fn run(
         pings,
         reports,
         custom_registries,
+        local_data_maps,
     )
 }
 
@@ -2018,6 +2057,7 @@ fn receive_play(
     pings: &PingSamples,
     reports: &Arc<crate::chunk_io::Reports>,
     custom_registries: &crate::custom_registry_net::LocalRegistries,
+    local_data_maps: &crate::data_map_net::LocalDataMaps,
 ) -> Result<Reason, Reason> {
     use play_bundle::{PlayBundle, PlayTurn};
     use sunrise_protocol::payload_negotiation::Phase;
@@ -2185,6 +2225,7 @@ fn receive_play(
                     resources,
                     payloads,
                     custom_registries,
+                    local_data_maps,
                 )?;
                 registries = Arc::new(snapshot);
                 io = new_listener();
@@ -2280,6 +2321,7 @@ fn configure(
     resources: &ItemData,
     payloads: &Arc<crate::raw_payloads::Transport>,
     local_registries: &crate::custom_registry_net::LocalRegistries,
+    local_data_maps: &crate::data_map_net::LocalDataMaps,
 ) -> Result<
     (
         Dynamic,
@@ -2396,6 +2438,16 @@ fn configure(
                 custom_registries
                     .accept_chunk(&p.data)
                     .map_err(Reason::plain)?;
+            }
+            cfg::Clientbound::CustomPayload(p)
+                if p.channel == crate::data_map_net::KNOWN_CHANNEL =>
+            {
+                let data = crate::data_map_net::handle_known_data_maps(&p.data, local_data_maps)
+                    .map_err(Reason::plain)?;
+                reply(cfg::Serverbound::CustomPayload(cfg::CustomPayload {
+                    channel: crate::data_map_net::KNOWN_REPLY_CHANNEL.into(),
+                    data,
+                }))?;
             }
             cfg::Clientbound::CustomPayload(p) => {
                 let Some(p) = receive_application(

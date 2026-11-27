@@ -355,6 +355,43 @@ impl DataMaps {
         self.maps.insert(registry, maps);
     }
 
+    /// Build the network-projected snapshot of all synced (`Optional` and `Required`) maps
+    /// for server-to-client synchronization.
+    pub fn synced_snapshot(&self) -> sunrise_sim::data_map_net::SyncedDataMapsSnapshot {
+        let registered = mod_api::__private::installed_data_maps();
+        let mut registries = BTreeMap::new();
+        for (registry, by_map) in &self.maps {
+            let mut out_maps = Vec::new();
+            for (map_id, entries) in by_map {
+                if let Some(reg) = registered
+                    .iter()
+                    .find(|r| r.registry() == registry && r.id_str() == map_id)
+                {
+                    if reg.sync() == mod_api::DataMapSync::ServerOnly {
+                        continue;
+                    }
+                    let projected: Vec<(String, Tag)> = entries
+                        .iter()
+                        .filter_map(|(entry_id, tag)| {
+                            reg.project_network_value(entry_id, tag)
+                                .map(|projected| (entry_id.clone(), projected))
+                        })
+                        .collect();
+                    out_maps.push((map_id.clone(), projected));
+                } else if sunrise_sim::data_map_net::BUILTIN_SYNCED_MAPS
+                    .contains(&(registry.as_str(), map_id.as_str()))
+                {
+                    out_maps.push((map_id.clone(), entries.clone()));
+                }
+            }
+            if !out_maps.is_empty() {
+                out_maps.sort_by(|a, b| a.0.cmp(&b.0));
+                registries.insert(registry.clone(), out_maps);
+            }
+        }
+        sunrise_sim::data_map_net::SyncedDataMapsSnapshot { registries }
+    }
+
     pub fn with_builtins(mut self, builtin: Loaded) -> Self {
         for (definition, values) in builtin.values {
             if self
