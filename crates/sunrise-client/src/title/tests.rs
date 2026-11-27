@@ -3155,4 +3155,40 @@ mod hidden_features {
             ])
         );
     }
+
+    #[test]
+    fn sub_page_key_distinguishes_overlays_and_subscreens() {
+        let mut f = Fixture::new();
+        let base = f.title.sub_page_key();
+        f.title.preparing = true;
+        assert_ne!(base, f.title.sub_page_key());
+        f.title.preparing = false;
+
+        f.title.set_mode(Mode::CreateFlat {
+            name: "Flat".into(),
+            seed: String::new(),
+            creative: true,
+            focus: 0,
+            options: WorldOptions::default(),
+            flat: flat::State::new(
+                std::path::Path::new("/nonexistent/sunrise-test"),
+                None,
+                &sunrise_world::worldgen::overrides::WorldgenOverrides::default(),
+            ),
+        });
+        let layers = f.title.sub_page_key();
+        if let Mode::CreateFlat { flat, .. } = &mut f.title.mode {
+            flat.open_presets();
+        }
+        assert_ne!(layers, f.title.sub_page_key());
+
+        let mut realms = crate::realms::Screen::new();
+        let main_realms = realms.subscreen_key();
+        realms.subscreen = crate::realms::SubScreen::JoinCode {
+            code: String::new(),
+            error: None,
+            job: None,
+        };
+        assert_ne!(main_realms, realms.subscreen_key());
+    }
 }

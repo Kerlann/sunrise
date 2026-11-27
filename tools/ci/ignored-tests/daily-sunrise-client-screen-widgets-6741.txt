@@ -1,0 +1,2 @@
+# Screen widgets parity (#6741, #6742, #972)
+sunrise-client cut_layout::game::client_side::native_hooks_client::base::screen_widgets_tests::sub_page_switch_clears_mounted_widgets_and_refires_init_post lib daily child-process

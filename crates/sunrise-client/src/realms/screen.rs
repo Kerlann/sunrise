@@ -133,6 +133,17 @@ impl Screen {
         }
     }
 
+    /// Distinguishes `SubScreen` (and `Popup`) variants that share `ScreenView.id == "realms"`.
+    pub fn subscreen_key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::mem::discriminant(&self.subscreen).hash(&mut hasher);
+        if let SubScreen::Popup(popup) = &self.subscreen {
+            std::mem::discriminant(popup).hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
     /// `AbstractSelectionList.updateNarration` over the selected server
     /// (`ServerEntry.getNarration`): the list narrates its selection as a widget line.
     pub fn narration(&self) -> Option<String> {

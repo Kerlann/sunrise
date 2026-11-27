@@ -2986,3 +2986,68 @@ fn config_opens_the_mods_own_screen_and_closing_it_returns_to_the_mods_screen() 
         });
     });
 }
+
+#[test]
+#[ignore = "daily"]
+fn sub_page_switch_clears_mounted_widgets_and_refires_init_post() {
+    if run_fresh_cases(
+        "cut_layout::game::client_side::native_hooks_client::base::screen_widgets_tests::sub_page_switch_clears_mounted_widgets_and_refires_init_post",
+        "SUNRISE_WIDGETS_SUBPAGE_CHILD",
+        &["options"],
+    ) {
+        return;
+    }
+
+    struct SubPageProbe {
+        inits: Arc<AtomicUsize>,
+        drops: Arc<AtomicUsize>,
+    }
+
+    #[mod_api::__subscriptions]
+    impl Hooks for SubPageProbe {
+        fn screen_init_post(&self, _host: &dyn ClientHost, event: &mut ScreenInitPostEvent<'_>) {
+            if event.screen.id != "options" {
+                return;
+            }
+            self.inits.fetch_add(1, Ordering::SeqCst);
+            let drop_guard = DropCounter(self.drops.clone());
+            event.widgets.add_button(Button::new(
+                [10.0, 10.0, 80.0, 20.0],
+                ApiText::literal("Marker"),
+                move |_state, _host| {
+                    let _ = &drop_guard;
+                },
+            ));
+        }
+    }
+
+    let inits = Arc::new(AtomicUsize::new(0));
+    let drops = Arc::new(AtomicUsize::new(0));
+    let mods = vec![ModEntry::new(
+        "subpage_probe",
+        Box::new(SubPageProbe {
+            inits: inits.clone(),
+            drops: drops.clone(),
+        }),
+    )]
+    .into();
+    with_mods(mods, || {
+        with_client_game(|game| {
+            let (_el, _wid) = attach_offscreen_window(game);
+            game.open_options(false);
+            game.observe_screen();
+            assert_eq!(inits.load(Ordering::SeqCst), 1);
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+            // Switching OptionsUi sub-page keeps ScreenView.id == "options", yet clears
+            // mounted widgets and re-fires screen_init_post.
+            game.client
+                .chat_ui
+                .options
+                .show(sunrise_client::options_ui::Page::Video);
+            game.observe_screen();
+            assert_eq!(inits.load(Ordering::SeqCst), 2);
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+        });
+    });
+}

@@ -842,13 +842,7 @@ impl crate::game::ClientGame<'_> {
     /// follows on opening and when a resize rebuilds the receiver's children.
     pub fn observe_change(&mut self, current: Option<ObservedScreen>) {
         let changed = match (&self.client.screen_state.0.observed, &current) {
-            (Some(old), Some(new)) => {
-                old.id != new.id
-                    || old.menu != new.menu
-                    || old.menu_generation != new.menu_generation
-                    || old.mod_screen != new.mod_screen
-                    || old.dialog_key != new.dialog_key
-            }
+            (Some(old), Some(new)) => !old.same_receiver(new),
             (None, None) => false,
             _ => true,
         };
@@ -942,6 +936,7 @@ impl crate::game::ClientGame<'_> {
                 (true, _, _) => (true, false, None),
                 key => key,
             }),
+            sub_page: self.observed_sub_page(view.id),
             title: view
                 .title
                 .and_then(|_| self.client.remote.as_ref()?.shared_menu_title_snapshot()),
@@ -952,6 +947,33 @@ impl crate::game::ClientGame<'_> {
             partial_tick: view.partial_tick,
             regions: Vec::new(),
         }
+    }
+    fn observed_sub_page(&self, id: &str) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        match id {
+            "options" => self.client.chat_ui.options.sub_page_key().hash(&mut hasher),
+            "world_options" => self
+                .client
+                .world_options
+                .0
+                .as_ref()
+                .map(|o| o.sub_page_key())
+                .hash(&mut hasher),
+            "dead" => self
+                .client
+                .chat_ui
+                .death_confirm
+                .is_some()
+                .hash(&mut hasher),
+            _ if self.client.screen == Screen::Playing && self.observed_overlay_now().is_none() => {
+                if let Some(title) = self.client.title.0.as_ref() {
+                    title.sub_page_key().hash(&mut hasher);
+                }
+            }
+            _ => {}
+        }
+        hasher.finish()
     }
     /// Snapshot of the receiving screen for screen input hooks, including overlays.
     pub(in crate::game) fn observed_input_screen(&self) -> Option<ObservedScreen> {

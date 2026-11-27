@@ -56,6 +56,15 @@ pub enum View {
     Restrictions,
     GameRules,
 }
+impl WorldOptions {
+    pub(in crate::game) fn sub_page_key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::mem::discriminant(&self.view).hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
 pub(in crate::game) use sunrise_gameplay_common::game::owner_link::Snapshot;
 
 const MODES: [&str; 4] = ["survival", "creative", "adventure", "spectator"];

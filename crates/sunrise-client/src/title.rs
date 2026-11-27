@@ -3372,6 +3372,26 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
         self.rules.borrow().is_some().hash(&mut hasher);
         hasher.finish()
     }
+
+    /// Distinguishes sub-screens and overlays that share a `Title` `Mode::id()`.
+    pub fn sub_page_key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.rules.borrow().is_some().hash(&mut hasher);
+        self.preparing.hash(&mut hasher);
+        self.pack_validation.is_some().hash(&mut hasher);
+        self.confirm_experiments
+            .borrow()
+            .is_some()
+            .hash(&mut hasher);
+        self.experiments.borrow().is_some().hash(&mut hasher);
+        match &self.mode {
+            Mode::CreateFlat { flat, .. } => std::mem::discriminant(&flat.page).hash(&mut hasher),
+            Mode::Realms(screen) => screen.subscreen_key().hash(&mut hasher),
+            _ => {}
+        }
+        hasher.finish()
+    }
     /// The keyboard's focus left a text field for another widget: the field
     /// loses the keys (`EditBox.setFocused(false)`).
     pub fn blur_field(&mut self) {
