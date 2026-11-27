@@ -500,7 +500,14 @@ impl crate::game::ServerGame<'_> {
         };
         let at = Vec3::new(g.position[0], g.position[1], g.position[2]);
         let seen_credits = g.seen_credits;
-        let actor = (name == "end_portal").then(|| PlayerId::guest(g));
+        let actor = if name == "end_portal" {
+            LevelId::loaded(self, self.common.dim).map(|level| ActorInLevel {
+                player: PlayerId::guest(g),
+                level,
+            })
+        } else {
+            None
+        };
         // EndGatewayBlock.getPortalDestination: none without its block entity.
         let gateway_ok = name != "end_gateway"
             || self
@@ -1023,7 +1030,7 @@ impl crate::game::ServerGame<'_> {
             .hub
             .begin_level_change(i, at, yaw, None, PLAYER_DELAY, &ctx);
         self.send_player_command_tree(conn);
-        let i = arrival_actor.map_or(i, |actor| actor.resume_transfer_slot(self, source, i));
+        let i = arrival_actor.map_or(i, |actor| actor.resume_transfer_slot(self, source_level, i));
         let ctx = server_ctx!(self);
         if let Some(host) = self.server.lan.as_mut() {
             host.hub.finish_level_change(i, change, true, &ctx);

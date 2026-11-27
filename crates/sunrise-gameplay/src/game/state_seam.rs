@@ -104,19 +104,6 @@ impl PlayerId {
         self.live(guests.get(index)?).then_some(index)
     }
 
-    #[inline(always)]
-    pub(super) fn resume_connection(self, game: &ServerGame<'_>, legacy: u32) -> u32 {
-        game.server
-            .lan
-            .as_ref()
-            .and_then(|host| {
-                let guests = &host.hub.guests;
-                let conn = guests[self.live_slot(guests)?].conn;
-                (conn == legacy).then_some(conn)
-            })
-            .unwrap_or(legacy)
-    }
-
     #[cfg(test)]
     #[inline(always)]
     fn view_at<'a>(self, game: &'a ServerGame<'_>, index: usize) -> Option<PlayerView<'a>> {
@@ -150,6 +137,18 @@ impl ActorInLevel {
     }
 
     #[inline(always)]
+    pub(super) fn resume_connection(self, game: &ServerGame<'_>, legacy: u32) -> u32 {
+        let slot = self.live_slot(game);
+        #[cfg(test)]
+        tests::record_resume(self, slot.is_some());
+        slot.and_then(|index| {
+            let conn = game.server.lan.as_ref()?.hub.guests[index].conn;
+            (conn == legacy).then_some(conn)
+        })
+        .unwrap_or(legacy)
+    }
+
+    #[inline(always)]
     pub(super) fn resume_slot(self, game: &ServerGame<'_>, legacy: usize) -> usize {
         // A row change still takes the parent adapter's slot and outcome.
         let slot = self.live_slot(game).filter(|&slot| slot == legacy);
@@ -162,13 +161,14 @@ impl ActorInLevel {
     pub(super) fn resume_transfer_slot(
         self,
         game: &ServerGame<'_>,
-        source: Dim,
+        source: Option<LevelId>,
         legacy: usize,
     ) -> usize {
         let slot = self.level.view(game).and_then(|_| {
+            let source = source.filter(|level| level.current(game))?;
             let guests = &game.server.lan.as_ref()?.hub.guests;
             let slot = self.player.live_slot(guests)?;
-            (slot == legacy && guests[slot].dimension == source.id()).then_some(slot)
+            (slot == legacy && guests[slot].dimension == source.dim.id()).then_some(slot)
         });
         slot.unwrap_or(legacy)
     }
