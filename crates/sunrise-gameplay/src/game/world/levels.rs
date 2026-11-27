@@ -35,6 +35,7 @@ use std::{
 use sunrise_game_data::Result;
 use sunrise_gameplay_common::game::GameGameExt3;
 use sunrise_gameplay_common::game::commands_common::{OtherEntity, Target};
+use sunrise_gameplay_common::game::end_state::EndLevelState;
 use sunrise_gameplay_common::game::entity::EntityLists;
 use sunrise_gameplay_common::game::residency_tick::ResidencyTickGameExt as _;
 use sunrise_gameplay_common::game::transactions::entities::EntityRemovalGameExt as _;
@@ -165,7 +166,7 @@ fn should_run_idle_maintenance(paused: bool) -> bool {
 pub struct Parked {
     pub world: World,
     pub streaming: ChunkStreamer,
-    locator: Option<Arc<VanillaTerrain>>,
+    end: EndLevelState,
     pub save: Arc<SaveDir>,
     block_ticks: Ticks,
     tick_chunks: TickChunkMembership,
@@ -745,7 +746,7 @@ impl Levels {
         &self,
         dimension: &str,
     ) -> Option<Arc<VanillaTerrain>> {
-        self.parked_of(dimension)?.locator.clone()
+        self.parked_of(dimension)?.end.locator()
     }
 
     /// The streaming of the level not in place whose dimension is `dimension`, to change.
@@ -816,10 +817,8 @@ impl Levels {
     /// The generators of the parked levels, for the world snapshots their workers read.
     pub(in crate::game::server_side) fn parked_terrains(
         &self,
-    ) -> impl Iterator<Item = &Arc<VanillaTerrain>> {
-        self.parked
-            .values()
-            .filter_map(|level| level.locator.as_ref())
+    ) -> impl Iterator<Item = Arc<VanillaTerrain>> + '_ {
+        self.parked.values().filter_map(|level| level.end.locator())
     }
 
     pub(in crate::game::server_side) fn parked_worlds(&self) -> impl Iterator<Item = &World> {
@@ -953,7 +952,7 @@ fn box_parked(
     Box::new(Parked {
         world,
         streaming,
-        locator,
+        end: EndLevelState::new(locator),
         save,
         block_ticks: Ticks::new(seed as i32),
         tick_chunks: Default::default(),
@@ -1262,9 +1261,7 @@ impl crate::game::ServerGame<'_> {
         // level: a level swap keeps it.
         self.common.world.carrier_data_existed_at_open = p.world.carrier_data_existed_at_open;
         swap(&mut self.server.streaming, &mut p.streaming);
-        let mut locator = self.common.end.locator();
-        swap(&mut locator, &mut p.locator);
-        self.common.end.set_locator(locator);
+        self.common.end.swap_level(&mut p.end);
         self.share_spawn_conditions();
         swap(&mut self.server.save.0, &mut p.save);
         swap(&mut self.common.block_ticks, &mut p.block_ticks);

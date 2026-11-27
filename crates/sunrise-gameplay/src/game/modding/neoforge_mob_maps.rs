@@ -178,7 +178,7 @@ impl ServerGame<'_> {
             .common
             .end
             .locator()
-            .iter()
+            .into_iter()
             .chain(self.server.levels.0.parked_terrains())
         {
             terrain.set_mob_maps(snapshot);

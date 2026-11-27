@@ -82,6 +82,27 @@ pub fn exact_teleport(entity: Option<&BlockEntity>) -> bool {
     matches!(entity, Some(BlockEntity::EndGateway(g)) if g.exact_teleport)
 }
 
+/// Per-level End state exchanged on level swap.
+#[derive(Default)]
+pub struct EndLevelState {
+    /// The Overworld generator, for stronghold positions (ServerLevel.findNearestMapStructure).
+    pub locator: std::sync::Mutex<Option<Arc<VanillaTerrain>>>,
+}
+
+impl EndLevelState {
+    pub fn new(locator: Option<Arc<VanillaTerrain>>) -> Self {
+        Self {
+            locator: std::sync::Mutex::new(locator),
+        }
+    }
+    pub fn locator(&self) -> Option<Arc<VanillaTerrain>> {
+        self.locator.lock().unwrap().clone()
+    }
+    pub fn set_locator(&self, terrain: Option<Arc<VanillaTerrain>>) {
+        *self.locator.lock().unwrap() = terrain;
+    }
+}
+
 #[derive(Default)]
 pub struct EndState {
     /// Ticks until the player can use a gateway again (TheEndGatewayBlockEntity cooldown).
@@ -95,8 +116,7 @@ pub struct EndState {
     /// the chunk each landed in, kept loaded for the ticks left of its
     /// `TicketType.PORTAL`, so that it can come down and take its owner there.
     pub tickets: Vec<((i32, i32), u32)>,
-    /// The Overworld generator, for stronghold positions (ServerLevel.findNearestMapStructure).
-    pub locator: std::sync::Mutex<Option<Arc<VanillaTerrain>>>,
+    pub level: EndLevelState,
     /// Thrown eyes of ender in flight.
     pub eyes: Vec<EyeOfEnder>,
     pub flash: EndFlash,
@@ -157,10 +177,13 @@ pub fn flash_pose(x_angle: f32, y_angle: f32) -> glam::Mat4 {
 
 impl EndState {
     pub fn locator(&self) -> Option<Arc<VanillaTerrain>> {
-        self.locator.lock().unwrap().clone()
+        self.level.locator()
     }
     pub fn set_locator(&self, terrain: Option<Arc<VanillaTerrain>>) {
-        *self.locator.lock().unwrap() = terrain;
+        self.level.set_locator(terrain);
+    }
+    pub fn swap_level(&mut self, other: &mut EndLevelState) {
+        std::mem::swap(&mut self.level, other);
     }
 }
 
@@ -324,5 +347,95 @@ impl EyeOfEnder {
         };
         horizontal * (wanted_speed / length)
             + glam::DVec3::new(0.0, y + (wanted_y - y) * 0.015, 0.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn swap_level_exchanges_per_level_fields_only() {
+        let mut traveller = sunrise_sim::end_gateway::Traveller::default();
+        traveller.set_cooldown(23);
+        let mut state = EndState {
+            gateway_cooldown: 17,
+            gateways: [(9, traveller)].into_iter().collect(),
+            arrivals: vec![GatewayArrival {
+                traveller: Arriving::Live(77),
+                job: GatewayJob::Known {
+                    exit: [1, 2, 3],
+                    exact: true,
+                },
+                target: Vec3::new(4.0, 5.0, 6.0),
+            }],
+            areas: vec![(3, 4)],
+            tickets: vec![((5, 6), 99)],
+            level: EndLevelState::new(None),
+            eyes: vec![EyeOfEnder {
+                id: 55,
+                position: glam::DVec3::new(1.0, 2.0, 3.0),
+                previous: glam::DVec3::new(0.5, 1.5, 2.5),
+                velocity: glam::DVec3::new(0.1, 0.2, 0.3),
+                target: glam::DVec3::new(10.0, 20.0, 30.0),
+                life: 12,
+                survive: true,
+            }],
+            flash: EndFlash {
+                seed: Some(7),
+                offset: 12,
+                duration: 150,
+                intensity: 0.5,
+                old_intensity: 0.25,
+                x_angle: 10.0,
+                y_angle: 20.0,
+            },
+        };
+        let mut parked = EndLevelState::new(None);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = parked.locator.lock().unwrap();
+            panic!("mark parked locator distinct without worldgen resources");
+        }));
+        assert!(!state.level.locator.is_poisoned());
+        assert!(parked.locator.is_poisoned());
+
+        let check_non_level = |s: &EndState| {
+            assert_eq!(s.gateway_cooldown, 17);
+            assert_eq!(s.gateways.len(), 1);
+            assert_eq!(s.gateways[&9].cooldown(), 23);
+            assert_eq!(s.arrivals.len(), 1);
+            assert!(matches!(s.arrivals[0].traveller, Arriving::Live(77)));
+            assert_eq!(
+                s.arrivals[0].job,
+                GatewayJob::Known {
+                    exit: [1, 2, 3],
+                    exact: true,
+                }
+            );
+            assert_eq!(s.arrivals[0].target, Vec3::new(4.0, 5.0, 6.0));
+            assert_eq!(s.areas, vec![(3, 4)]);
+            assert_eq!(s.tickets, vec![((5, 6), 99)]);
+            assert_eq!(s.eyes.len(), 1);
+            assert_eq!(s.eyes[0].id, 55);
+            assert_eq!(s.eyes[0].life, 12);
+            assert!(s.eyes[0].survive);
+            assert_eq!(s.flash.seed, Some(7));
+            assert_eq!(s.flash.offset, 12);
+            assert_eq!(s.flash.duration, 150);
+            assert_eq!(s.flash.intensity, 0.5);
+            assert_eq!(s.flash.old_intensity, 0.25);
+            assert_eq!(s.flash.x_angle, 10.0);
+            assert_eq!(s.flash.y_angle, 20.0);
+        };
+
+        state.swap_level(&mut parked);
+        check_non_level(&state);
+        assert!(state.level.locator.is_poisoned());
+        assert!(!parked.locator.is_poisoned());
+
+        state.swap_level(&mut parked);
+        check_non_level(&state);
+        assert!(!state.level.locator.is_poisoned());
+        assert!(parked.locator.is_poisoned());
     }
 }
