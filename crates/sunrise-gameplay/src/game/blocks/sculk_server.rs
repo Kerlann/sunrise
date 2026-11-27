@@ -2936,11 +2936,15 @@ mod swap_level_tests {
                 ),
                 (1.5, 2.5, [1.0, 64.0, 2.0], true, false)
             );
+            assert_eq!(s.falling_items.len(), 2);
             assert!(s.falling_items.contains(&101) && s.falling_items.contains(&102));
+            assert_eq!(s.mounts.len(), 2);
             assert_eq!(s.mounts.get(&Who::Player), Some(&(7, [1.0, 2.0, 3.0])));
             assert_eq!(s.mounts.get(&Who::Mob(8)), Some(&(9, [4.0, 5.0, 6.0])));
+            assert_eq!(s.damaged.len(), 1);
             assert_eq!(s.damaged.get(&14), Some(&500));
             let slots = s.mob_slots.as_ref().unwrap();
+            assert_eq!(slots.by_id.len(), 1);
             assert_eq!(slots.by_id.get(&14), Some(&0));
             assert_eq!(slots.listeners, vec![(0, 14)]);
             assert_eq!(slots.next_entity, 33);
@@ -2955,19 +2959,50 @@ mod swap_level_tests {
         sculk.swap_level(&mut parked);
         check_non_level(&sculk);
         assert_eq!(sculk.level.index.order, vec![(-5, 70, -6)]);
+        assert_eq!(sculk.level.index.set.len(), 1);
         assert!(sculk.level.index.contains(&(-5, 70, -6)));
+        assert_eq!(
+            sculk.level.index.within([-5, 70, -6], 16),
+            vec![(-5, 70, -6)]
+        );
+        assert!(sculk.level.index.within([1, 64, 2], 8).is_empty());
         assert_eq!(sorted_coords(&sculk.level.known), vec![(-3, -4)]);
         assert_eq!(parked.index.order, vec![(1, 64, 2), (3, 65, 4)]);
-        assert!(parked.index.contains(&(1, 64, 2)));
+        assert_eq!(parked.index.set.len(), 2);
+        assert!(parked.index.contains(&(1, 64, 2)) && parked.index.contains(&(3, 65, 4)));
+        assert_eq!(
+            parked.index.within([2, 64, 3], 16),
+            vec![(1, 64, 2), (3, 65, 4)]
+        );
+        assert!(parked.index.within([-5, 70, -6], 8).is_empty());
         assert_eq!(sorted_coords(&parked.known), vec![(0, 0), (1, 2)]);
+
+        // Inserting into the swapped-in index preserves rank ordering against existing cells.
+        sculk.level.index.insert((-4, 70, -5));
+        assert_eq!(sculk.level.index.order, vec![(-5, 70, -6), (-4, 70, -5)]);
+        assert_eq!(sculk.level.index.set.len(), 2);
+        assert_eq!(
+            sculk.level.index.within([-5, 70, -6], 16),
+            vec![(-5, 70, -6), (-4, 70, -5)]
+        );
 
         sculk.swap_level(&mut parked);
         check_non_level(&sculk);
         assert_eq!(sculk.level.index.order, vec![(1, 64, 2), (3, 65, 4)]);
-        assert!(sculk.level.index.contains(&(1, 64, 2)));
+        assert_eq!(sculk.level.index.set.len(), 2);
+        assert!(sculk.level.index.contains(&(1, 64, 2)) && sculk.level.index.contains(&(3, 65, 4)));
+        assert_eq!(
+            sculk.level.index.within([2, 64, 3], 16),
+            vec![(1, 64, 2), (3, 65, 4)]
+        );
         assert_eq!(sorted_coords(&sculk.level.known), vec![(0, 0), (1, 2)]);
-        assert_eq!(parked.index.order, vec![(-5, 70, -6)]);
-        assert!(parked.index.contains(&(-5, 70, -6)));
+        assert_eq!(parked.index.order, vec![(-5, 70, -6), (-4, 70, -5)]);
+        assert_eq!(parked.index.set.len(), 2);
+        assert!(parked.index.contains(&(-5, 70, -6)) && parked.index.contains(&(-4, 70, -5)));
+        assert_eq!(
+            parked.index.within([-5, 70, -6], 16),
+            vec![(-5, 70, -6), (-4, 70, -5)]
+        );
         assert_eq!(sorted_coords(&parked.known), vec![(-3, -4)]);
     }
 }

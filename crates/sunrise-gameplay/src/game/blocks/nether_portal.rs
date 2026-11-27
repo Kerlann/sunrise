@@ -2118,7 +2118,18 @@ pub mod tests {
                     1.8,
                 ),
                 tag: Tag::Int(9),
-                transferred: None,
+                transferred: Some(TransferredArrivalState::Entity(
+                    super::super::entity_initialization::TransferredEntityState {
+                        attachments: None,
+                        initialized: true,
+                        accepted_hit: None,
+                        died: false,
+                        transient: true,
+                        journaled: Some(41),
+                        rollback: None,
+                        source: 88,
+                    },
+                )),
             }],
             carrying: vec![(Dim::Overworld, 12, BlockPos::new(3, 65, 4))],
             carried_motion: [(12, Vec3::new(0.25, 0.5, 0.75))].into_iter().collect(),
@@ -2140,16 +2151,44 @@ pub mod tests {
         };
 
         let check_global = |p: &Portals| {
+            assert_eq!(p.before.len(), 1);
             assert_eq!(p.before.get(&11), Some(&Vec3::new(1.0, 2.0, 3.0)));
             assert_eq!(p.arrivals.len(), 1);
-            assert!(p.arrivals[0].tnt_used_portal);
-            assert_eq!(p.arrivals[0].tag, Tag::Int(9));
+            let arrival = &p.arrivals[0];
+            assert!(arrival.tnt_used_portal);
+            assert_eq!(arrival.plan.dim, Dim::End);
+            assert_eq!(
+                arrival.plan.approximate,
+                BlockPos::new(
+                    sunrise_gameplay_common::game::end_state::END_SPAWN[0],
+                    sunrise_gameplay_common::game::end_state::END_SPAWN[1],
+                    sunrise_gameplay_common::game::end_state::END_SPAWN[2],
+                )
+            );
+            assert!(arrival.plan.entry_x_axis);
+            assert_eq!(arrival.plan.offset, Vec3::ZERO);
+            assert_eq!((arrival.plan.width, arrival.plan.height), (0.6, 1.8));
+            assert!(arrival.plan.end && !arrival.plan.from_end);
+            assert_eq!(arrival.tag, Tag::Int(9));
+            match arrival.transferred.as_ref() {
+                Some(TransferredArrivalState::Entity(t)) => {
+                    assert!(t.attachments.is_none());
+                    assert!(t.initialized && !t.died && t.transient);
+                    assert!(t.accepted_hit.is_none() && t.rollback.is_none());
+                    assert_eq!(t.journaled, Some(41));
+                    assert_eq!(t.source, 88);
+                }
+                other => panic!("unexpected transferred payload: {other:?}"),
+            }
             assert_eq!(
                 p.carrying,
                 vec![(Dim::Overworld, 12, BlockPos::new(3, 65, 4))]
             );
+            assert_eq!(p.carried_motion.len(), 1);
             assert_eq!(p.carried_motion.get(&12), Some(&Vec3::new(0.25, 0.5, 0.75)));
+            assert_eq!(p.carried_cooldown.len(), 1);
             assert_eq!(p.carried_cooldown.get(&12), Some(&7));
+            assert_eq!(p.carried_at.len(), 1);
             assert_eq!(p.carried_at.get(&12), Some(&Vec3::new(10.0, 20.0, 30.0)));
             assert!(p.loaded);
             assert!(p.dirty);

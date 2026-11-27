@@ -406,42 +406,50 @@ mod tests {
 
     #[test]
     fn swap_level_exchanges_per_level_fields_only() {
+        let shulker_a = Shulker {
+            open_count: 2,
+            status: ShulkerStatus::Opening,
+            progress: 0.5,
+            progress_old: 0.25,
+        };
+        let bell_a = Bell {
+            ticks: 9,
+            shaking: true,
+            click_direction: Some(3),
+            last_ring_timestamp: 100,
+            nearby: Some(vec![11, 12]),
+            resonating: true,
+            resonation_ticks: 4,
+        };
+        let gateway_a = EndGateway {
+            age: 240,
+            teleport_cooldown: 40,
+        };
+        let shulker_b = Shulker {
+            open_count: 1,
+            status: ShulkerStatus::Opened,
+            progress: 1.0,
+            progress_old: 1.0,
+        };
+        let bell_b = Bell {
+            ticks: 2,
+            shaking: false,
+            click_direction: None,
+            last_ring_timestamp: 200,
+            nearby: None,
+            resonating: false,
+            resonation_ticks: 0,
+        };
+        let gateway_b = EndGateway {
+            age: 12,
+            teleport_cooldown: 5,
+        };
+
         let mut ticks = BlockEntityTicks {
             level: BlockEntityLevelTicks {
-                shulkers: [(
-                    [1, 2, 3],
-                    Shulker {
-                        open_count: 2,
-                        status: ShulkerStatus::Opening,
-                        progress: 0.5,
-                        progress_old: 0.25,
-                    },
-                )]
-                .into_iter()
-                .collect(),
-                bells: [(
-                    [4, 5, 6],
-                    Bell {
-                        ticks: 9,
-                        shaking: true,
-                        click_direction: Some(3),
-                        last_ring_timestamp: 100,
-                        nearby: Some(vec![11, 12]),
-                        resonating: true,
-                        resonation_ticks: 4,
-                    },
-                )]
-                .into_iter()
-                .collect(),
-                gateway_servers: [(
-                    [7, 8, 9],
-                    EndGateway {
-                        age: 240,
-                        teleport_cooldown: 40,
-                    },
-                )]
-                .into_iter()
-                .collect(),
+                shulkers: [([1, 2, 3], shulker_a.clone())].into_iter().collect(),
+                bells: [([4, 5, 6], bell_a.clone())].into_iter().collect(),
+                gateway_servers: [([7, 8, 9], gateway_a)].into_iter().collect(),
                 conduit_servers: [(
                     [10, 11, 12],
                     ConduitServer {
@@ -457,40 +465,9 @@ mod tests {
             kinds: vec![None, Some(Ticker::Bell), Some(Ticker::Conduit)],
         };
         let mut parked = BlockEntityLevelTicks {
-            shulkers: [(
-                [-1, -2, -3],
-                Shulker {
-                    open_count: 1,
-                    status: ShulkerStatus::Opened,
-                    progress: 1.0,
-                    progress_old: 1.0,
-                },
-            )]
-            .into_iter()
-            .collect(),
-            bells: [(
-                [-4, -5, -6],
-                Bell {
-                    ticks: 2,
-                    shaking: false,
-                    click_direction: None,
-                    last_ring_timestamp: 200,
-                    nearby: None,
-                    resonating: false,
-                    resonation_ticks: 0,
-                },
-            )]
-            .into_iter()
-            .collect(),
-            gateway_servers: [(
-                [-7, -8, -9],
-                EndGateway {
-                    age: 12,
-                    teleport_cooldown: 5,
-                },
-            )]
-            .into_iter()
-            .collect(),
+            shulkers: [([-1, -2, -3], shulker_b.clone())].into_iter().collect(),
+            bells: [([-4, -5, -6], bell_b.clone())].into_iter().collect(),
+            gateway_servers: [([-7, -8, -9], gateway_b)].into_iter().collect(),
             conduit_servers: [(
                 [-10, -11, -12],
                 ConduitServer {
@@ -507,11 +484,11 @@ mod tests {
         let expected_kinds = vec![None, Some(Ticker::Bell), Some(Ticker::Conduit)];
         let assert_a = |level: &BlockEntityLevelTicks| {
             assert_eq!(level.shulkers.len(), 1);
-            assert_eq!(level.shulkers[&[1, 2, 3]].open_count, 2);
+            assert_eq!(level.shulkers[&[1, 2, 3]], shulker_a);
             assert_eq!(level.bells.len(), 1);
-            assert_eq!(level.bells[&[4, 5, 6]].ticks, 9);
+            assert_eq!(level.bells[&[4, 5, 6]], bell_a);
             assert_eq!(level.gateway_servers.len(), 1);
-            assert_eq!(level.gateway_servers[&[7, 8, 9]].age, 240);
+            assert_eq!(level.gateway_servers[&[7, 8, 9]], gateway_a);
             assert_eq!(level.conduit_servers.len(), 1);
             let c = &level.conduit_servers[&[10, 11, 12]];
             assert!(c.is_active);
@@ -521,11 +498,11 @@ mod tests {
         };
         let assert_b = |level: &BlockEntityLevelTicks| {
             assert_eq!(level.shulkers.len(), 1);
-            assert_eq!(level.shulkers[&[-1, -2, -3]].open_count, 1);
+            assert_eq!(level.shulkers[&[-1, -2, -3]], shulker_b);
             assert_eq!(level.bells.len(), 1);
-            assert_eq!(level.bells[&[-4, -5, -6]].ticks, 2);
+            assert_eq!(level.bells[&[-4, -5, -6]], bell_b);
             assert_eq!(level.gateway_servers.len(), 1);
-            assert_eq!(level.gateway_servers[&[-7, -8, -9]].age, 12);
+            assert_eq!(level.gateway_servers[&[-7, -8, -9]], gateway_b);
             assert_eq!(level.conduit_servers.len(), 1);
             let c = &level.conduit_servers[&[-10, -11, -12]];
             assert!(!c.is_active);

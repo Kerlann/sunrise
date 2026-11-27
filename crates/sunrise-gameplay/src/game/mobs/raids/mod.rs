@@ -1795,11 +1795,20 @@ mod swap_level_tests {
     #[test]
     fn swap_level_exchanges_per_level_fields_only() {
         let mut raids_a = Raids::default();
-        let (id_a, _) = raids_a.create_or_extend([10, 64, 20], 2, Some(1), 11);
+        let (id_a1, _) = raids_a.create_or_extend([10, 64, 20], 2, Some(1), 11);
+        let (id_a2, _) = raids_a.create_or_extend([400, 64, 20], 2, Some(2), 12);
         raids_a.tick = 100;
+        raids_a.next_id = 17;
+        raids_a.dirty = false;
+        let nbt_a = raids_a.to_nbt();
+
         let mut raids_b = Raids::default();
+        raids_b.next_id = 5;
         let (id_b, _) = raids_b.create_or_extend([-30, 70, 40], 3, Some(2), 22);
         raids_b.tick = 200;
+        raids_b.dirty = true;
+        let nbt_b = raids_b.to_nbt();
+        assert_ne!(id_a1, id_b);
 
         let mut raiding = Raiding {
             patrol: PatrolSpawner { next_tick: 777 },
@@ -1813,9 +1822,9 @@ mod swap_level_tests {
             level: RaidLevelState {
                 raids: raids_a,
                 loaded: Some(Dim::Overworld),
-                unseeded: Some(vec![(id_a, 0)]),
-                bar_hurts: [(id_a, 55)].into_iter().collect(),
-                homes: [(id_a, (100, Arc::new(vec![[10, 64, 20]])))]
+                unseeded: Some(vec![(id_a1, 0), (id_a2, 1)]),
+                bar_hurts: [(id_a1, 55)].into_iter().collect(),
+                homes: [(id_a1, (100, Arc::new(vec![[10, 64, 20]])))]
                     .into_iter()
                     .collect(),
             },
@@ -1844,24 +1853,39 @@ mod swap_level_tests {
         };
         let assert_a = |level: &RaidLevelState| {
             assert_eq!(level.raids.tick, 100);
-            assert_eq!(level.raids.get(id_a).unwrap().center, [10, 64, 20]);
+            assert_eq!(level.raids.next_id, 17);
+            assert!(!level.raids.dirty);
+            assert_eq!(level.raids.map.len(), 2);
+            assert_eq!(level.raids.ids(), vec![id_a1, id_a2]);
+            assert_eq!(level.raids.to_nbt(), nbt_a);
             assert_eq!(level.loaded, Some(Dim::Overworld));
-            assert_eq!(level.unseeded.as_deref(), Some(&[(id_a, 0)][..]));
-            assert_eq!(level.bar_hurts.get(&id_a), Some(&55));
+            assert_eq!(
+                level.unseeded.as_deref(),
+                Some(&[(id_a1, 0), (id_a2, 1)][..])
+            );
+            assert_eq!(level.bar_hurts.len(), 1);
+            assert_eq!(level.bar_hurts.get(&id_a1), Some(&55));
+            assert_eq!(level.homes.len(), 1);
             assert_eq!(
                 level
                     .homes
-                    .get(&id_a)
+                    .get(&id_a1)
                     .map(|(t, beds)| (*t, beds.as_slice())),
                 Some((100, &[[10, 64, 20]][..]))
             );
         };
         let assert_b = |level: &RaidLevelState| {
             assert_eq!(level.raids.tick, 200);
-            assert_eq!(level.raids.get(id_b).unwrap().center, [-30, 70, 40]);
+            assert_eq!(level.raids.next_id, 6);
+            assert!(level.raids.dirty);
+            assert_eq!(level.raids.map.len(), 1);
+            assert_eq!(level.raids.ids(), vec![id_b]);
+            assert_eq!(level.raids.to_nbt(), nbt_b);
             assert_eq!(level.loaded, Some(Dim::Nether));
             assert_eq!(level.unseeded.as_deref(), Some(&[(id_b, 3)][..]));
+            assert_eq!(level.bar_hurts.len(), 1);
             assert_eq!(level.bar_hurts.get(&id_b), Some(&88));
+            assert_eq!(level.homes.len(), 1);
             assert_eq!(
                 level
                     .homes
