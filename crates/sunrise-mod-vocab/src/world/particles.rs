@@ -1,6 +1,5 @@
 //! Owned particle requests, with provider identities resolved once when content loads.
-#[allow(unused_imports)]
-use crate::*;
+use crate::ParticleKey;
 
 /// The listener of a vibration signal (`VibrationParticleOption`), independent
 /// of its resolved rendering destination and of the network protocol.
@@ -19,7 +18,7 @@ pub enum PositionSource {
 }
 
 /// An owned particle request: built-in options, an asset-only type, or the
-/// value paired with a registered [`ParticleType`].
+/// value paired with a registered [`crate::ParticleType`].
 // no wire: process-local type slots and erased native values; each type owns its stream codec.
 #[derive(Clone, Debug, PartialEq)]
 // exhaustive: construction is through the methods, which pair typed values and keys.
@@ -77,7 +76,7 @@ impl ParticleOptions {
     }
 
     /// Construct a value for a vanilla or asset-only sprite-provider key.
-    /// Code-defined types require [`ParticleType::options`].
+    /// Code-defined types require [`crate::ParticleType::options`].
     pub fn simple(ty: ParticleKey) -> Self {
         Self {
             ty,
