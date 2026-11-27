@@ -62,8 +62,7 @@ pub struct Raiding {
     pub(in crate::game) patrol: PatrolSpawner,
     pub siege: VillageSiege,
     pub level: RaidLevelState,
-    /// `ServerPlayer.raidOmenPosition` (`raid_omen_position`), read from the
-    /// player data on first use.
+    /// `ServerPlayer.raidOmenPosition`, loaded on first use.
     pub(in crate::game) omen_position: Option<[i32; 3]>,
     pub(in crate::game) omen_loaded: bool,
 }

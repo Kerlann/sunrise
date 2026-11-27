@@ -168,8 +168,6 @@ pub struct Portals {
 }
 
 impl Portals {
-    /// Exchange the per-level entity portal states with another level's
-    /// (game/world/levels.rs).
     pub(in crate::game::server_side) fn swap_level(&mut self, other: &mut PortalLevelState) {
         std::mem::swap(&mut self.level, other);
     }

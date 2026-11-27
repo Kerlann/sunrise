@@ -333,8 +333,7 @@ impl ServerGame<'_> {
             self.tick_conduit_server(pos);
         }
     }
-    /// Sets `be_anims.level.conduit_servers` to the conduits in the
-    /// chunks that tick blocks, keeping the state of those already known.
+    /// Updates `be_anims.level.conduit_servers` from block-ticking chunks, preserving existing state.
     pub(in crate::game::server_side) fn find_conduits(&mut self) {
         let levels = self.server.tickets.0.levels();
         let kinds = &self.server.be_anims.kinds;
