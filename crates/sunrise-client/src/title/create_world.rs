@@ -161,6 +161,7 @@ pub(super) fn buttons(
         y,
         w,
         label,
+        text: None,
         enabled,
         id,
         icon: None,

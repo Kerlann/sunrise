@@ -879,39 +879,92 @@ impl crate::game::ClientGame<'_> {
         }
         if let (Some(old), Some(new)) = (&self.client.screen_state.0.observed, &current)
             && old.screen_size != new.screen_size
-            // Screen.resize calls repositionElements. Screen's default rebuilds
-            // widgets; these receivers override it to relayout existing children.
-            // A panel rect can also move independently (e.g. opening a recipe book).
-            && !matches!(
-                new.id,
-                "options"
-                    | "world_options"
-                    | "stats"
-                    | "advancements"
-                    | "social"
-                    | "debug_options"
-                    | "dialog"
-                    | "dialog_warning"
-                    | "confirm_link"
-                    | "demo_intro"
-                    | "link_prompt"
-                    | "code_of_conduct"
-                    | "world_select"
-                    | "world_create"
-                    | "world_create_flat"
-                    | "world_create_buffet"
-                    | "world_edit"
-                    | "world_recover"
-                    | "multiplayer"
-                    | "multiplayer_warning"
-                    | "disconnected"
-                    | "onboarding"
-            )
+            && self.common.options.execution_role.is_client()
         {
-            self.clear_screen_widgets();
-            self.init_screen_widgets(&new.view());
+            if self.screen_repositions_on_resize(new.id) {
+                self.reposition_screen_widgets();
+            } else {
+                self.clear_screen_widgets();
+                self.init_screen_widgets(&new.view());
+            }
         }
         self.client.screen_state.0.observed = current;
+    }
+    /// Whether this screen's vanilla 26.3 counterpart overrides `Screen.repositionElements()`
+    /// to re-layout existing children instead of inheriting `Screen.repositionElements()`
+    /// (`Screen.java:444`, which calls `rebuildWidgets()`).
+    fn screen_repositions_on_resize(&self, id: &str) -> bool {
+        match id {
+            // OptionsScreen.java:88, OptionsSubScreen.java:56, VideoSettingsScreen.java:295,
+            // KeyBindsScreen.java:53, LanguageSelectScreen.java:84, PackSelectionScreen.java:163,
+            // CreditsAndAttributionScreen.java:39, TelemetryInfoScreen.java:82
+            "options"
+            // WorldOptionsScreen.java:454, PopupScreen.java:92, RestrictionsScreen.java:105,
+            // AbstractGameRulesScreen.java:86
+            | "world_options"
+            // StatsScreen.java:136
+            | "stats"
+            // AdvancementsScreen.java:82
+            | "advancements"
+            // FriendsOverlayScreen.java:115
+            | "friends"
+            // SocialInteractionsScreen.java:149
+            | "social"
+            // DebugOptionsScreen.java:110
+            | "debug_options"
+            // DialogScreen.java:101, WaitingForResponseScreen.java:47
+            | "dialog"
+            // DialogScreen.WarningScreen extends ConfirmScreen (ConfirmScreen.java:59)
+            | "dialog_warning"
+            // ServerLinksDialogScreen extends ButtonListDialogScreen extends DialogScreen (DialogScreen.java:101)
+            | "server_links"
+            // ConfirmLinkScreen extends ConfirmScreen (ConfirmScreen.java:59)
+            | "confirm_link"
+            | "link_prompt"
+            | "ban_notice"
+            // ClientPacketListener.java:1611 opens PopupScreen (PopupScreen.java:92)
+            | "demo_intro"
+            // ConfirmScreen (ConfirmScreen.java:59)
+            | "command_prompt"
+            | "server_pack_prompt"
+            | "world_delete"
+            | "server_delete"
+            | "low_disk_space"
+            | "missing_biome_regions"
+            | "missing_mods"
+            | "adopt_biome_regions"
+            | "pack_validation_failed"
+            // CodeOfConductScreen / SafetyScreen extend WarningScreen (WarningScreen.java:56)
+            | "code_of_conduct"
+            | "multiplayer_warning"
+            // SelectWorldScreen.java:139
+            | "world_select"
+            // CreateWorldScreen.java:267, ExperimentsScreen.java:80,
+            // ConfirmExperimentalFeaturesScreen.java:69,98, AbstractGameRulesScreen.java:86
+            | "world_create"
+            // CreateFlatWorldScreen.java:98
+            | "world_create_flat"
+            // CreateBuffetWorldScreen.java:78
+            | "world_create_buffet"
+            // EditWorldScreen.java:142
+            | "world_edit"
+            // RecoverWorldDataScreen.java:143
+            | "world_recover"
+            // GenericMessageScreen.java:22
+            | "world_backup"
+            // JoinMultiplayerScreen.java:133
+            | "multiplayer"
+            // DisconnectedScreen.java:71
+            | "disconnected"
+            // AccessibilityOnboardingScreen.java:90
+            | "onboarding"
+            // RealmsMainScreen.java:188 and Realms*Screen subclasses
+            | "realms" => true,
+            // DeathScreen.TitleConfirmScreen extends ConfirmScreen (ConfirmScreen.java:59);
+            // ordinary DeathScreen inherits Screen.repositionElements() -> rebuildWidgets().
+            "dead" => self.client.chat_ui.death_confirm.is_some(),
+            _ => false,
+        }
     }
     pub fn observe_screen(&mut self) {
         self.settle_title_mode();
@@ -1645,7 +1698,8 @@ impl crate::game::ClientGame<'_> {
         let gated = heard
             || (self.common.options.execution_role.is_client()
                 && !self.client.screen_state.0.replacing
-                && mod_api::__private::listened(mod_api::HookId::ScreenInitPost));
+                && (mod_api::__private::listened(mod_api::HookId::ScreenInitPre)
+                    || mod_api::__private::listened(mod_api::HookId::ScreenInitPost)));
         let Some(title) = self.client.title.0.as_mut() else {
             return;
         };
@@ -1908,6 +1962,7 @@ impl crate::game::ClientGame<'_> {
             HookId::ScreenCharTypedPost,
             HookId::ScreenOpening,
             HookId::ScreenClosing,
+            HookId::ScreenInitPre,
             HookId::ScreenInitPost,
             HookId::ScreenRoom,
             HookId::ScreenExclusionAreas,

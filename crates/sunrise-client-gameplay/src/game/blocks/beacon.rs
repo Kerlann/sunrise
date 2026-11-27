@@ -338,29 +338,84 @@ impl crate::game::ClientGame<'_> {
                 };
                 (text, positioner)
             });
-        let button =
-            |batch: &mut HudBatch, x: f32, y: f32, active: bool, selected: bool, icon: &str| {
-                let hover = inside(local, x, y, 22.0, 22.0);
-                let sprite = if !active {
-                    "button_disabled"
-                } else if selected {
-                    "button_selected"
-                } else if hover {
-                    "button_highlighted"
-                } else {
-                    "button"
-                };
-                batch.sprite(atlas, &format!("container/beacon/{sprite}"), bx + x, by + y);
-                batch.sprite_scaled(
-                    atlas,
-                    icon,
-                    bx + x + 2.0,
-                    by + y + 2.0,
-                    18.0,
-                    18.0,
-                    u32::MAX,
-                );
-            };
+        let button = |batch: &mut HudBatch,
+                      x: f32,
+                      y: f32,
+                      active: bool,
+                      selected: bool,
+                      icon: &str,
+                      key: &str| {
+            let hover = inside(local, x, y, 22.0, 22.0);
+            let rect = [bx + x, by + y, 22.0, 22.0];
+            match sunrise_client::widgets::resolve_engine_widget(
+                sunrise_client::widgets::EngineWidgetInput {
+                    bucket: sunrise_client::widgets::WidgetBucket::Button,
+                    rect,
+                    label: None,
+                    explicit_key: Some(key),
+                    active,
+                    hovered: hover,
+                    focused: false,
+                    tab_order_group: 0,
+                },
+            ) {
+                sunrise_client::widgets::ResolvedEngineWidget::Skip => {}
+                sunrise_client::widgets::ResolvedEngineWidget::Unchanged => {
+                    let sprite = if !active {
+                        "button_disabled"
+                    } else if selected {
+                        "button_selected"
+                    } else if hover {
+                        "button_highlighted"
+                    } else {
+                        "button"
+                    };
+                    batch.sprite(atlas, &format!("container/beacon/{sprite}"), bx + x, by + y);
+                    batch.sprite_scaled(
+                        atlas,
+                        icon,
+                        bx + x + 2.0,
+                        by + y + 2.0,
+                        18.0,
+                        18.0,
+                        u32::MAX,
+                    );
+                }
+                sunrise_client::widgets::ResolvedEngineWidget::Draw(props) => {
+                    let lit = props
+                        .override_render_highlighted_sprite
+                        .unwrap_or(props.hovered);
+                    let sprite = if !props.active {
+                        "button_disabled"
+                    } else if selected {
+                        "button_selected"
+                    } else if lit {
+                        "button_highlighted"
+                    } else {
+                        "button"
+                    };
+                    let tint = sunrise_client::widgets::white_abgr_alpha(props.alpha);
+                    batch.sprite_scaled(
+                        atlas,
+                        &format!("container/beacon/{sprite}"),
+                        props.rect[0],
+                        props.rect[1],
+                        props.rect[2],
+                        props.rect[3],
+                        tint,
+                    );
+                    batch.sprite_scaled(
+                        atlas,
+                        icon,
+                        props.rect[0] + 2.0,
+                        props.rect[1] + 2.0,
+                        18.0,
+                        18.0,
+                        tint,
+                    );
+                }
+            }
+        };
         for (e, x, y, primary) in buttons {
             let tier = EFFECTS[e].1;
             let active = if primary {
@@ -374,12 +429,25 @@ impl crate::game::ClientGame<'_> {
                 sel[1] == Some(e)
             };
             let icon = format!("mob_effect/{}", EFFECTS[e].0);
-            button(batch, x, y, active, selected, &icon);
+            let key = format!(
+                "beacon/{}/{}",
+                if primary { "primary" } else { "secondary" },
+                EFFECTS[e].0
+            );
+            button(batch, x, y, active, selected, &icon, &key);
         }
         if let Some(p) = sel[0] {
             let (x, y) = upgrade_button();
             let icon = format!("mob_effect/{}", EFFECTS[p].0);
-            button(batch, x, y, levels >= 4, sel[1] == Some(p), &icon);
+            button(
+                batch,
+                x,
+                y,
+                levels >= 4,
+                sel[1] == Some(p),
+                &icon,
+                "beacon/upgrade",
+            );
         }
         button(
             batch,
@@ -388,8 +456,17 @@ impl crate::game::ClientGame<'_> {
             paid && sel[0].is_some(),
             false,
             "container/beacon/confirm",
+            "gui.done",
         );
-        button(batch, 190.0, 107.0, true, false, "container/beacon/cancel");
+        button(
+            batch,
+            190.0,
+            107.0,
+            true,
+            false,
+            "container/beacon/cancel",
+            "gui.cancel",
+        );
         let slots: Vec<usize> = (0..36).chain([INPUT]).collect();
         self.draw_hovered_slot_highlight(batch, false, ox, oy);
         for i in slots {

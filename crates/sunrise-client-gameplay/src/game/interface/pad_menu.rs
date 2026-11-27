@@ -2855,41 +2855,12 @@ impl crate::game::ClientGame<'_> {
         }
         let inventory = self.observed_overlay_now().is_none()
             && matches!(self.client.screen, Screen::Inventory | Screen::Creative);
-        // The built-in children a mod removed at `ScreenEvent.Init.Post`: last frame may still
-        // have drawn them, and a replacement at their bounds takes their presses.
-        let removed: Vec<[f32; 4]> = match self.client.title.0.as_ref() {
-            _ if self.observed_overlay_now().is_some() => Vec::new(),
-            _ if self.client.screen == Screen::Paused => self
-                .pause_init_children()
-                .into_iter()
-                .filter(|(action, _, _)| self.pause_child_removed(*action))
-                .map(|(_, rect, _)| rect)
-                .collect(),
-            Some(title)
-                if self.client.screen == Screen::Playing && title.has_removed_children() =>
-            {
-                let [w, h] = self.gui_frame_now().1.size.map(|axis| axis as f32);
-                title
-                    .init_children(&self.client.gui.atlas, w, h)
-                    .into_iter()
-                    .filter(|(id, _, _)| title.child_removed(*id))
-                    .map(|(_, rect, _)| rect)
-                    .collect()
-            }
-            _ => Vec::new(),
-        };
         let (cx, cy) = self.client.cursor;
         key_focus::keyboard_targets(key_focus::drawn_targets(), inventory)
             .into_iter()
             .find(|t| {
                 let [x, y, w, h] = t.rect;
-                cx >= x
-                    && cy >= y
-                    && cx < x + w
-                    && cy < y + h
-                    && !removed
-                        .iter()
-                        .any(|r| r.iter().zip(t.rect).all(|(a, b)| (a - b).abs() < 0.5))
+                cx >= x && cy >= y && cx < x + w && cy < y + h && !self.engine_rect_blocked(t.rect)
             })
     }
 

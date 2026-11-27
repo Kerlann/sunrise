@@ -792,28 +792,101 @@ impl ClientGame<'_> {
                     let [x, y, cw, ch] = rect;
                     let hover = in_area(cursor.1) && ui::hovered(cursor, x, y, cw, ch);
                     let on = open.values.get(input) == Some(&InputValue::Bool(true));
-                    let sprite = match (on, hover) {
-                        (true, true) => "widget/checkbox_selected_highlighted",
-                        (true, false) => "widget/checkbox_selected",
-                        (false, true) => "widget/checkbox_highlighted",
-                        (false, false) => "widget/checkbox",
-                    };
                     let Control::Boolean { label, .. } = &open.dialog.inputs[input].control else {
                         continue;
                     };
-                    sunrise_client::widgets::record(&label.plain(), rect, true);
-                    widgets::narratable(|| {
-                        widgets::Narratable::checkbox(label.plain(), on, rect, true).hovered(hover)
-                    });
-                    batch.sprite_scaled(atlas, sprite, x, y, BOX, BOX, u32::MAX);
-                    batch.text_styled(
-                        atlas,
-                        label,
-                        x + BOX + 4.0,
-                        y + 4.0,
-                        rgba(224, 224, 224, 255),
-                        true,
-                    );
+                    match widgets::resolve_engine_widget(widgets::EngineWidgetInput {
+                        bucket: widgets::WidgetBucket::Checkbox,
+                        rect,
+                        label: Some(label),
+                        explicit_key: None,
+                        active: true,
+                        hovered: hover,
+                        focused: false,
+                        tab_order_group: 0,
+                    }) {
+                        widgets::ResolvedEngineWidget::Skip => {}
+                        widgets::ResolvedEngineWidget::Unchanged => {
+                            let sprite = match (on, hover) {
+                                (true, true) => "widget/checkbox_selected_highlighted",
+                                (true, false) => "widget/checkbox_selected",
+                                (false, true) => "widget/checkbox_highlighted",
+                                (false, false) => "widget/checkbox",
+                            };
+                            sunrise_client::widgets::record(&label.plain(), rect, true);
+                            widgets::narratable(|| {
+                                widgets::Narratable::checkbox(label.plain(), on, rect, true)
+                                    .hovered(hover)
+                            });
+                            batch.sprite_scaled(atlas, sprite, x, y, BOX, BOX, u32::MAX);
+                            batch.text_styled(
+                                atlas,
+                                label,
+                                x + BOX + 4.0,
+                                y + 4.0,
+                                rgba(224, 224, 224, 255),
+                                true,
+                            );
+                        }
+                        widgets::ResolvedEngineWidget::Draw(props) => {
+                            let [rx, ry, rw, rh] = props.rect;
+                            let draw_label = props.message.as_ref().unwrap_or(label);
+                            let draw_plain = draw_label.plain();
+                            let props_active = props.active;
+                            let props_hovered = props.hovered;
+                            let tab_order_group = props.tab_order_group;
+                            let tooltip_hint = props.tooltip_narration.clone();
+                            sunrise_client::widgets::record(
+                                &draw_plain,
+                                [rx, ry, rw, rh],
+                                props_active,
+                            );
+                            widgets::narratable(|| {
+                                let mut n = widgets::Narratable::checkbox(
+                                    draw_plain.clone(),
+                                    on,
+                                    [rx, ry, rw, rh],
+                                    props_active,
+                                );
+                                widgets::apply_narration_overrides(
+                                    &mut n,
+                                    [rx, ry, rw, rh],
+                                    props_active,
+                                    props_hovered,
+                                    Some(&draw_plain),
+                                    tab_order_group,
+                                    tooltip_hint,
+                                );
+                                n
+                            });
+                            let lit = props
+                                .override_render_highlighted_sprite
+                                .unwrap_or(props_active && props_hovered);
+                            let sprite = match (on, lit) {
+                                (true, true) => "widget/checkbox_selected_highlighted",
+                                (true, false) => "widget/checkbox_selected",
+                                (false, true) => "widget/checkbox_highlighted",
+                                (false, false) => "widget/checkbox",
+                            };
+                            let tint = widgets::white_abgr_alpha(props.alpha);
+                            let text_color = widgets::scale_abgr_alpha(
+                                props
+                                    .label_text_color
+                                    .map(sunrise_client::hud_layout::abgr)
+                                    .unwrap_or_else(|| rgba(224, 224, 224, 255)),
+                                props.alpha,
+                            );
+                            batch.sprite_scaled(atlas, sprite, rx, ry, BOX, BOX, tint);
+                            batch.text_styled(
+                                atlas,
+                                draw_label,
+                                rx + BOX + 4.0,
+                                ry + 4.0,
+                                text_color,
+                                true,
+                            );
+                        }
+                    }
                 }
                 Part::Cycle { input, rect } => {
                     let [x, y, cw, ch] = rect;

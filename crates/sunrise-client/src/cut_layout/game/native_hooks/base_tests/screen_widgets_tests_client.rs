@@ -805,8 +805,21 @@ fn init_post_edits_ordered_children_and_discards_a_failed_stage() {
             assert_eq!(take_log(&log), ["added", "about to panic", "published"]);
             assert_eq!(game.client.screen_state.0.widgets.len(), 1);
             assert!(!game.client.screen_state.0.widgets.has_focus());
-            assert!(game.pause_child_removed(0));
-            assert!(!game.pause_child_removed(1));
+            let resume_label = ApiText::translate("menu.returnToGame", vec![]);
+            let options_label = ApiText::translate("menu.options", vec![]);
+            {
+                let live = game.screen_widgets().expect("pause screen is open");
+                assert!(
+                    live.children()
+                        .iter()
+                        .all(|child| child.message.as_ref() != Some(&resume_label))
+                );
+                assert!(
+                    live.children()
+                        .iter()
+                        .any(|child| child.message.as_ref() == Some(&options_label))
+                );
+            }
             let [x, y, _, _] = game.mounted_widget_targets()[0].rect;
             move_mouse(game, win_id, f64::from(x + 5.0), f64::from(y + 5.0));
             assert!(

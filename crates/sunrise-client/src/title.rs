@@ -41,7 +41,7 @@ pub use buffet::State as BuffetEditor;
 pub use create_world::{DIFFICULTIES, WorldOptions};
 pub use flat::{FlatLayer, FlatSettings, State as FlatEditor};
 pub use onboarding::Onboarding;
-use preset_buttons::{ADDED_IDS, CREDITS_ID, credits_notice};
+use preset_buttons::{ADDED_IDS, CREDITS_KEY, credits_notice};
 use preset_editors::PresetEditorFactories;
 use world_toast::WorldToast;
 
@@ -390,9 +390,6 @@ pub struct Title {
     warning_check: Cell<[f32; 4]>,
     /// The bottom notice's `PlainTextButton` as last drawn: x, y, width, height.
     credits_button: Cell<[f32; 4]>,
-    /// The main menu's own widgets a mod removed at `ScreenEvent.Init.Post`, by id
-    /// ([`Title::init_children`]): neither drawn, pressed nor focused until the next init.
-    removed_children: Vec<u8>,
     /// `Minecraft.allowsMultiplayer()` once the account's attributes are known.
     pub allows_multiplayer: bool,
     /// The packages in the mods folder (the Mods screen's rows): the main menu's added buttons
@@ -466,6 +463,9 @@ pub(crate) struct Button {
     y: f32,
     w: f32,
     label: String,
+    /// Structured label when the button comes from a translation key, preserving
+    /// translation identity for the widget collector and override table.
+    text: Option<Text>,
     enabled: bool,
     id: u8,
     icon: Option<(&'static str, f32)>,
@@ -479,6 +479,12 @@ impl Button {
     fn does(mut self, action: crate::widgets::Action) -> Self {
         self.action = Some(action);
         self
+    }
+    fn display_text(&self) -> std::borrow::Cow<'_, Text> {
+        match &self.text {
+            Some(text) => std::borrow::Cow::Borrowed(text),
+            None => std::borrow::Cow::Owned(Text::literal(&self.label)),
+        }
     }
     /// `AbstractButton.extractDefaultLabel`: the label centred with a 2 px
     /// margin, and slid inside the button when it does not fit
@@ -784,7 +790,6 @@ impl Title {
             message_lines: Cell::new(1),
             warning_check: Cell::new([0.0; 4]),
             credits_button: Cell::new([0.0; 4]),
-            removed_children: Vec::new(),
             allows_multiplayer: true,
             mods: 0,
             ban_queue: Default::default(),
@@ -2069,13 +2074,9 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
             7 => icon("accessibility.onboarding.accessibility.button.narration"),
             _ => Narratable::button(b.label.clone(), rect, b.enabled),
         };
-        // TitleScreen.init adds the icon row after Minecraft Realms and before
-        // Options... and Quit Game, which Sunrise draws first.
-        narratable.order(match b.id {
-            5..=7 => 1,
-            2 | 3 => 2,
-            _ => 0,
-        })
+        // `main_buttons` already lists widgets in `TitleScreen.init` order:
+        // Singleplayer, Multiplayer, Realms, added buttons, icon row, Options..., Quit Game.
+        narratable
     }
 
     /// The `Tooltip` vanilla sets on a button of the open screen, as its key:
@@ -2260,7 +2261,7 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
                 return (Action::None, true, true);
             }
         }
-        if matches!(self.mode, Mode::Main) && !self.removed_children.contains(&CREDITS_ID) {
+        if matches!(self.mode, Mode::Main) {
             let [bx, by, bw, bh] = self.credits_button.get();
             if (bx..bx + bw).contains(&x) && (by..by + bh).contains(&y) {
                 return (Action::Credits, true, true);

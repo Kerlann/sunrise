@@ -1901,16 +1901,48 @@ impl crate::game::ClientGame<'_> {
         let cursor = self.client.cursor;
         let (bx, by) = self.book_button_pos(book_type, ox, batch);
         let hover = inside(cursor, bx, by, 20.0, 18.0);
-        batch.sprite(
-            &self.client.gui.atlas,
-            &sprite(if hover {
-                "button_highlighted"
-            } else {
-                "button"
-            }),
-            bx,
-            by,
-        );
+        let rect = [bx, by, 20.0, 18.0];
+        match sunrise_client::widgets::resolve_engine_widget(
+            sunrise_client::widgets::EngineWidgetInput {
+                bucket: sunrise_client::widgets::WidgetBucket::Button,
+                rect,
+                label: None,
+                explicit_key: Some("recipe_book/button"),
+                active: true,
+                hovered: hover,
+                focused: false,
+                tab_order_group: 0,
+            },
+        ) {
+            sunrise_client::widgets::ResolvedEngineWidget::Skip => {}
+            sunrise_client::widgets::ResolvedEngineWidget::Unchanged => {
+                batch.sprite(
+                    &self.client.gui.atlas,
+                    &sprite(if hover {
+                        "button_highlighted"
+                    } else {
+                        "button"
+                    }),
+                    bx,
+                    by,
+                );
+            }
+            sunrise_client::widgets::ResolvedEngineWidget::Draw(props) => {
+                let lit = props
+                    .override_render_highlighted_sprite
+                    .unwrap_or(props.active && props.hovered);
+                let tint = sunrise_client::widgets::white_abgr_alpha(props.alpha);
+                batch.sprite_scaled(
+                    &self.client.gui.atlas,
+                    &sprite(if lit { "button_highlighted" } else { "button" }),
+                    props.rect[0],
+                    props.rect[1],
+                    props.rect[2],
+                    props.rect[3],
+                    tint,
+                );
+            }
+        }
         self.draw_ghost(batch, book_type);
         let tooltip = if self.book_open(book_type) {
             self.refresh_book_view(book_type);

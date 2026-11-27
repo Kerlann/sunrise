@@ -63,7 +63,6 @@ pub(in crate::game) struct MountedWidgetsInner {
     pub(in crate::game) pending_tooltip: Option<widgets::PendingWidgetTooltip>,
     pub(in crate::game) mounted_hover_since: HashMap<ScreenWidgetId, Instant>,
     pub(in crate::game) entries: Vec<Option<MountedWidgetEntry>>,
-    pub(in crate::game) removed_pause_actions: Vec<u8>,
     pub(in crate::game) discovered: bool,
     pub(in crate::game) overrides_active: bool,
     pub(in crate::game) focused: Option<usize>,
@@ -94,7 +93,6 @@ impl Default for MountedScreenWidgets {
                 pending_tooltip: None,
                 mounted_hover_since: HashMap::new(),
                 entries: Vec::new(),
-                removed_pause_actions: Vec::new(),
                 discovered: false,
                 overrides_active: false,
                 focused: None,
@@ -179,7 +177,6 @@ impl MountedScreenWidgets {
             inner.pending_tooltip = None;
             inner.mounted_hover_since.clear();
             inner.dragging = None;
-            inner.removed_pause_actions.clear();
             inner.discovered = false;
             inner.overrides_active = false;
             (std::mem::take(&mut inner.entries), inner.focused.take())
@@ -421,11 +418,78 @@ pub(in crate::game) fn apply_staged_op_to_mounted(
     }
 }
 
+/// Apply one staged override operation to an engine widget's override entry.
+pub(in crate::game) fn apply_staged_op_to_engine(
+    ov: &mut widgets::EngineWidgetOverride,
+    op: StagedWidgetOp,
+) {
+    match op {
+        StagedWidgetOp::Bounds(rect) => ov.rect = Some(rect),
+        StagedWidgetOp::Message(_, engine) => ov.message = Some(engine),
+        StagedWidgetOp::Active(v) => ov.active = Some(v),
+        StagedWidgetOp::Visible(v) => ov.visible = Some(v),
+        StagedWidgetOp::Alpha(v) => ov.alpha = Some(v),
+        StagedWidgetOp::LabelTextColor(c) => ov.label_text_color = Some(c),
+        StagedWidgetOp::Tooltip(_, engine_tip) => ov.tooltip = Some(engine_tip),
+        StagedWidgetOp::TooltipDelay(d) => ov.tooltip_delay = Some(d),
+        StagedWidgetOp::TabOrderGroup(g) => ov.tab_order_group = Some(g),
+        StagedWidgetOp::Sprites(s) => ov.sprites = Some(s),
+        StagedWidgetOp::OverrideHighlighted(h) => ov.override_render_highlighted_sprite = Some(h),
+    }
+}
+
+/// Build hit-test entries directly from discovered engine slots and active overrides so clicks,
+/// blocking, and `press(id)` match the override table immediately before the next frame draws.
+pub(in crate::game) fn build_engine_hits(
+    slots: &[EngineChildSlot],
+    maps: &widgets::EngineOverrideMaps,
+) -> Vec<widgets::EngineHitEntry> {
+    slots
+        .iter()
+        .map(|slot| {
+            if maps.suppress_all {
+                return widgets::EngineHitEntry {
+                    key: slot.key.clone(),
+                    original_rect: slot.default_rect,
+                    resolved_rect: slot.default_rect,
+                    interactive: false,
+                    blocks_original: true,
+                };
+            }
+            let ov = maps.overrides.get(&slot.key);
+            let removed = ov.is_some_and(|o| o.removed);
+            let visible = ov.and_then(|o| o.visible).unwrap_or(true);
+            if removed || !visible {
+                return widgets::EngineHitEntry {
+                    key: slot.key.clone(),
+                    original_rect: slot.default_rect,
+                    resolved_rect: slot.default_rect,
+                    interactive: false,
+                    blocks_original: true,
+                };
+            }
+            let resolved_rect = ov.and_then(|o| o.rect).unwrap_or(slot.default_rect);
+            let active = ov.and_then(|o| o.active).unwrap_or(slot.default_active);
+            let moved = ov.and_then(|o| o.rect).is_some();
+            widgets::EngineHitEntry {
+                key: slot.key.clone(),
+                original_rect: slot.default_rect,
+                resolved_rect,
+                interactive: active,
+                blocks_original: moved || (!active && slot.default_active),
+            }
+        })
+        .collect()
+}
+
 /// Registrar passed to `Hooks::screen_init_pre` and `Hooks::screen_init_post`.
 pub(in crate::game) struct ScreenWidgetMount {
     pub(in crate::game) next_id: u64,
     pub(in crate::game) entries: Vec<MountedWidgetEntry>,
     pub(in crate::game) children: Vec<ScreenChild>,
+    pub(in crate::game) engine_ids: Vec<ScreenWidgetId>,
+    pub(in crate::game) field_ids: Vec<ScreenWidgetId>,
+    pub(in crate::game) custom_ids: Vec<ScreenWidgetId>,
     pub(in crate::game) removed: Vec<ScreenWidgetId>,
     pub(in crate::game) cleared: bool,
     pub(in crate::game) ops: Vec<(ScreenWidgetId, StagedWidgetOp)>,
@@ -449,6 +513,8 @@ impl ScreenWidgetMount {
 
     pub(in crate::game) fn stage(&mut self, kind: MountedWidgetKind) -> ScreenWidgetId {
         let id = self.alloc_id();
+        let is_field = matches!(kind, MountedWidgetKind::TextField { .. });
+        let is_custom = matches!(kind, MountedWidgetKind::Custom(_));
         let mut entry = MountedWidgetEntry {
             id,
             owner: widget_callback_owner(),
@@ -501,6 +567,11 @@ impl ScreenWidgetMount {
         if let Some(child) = child
             && valid_widget_rect(child.rect)
         {
+            if is_field {
+                self.field_ids.push(id);
+            } else if is_custom {
+                self.custom_ids.push(id);
+            }
             self.children.push(child);
             self.entries.push(entry);
         } else {
@@ -562,14 +633,23 @@ impl ScreenWidgets for ScreenWidgetMount {
     }
 
     fn set_initial_focus(&mut self, id: ScreenWidgetId) -> bool {
-        let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) else {
-            return false;
-        };
-        if !entry.can_focus() {
-            return false;
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
+            if !entry.can_focus() {
+                return false;
+            }
+            self.initial_focus = Some(id);
+            return true;
         }
-        self.initial_focus = Some(id);
-        true
+        if !self.engine_ids.contains(&id)
+            && self
+                .children
+                .iter()
+                .any(|child| child.id == id && child.visible && child.active)
+        {
+            self.initial_focus = Some(id);
+            return true;
+        }
+        false
     }
 
     fn remove(&mut self, id: ScreenWidgetId) -> bool {
@@ -597,7 +677,11 @@ impl ScreenWidgets for ScreenWidgetMount {
     }
 
     fn set_bounds(&mut self, id: ScreenWidgetId, rect: [f32; 4]) -> bool {
-        if !valid_widget_rect(rect) || rect[2] < 0.0 || rect[3] < 0.0 {
+        if !valid_widget_rect(rect)
+            || rect[2] < 0.0
+            || rect[3] < 0.0
+            || self.custom_ids.contains(&id)
+        {
             return false;
         }
         let Some(child) = self.children.iter_mut().find(|child| child.id == id) else {
@@ -622,6 +706,9 @@ impl ScreenWidgets for ScreenWidgetMount {
     }
 
     fn set_message(&mut self, id: ScreenWidgetId, message: ApiText) -> bool {
+        if self.custom_ids.contains(&id) {
+            return false;
+        }
         let Ok(engine_text): std::result::Result<Text, _> = message.try_into_engine(&()) else {
             return false;
         };
@@ -645,6 +732,9 @@ impl ScreenWidgets for ScreenWidgetMount {
     }
 
     fn set_active(&mut self, id: ScreenWidgetId, active: bool) -> bool {
+        if self.custom_ids.contains(&id) {
+            return false;
+        }
         let Some(child) = self.children.iter_mut().find(|child| child.id == id) else {
             return false;
         };
@@ -662,6 +752,9 @@ impl ScreenWidgets for ScreenWidgetMount {
     }
 
     fn set_visible(&mut self, id: ScreenWidgetId, visible: bool) -> bool {
+        if self.custom_ids.contains(&id) {
+            return false;
+        }
         let Some(child) = self.children.iter_mut().find(|child| child.id == id) else {
             return false;
         };
@@ -679,7 +772,7 @@ impl ScreenWidgets for ScreenWidgetMount {
     }
 
     fn set_alpha(&mut self, id: ScreenWidgetId, alpha: f32) -> bool {
-        if !alpha.is_finite() {
+        if !alpha.is_finite() || self.custom_ids.contains(&id) {
             return false;
         }
         let Some(child) = self.children.iter_mut().find(|child| child.id == id) else {
@@ -699,6 +792,9 @@ impl ScreenWidgets for ScreenWidgetMount {
     }
 
     fn set_label_text_color(&mut self, id: ScreenWidgetId, color: Option<u32>) -> bool {
+        if self.custom_ids.contains(&id) || self.field_ids.contains(&id) {
+            return false;
+        }
         let Some(child) = self.children.iter_mut().find(|child| child.id == id) else {
             return false;
         };
@@ -715,6 +811,9 @@ impl ScreenWidgets for ScreenWidgetMount {
     }
 
     fn set_tooltip(&mut self, id: ScreenWidgetId, tooltip: Option<WidgetTooltip>) -> bool {
+        if self.custom_ids.contains(&id) {
+            return false;
+        }
         let Some(engine_tip) = convert_widget_tooltip(tooltip.clone()) else {
             return false;
         };
@@ -735,6 +834,9 @@ impl ScreenWidgets for ScreenWidgetMount {
     }
 
     fn set_tooltip_delay(&mut self, id: ScreenWidgetId, delay: Duration) -> bool {
+        if self.custom_ids.contains(&id) {
+            return false;
+        }
         if !self.children.iter().any(|child| child.id == id) {
             return false;
         }
@@ -754,6 +856,9 @@ impl ScreenWidgets for ScreenWidgetMount {
     }
 
     fn set_tab_order_group(&mut self, id: ScreenWidgetId, group: i32) -> bool {
+        if self.custom_ids.contains(&id) {
+            return false;
+        }
         let Some(child) = self.children.iter_mut().find(|child| child.id == id) else {
             return false;
         };
@@ -774,6 +879,9 @@ impl ScreenWidgets for ScreenWidgetMount {
     }
 
     fn set_sprites(&mut self, id: ScreenWidgetId, sprites: Option<ButtonSprites>) -> bool {
+        if self.custom_ids.contains(&id) || self.field_ids.contains(&id) {
+            return false;
+        }
         if !self.children.iter().any(|child| child.id == id) {
             return false;
         }
@@ -793,6 +901,9 @@ impl ScreenWidgets for ScreenWidgetMount {
         id: ScreenWidgetId,
         highlighted: Option<bool>,
     ) -> bool {
+        if self.custom_ids.contains(&id) || self.field_ids.contains(&id) {
+            return false;
+        }
         let Some(child) = self.children.iter_mut().find(|child| child.id == id) else {
             return false;
         };
@@ -1027,15 +1138,188 @@ impl crate::game::ClientGame<'_> {
         if self.observed_screen_view().is_none() {
             return None;
         }
-        self.client
-            .screen_state
-            .0
-            .widgets
-            .inner
-            .borrow_mut()
-            .overrides_active = true;
+        let needs_discover = !self.client.screen_state.0.widgets.inner.borrow().discovered;
+        if needs_discover {
+            let collected = self.discover_screen_widgets();
+            let mut new_slots = Vec::with_capacity(collected.len());
+            let mut new_ids = Vec::with_capacity(collected.len());
+            for item in collected {
+                let id = self.alloc_widget_id();
+                let default_message = item.message.as_ref().and_then(|t| t.try_into_api().ok());
+                new_ids.push(id);
+                new_slots.push(EngineChildSlot {
+                    id,
+                    key: item.key,
+                    default_rect: item.rect,
+                    default_message,
+                    default_active: item.active,
+                    default_tab_order_group: item.tab_order_group,
+                });
+            }
+            let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+            let existing_order = std::mem::take(&mut inner.order);
+            inner.order = new_ids;
+            inner.order.extend(existing_order);
+            inner.engine_children = new_slots;
+            inner.engine_hits = build_engine_hits(&inner.engine_children, &inner.engine_overrides);
+            inner.discovered = true;
+            inner.overrides_active = true;
+        } else {
+            self.client
+                .screen_state
+                .0
+                .widgets
+                .inner
+                .borrow_mut()
+                .overrides_active = true;
+        }
         self.sync_children_cache();
         Some(self)
+    }
+
+    /// Whether an engine widget whose original rectangle matches `rect` is currently blocked
+    /// (removed, hidden, disabled, moved away, or suppressed by `screen_init_pre` cancellation).
+    pub(in crate::game) fn engine_rect_blocked(&self, rect: [f32; 4]) -> bool {
+        let inner = self.client.screen_state.0.widgets.inner.borrow();
+        if !inner.overrides_active {
+            return false;
+        }
+        if inner.engine_overrides.suppress_all {
+            return true;
+        }
+        inner.engine_hits.iter().any(|hit| {
+            hit.blocks_original
+                && hit
+                    .original_rect
+                    .iter()
+                    .zip(rect)
+                    .all(|(a, b)| (a - b).abs() < 0.5)
+        })
+    }
+
+    /// Run a scoped collector pass over the currently open engine screen or overlay to enumerate
+    /// its built-in widgets in exact draw/registration order, preserving any rasterized font or
+    /// pack icon atlas patches without touching live widget/target/narration buffers.
+    pub(in crate::game) fn discover_screen_widgets(&mut self) -> Vec<widgets::CollectedWidget> {
+        let size = self.renderer_framebuffer().unwrap_or([854, 480]);
+        let mut batch = HudBatch::new(size, self.client.settings.gui_scale_inputs());
+        let prev_room = std::mem::replace(
+            &mut self.client.chat_ui.room,
+            sunrise_client::hud_kit::room::Room::new(batch.width, batch.height),
+        );
+        let prev_frame_ticks = std::mem::replace(&mut self.client.frame_ticks, 0.0);
+        let collected = widgets::with_widget_collector(|| {
+            if self.client.command_prompt.0.is_some() {
+                self.draw_command_prompt(&mut batch);
+            } else if self.client.link_prompt.is_some() {
+                self.draw_link_prompt(&mut batch);
+            } else if self.client.code_of_conduct.is_some() {
+                self.draw_code_of_conduct(&mut batch);
+            } else if self.client.server_packs.0.prompt.is_some() {
+                self.draw_pack_prompt(&mut batch);
+            } else if self.dialog_open() {
+                self.draw_dialog(&mut batch);
+            } else if self.client.book.is_some() {
+                self.draw_book(&mut batch);
+            } else if self.client.sign_edit.is_some() {
+                self.draw_sign_editor(&mut batch);
+            } else if self.client.screen == super::Screen::Win {
+                self.draw_win_screen(&mut batch);
+            } else if self.client.screen == super::Screen::Options && self.client.title.0.is_some()
+            {
+                self.draw_options(&mut batch, true);
+            } else if self.client.screen == super::Screen::DebugOptions
+                && self.client.title.0.is_some()
+            {
+                self.draw_debug_options(&mut batch);
+            } else if self.client.screen == super::Screen::Mod && self.client.title.0.is_some() {
+                // Mod-owned screens have no built-in engine widgets.
+            } else if self.client.title.0.is_some() {
+                let mods = self.client.settings.mods.installed.len();
+                if let Some(title) = &mut self.client.title.0 {
+                    title.mods = mods;
+                }
+                if let Some(title) = &self.client.title.0 {
+                    title.draw_with_items(
+                        &self.client.gui.atlas,
+                        Some(&self.client.client_pack.item_renderer),
+                        &mut batch,
+                        self.client.cursor,
+                        self.client.settings.file.bool("hideSplashTexts"),
+                        self.client.settings.file.bool("hideServerAddress"),
+                        &mut |_, _| {},
+                    );
+                }
+            } else if self.remote_loading() {
+                let _ = self.remote_overlay(&mut batch);
+            } else {
+                match self.client.screen {
+                    super::Screen::Options => self.draw_options(&mut batch, true),
+                    super::Screen::Paused if self.client.pause_menu => {
+                        self.draw_pause_menu(&mut batch)
+                    }
+                    super::Screen::GameModeSwitcher => self.draw_gamemode_switcher(&mut batch),
+                    super::Screen::Dead => self.draw_death_screen(&mut batch),
+                    super::Screen::Stats => self.draw_stats(&mut batch),
+                    super::Screen::Advancements => self.draw_advancements(&mut batch),
+                    super::Screen::WorldOptions => self.draw_world_options(&mut batch),
+                    super::Screen::Friends => self.draw_friends_screen(&mut batch),
+                    super::Screen::Social => self.draw_social_screen(&mut batch),
+                    super::Screen::ServerLinks => self.draw_server_links(&mut batch),
+                    super::Screen::ConfirmLink => self.draw_confirm_link(&mut batch),
+                    super::Screen::DemoIntro => self.draw_demo_intro(&mut batch),
+                    super::Screen::DialogWarning => self.draw_dialog_warning(&mut batch),
+                    super::Screen::CommandBlock => self.draw_command_block(&mut batch),
+                    super::Screen::BlockEditor => self.draw_block_editor(&mut batch),
+                    super::Screen::DebugOptions => self.draw_debug_options(&mut batch),
+                    super::Screen::Inventory => {
+                        let _ = self.draw_inventory(&mut batch);
+                    }
+                    super::Screen::Creative => {
+                        let _ = self.draw_creative(&mut batch);
+                    }
+                    super::Screen::Chat => self.draw_chat_screen(&mut batch),
+                    super::Screen::Playing
+                    | super::Screen::Win
+                    | super::Screen::Paused
+                    | super::Screen::Mod => {}
+                }
+            }
+        });
+        self.client.frame_ticks = prev_frame_ticks;
+        self.client.chat_ui.room = prev_room;
+        // Keep any newly rasterized font glyphs or pack icons queued for GPU upload.
+        self.client
+            .text_patches
+            .borrow_mut()
+            .append(&mut batch.patches);
+        collected
+    }
+
+    /// Re-layout engine widgets after a resize on a screen whose vanilla counterpart overrides
+    /// `repositionElements()`: clear only engine bounds overrides while keeping all non-bounds
+    /// overrides and all mounted mod widgets (with their bounds) intact.
+    pub(in crate::game) fn reposition_screen_widgets(&mut self) {
+        let should_rediscover = {
+            let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+            for ov in inner.engine_overrides.overrides.values_mut() {
+                ov.rect = None;
+            }
+            inner.discovered && !inner.engine_overrides.suppress_all
+        };
+        if should_rediscover {
+            let collected = self.discover_screen_widgets();
+            let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+            for seen in collected {
+                if let Some(slot) = inner.engine_children.iter_mut().find(|s| s.key == seen.key) {
+                    slot.default_rect = seen.rect;
+                    slot.default_active = seen.active;
+                    slot.default_tab_order_group = seen.tab_order_group;
+                }
+            }
+            inner.engine_hits = build_engine_hits(&inner.engine_children, &inner.engine_overrides);
+        }
+        self.sync_children_cache();
     }
 
     /// Run a screen draw closure under the active screen's engine widget override table when
@@ -1216,138 +1500,194 @@ impl crate::game::ClientGame<'_> {
         }
     }
 
-    /// Run `ScreenEvent.Init.Post` to mount widgets on the initialized screen and apply focus.
+    /// Run `ScreenEvent.Init.Pre`, discover the open screen's built-in widgets unless cancelled,
+    /// run `ScreenEvent.Init.Post`, and commit mounted widgets, engine overrides, and initial focus.
     pub fn init_screen_widgets(&mut self, view: &ScreenView<'_>) {
-        if !mod_api::__private::listened(mod_api::HookId::ScreenInitPost) {
+        let listen_pre = mod_api::__private::listened(mod_api::HookId::ScreenInitPre);
+        let listen_post = mod_api::__private::listened(mod_api::HookId::ScreenInitPost);
+        if !listen_pre && !listen_post {
             return;
         }
         let mut mount = ScreenWidgetMount {
             next_id: self.client.screen_state.0.widgets.next_id.get(),
             entries: Vec::new(),
             children: Vec::new(),
+            engine_ids: Vec::new(),
+            field_ids: Vec::new(),
+            custom_ids: Vec::new(),
             removed: Vec::new(),
             cleared: false,
             ops: Vec::new(),
             initial_focus: None,
         };
-        // Use the initialized layout, not last frame's draw registrations (which may
-        // still belong to a different screen, and omit children clipped offscreen).
-        let native = match (view.id, self.client.title.0.as_ref()) {
-            ("paused", _) => self.pause_init_children(),
-            ("title", Some(title)) => {
-                let [w, h] = self.gui_frame_now().1.size.map(|axis| axis as f32);
-                title
-                    .init_children(&self.client.gui.atlas, w, h)
-                    .into_iter()
-                    .map(|(action, rect, key)| {
-                        (
-                            action,
-                            rect,
-                            Some(mod_api::Text::translate(key, Vec::new())),
-                        )
-                    })
-                    .collect()
-            }
-            _ => Vec::new(),
-        };
-        let native = native
-            .into_iter()
-            .map(|(action, rect, label)| {
-                let id = mount.alloc_id();
-                mount.children.push(ScreenChild::new(id, rect, label));
-                (id, action)
-            })
-            .collect::<Vec<_>>();
         let mut entries: Vec<MountedWidgetEntry> = Vec::new();
-        let mut removed_actions = Vec::new();
-        let mut initial_focus = None;
-        self.native_screen_init_post(view, |listen| {
-            let children = mount.children.clone();
-            if listen(&mut mount) {
+        let mut engine_children: Vec<EngineChildSlot> = Vec::new();
+        let mut engine_overrides = widgets::EngineOverrideMaps::default();
+        let mut initial_focus: Option<ScreenWidgetId> = None;
+
+        let commit_listener =
+            |mount: &mut ScreenWidgetMount,
+             entries: &mut Vec<MountedWidgetEntry>,
+             engine_children: &[EngineChildSlot],
+             engine_overrides: &mut widgets::EngineOverrideMaps,
+             initial_focus: &mut Option<ScreenWidgetId>| {
                 if mount.cleared {
                     mount.cleared = false;
-                    initial_focus = None;
+                    *initial_focus = None;
                     for entry in entries.drain(..) {
                         entry.dispose();
                     }
-                    for &(id, action) in &native {
-                        let _ = id;
-                        if !removed_actions.contains(&action) {
-                            removed_actions.push(action);
+                    if !engine_children.is_empty() {
+                        engine_overrides.suppress_all = true;
+                        for slot in engine_children {
+                            engine_overrides
+                                .overrides
+                                .entry(slot.key.clone())
+                                .or_default()
+                                .removed = true;
                         }
                     }
                 }
                 for id in mount.removed.drain(..) {
-                    if initial_focus == Some(id) {
-                        initial_focus = None;
+                    if *initial_focus == Some(id) {
+                        *initial_focus = None;
                     }
                     if let Some(pos) = entries.iter().position(|entry| entry.id == id) {
                         entries.remove(pos).dispose();
-                    } else if let Some(&(_, action)) =
-                        native.iter().find(|&&(child, _)| child == id)
-                    {
-                        removed_actions.push(action);
+                    } else if let Some(slot) = engine_children.iter().find(|s| s.id == id) {
+                        engine_overrides
+                            .overrides
+                            .entry(slot.key.clone())
+                            .or_default()
+                            .removed = true;
                     }
                 }
                 for (id, op) in mount.ops.drain(..) {
                     if let Some(entry) = entries.iter_mut().find(|entry| entry.id == id) {
                         apply_staged_op_to_mounted(entry, op);
+                    } else if let Some(slot) = engine_children.iter().find(|s| s.id == id) {
+                        let ov = engine_overrides
+                            .overrides
+                            .entry(slot.key.clone())
+                            .or_default();
+                        apply_staged_op_to_engine(ov, op);
                     }
                 }
-                initial_focus = mount.initial_focus.take().or(initial_focus);
+                *initial_focus = mount.initial_focus.take().or(*initial_focus);
                 entries.append(&mut mount.entries);
-            } else {
-                mount.children = children;
-                mount.initial_focus = None;
-                mount.cleared = false;
-                mount.removed.clear();
-                mount.ops.clear();
-                for entry in mount.entries.drain(..) {
-                    entry.dispose();
-                }
+            };
+
+        let mut pre_canceled = false;
+        if listen_pre {
+            self.native_screen_init_pre(
+                view,
+                |listen| {
+                    let children = mount.children.clone();
+                    let field_ids = mount.field_ids.clone();
+                    let custom_ids = mount.custom_ids.clone();
+                    if listen(&mut mount) {
+                        commit_listener(
+                            &mut mount,
+                            &mut entries,
+                            &engine_children,
+                            &mut engine_overrides,
+                            &mut initial_focus,
+                        );
+                    } else {
+                        mount.children = children;
+                        mount.field_ids = field_ids;
+                        mount.custom_ids = custom_ids;
+                        mount.initial_focus = None;
+                        mount.cleared = false;
+                        mount.removed.clear();
+                        mount.ops.clear();
+                        for entry in mount.entries.drain(..) {
+                            entry.dispose();
+                        }
+                    }
+                },
+                &mut pre_canceled,
+            );
+        }
+
+        if pre_canceled {
+            engine_overrides.suppress_all = true;
+        } else {
+            let collected = self.discover_screen_widgets();
+            for item in collected {
+                let id = mount.alloc_id();
+                let api_msg = item.message.as_ref().and_then(|t| t.try_into_api().ok());
+                let mut child = ScreenChild::new(id, item.rect, api_msg.clone());
+                child.active = item.active;
+                child.tab_order_group = item.tab_order_group;
+                mount.children.push(child);
+                mount.engine_ids.push(id);
+                engine_children.push(EngineChildSlot {
+                    id,
+                    key: item.key,
+                    default_rect: item.rect,
+                    default_message: api_msg,
+                    default_active: item.active,
+                    default_tab_order_group: item.tab_order_group,
+                });
             }
-            // IDs issued to a failed listener are never reused.
-        });
+        }
+
+        if listen_post {
+            self.native_screen_init_post(view, |listen| {
+                let children = mount.children.clone();
+                let field_ids = mount.field_ids.clone();
+                let custom_ids = mount.custom_ids.clone();
+                if listen(&mut mount) {
+                    commit_listener(
+                        &mut mount,
+                        &mut entries,
+                        &engine_children,
+                        &mut engine_overrides,
+                        &mut initial_focus,
+                    );
+                } else {
+                    mount.children = children;
+                    mount.field_ids = field_ids;
+                    mount.custom_ids = custom_ids;
+                    mount.initial_focus = None;
+                    mount.cleared = false;
+                    mount.removed.clear();
+                    mount.ops.clear();
+                    for entry in mount.entries.drain(..) {
+                        entry.dispose();
+                    }
+                }
+                // IDs issued to a failed listener are never reused.
+            });
+        }
+
         self.client
             .screen_state
             .0
             .widgets
             .next_id
             .set(mount.next_id);
-        let initial_focus =
-            initial_focus.and_then(|id| entries.iter().position(|entry| entry.id == id));
-        if view.id == "title"
-            && let Some(title) = self.client.title.0.as_mut()
-        {
-            title.set_removed_children(std::mem::take(&mut removed_actions));
-        }
+        let initial_focus = initial_focus.and_then(|id| {
+            entries
+                .iter_mut()
+                .position(|entry| entry.id == id && entry.can_focus())
+        });
+        let order: Vec<ScreenWidgetId> = mount.children.iter().map(|c| c.id).collect();
+        let engine_hits = build_engine_hits(&engine_children, &engine_overrides);
         let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
-        inner.order = entries.iter().map(|e| e.id).collect();
+        inner.order = order;
+        inner.engine_children = engine_children;
+        inner.engine_overrides = engine_overrides;
+        inner.engine_hits = engine_hits;
         inner.entries = entries.into_iter().map(Some).collect();
-        inner.removed_pause_actions = removed_actions;
-        if self
-            .client
-            .pause_focus
-            .is_some_and(|id| inner.removed_pause_actions.contains(&id))
-        {
-            self.client.pause_focus = None;
-        }
+        inner.discovered = true;
+        inner.overrides_active = true;
         drop(inner);
+        self.sync_children_cache();
         if let Some(idx) = initial_focus {
             self.set_mounted_widget_focus(Some(idx));
         }
-    }
-
-    /// Whether Init.Post removed this native PauseScreen action from the current build.
-    pub fn pause_child_removed(&self, action: u8) -> bool {
-        self.client
-            .screen_state
-            .0
-            .widgets
-            .inner
-            .borrow()
-            .removed_pause_actions
-            .contains(&action)
     }
 
     /// Clear and dispose all mounted widgets for the current screen without
@@ -1356,9 +1696,6 @@ impl crate::game::ClientGame<'_> {
     pub fn clear_screen_widgets(&mut self) {
         self.client.screen_state.0.widgets.clear();
         self.client.screen_state.0.widgets.children_cache.clear();
-        if let Some(title) = self.client.title.0.as_mut() {
-            title.set_removed_children(Vec::new());
-        }
         sunrise_client::preedit::reset();
         self.client.ime_area = None;
     }
@@ -2668,23 +3005,33 @@ impl ScreenWidgets for crate::game::ClientGame<'_> {
     fn clear(&mut self) {
         let (entries, focused) = {
             let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
-            inner.order.clear();
-            inner.engine_overrides.suppress_all = true;
-            for slot in &inner.engine_children {
-                inner
-                    .engine_overrides
+            let MountedWidgetsInner {
+                order,
+                engine_children,
+                engine_overrides,
+                engine_hits,
+                dragging,
+                pending_tooltip,
+                entries,
+                focused,
+                ..
+            } = &mut *inner;
+            order.clear();
+            engine_overrides.suppress_all = true;
+            for slot in engine_children.iter() {
+                engine_overrides
                     .overrides
                     .entry(slot.key.clone())
                     .or_default()
                     .removed = true;
             }
-            for hit in &mut inner.engine_hits {
+            for hit in engine_hits.iter_mut() {
                 hit.interactive = false;
                 hit.blocks_original = true;
             }
-            inner.dragging = None;
-            inner.pending_tooltip = None;
-            (std::mem::take(&mut inner.entries), inner.focused.take())
+            *dragging = None;
+            *pending_tooltip = None;
+            (std::mem::take(entries), focused.take())
         };
         if let Some(idx) = focused {
             sunrise_client::preedit::reset();

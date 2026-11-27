@@ -1067,17 +1067,54 @@ impl ClientGame<'_> {
         }
         let tr = |key: &str, fallback: &str| self.translate_with_fallback(key, fallback);
         let page_buttons = |batch: &mut HudBatch, back: bool, forward: bool| {
-            for (show, x, name) in [
-                (forward, 116.0, "page_forward"),
-                (back, 43.0, "page_backward"),
+            for (show, x, name, key) in [
+                (forward, 116.0, "page_forward", "book.page_button.next"),
+                (back, 43.0, "page_backward", "book.page_button.previous"),
             ] {
                 if show {
-                    let sprite = if hover(left + x, top + 157.0, 23.0, 13.0) {
-                        format!("widget/{name}_highlighted")
-                    } else {
-                        format!("widget/{name}")
-                    };
-                    batch.sprite(atlas, &sprite, left + x, top + 157.0);
+                    let rect = [left + x, top + 157.0, 23.0, 13.0];
+                    let is_hovered = hover(rect[0], rect[1], rect[2], rect[3]);
+                    let label = Text::translate(key, &[]);
+                    match widgets::resolve_engine_widget(widgets::EngineWidgetInput {
+                        bucket: widgets::WidgetBucket::Button,
+                        rect,
+                        label: Some(&label),
+                        explicit_key: None,
+                        active: true,
+                        hovered: is_hovered,
+                        focused: false,
+                        tab_order_group: 0,
+                    }) {
+                        widgets::ResolvedEngineWidget::Skip => {}
+                        widgets::ResolvedEngineWidget::Unchanged => {
+                            let sprite = if is_hovered {
+                                format!("widget/{name}_highlighted")
+                            } else {
+                                format!("widget/{name}")
+                            };
+                            batch.sprite(atlas, &sprite, rect[0], rect[1]);
+                        }
+                        widgets::ResolvedEngineWidget::Draw(props) => {
+                            let lit = props
+                                .override_render_highlighted_sprite
+                                .unwrap_or(props.active && props.hovered);
+                            let sprite = if lit {
+                                format!("widget/{name}_highlighted")
+                            } else {
+                                format!("widget/{name}")
+                            };
+                            let tint = widgets::white_abgr_alpha(props.alpha);
+                            batch.sprite_scaled(
+                                atlas,
+                                &sprite,
+                                props.rect[0],
+                                props.rect[1],
+                                props.rect[2],
+                                props.rect[3],
+                                tint,
+                            );
+                        }
+                    }
                 }
             }
         };

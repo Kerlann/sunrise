@@ -12,7 +12,6 @@ use sunrise_game_data::{
     Result,
     text::{self, ClickEvent, Text},
 };
-use sunrise_gameplay_common::game::api_values::TryIntoApi;
 use winit::keyboard::KeyCode;
 
 pub(in crate::game) trait ScreenClientExt: Sized {
@@ -368,42 +367,6 @@ impl crate::game::ClientGame<'_> {
             icons: pause_icons(w, h, inputs.links, inputs.additions, &inputs.rows),
         }
     }
-    /// Native controls built by PauseScreen.init, in the grid's registration order.
-    pub(in crate::game::client_side) fn pause_init_children(
-        &self,
-    ) -> Vec<(u8, [f32; 4], Option<mod_api::Text>)> {
-        if self.client.screen != Screen::Paused || !self.client.pause_menu {
-            return Vec::new();
-        }
-        let [w, h] = self.gui_frame_now().1.size.map(|axis| axis as f32);
-        let Some(layout) = self.built_pause(w, h) else {
-            return Vec::new();
-        };
-        let buttons = layout.buttons.iter().map(|&(x, y, bw, key, id, _)| {
-            let label = if id == 14 {
-                self.pause_screen_additions()
-                    .and_then(|(text, _)| text.try_into_api().ok())
-            } else {
-                Some(mod_api::Text::translate(key, Vec::new()))
-            };
-            (id, [x, y, bw, 20.0], label)
-        });
-        let icons = layout.icons.iter().enumerate().map(|(i, &(x, y, _))| {
-            let id = if i == FRIENDS_ICON { 10 } else { 12 + i as u8 };
-            (
-                id,
-                [x, y, 20.0, 20.0],
-                Some(mod_api::Text::translate(ICON_LABELS[i], Vec::new())),
-            )
-        });
-        buttons
-            .clone()
-            .take(3)
-            .chain(icons)
-            .chain(buttons.skip(3))
-            .collect()
-    }
-
     pub(in crate::game::client_side) fn draw_pause_menu(&mut self, batch: &mut HudBatch) {
         let friends = self.friends_shown();
         let atlas = &self.client.gui.atlas;
@@ -431,88 +394,84 @@ impl crate::game::ClientGame<'_> {
             }
         };
         let mut tooltip = None;
-        let mut icon_narration_index = 0;
-        for (index, &(x, y, bw, key, id, active)) in layout.buttons.iter().enumerate() {
-            if self.pause_child_removed(id) {
-                continue;
-            }
-            icon_narration_index += usize::from(index < 3);
-            let is_focused = self.client.pause_focus == Some(id);
-            let hover = active && (ui::hovered(self.client.cursor, x, y, bw, 20.0) || is_focused);
-            let label = match (id, &additions) {
-                (14, Some((label, _))) => label.clone(),
-                _ => Text::translate(key, &[]),
+        let draw_pause_button =
+            |batch: &mut HudBatch,
+             tooltip: &mut Option<Text>,
+             &(x, y, bw, key, id, active): &(f32, f32, f32, &'static str, u8, bool)| {
+                let is_focused = self.client.pause_focus == Some(id);
+                let hover =
+                    active && (ui::hovered(self.client.cursor, x, y, bw, 20.0) || is_focused);
+                let label = match (id, &additions) {
+                    (14, Some((label, _))) => label.clone(),
+                    _ => Text::translate(key, &[]),
+                };
+                let action = match id {
+                    0 => Some(sunrise_client::widgets::Action::Back),
+                    1 => Some(sunrise_client::widgets::Action::Options),
+                    2 => Some(sunrise_client::widgets::Action::Exit),
+                    _ => None,
+                };
+                if let Some(action) = action {
+                    ui::action_button(batch, atlas, action, x, y, bw, 20.0, &label, active, hover);
+                } else {
+                    ui::button(batch, atlas, x, y, bw, 20.0, &label, active, hover);
+                }
+                // PauseScreen's customAdditions button: CUSTOM_OPTIONS_TOOLTIP.
+                if (id == 11 || id == 14) && hover && !self.engine_rect_blocked([x, y, bw, 20.0]) {
+                    *tooltip = Some(Text::translate("menu.custom_options.tooltip", &[]));
+                }
             };
-            let action = match id {
-                0 => Some(sunrise_client::widgets::Action::Back),
-                1 => Some(sunrise_client::widgets::Action::Options),
-                2 => Some(sunrise_client::widgets::Action::Exit),
-                _ => None,
-            };
-            if let Some(action) = action {
-                ui::action_button(batch, atlas, action, x, y, bw, 20.0, &label, active, hover);
-            } else {
-                ui::button(batch, atlas, x, y, bw, 20.0, &label, active, hover);
-            }
-            // PauseScreen's customAdditions button: CUSTOM_OPTIONS_TOOLTIP.
-            if (id == 11 || id == 14) && hover {
-                tooltip = Some(Text::translate("menu.custom_options.tooltip", &[]));
-            }
+        // `PauseScreen.init` adds Back to Game, Advancements, Statistics, then the icon row,
+        // then the remaining buttons (Options..., Open to LAN, Save and Quit to Title, etc.).
+        for button in layout.buttons.iter().take(3) {
+            draw_pause_button(batch, &mut tooltip, button);
         }
         for (i, &(x, y, sprite)) in layout.icons.iter().enumerate() {
             let id = if i == FRIENDS_ICON { 10 } else { 12 + i as u8 };
-            if self.pause_child_removed(id) {
-                continue;
-            }
             let active = icon_active(i, friends);
             let is_focused = self.client.pause_focus == Some(id);
             let hover = active && (ui::hovered(self.client.cursor, x, y, 20.0, 20.0) || is_focused);
-            // The icon has no label: name it for controller focus and the
-            // control socket's widget tree.
-            if i == FRIENDS_ICON {
-                sunrise_client::widgets::record(super::friends::TITLE, [x, y, 20.0, 20.0], active);
+            let rect = [x, y, 20.0, 20.0];
+            let blocked = self.engine_rect_blocked(rect);
+            // Keep the control socket's legacy name for the Friends icon when not suppressed.
+            if i == FRIENDS_ICON && !blocked {
+                sunrise_client::widgets::record(super::friends::TITLE, rect, active);
             }
-            ui::button(
+            let label = Text::translate(ICON_LABELS[i], &[]);
+            ui::button_decorated(
                 batch,
                 atlas,
-                x,
-                y,
-                20.0,
-                20.0,
-                &Text::empty(),
-                active,
-                hover,
+                rect,
+                &label,
+                ui::ButtonVisualState {
+                    active,
+                    hovered: hover,
+                    focused: is_focused,
+                },
+                None,
+                Some(ui::ButtonIcon::Centered { sprite, size: 15.0 }),
+                None,
+                |r| {
+                    let t = |key: &str| Text::translate(key, &[]).plain();
+                    if i == FRIENDS_ICON {
+                        widgets::Narratable::named(t("gui.friends.open.narration"), r, active)
+                            .hint(t("gui.friends.open.tooltip"))
+                    } else {
+                        let key = ICON_LABELS[i];
+                        widgets::Narratable::button(t(key), r, active).hint(t(key))
+                    }
+                },
             );
-            // PauseScreen adds the icon row after Statistics: the icons'
-            // messages (their tooltips too), the friends button's own.
-            widgets::last_narratable_at(icon_narration_index, |n| {
-                let t = |key: &str| Text::translate(key, &[]).plain();
-                let key = [
-                    "menu.reportBugs",
-                    "menu.sendFeedback",
-                    "",
-                    "menu.playerReporting",
-                ][i];
-                *n = if i == FRIENDS_ICON {
-                    widgets::Narratable::named(t("gui.friends.open.narration"), n.rect, active)
-                        .hint(t("gui.friends.open.tooltip"))
-                } else {
-                    widgets::Narratable::button(t(key), n.rect, active).hint(t(key))
-                }
-                .hovered(hover);
-            });
-            icon_narration_index += 1;
-            // SpriteIconButton.CenteredIcon: the 15x15 sprite at
-            // x + width / 2 - 15 / 2 in integer pixels, untinted even
-            // when the button is inactive.
-            batch.sprite_scaled(atlas, sprite, x + 3.0, y + 3.0, 15.0, 15.0, u32::MAX);
-            if hover {
+            if hover && !blocked {
                 tooltip = Some(if i == FRIENDS_ICON {
                     Text::literal(super::friends::title())
                 } else {
                     Text::translate(ICON_LABELS[i], &[])
                 });
             }
+        }
+        for button in layout.buttons.iter().skip(3) {
+            draw_pause_button(batch, &mut tooltip, button);
         }
         self.draw_screen_phase(batch, sunrise_client::screen_draw::RenderPhase::Foreground);
         // SpriteIconButton.withTootip: the label as a tooltip.
@@ -603,7 +562,7 @@ impl crate::game::ClientGame<'_> {
             .iter()
             .copied()
             .find(|b| {
-                b.5 && !self.pause_child_removed(b.4)
+                b.5 && !self.engine_rect_blocked([b.0, b.1, b.2, 20.0])
                     && ui::hovered(self.client.cursor, b.0, b.1, b.2, 20.0)
             })
             .map(|b| b.4)
@@ -612,14 +571,19 @@ impl crate::game::ClientGame<'_> {
                 [0, 1, 3]
                     .into_iter()
                     .find(|&i| {
-                        !self.pause_child_removed(12 + i as u8)
+                        !self.engine_rect_blocked([icons[i].0, icons[i].1, 20.0, 20.0])
                             && ui::hovered(self.client.cursor, icons[i].0, icons[i].1, 20.0, 20.0)
                     })
                     .map(|i| 12 + i as u8)
             })
             .or_else(|| {
                 (self.friends_shown()
-                    && !self.pause_child_removed(10)
+                    && !self.engine_rect_blocked([
+                        icons[FRIENDS_ICON].0,
+                        icons[FRIENDS_ICON].1,
+                        20.0,
+                        20.0,
+                    ])
                     && ui::hovered(
                         self.client.cursor,
                         icons[FRIENDS_ICON].0,
@@ -662,16 +626,19 @@ impl crate::game::ClientGame<'_> {
             .buttons
             .iter()
             .copied()
-            .filter(|b| b.5 && !self.pause_child_removed(b.4))
+            .filter(|b| b.5 && !self.engine_rect_blocked([b.0, b.1, b.2, 20.0]))
             .collect();
         let icons = layout.icons;
         let mut active_ids: Vec<u8> = buttons.iter().map(|b| b.4).collect();
         let friends = self.friends_shown();
-        active_ids.extend(
-            pause_icon_focus_ids(friends)
-                .into_iter()
-                .filter(|&id| !self.pause_child_removed(id)),
-        );
+        active_ids.extend(pause_icon_focus_ids(friends).into_iter().filter(|&id| {
+            let idx = if id == 10 {
+                FRIENDS_ICON
+            } else {
+                usize::from(id - 12)
+            };
+            !self.engine_rect_blocked([icons[idx].0, icons[idx].1, 20.0, 20.0])
+        }));
         if active_ids.is_empty() {
             return Ok(false);
         }
@@ -715,7 +682,7 @@ impl crate::game::ClientGame<'_> {
                 let friends = self.friends_shown();
                 for (i, &(x, y, _)) in icons.iter().enumerate() {
                     let id = if i == FRIENDS_ICON { 10 } else { 12 + i as u8 };
-                    if icon_active(i, friends) && !self.pause_child_removed(id) {
+                    if icon_active(i, friends) && !self.engine_rect_blocked([x, y, 20.0, 20.0]) {
                         rects.push((id, x, y, 20.0));
                     }
                 }
