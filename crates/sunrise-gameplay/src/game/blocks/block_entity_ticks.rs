@@ -465,7 +465,14 @@ impl ServerGame<'_> {
         let ticking = self.block_ticking_area();
         let mut pushes = Vec::new();
         let mut gone = Vec::new();
-        let positions: Vec<[i32; 3]> = self.server.be_anims.shulkers.keys().copied().collect();
+        let positions: Vec<[i32; 3]> = self
+            .server
+            .be_anims
+            .level
+            .shulkers
+            .keys()
+            .copied()
+            .collect();
         for pos in positions {
             let state = self.common.world.block(pos[0], pos[1], pos[2]);
             let Some(Ticker::Shulker { facing }) = self.server.be_anims.ticker(state.0) else {
@@ -483,6 +490,7 @@ impl ServerGame<'_> {
             let tick = self
                 .server
                 .be_anims
+                .level
                 .shulkers
                 .get_mut(&pos)
                 .map(|shulker| shulker.tick(pos, facing));
@@ -502,7 +510,7 @@ impl ServerGame<'_> {
             }
         }
         for pos in gone {
-            self.server.be_anims.shulkers.remove(&pos);
+            self.server.be_anims.level.shulkers.remove(&pos);
         }
         pushes
     }

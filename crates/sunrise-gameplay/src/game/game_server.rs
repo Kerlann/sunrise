@@ -633,11 +633,8 @@ impl crate::game::ServerGame<'_> {
         self.restore_effects();
         self.common.mining = None;
         self.common.container = None;
-        let kinds = std::mem::take(&mut self.server.be_anims.kinds);
-        self.server.be_anims = sunrise_level::block_entity_ticks::BlockEntityTicks {
-            kinds,
-            ..Default::default()
-        };
+        self.server.be_anims.level =
+            sunrise_level::block_entity_ticks::BlockEntityLevelTicks::default();
         self.common.carried = None;
         self.common.using = None;
         self.server.streaming.radius =
@@ -2499,7 +2496,7 @@ impl crate::game::ServerGame<'_> {
             attachment_query_scopes: &self.common.transactions.attachment_query_scopes,
             command_block_transition: None,
             positions: piston_carry_common::PositionState {
-                gateways: &mut self.server.be_anims.gateway_servers,
+                gateways: &mut self.server.be_anims.level.gateway_servers,
                 hoppers: &mut self.server.hoppers,
             },
             border: self.common.border.geometry(),

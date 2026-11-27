@@ -2968,7 +2968,7 @@ pub(crate) mod tests {
             // hooks run, and before tick_block_entities synchronizes animations.
             // Exercise that producer with both an absent and a closed snapshot.
             for had_snapshot in [false, true] {
-                game.server.be_anims.shulkers.remove(&[0, 64, 0]);
+                game.server.be_anims.level.shulkers.remove(&[0, 64, 0]);
                 game.world.shulkers.remove(&[0, 64, 0]);
                 if had_snapshot {
                     game.world.shulkers.insert([0, 64, 0], Shulker::default());
@@ -2981,7 +2981,7 @@ pub(crate) mod tests {
                 }
                 assert!(game.container_openers_changed((0, 64, 0), true));
                 assert_eq!(
-                    game.server.be_anims.shulkers[&[0, 64, 0]].status,
+                    game.server.be_anims.level.shulkers[&[0, 64, 0]].status,
                     ShulkerStatus::Opening
                 );
                 for parked in [false, true] {
@@ -3018,7 +3018,7 @@ pub(crate) mod tests {
                     );
                 }
             }
-            game.server.be_anims.shulkers.remove(&[0, 64, 0]);
+            game.server.be_anims.level.shulkers.remove(&[0, 64, 0]);
             for status in [
                 ShulkerStatus::Closed,
                 ShulkerStatus::Opening,

@@ -43,7 +43,7 @@ use sunrise_gameplay_common::game::transactions::entities::EntityRemovalGameExt 
 use sunrise_gameplay_common::{hoppers::HopperState, leash_knot::Knot};
 use sunrise_level::spans::time as span;
 use sunrise_level::world::World;
-use sunrise_level::{block_entity_ticks::BlockEntityTicks, chunk_streamer::ChunkStreamer};
+use sunrise_level::{block_entity_ticks::BlockEntityLevelTicks, chunk_streamer::ChunkStreamer};
 use sunrise_sim::join_seq::{
     Joined,
     residency::{
@@ -214,7 +214,7 @@ pub struct Parked {
     /// them: what its players' moves are checked against before this tick describes them again.
     lan_states: sunrise_sim::lan::entity::States,
     /// Only the per-level parts of these are used (`swap_level`).
-    anims: BlockEntityTicks,
+    anims: BlockEntityLevelTicks,
     pub raiding: Raiding,
     chunk_spawn_enemies: bool,
     sculk: SculkState,
@@ -796,7 +796,7 @@ impl Levels {
         )
     }
 
-    pub(in crate::game) fn parked_anims(&self, dim: Dim) -> Option<&BlockEntityTicks> {
+    pub(in crate::game) fn parked_anims(&self, dim: Dim) -> Option<&BlockEntityLevelTicks> {
         self.parked.get(&dim).map(|level| &level.anims)
     }
 

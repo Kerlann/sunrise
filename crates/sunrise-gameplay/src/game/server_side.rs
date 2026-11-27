@@ -1629,7 +1629,7 @@ impl sunrise_gameplay_common::game::Side for ServerState {
     fn shulkers(
         &self,
     ) -> &sunrise_level::fast_hash::FxHashMap<[i32; 3], sunrise_level::shulker_box::Shulker> {
-        &self.be_anims.shulkers
+        &self.be_anims.level.shulkers
     }
 
     #[inline(always)]

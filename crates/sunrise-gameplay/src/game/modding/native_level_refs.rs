@@ -504,7 +504,7 @@ impl<'g> ServerGame<'g> {
             return None;
         }
         let (world, shulkers) = if self.common.dim.key() == level.dimension() {
-            (&self.common.world, &self.server.be_anims.shulkers)
+            (&self.common.world, &self.server.be_anims.level.shulkers)
         } else {
             self.server.side_parked_block_shapes(level.dimension())?
         };

@@ -603,6 +603,7 @@ pub mod tests {
                     if block == "shulker_box" {
                         game.server
                             .be_anims
+                            .level
                             .shulkers
                             .get(&at)
                             .map_or(0, |s| s.open_count)
