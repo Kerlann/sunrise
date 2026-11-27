@@ -1216,6 +1216,9 @@ pub struct ServerState {
     /// `ContainerOpenersCounter`: how many players (the host and the guests)
     /// have each chest open.
     pub lid_openers: HashMap<(i32, i32, i32), i32>,
+    /// The block entity each `lid_openers` count belongs to: a replacement at
+    /// the same position starts a new `ContainerOpenersCounter`.
+    pub(in crate::game::server_side) lid_opener_entities: HashMap<(i32, i32, i32), u64>,
     pub lan_acting: Option<u32>,
     /// The abilities of the server player whose turn it is (`as_guest`): their record's
     /// copy, which the turn reads and writes and the put-back at the end of `guest_turn` stores. None outside a turn.
@@ -1505,6 +1508,7 @@ impl ServerState {
             known_movement: Vec3::ZERO,
             lan_global_events: Vec::new(),
             lid_openers: HashMap::new(),
+            lid_opener_entities: HashMap::new(),
             lan_acting: None,
             acting_abilities: None,
             save_after_guest_turn: false,

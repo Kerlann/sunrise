@@ -225,6 +225,7 @@ pub struct Parked {
     persist: EntityMemory,
     lectern_pulses: Vec<((i32, i32, i32), i32)>,
     lid_openers: HashMap<(i32, i32, i32), i32>,
+    lid_opener_entities: HashMap<(i32, i32, i32), u64>,
     lan_events: Vec<super::QueuedLevelEvent>,
     lan_queues: LanEventLevelState,
     /// The hub's tracked entities of this level (`LanHost::states`), as its last tick described
@@ -1059,6 +1060,7 @@ fn box_parked(
         persist: Default::default(),
         lectern_pulses: Vec::new(),
         lid_openers: HashMap::new(),
+        lid_opener_entities: HashMap::new(),
         lan_events: Vec::new(),
         lan_queues: Default::default(),
         lan_states: Default::default(),
@@ -1369,6 +1371,10 @@ impl crate::game::ServerGame<'_> {
         swap(&mut self.common.persist, &mut p.persist);
         swap(&mut self.server.lectern_pulses, &mut p.lectern_pulses);
         swap(&mut self.server.lid_openers, &mut p.lid_openers);
+        swap(
+            &mut self.server.lid_opener_entities,
+            &mut p.lid_opener_entities,
+        );
         swap(&mut self.server.lan_events, &mut p.lan_events);
         swap(&mut self.server.lan_queues, &mut p.lan_queues);
         self.server.be_anims.swap_level(&mut p.anims);
