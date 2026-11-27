@@ -747,7 +747,7 @@ impl Levels {
         &self,
         dimension: &str,
     ) -> Option<Arc<VanillaTerrain>> {
-        self.parked_of(dimension)?.end.locator()
+        self.parked_of(dimension)?.end.locator.clone()
     }
 
     /// The streaming of the level not in place whose dimension is `dimension`, to change.
@@ -818,8 +818,10 @@ impl Levels {
     /// The generators of the parked levels, for the world snapshots their workers read.
     pub(in crate::game::server_side) fn parked_terrains(
         &self,
-    ) -> impl Iterator<Item = Arc<VanillaTerrain>> + '_ {
-        self.parked.values().filter_map(|level| level.end.locator())
+    ) -> impl Iterator<Item = &Arc<VanillaTerrain>> {
+        self.parked
+            .values()
+            .filter_map(|level| level.end.locator.as_ref())
     }
 
     pub(in crate::game::server_side) fn parked_worlds(&self) -> impl Iterator<Item = &World> {

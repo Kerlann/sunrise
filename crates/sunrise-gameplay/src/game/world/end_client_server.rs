@@ -11,7 +11,6 @@ impl ServerGame<'_> {
         let rings = self
             .common
             .end
-            .level
             .locator
             .lock()
             .unwrap()
