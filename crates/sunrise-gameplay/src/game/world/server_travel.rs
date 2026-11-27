@@ -1449,10 +1449,9 @@ impl crate::game::ServerGame<'_> {
             }
             host.hub.guests.update(i, |g| {
                 g.yaw = yaw;
-                // A new body at the exit: no fall distance or motion carried over,
-                // but the player's attributes (ServerPlayer.teleport keeps the entity).
-                if !trip.hold {
-                    g.new_body(true);
+                if let Some(body) = g.motion.as_mut() {
+                    body.yaw = yaw;
+                    body.position = position;
                 }
             });
             let at = [position.x, position.y, position.z];
@@ -1661,24 +1660,8 @@ impl crate::game::ServerGame<'_> {
         self.send_player_command_tree(t.conn);
         let ctx = server_ctx!(self);
         if let Some(host) = self.server.lan.as_mut() {
-            let passenger_body = host.hub.guests.update(i, |g| {
-                // A new body there: no fall distance or motion carried over, but
-                // the player's attributes (ServerPlayer.teleport keeps the entity).
-                if t.vehicle.is_some() {
-                    g.motion.take()
-                } else {
-                    g.new_body(true);
-                    None
-                }
-            });
             host.hub.finish_level_change(i, change, false, &ctx);
-            host.hub.guests.update(i, |g| {
-                g.vehicle = t.vehicle;
-                if let Some(mut body) = passenger_body {
-                    body.position = Vec3::new(t.at[0], t.at[1], t.at[2]);
-                    g.motion = Some(body);
-                }
-            });
+            host.hub.guests.update(i, |g| g.vehicle = t.vehicle);
         }
         self.bind_player_attachments(t.conn, false);
         if let Some(hold) = menu_hold {
