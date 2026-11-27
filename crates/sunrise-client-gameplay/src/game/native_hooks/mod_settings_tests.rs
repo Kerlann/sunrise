@@ -45,6 +45,10 @@ impl Hooks for RegisteredMod {
             r.register_setting(SettingSpec::toggle("on", "test.on", false))
                 .unwrap(),
         );
+        let _ = self.choice.set(
+            r.register_setting(SettingSpec::choice("mode", "test.mode", ["a", "b", "c"], 0))
+                .unwrap(),
+        );
         let _ = self.range.set(
             r.register_setting(SettingSpec::range(
                 "scale",
@@ -56,10 +60,7 @@ impl Hooks for RegisteredMod {
             ))
             .unwrap(),
         );
-        let _ = self.choice.set(
-            r.register_setting(SettingSpec::choice("mode", "test.mode", ["a", "b", "c"], 0))
-                .unwrap(),
-        );
+        r.show_setting_when_choice("scale", "mode", 1).unwrap();
         let _ = self.color.set(
             r.register_setting(SettingSpec::color("tint", "test.tint", 0x11_2233))
                 .unwrap(),
@@ -182,6 +183,15 @@ fn single_owner_reads_writes_reloads_exact_f64_and_contains_callback_panics() {
             assert_eq!(game.setting_choice(alpha_mode), Ok(0));
             assert_eq!(game.setting_color(alpha_tint), Ok(0x11_2233));
             assert_eq!(game.setting_bool(beta_on), Ok(true));
+            let registered_page = game.native_page_settings("alpha");
+            assert_eq!(registered_page[1].key, "scale");
+            assert_eq!(
+                registered_page[1].visible_when,
+                Some(sunrise_client::mod_list::SettingVisibility {
+                    choice_setting: "mode".into(),
+                    choice_index: 1,
+                })
+            );
             assert!(alpha_seen.lock().unwrap().is_empty());
 
             // Unknown key and wrong-kind reads return typed errors.
@@ -267,6 +277,49 @@ fn single_owner_reads_writes_reloads_exact_f64_and_contains_callback_panics() {
                     ("on".to_owned(), SettingValue::Toggle(true)),
                     ("mode".to_owned(), SettingValue::Choice(1)),
                 ]
+            );
+
+            // A non-default dependent value survives an Options close/reopen while its
+            // controlling choice keeps the row hidden, then remains available when shown.
+            assert_eq!(
+                game.set_setting(alpha_mode, SettingValue::Choice(1)),
+                Ok(true)
+            );
+            assert_eq!(
+                game.set_setting(alpha_scale, SettingValue::Range(0.5)),
+                Ok(true)
+            );
+            assert_eq!(
+                game.set_setting(alpha_mode, SettingValue::Choice(0)),
+                Ok(true)
+            );
+            let reopen = LoadContext::new_with_registered(
+                DataLoadOrigin::ClientPreload,
+                Arc::new(LoadInputs::new(BTreeMap::new(), root.clone())),
+                [],
+                registered_setting_keys(),
+            );
+            game.common.loop_context = Arc::new(reopen.captured_loop_context(LoopSide::Client));
+            game.sync_native_settings_from_loop_context();
+            assert_eq!(game.setting_choice(alpha_mode), Ok(0));
+            assert_eq!(game.setting_f64(alpha_scale), Ok(0.5));
+            let reopened_page = game.native_page_settings("alpha");
+            assert_eq!(
+                reopened_page[1].value,
+                NativeSettingValue::Range {
+                    min: -2.0,
+                    max: 2.0,
+                    step: 0.5,
+                    value: 0.5,
+                }
+            );
+            assert_eq!(
+                game.set_setting(alpha_mode, SettingValue::Choice(1)),
+                Ok(true)
+            );
+            assert_eq!(
+                game.native_page_settings("alpha")[1].value,
+                reopened_page[1].value
             );
 
             // A single-owner page refresh notifies the same way.

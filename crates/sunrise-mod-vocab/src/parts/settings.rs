@@ -143,9 +143,13 @@ pub trait SettingsRegistrar {
     fn categorize_setting(&mut self, key: &str, category: &str) -> Result<(), crate::SettingError>;
 
     /// Show the setting `key` on Options > Mods only when the calling mod's earlier choice
-    /// setting `controller` currently has the zero-based option `choice`. The setting stays
-    /// registered and its saved value is retained while hidden. Call after both settings have
-    /// been registered; `controller` must be a choice and `choice` one of its options.
+    /// setting `controller` currently has the zero-based option `choice`. Register the controller
+    /// before `key`, then call this after both settings are registered. The controller must be a
+    /// choice and `choice` one of its options. The setting stays registered and its saved value is
+    /// retained while hidden. A later valid call replaces the condition; an invalid call leaves
+    /// the previous condition unchanged. Missing keys return `UnknownSetting`; self-reference,
+    /// a controller registered after the dependent setting, a non-choice controller, or an
+    /// out-of-range choice returns `InvalidVisibility`.
     fn show_setting_when_choice(
         &mut self,
         key: &str,

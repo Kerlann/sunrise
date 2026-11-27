@@ -159,8 +159,8 @@ pub enum SettingError {
     Duplicate(String),
     /// No setting with this key is registered by the calling mod.
     UnknownSetting(String),
-    /// A conditional setting row refers to a missing setting, itself, a non-choice setting,
-    /// or a choice option outside the controller's registered options.
+    /// A conditional setting row refers to itself, a later-registered setting, a non-choice
+    /// controller, or a choice option outside the controller's registered options.
     InvalidVisibility {
         /// The setting row whose visibility condition is invalid.
         setting: String,

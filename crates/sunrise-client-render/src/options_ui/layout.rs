@@ -59,6 +59,28 @@ impl OptionsUi {
             return std::sync::Arc::clone(layout);
         }
         let (widgets, top, bottom, content) = self.layout(s, w, h);
+        // A live mod setting write can hide the row that owns keyboard focus or a
+        // dragged slider while this page is already open. Drop every target that
+        // no longer exists in the newly built layout before input can use it.
+        if self.focus.as_ref().is_some_and(|focus| {
+            !widgets
+                .iter()
+                .enumerate()
+                .any(|(i, widget)| matches_focus(focus, i, widget))
+        }) {
+            self.focus = None;
+            self.focus_from_keyboard = false;
+            self.can_change_value = false;
+        }
+        if self.dragging.is_some_and(|opt| {
+            !widgets.iter().any(
+                |widget| matches!(&widget.kind, WKind::Slider { opt: found, .. } if *found == opt),
+            )
+        }) {
+            self.dragging = None;
+            self.slider_value = None;
+            self.can_change_value = false;
+        }
         // `layout` clamps the scroll; key the settled value.
         let key = (w, h, self.rev, self.scroll.to_bits());
         let layout = std::sync::Arc::new(OptionsLayout {
@@ -438,39 +460,12 @@ impl OptionsUi {
                             y += 20.0;
                             rows.end(&mut out, y);
                         }
-                        let (key, modifiers) = s.mods.binding(
-                            &m.id,
-                            &mapping.id,
-                            (mapping.key.as_str(), mapping.modifiers),
-                        );
-                        let at_default = key == mapping.key && modifiers == mapping.modifiers;
-                        let mut message = binding_text(&key, modifiers);
-                        if !key_conflicts(
+                        let (_, _, at_default, message) = mod_key_presentation(
                             s,
                             &m.id,
-                            &mapping.id,
-                            &key,
-                            modifiers,
-                            mapping.context,
-                            at_default,
-                        )
-                        .is_empty()
-                        {
-                            message = Text::literal("[ ")
-                                .append(message.with_color(text::WHITE))
-                                .append(" ]")
-                                .with_color(text::YELLOW);
-                        }
-                        if self.selected_mod_key == Some((i, k)) {
-                            message = Text::literal("> ")
-                                .append(message.with_style(&Style {
-                                    color: Some(text::WHITE),
-                                    underlined: Some(true),
-                                    ..Style::default()
-                                }))
-                                .append(" <")
-                                .with_color(text::YELLOW);
-                        }
+                            mapping,
+                            self.selected_mod_key == Some((i, k)),
+                        );
                         rows.begin(&out, y);
                         out.push(Widget {
                             x: row_left + 2.0,

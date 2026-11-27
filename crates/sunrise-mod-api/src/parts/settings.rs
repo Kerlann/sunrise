@@ -99,6 +99,18 @@ pub mod tests {
             [("first", "key_zoom".to_owned(), "mode".to_owned(), 1)]
         );
         assert_eq!(
+            registrar.show_setting_when_choice("key_zoom", "mode", 2),
+            Err(SettingError::InvalidVisibility {
+                setting: "key_zoom".into(),
+                controller: "mode".into(),
+            })
+        );
+        assert_eq!(
+            registrar.parts.setting_visibility,
+            [("first", "key_zoom".to_owned(), "mode".to_owned(), 1)],
+            "an invalid replacement must keep the previous condition"
+        );
+        assert_eq!(
             registrar.show_setting_when_choice("key_zoom", "missing", 0),
             Err(SettingError::UnknownSetting("missing".into()))
         );
@@ -120,6 +132,29 @@ pub mod tests {
                 controller: "mode".into(),
             })
         );
+        assert_eq!(
+            registrar.show_setting_when_choice("mode", "key_zoom", 0),
+            Err(SettingError::InvalidVisibility {
+                setting: "mode".into(),
+                controller: "key_zoom".into(),
+            }),
+            "a later setting cannot control an earlier row, so cycles are impossible"
+        );
+        let mut forward = super::PartRegistrar::new("forward");
+        forward
+            .register_setting(SettingSpec::range("row", "row", 0.0, 2.0, 1.0, 0.0))
+            .unwrap();
+        forward
+            .register_setting(SettingSpec::choice("mode", "mode", ["a", "b"], 0))
+            .unwrap();
+        assert_eq!(
+            forward.show_setting_when_choice("row", "mode", 0),
+            Err(SettingError::InvalidVisibility {
+                setting: "row".into(),
+                controller: "mode".into(),
+            })
+        );
+        assert!(forward.parts.setting_visibility.is_empty());
         registrar.mod_id = "second";
         assert_eq!(
             registrar.show_setting_when_choice("key_zoom", "mode", 1),
@@ -180,19 +215,20 @@ impl SettingsRegistrar for PartRegistrar {
         controller: &str,
         choice: usize,
     ) -> Result<(), crate::SettingError> {
-        if !self
+        let Some(setting_index) = self
             .parts
             .settings
             .iter()
-            .any(|(owner, spec)| *owner == self.mod_id && spec.key == key)
-        {
+            .position(|(owner, spec)| *owner == self.mod_id && spec.key == key)
+        else {
             return Err(crate::SettingError::UnknownSetting(key.to_owned()));
-        }
-        let Some((_, controller_spec)) = self
+        };
+        let Some((controller_index, (_, controller_spec))) = self
             .parts
             .settings
             .iter()
-            .find(|(owner, spec)| *owner == self.mod_id && spec.key == controller)
+            .enumerate()
+            .find(|(_, (owner, spec))| *owner == self.mod_id && spec.key == controller)
         else {
             return Err(crate::SettingError::UnknownSetting(controller.to_owned()));
         };
@@ -200,7 +236,9 @@ impl SettingsRegistrar for PartRegistrar {
             &controller_spec.kind,
             crate::SettingKind::Choice { options, .. } if choice < options.len()
         );
-        if key == controller || !valid_choice {
+        // The controller must precede the dependent row. That gives every condition a
+        // registration-order edge and makes visibility cycles impossible.
+        if controller_index >= setting_index || !valid_choice {
             return Err(crate::SettingError::InvalidVisibility {
                 setting: key.to_owned(),
                 controller: controller.to_owned(),

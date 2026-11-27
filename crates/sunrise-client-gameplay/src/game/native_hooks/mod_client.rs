@@ -2167,12 +2167,23 @@ impl crate::game::ClientGame<'_> {
         else {
             return;
         };
-        if let Some(setting) = page
+        let changed = if let Some(setting) = page
             .settings
             .iter_mut()
             .find(|setting| setting.key == spec.key)
         {
-            setting.value = ui_setting_value(spec, value);
+            let next = ui_setting_value(spec, value);
+            if setting.value != next {
+                setting.value = next;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if changed {
+            self.client.chat_ui.options.layout_changed();
         }
     }
 
