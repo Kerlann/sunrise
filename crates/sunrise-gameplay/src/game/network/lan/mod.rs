@@ -2507,7 +2507,7 @@ impl crate::game::ServerGame<'_> {
         if self
             .install_guest_body(conn, |g| {
                 let at = prepared.map_or(g.position, |spawn| spawn.position);
-                g.build_motion(motion, at);
+                g.health = g.build_motion(motion, at).health.health();
             })
             .is_none()
         {

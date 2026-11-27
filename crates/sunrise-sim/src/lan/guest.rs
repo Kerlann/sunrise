@@ -1158,7 +1158,11 @@ impl Guest {
     }
     /// Construct a `ServerPlayer` body, before applying saved or copied state.
     /// The seed belongs to the new entity; moving it does not start another stream.
-    pub fn build_motion(&mut self, resources: &crate::motion::MotionResources, at: [f64; 3]) {
+    pub fn build_motion(
+        &mut self,
+        resources: &crate::motion::MotionResources,
+        at: [f64; 3],
+    ) -> &mut PlayerMotion {
         let [x, y, z] = at;
         let position = Vec3::new(x, y, z);
         let mut body = PlayerMotion::new(resources, position);
@@ -1167,7 +1171,7 @@ impl Guest {
             self.entity_id as u32,
             position,
         ));
-        self.motion = Some(Box::new(body));
+        self.motion.insert(Box::new(body)).as_mut()
     }
 
     /// Apply the decoded living and entity fields to the owned body. Import calls
