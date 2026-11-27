@@ -2189,10 +2189,7 @@ impl crate::game::ClientGame<'_> {
 
     /// `NativeSettingValue`'s derived equality considers signed zero equal. The settings
     /// store compares range values by bits, so keep the displayed model in sync with it.
-    fn native_setting_values_equal(
-        left: &NativeSettingValue,
-        right: &NativeSettingValue,
-    ) -> bool {
+    fn native_setting_values_equal(left: &NativeSettingValue, right: &NativeSettingValue) -> bool {
         match (left, right) {
             (
                 NativeSettingValue::Range {
