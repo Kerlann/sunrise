@@ -1156,6 +1156,59 @@ impl Guest {
             self.send(p);
         }
     }
+    /// Construct a `ServerPlayer` body, before applying saved or copied state.
+    /// The seed belongs to the new entity; moving it does not start another stream.
+    pub fn build_motion(&mut self, resources: &crate::motion::MotionResources, at: [f64; 3]) {
+        let [x, y, z] = at;
+        let position = Vec3::new(x, y, z);
+        let mut body = PlayerMotion::new(resources, position);
+        body.entity_id = self.entity_id;
+        body.random = sunrise_core::random::EntityRandom::own(crate::mobs::entity_random(
+            self.entity_id as u32,
+            position,
+        ));
+        self.motion = Some(Box::new(body));
+    }
+
+    /// Apply the decoded living and entity fields to the owned body. Import calls
+    /// this after merging its selected parts, without constructing another body.
+    pub fn apply_loaded_motion(&mut self, reload_attributes: bool) {
+        let spectator = self.spectator();
+        let Some(body) = self.motion.as_mut() else {
+            return;
+        };
+        if let Some(saved) = self.loaded_body.take() {
+            saved.apply(body);
+            if reload_attributes {
+                let _ = body.set_walking_speed_base(self.abilities.walking_speed);
+                let _ = body.apply_saved_attributes(
+                    self.saved.as_ref().and_then(|tag| tag.get("attributes")),
+                );
+            }
+        }
+        if let Some(absorption) = self.saved_absorption.take() {
+            let _ = body.internal_set_absorption(absorption);
+        }
+        let _ = body.set_health(self.health, false);
+        body.health.food.food = self.food;
+        body.health.food.saturation = self.saturation;
+        let [x, y, z] = self.position;
+        body.position = Vec3::new(x, y, z);
+        body.yaw = self.yaw;
+        body.pitch = self.pitch;
+        body.ground.on_ground = self.on_ground;
+        body.fall_flying = self.fall_flying;
+        body.spectator = spectator;
+        body.local_spectator = spectator;
+        body.may_fly = self.abilities.may_fly;
+        body.flying = self.abilities.flying;
+        body.flying_speed = self.abilities.flying_speed;
+        body.invulnerable = self.abilities.invulnerable || self.handover.is_some();
+        let mut status = self.effects.status();
+        status.protection = std::mem::take(&mut body.status.protection);
+        body.status = status;
+    }
+
     /// A new player at `at` (`ChunkMap.addEntity`; the tickets start there).
     pub fn place(&mut self, at: [f64; 3]) {
         (
@@ -1163,6 +1216,10 @@ impl Guest {
             self.previous_position,
             self.held_ticket_chunk,
         ) = (at, at, None);
+        if let Some(body) = self.motion.as_mut() {
+            let [x, y, z] = at;
+            body.position = Vec3::new(x, y, z);
+        }
     }
     /// `ServerChunkCache.move` after an accepted move: the tickets follow.
     pub fn accept_move(&mut self, to: [f64; 3]) {
