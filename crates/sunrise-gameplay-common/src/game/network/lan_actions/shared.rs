@@ -76,9 +76,7 @@ mod issue_6825_tests {
 
     /// The prepared vanilla data this test needs; a missing or unloadable input fails.
     fn motion_resources() -> sunrise_sim::motion::MotionResources {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../.local/sunrise-client")
-            .join(sunrise_core::VANILLA_VERSION);
+        let root = crate::prepared_test_root::prepared_root(&[]);
         let assets = sunrise_level::assets::Assets::load(&root)
             .expect("prepared resources load for the reach fixture");
         sunrise_sim::motion::MotionResources::load(&root, &assets)
