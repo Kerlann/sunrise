@@ -222,18 +222,20 @@ impl crate::game::ClientGame<'_> {
 
         let [x, y, cw, ch] = layout.check;
         let hover = ui::hovered(cursor, x, y, cw, ch);
-        match sunrise_client::widgets::resolve_engine_widget(
-            sunrise_client::widgets::EngineWidgetInput {
-                bucket: sunrise_client::widgets::WidgetBucket::Checkbox,
-                rect: layout.check,
-                label: Some(&layout.label),
-                explicit_key: None,
-                active: true,
-                hovered: hover,
-                focused: false,
-                tab_order_group: 0,
-            },
-        ) {
+        match sunrise_client::widgets::with_native_action(0, || {
+            sunrise_client::widgets::resolve_engine_widget(
+                sunrise_client::widgets::EngineWidgetInput {
+                    bucket: sunrise_client::widgets::WidgetBucket::Checkbox,
+                    rect: layout.check,
+                    label: Some(&layout.label),
+                    explicit_key: None,
+                    active: true,
+                    hovered: hover,
+                    focused: false,
+                    tab_order_group: 0,
+                },
+            )
+        }) {
             sunrise_client::widgets::ResolvedEngineWidget::Skip => {}
             sunrise_client::widgets::ResolvedEngineWidget::Unchanged => {
                 sunrise_client::widgets::record(&layout.label.plain(), layout.check, true);
@@ -326,11 +328,35 @@ impl crate::game::ClientGame<'_> {
             Text::translate("gui.acknowledge", &[]),
             Text::translate("menu.disconnect", &[]),
         ];
-        for ([x, y, bw, bh], label) in layout.buttons.into_iter().zip(&labels) {
+        for (i, ([x, y, bw, bh], label)) in layout.buttons.into_iter().zip(&labels).enumerate() {
             let hover = ui::hovered(cursor, x, y, bw, bh);
-            ui::button(batch, atlas, x, y, bw, bh, label, true, hover);
+            sunrise_client::widgets::with_native_action((i + 1) as u64, || {
+                ui::button(batch, atlas, x, y, bw, bh, label, true, hover);
+            });
         }
         self.draw_overlay_mounted_widgets(batch, "code_of_conduct");
+    }
+
+    pub(in crate::game) fn code_of_conduct_press_child(&mut self, tag: u64) -> Result<bool> {
+        match tag {
+            0 => {
+                let Some(prompt) = self.client.code_of_conduct.as_mut() else {
+                    return Ok(false);
+                };
+                prompt.stop_showing = !prompt.stop_showing;
+                self.play_audio_button_click();
+                Ok(true)
+            }
+            1 | 2 => {
+                if self.client.code_of_conduct.is_none() {
+                    return Ok(false);
+                }
+                self.play_audio_button_click();
+                self.answer_code_of_conduct(tag == 1)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
     }
 
     /// A left click: the box toggles, a button answers.

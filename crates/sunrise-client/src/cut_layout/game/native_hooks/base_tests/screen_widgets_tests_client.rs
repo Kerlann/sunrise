@@ -3814,10 +3814,206 @@ fn press_id_and_mutating_widgets_from_screen_input_hooks_and_lazy_discovery() {
                 None,
                 "Left release must release Left's captured target"
             );
-            // Restore Default profile via press(default_id) before moving on to Options.
+            // Restore Default profile via press(default_id) before moving on to BlockEditor/Stats/Dialog/Options.
             assert!(game.screen_widgets().unwrap().press(default_id));
             game.close_debug_options();
             game.observe_screen();
+
+            // BlockEditor: coincident original bounds, moved slider over coincident buttons,
+            // wrong-button release, and hiding the slider mid-drag.
+            let be_log = game.open_test_coincident_block_editor((0, 64, 0));
+            game.observe_screen();
+            assert_eq!(game.client.screen, Screen::BlockEditor);
+            let alpha_msg = ApiText::literal("Alpha");
+            let beta_msg = ApiText::literal("Beta");
+            let gain_msg = ApiText::literal("Gain");
+            let (alpha_id, beta_id, gain_id, shared_rect) = {
+                let widgets = game.screen_widgets().unwrap();
+                let children = widgets.children();
+                let alpha = children
+                    .iter()
+                    .find(|c| c.message.as_ref() == Some(&alpha_msg))
+                    .expect("BlockEditor exposes Alpha button");
+                let beta = children
+                    .iter()
+                    .find(|c| c.message.as_ref() == Some(&beta_msg))
+                    .expect("BlockEditor exposes Beta button");
+                let gain = children
+                    .iter()
+                    .find(|c| c.message.as_ref() == Some(&gain_msg))
+                    .expect("BlockEditor exposes Gain slider");
+                assert_eq!(
+                    alpha.rect, beta.rect,
+                    "Alpha and Beta share identical original bounds"
+                );
+                (alpha.id, beta.id, gain.id, alpha.rect)
+            };
+            // Pressing Alpha by id activates ONLY button 1, never coincident button 2.
+            assert!(game.screen_widgets().unwrap().press(alpha_id));
+            assert_eq!(
+                std::mem::take(&mut *be_log.lock().unwrap()),
+                vec!["button:1".to_owned()],
+                "selected-child dispatch must invoke only Alpha even when Beta has identical bounds"
+            );
+            // Pressing Beta by id activates ONLY button 2.
+            assert!(game.screen_widgets().unwrap().press(beta_id));
+            assert_eq!(
+                std::mem::take(&mut *be_log.lock().unwrap()),
+                vec!["button:2".to_owned()],
+                "selected-child dispatch must invoke only Beta when Beta is selected"
+            );
+            // Move the Gain slider onto the coincident buttons' exact rect.
+            assert!(
+                game.screen_widgets()
+                    .unwrap()
+                    .set_bounds(gain_id, shared_rect)
+            );
+            let _ = game.hud_layers([640, 480]);
+            sunrise_client::widgets::end_frame(52_007);
+            move_mouse(
+                game,
+                win_id,
+                f64::from(shared_rect[0] + 10.0),
+                f64::from(shared_rect[1] + shared_rect[3] * 0.5),
+            );
+            send_mouse_button(game, win_id, MouseButton::Left, true);
+            assert_eq!(
+                std::mem::take(&mut *be_log.lock().unwrap()),
+                vec!["slider:3".to_owned()],
+                "moved slider over coincident buttons must receive only slider press"
+            );
+            // Wrong-button release does not end Left's slider drag.
+            send_mouse_button(game, win_id, MouseButton::Right, false);
+            assert_eq!(
+                game.client.screen_state.0.widgets.active_redirect_button(),
+                Some(0)
+            );
+            move_mouse(
+                game,
+                win_id,
+                f64::from(shared_rect[0] + shared_rect[2] - 10.0),
+                f64::from(shared_rect[1] + shared_rect[3] * 0.5),
+            );
+            assert_eq!(
+                std::mem::take(&mut *be_log.lock().unwrap()),
+                vec!["slider:3".to_owned()],
+                "slider must still receive Left drag after Right release"
+            );
+            // Hiding the slider mid-drag cancels the gesture cleanly without retargeting Alpha/Beta.
+            assert!(game.screen_widgets().unwrap().set_visible(gain_id, false));
+            move_mouse(
+                game,
+                win_id,
+                f64::from(shared_rect[0] + shared_rect[2] * 0.5),
+                f64::from(shared_rect[1] + shared_rect[3] * 0.5),
+            );
+            assert!(
+                be_log.lock().unwrap().is_empty(),
+                "hidden slider mid-drag must neither slide nor retarget buttons underneath"
+            );
+            assert_eq!(
+                game.client.screen_state.0.widgets.active_redirect_button(),
+                None,
+                "hiding captured widget mid-drag must cancel gesture ownership"
+            );
+            send_mouse_button(game, win_id, MouseButton::Left, false);
+            game.close_block_editor();
+            game.observe_screen();
+
+            // Stats: moving Done directly over the non-widget scrollbar routes exclusively to Done.
+            game.open_stats();
+            game.observe_screen();
+            assert_eq!(game.client.screen, Screen::Stats);
+            let stats_done_id = {
+                let widgets = game.screen_widgets().unwrap();
+                widgets
+                    .children()
+                    .iter()
+                    .find(|c| c.message.as_ref() == Some(&done_msg))
+                    .expect("Stats exposes Done button")
+                    .id
+            };
+            let (gw, _) = game.gui_size();
+            let bar_x = ((gw - 280.0) / 2.0).floor() + 280.0 + 6.0;
+            let bar_rect = [bar_x, 28.0, 6.0, 40.0];
+            assert!(
+                game.screen_widgets()
+                    .unwrap()
+                    .set_bounds(stats_done_id, bar_rect)
+            );
+            let _ = game.hud_layers([640, 480]);
+            sunrise_client::widgets::end_frame(52_008);
+            move_mouse(
+                game,
+                win_id,
+                f64::from(bar_rect[0] + 3.0),
+                f64::from(bar_rect[1] + 20.0),
+            );
+            send_mouse_button(game, win_id, MouseButton::Left, true);
+            send_mouse_button(game, win_id, MouseButton::Left, false);
+            assert_eq!(
+                game.client.screen,
+                Screen::Paused,
+                "moved Done over Stats scrollbar must close Stats rather than grabbing the scrollbar"
+            );
+
+            // Dialog: moving an action button directly over a non-widget clickable text link
+            // runs only the button and never fires the underlying text click event.
+            let dialog = sunrise_command::snbt::parse_fully(
+                r#"{type:"minecraft:notice",title:"Notice",body:[{type:"minecraft:plain_message",contents:{text:"CopyMe",click_event:{action:"copy_to_clipboard",value:"SHOULD_NOT_COPY"}}}],action:{label:"Dismiss"}}"#,
+            )
+            .unwrap();
+            use sunrise_client::clipboard::Clipboard as _;
+            game.client.clipboard.0.set("UNCHANGED");
+            game.show_dialog(&dialog);
+            game.observe_screen();
+            let dismiss_msg = ApiText::literal("Dismiss");
+            let dismiss_id = {
+                let widgets = game.screen_widgets().unwrap();
+                widgets
+                    .children()
+                    .iter()
+                    .find(|c| c.message.as_ref() == Some(&dismiss_msg))
+                    .expect("Dialog exposes Dismiss button")
+                    .id
+            };
+            let dialog_layout = sunrise_client::dialog_screen::Layout::new(
+                &game.decode_dialog(&dialog, None).unwrap(),
+                &game.client.gui.atlas.font,
+                game.gui_size(),
+            );
+            let (line_x, line_y) = dialog_layout
+                .placed(0.0)
+                .find_map(|(part, _)| match part {
+                    sunrise_client::dialog_screen::Part::Line(_, x, y) => Some((x, y)),
+                    _ => None,
+                })
+                .expect("Dialog exposes clickable text line");
+            let link_rect = [line_x, line_y, 60.0, 12.0];
+            assert!(
+                game.screen_widgets()
+                    .unwrap()
+                    .set_bounds(dismiss_id, link_rect)
+            );
+            let _ = game.hud_layers([640, 480]);
+            sunrise_client::widgets::end_frame(52_009);
+            move_mouse(
+                game,
+                win_id,
+                f64::from(line_x + 10.0),
+                f64::from(line_y + 4.0),
+            );
+            send_mouse_button(game, win_id, MouseButton::Left, true);
+            send_mouse_button(game, win_id, MouseButton::Left, false);
+            assert!(
+                !game.dialog_open(),
+                "moved Dismiss button over clickable dialog text must close the dialog"
+            );
+            assert_eq!(
+                game.client.clipboard.0.get(),
+                "UNCHANGED",
+                "non-widget text link underneath moved dialog button must not run"
+            );
 
             // Moving an engine slider over another engine button routes press, drag, and release
             // exclusively to the moved slider; the button underneath receives none.
@@ -3849,7 +4045,7 @@ fn press_id_and_mutating_widgets_from_screen_input_hooks_and_lazy_discovery() {
                     .set_bounds(fov_id, online_rect)
             );
             let _ = game.hud_layers([640, 480]);
-            sunrise_client::widgets::end_frame(52_007);
+            sunrise_client::widgets::end_frame(52_010);
             game.client.settings.fov = 70.0;
             move_mouse(
                 game,

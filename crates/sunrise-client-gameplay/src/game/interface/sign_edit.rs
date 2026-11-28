@@ -337,6 +337,14 @@ impl ClientGame<'_> {
         }
         self.sign_keep(before);
     }
+    pub(in crate::game) fn sign_edit_press_child(&mut self, tag: u64) -> bool {
+        if tag != 0 || self.client.sign_edit.is_none() {
+            return false;
+        }
+        self.play_audio_button_click();
+        self.close_sign_editor();
+        true
+    }
     /// Done button (`this.width / 2 - 100, this.height / 4 + 144`, 200x20),
     /// or a click on a line (`EditBox.onClick`).
     pub(in crate::game::client_side) fn sign_edit_click(&mut self, size: [u32; 2]) -> bool {
@@ -521,18 +529,20 @@ fn draw_done_button(
 ) {
     let (bx, by) = done_button(w, h);
     let hover = sunrise_client::ui::hovered(cursor, bx, by, 200.0, 20.0);
-    sunrise_client::ui::action_button(
-        batch,
-        atlas,
-        sunrise_client::widgets::Action::Done,
-        bx,
-        by,
-        200.0,
-        20.0,
-        &sunrise_game_data::text::Text::literal(done_label()),
-        true,
-        hover,
-    );
+    sunrise_client::widgets::with_native_action(0, || {
+        sunrise_client::ui::action_button(
+            batch,
+            atlas,
+            sunrise_client::widgets::Action::Done,
+            bx,
+            by,
+            200.0,
+            20.0,
+            &sunrise_game_data::text::Text::literal(done_label()),
+            true,
+            hover,
+        );
+    });
 }
 
 #[cfg(test)]

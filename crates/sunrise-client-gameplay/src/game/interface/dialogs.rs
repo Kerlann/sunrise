@@ -655,18 +655,20 @@ impl ClientGame<'_> {
             if visible {
                 let (bx, by) = (((w - 200.0) / 2.0).trunc(), top + 33.0);
                 let hover = ui::hovered(cursor, bx, by, 200.0, 20.0);
-                ui::action_button(
-                    batch,
-                    atlas,
-                    widgets::Action::Back,
-                    bx,
-                    by,
-                    200.0,
-                    20.0,
-                    &label,
-                    active,
-                    hover,
-                );
+                widgets::with_native_action(1 << 32, || {
+                    ui::action_button(
+                        batch,
+                        atlas,
+                        widgets::Action::Back,
+                        bx,
+                        by,
+                        200.0,
+                        20.0,
+                        &label,
+                        active,
+                        hover,
+                    );
+                });
             }
             self.draw_overlay_mounted_widgets(batch, "dialog");
             return;
@@ -697,15 +699,17 @@ impl ClientGame<'_> {
         let [wx, wy, ww, wh] = layout.warning;
         let warn_hover = ui::hovered(cursor, wx, wy, ww, wh);
         let warn_label = Text::translate("menu.custom_screen_info.button_narration", &[]);
-        match widgets::resolve_engine_widget(widgets::EngineWidgetInput {
-            bucket: widgets::WidgetBucket::Button,
-            rect: layout.warning,
-            label: Some(&warn_label),
-            explicit_key: Some("menu.custom_screen_info.button_narration"),
-            active: true,
-            hovered: warn_hover,
-            focused: false,
-            tab_order_group: -10,
+        match widgets::with_native_action(2 << 32, || {
+            widgets::resolve_engine_widget(widgets::EngineWidgetInput {
+                bucket: widgets::WidgetBucket::Button,
+                rect: layout.warning,
+                label: Some(&warn_label),
+                explicit_key: Some("menu.custom_screen_info.button_narration"),
+                active: true,
+                hovered: warn_hover,
+                focused: false,
+                tab_order_group: -10,
+            })
         }) {
             widgets::ResolvedEngineWidget::Skip => {}
             widgets::ResolvedEngineWidget::Unchanged => {
@@ -840,12 +844,16 @@ impl ClientGame<'_> {
                             if widgets::narrating() {
                                 edit.message = label;
                             }
-                            edit.draw(batch, atlas, None);
+                            widgets::with_native_action((3 << 32) | (input as u64), || {
+                                edit.draw(batch, atlas, None);
+                            });
                         }
                         Some(Some(Field::Multi(edit))) => {
                             [edit.x, edit.y, edit.width, edit.height] = rect;
                             edit.set_focused(focused);
-                            edit.draw(batch, atlas);
+                            widgets::with_native_action((3 << 32) | (input as u64), || {
+                                edit.draw(batch, atlas);
+                            });
                             // MultiLineEditBox.updateWidgetNarration: as an EditBox.
                             widgets::narratable(|| {
                                 widgets::Narratable::edit_box(label, edit.value(), rect)
@@ -862,15 +870,17 @@ impl ClientGame<'_> {
                     let Control::Boolean { label, .. } = &open.dialog.inputs[input].control else {
                         continue;
                     };
-                    match widgets::resolve_engine_widget(widgets::EngineWidgetInput {
-                        bucket: widgets::WidgetBucket::Checkbox,
-                        rect,
-                        label: Some(label),
-                        explicit_key: None,
-                        active: true,
-                        hovered: hover,
-                        focused: false,
-                        tab_order_group: 0,
+                    match widgets::with_native_action((4 << 32) | (input as u64), || {
+                        widgets::resolve_engine_widget(widgets::EngineWidgetInput {
+                            bucket: widgets::WidgetBucket::Checkbox,
+                            rect,
+                            label: Some(label),
+                            explicit_key: None,
+                            active: true,
+                            hovered: hover,
+                            focused: false,
+                            tab_order_group: 0,
+                        })
                     }) {
                         widgets::ResolvedEngineWidget::Skip => {}
                         widgets::ResolvedEngineWidget::Unchanged => {
@@ -965,7 +975,9 @@ impl ClientGame<'_> {
                     else {
                         continue;
                     };
-                    ui::button(batch, atlas, x, y, cw, ch, &label, true, hover);
+                    widgets::with_native_action((5 << 32) | (input as u64), || {
+                        ui::button(batch, atlas, x, y, cw, ch, &label, true, hover);
+                    });
                     // A CycleButton: the option a click moves to.
                     widgets::last_narratable(|n| {
                         let control = &open.dialog.inputs[input].control;
@@ -997,18 +1009,20 @@ impl ClientGame<'_> {
                         continue;
                     };
                     let held = open.dragging == Some(input);
-                    ui::slider(
-                        batch,
-                        atlas,
-                        x,
-                        y,
-                        sw,
-                        &label,
-                        position,
-                        hover || held,
-                        true,
-                        held,
-                    );
+                    widgets::with_native_action((6 << 32) | (input as u64), || {
+                        ui::slider(
+                            batch,
+                            atlas,
+                            x,
+                            y,
+                            sw,
+                            &label,
+                            position,
+                            hover || held,
+                            true,
+                            held,
+                        );
+                    });
                 }
                 Part::Item { body, rect } => {
                     let [x, y, iw, ih] = rect;
@@ -1038,14 +1052,16 @@ impl ClientGame<'_> {
                     let hover =
                         (!clipped || in_area(cursor.1)) && ui::hovered(cursor, x, y, bw, bh);
                     let b = buttons[index];
-                    if open.dialog.escape_button() == Some(index) {
-                        let action = widgets::Action::Cancel;
-                        ui::action_button(
-                            batch, atlas, action, x, y, bw, bh, &b.label, true, hover,
-                        );
-                    } else {
-                        ui::button(batch, atlas, x, y, bw, bh, &b.label, true, hover);
-                    }
+                    widgets::with_native_action((7 << 32) | (index as u64), || {
+                        if open.dialog.escape_button() == Some(index) {
+                            let action = widgets::Action::Cancel;
+                            ui::action_button(
+                                batch, atlas, action, x, y, bw, bh, &b.label, true, hover,
+                            );
+                        } else {
+                            ui::button(batch, atlas, x, y, bw, bh, &b.label, true, hover);
+                        }
+                    });
                     if let Some(t) = &b.tooltip {
                         widgets::last_narratable(|n| n.hint = Some(t.plain()));
                     }
@@ -1391,6 +1407,140 @@ impl ClientGame<'_> {
             return true;
         }
         false
+    }
+
+    /// Directly activate the selected Dialog child by its bound native action tag without
+    /// coordinate re-hit-testing (never falling through to `Part::Line` text clicks or siblings).
+    pub(in crate::game) fn dialog_press_child(
+        &mut self,
+        tag: u64,
+        mapped_cursor: (f32, f32),
+        original_rect: [f32; 4],
+    ) -> Result<bool> {
+        let kind = tag >> 32;
+        let payload = (tag & 0xFFFF_FFFF) as usize;
+        if self.client.dialogs.0.warning {
+            return match (kind, payload) {
+                (0, 0) => {
+                    self.play_audio_button_click();
+                    let reason = Text::translate("menu.custom_screen_info.disconnect", &[]);
+                    self.leave_server(Some(reason))?;
+                    Ok(true)
+                }
+                (0, 1) => {
+                    self.play_audio_button_click();
+                    self.return_from_dialog_warning();
+                    Ok(true)
+                }
+                _ => Ok(false),
+            };
+        }
+        if let Some(since) = self.client.dialogs.0.waiting {
+            if kind == 1 && waiting_button((since.elapsed().as_millis() / 50) as u32).2 {
+                self.play_audio_button_click();
+                self.client.dialogs.0.waiting = None;
+                self.dialog_receiver_changed();
+                return Ok(true);
+            }
+            return Ok(false);
+        }
+        if kind == 2 {
+            self.play_audio_button_click();
+            self.open_screen_overlay("dialog", |game| game.client.dialogs.0.warning = true);
+            return Ok(true);
+        }
+        let shift = self.client.modifiers.shift_key();
+        let Some(open) = self.client.dialogs.0.open.as_mut() else {
+            return Ok(false);
+        };
+        match kind {
+            3 => {
+                let input = payload;
+                let [x, y, w, h] = original_rect;
+                match open.fields.get_mut(input) {
+                    Some(Some(Field::Line(edit))) => {
+                        open.focus = Some(input);
+                        edit.focused = true;
+                        edit.click(&self.client.gui.atlas, mapped_cursor.0, false, false);
+                        open.selecting = Some(input);
+                        Ok(true)
+                    }
+                    Some(Some(Field::Multi(edit))) => {
+                        open.focus = Some(input);
+                        [edit.x, edit.y, edit.width, edit.height] = [x, y, w, h];
+                        edit.set_focused(true);
+                        edit.click(&self.client.gui.atlas.font, mapped_cursor, shift, false);
+                        open.selecting = Some(input);
+                        Ok(true)
+                    }
+                    _ => Ok(false),
+                }
+            }
+            4 => {
+                let input = payload;
+                if let Some(InputValue::Bool(b)) = open.values.get_mut(input) {
+                    *b = !*b;
+                    open.focus = None;
+                    self.play_audio_button_click();
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+            5 => {
+                let input = payload;
+                if input < open.dialog.inputs.len() {
+                    cycle(open, input, if shift { -1 } else { 1 });
+                    open.focus = None;
+                    self.play_audio_button_click();
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+            6 => {
+                let input = payload;
+                let [x, _, w, _] = original_rect;
+                if let Some(v) = open.values.get_mut(input) {
+                    open.focus = Some(input);
+                    open.dragging = Some(input);
+                    *v = InputValue::Slider(ui::slider_value(x, w, mapped_cursor.0) as f32);
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+            7 => {
+                let index = payload;
+                open.focus = None;
+                Self::dialog_values(open);
+                let d = &open.dialog;
+                let buttons = d.buttons();
+                let Some(btn) = buttons.get(index) else {
+                    return Ok(false);
+                };
+                let click = btn
+                    .action
+                    .as_ref()
+                    .and_then(|a| a.click(&d.inputs, &open.values));
+                let after = d.after_action;
+                self.play_audio_button_click();
+                self.run_dialog_action(click, after)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    pub(in crate::game) fn dialog_cancel_drag(&mut self) {
+        if let Some(open) = self.client.dialogs.0.open.as_mut() {
+            if let Some(selecting) = open.selecting.take()
+                && let Some(Some(Field::Multi(edit))) = open.fields.get_mut(selecting)
+            {
+                edit.release();
+            }
+            open.dragging = None;
+        }
     }
 
     /// The left button released: a held slider lets go and clicks.

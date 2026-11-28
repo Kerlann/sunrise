@@ -919,17 +919,19 @@ impl crate::game::ClientGame<'_> {
             let is_focused = self.client.death_focus == Some(id);
             let hover =
                 active && (ui::hovered(self.client.cursor, x, y, 200.0, 20.0) || is_focused);
-            ui::button(
-                batch,
-                atlas,
-                x,
-                y,
-                200.0,
-                20.0,
-                &Text::translate(key, &[]),
-                active,
-                hover,
-            );
+            widgets::with_native_action((1 << 32) | (id as u64), || {
+                ui::button(
+                    batch,
+                    atlas,
+                    x,
+                    y,
+                    200.0,
+                    20.0,
+                    &Text::translate(key, &[]),
+                    active,
+                    hover,
+                );
+            });
         }
         self.draw_screen_phase(batch, sunrise_client::screen_draw::RenderPhase::Foreground);
         // DeathScreen.visitText(HoveredTextEffects.TOOLTIP_AND_CURSOR): a
@@ -962,6 +964,42 @@ impl crate::game::ClientGame<'_> {
         self.remote_respawn();
         Ok(())
     }
+    pub(in crate::game) fn death_press_child(&mut self, tag: u64) -> Result<bool> {
+        if self
+            .client
+            .chat_ui
+            .died_at
+            .is_some_and(|t| t.elapsed().as_millis() < 1000)
+        {
+            return Ok(false);
+        }
+        let kind = tag >> 32;
+        let payload = (tag & 0xFFFF_FFFF) as usize;
+        if let Some(opened) = self.client.chat_ui.death_confirm {
+            if opened.elapsed().as_millis() < 1000 {
+                return Ok(false);
+            }
+            if kind == 0 && payload < 2 {
+                let yes = payload == 0;
+                self.client.death_focus = Some(payload);
+                self.death_confirm_answer(yes)?;
+                return Ok(true);
+            }
+            return Ok(false);
+        }
+        if kind != 1 || payload > 1 {
+            return Ok(false);
+        }
+        self.client.death_focus = Some(payload);
+        if payload == 1 && !self.common.level.hardcore {
+            self.client.chat_ui.death_confirm = Some(std::time::Instant::now());
+            self.play_audio_button_click();
+            return Ok(true);
+        }
+        self.death_action(Some(payload))?;
+        Ok(true)
+    }
+
     pub(in crate::game::client_side) fn death_click(&mut self) -> Result<bool> {
         if self
             .client
@@ -992,9 +1030,7 @@ impl crate::game::ClientGame<'_> {
         }
         // DeathScreen.mouseClicked first looks for a click event on the
         // cause line: an open_url link goes through the chat link flow.
-        if !sunrise_client::widgets::has_selected_engine_widget()
-            && let Some(cause) = &self.client.chat_ui.death_text
-        {
+        if let Some(cause) = &self.client.chat_ui.death_text {
             let atlas = &self.client.gui.atlas;
             let mid = self.gui_size().0;
             if let Some(text::Style {
@@ -1019,15 +1055,7 @@ impl crate::game::ClientGame<'_> {
         let b = HudBatch::new(size, self.client.settings.gui_scale_inputs());
         let hit = death_buttons(b.width, b.height, self.common.level.hardcore)
             .into_iter()
-            .find(|d| {
-                ui::hovered(self.client.cursor, d.0, d.1, 200.0, 20.0)
-                    && sunrise_client::widgets::matches_selected_engine_widget(
-                        sunrise_client::widgets::WidgetBucket::Button,
-                        Some(&Text::translate(d.2, &[])),
-                        None,
-                        0,
-                    )
-            })
+            .find(|d| ui::hovered(self.client.cursor, d.0, d.1, 200.0, 20.0))
             .map(|d| d.3);
         if let Some(id) = hit {
             self.client.death_focus = Some(id);

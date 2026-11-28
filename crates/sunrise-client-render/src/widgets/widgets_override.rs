@@ -50,6 +50,7 @@ pub struct CollectedWidget {
     pub message: Option<Text>,
     pub active: bool,
     pub tab_order_group: i32,
+    pub native_action: Option<u64>,
 }
 
 /// Mod-applied overrides for one engine widget on the active screen instance.
@@ -109,6 +110,7 @@ pub struct EngineHitEntry {
     /// Whether a click landing on `original_rect` must be blocked from reaching the engine screen
     /// (unless another interactive widget's `resolved_rect` covers that point).
     pub blocks_original: bool,
+    pub native_action: Option<u64>,
 }
 
 /// Deferred tooltip scheduled by an overridden engine widget or mounted widget.
@@ -194,6 +196,7 @@ thread_local! {
     static INPUT_HITS: RefCell<Option<Vec<EngineHitEntry>>> = const { RefCell::new(None) };
     static SELECTED_ENGINE_WIDGET: RefCell<Option<EngineWidgetKey>> = const { RefCell::new(None) };
     static LAST_TARGET_META: RefCell<Option<(EngineWidgetKey, i32)>> = const { RefCell::new(None) };
+    static NATIVE_ACTION: Cell<Option<u64>> = const { Cell::new(None) };
 }
 
 /// Clone the collector identity and resolved `tab_order_group` of the engine widget most recently
@@ -306,10 +309,18 @@ pub fn has_input_overrides() -> bool {
     HAS_INPUT_OVERRIDES.get()
 }
 
-/// Whether a single engine widget is currently selected for exclusive input delivery via
-/// [`with_selected_engine_widget`].
-pub fn has_selected_engine_widget() -> bool {
-    SELECTED_ENGINE_WIDGET.with_borrow(Option::is_some)
+/// Bind a screen-local native action tag (`u64`) to the engine widget resolved within `f`,
+/// storing it directly on the reconciled `CollectedWidget` / `EngineHitEntry` record so generic
+/// input dispatch invokes that child's native action without re-hit-testing coordinates.
+pub fn with_native_action<R>(tag: u64, f: impl FnOnce() -> R) -> R {
+    struct Guard(Option<u64>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            NATIVE_ACTION.set(self.0);
+        }
+    }
+    let _guard = Guard(NATIVE_ACTION.replace(Some(tag)));
+    f()
 }
 
 /// Resolve a captured drag target's `(original_rect, resolved_rect)` directly from the active
@@ -677,6 +688,7 @@ pub fn resolve_engine_widget(input: EngineWidgetInput<'_>) -> ResolvedEngineWidg
         return ResolvedEngineWidget::Unchanged;
     }
     let mut key = engine_widget_key(input.bucket, input.label, input.explicit_key, 0);
+    let native_action = NATIVE_ACTION.get();
     if collecting {
         COLLECTOR.with_borrow_mut(|slot| {
             let Some(state) = slot.as_mut() else {
@@ -702,6 +714,7 @@ pub fn resolve_engine_widget(input: EngineWidgetInput<'_>) -> ResolvedEngineWidg
                 message,
                 active: input.active,
                 tab_order_group: input.tab_order_group,
+                native_action,
             });
         });
         return ResolvedEngineWidget::Skip;
@@ -731,6 +744,7 @@ pub fn resolve_engine_widget(input: EngineWidgetInput<'_>) -> ResolvedEngineWidg
             message,
             active: input.active,
             tab_order_group: input.tab_order_group,
+            native_action,
         });
         if pass.maps.suppress_all {
             pass.output.hits.push(EngineHitEntry {
@@ -739,6 +753,7 @@ pub fn resolve_engine_widget(input: EngineWidgetInput<'_>) -> ResolvedEngineWidg
                 resolved_rect: input.rect,
                 interactive: false,
                 blocks_original: true,
+                native_action,
             });
             return ResolvedEngineWidget::Skip;
         }
@@ -752,6 +767,7 @@ pub fn resolve_engine_widget(input: EngineWidgetInput<'_>) -> ResolvedEngineWidg
                 resolved_rect: input.rect,
                 interactive: false,
                 blocks_original: true,
+                native_action,
             });
             return ResolvedEngineWidget::Skip;
         }
@@ -797,6 +813,7 @@ pub fn resolve_engine_widget(input: EngineWidgetInput<'_>) -> ResolvedEngineWidg
             resolved_rect: rect,
             interactive: active,
             blocks_original,
+            native_action,
         });
         let Some(ov) = ov.filter(|o| !o.is_identity()) else {
             return ResolvedEngineWidget::Unchanged;

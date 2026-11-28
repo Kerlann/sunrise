@@ -752,18 +752,20 @@ impl crate::game::ClientGame<'_> {
         let atlas = &self.client.gui.atlas;
         let (bx, by) = ((w / 2.0 - 100.0).floor(), h - FOOTER + 6.0);
         let hover = ui::hovered(self.client.cursor, bx, by, 200.0, 20.0);
-        ui::action_button(
-            batch,
-            atlas,
-            sunrise_client::widgets::Action::Done,
-            bx,
-            by,
-            200.0,
-            20.0,
-            &Text::translate("gui.done", &[]),
-            true,
-            hover,
-        );
+        sunrise_client::widgets::with_native_action(0, || {
+            ui::action_button(
+                batch,
+                atlas,
+                sunrise_client::widgets::Action::Done,
+                bx,
+                by,
+                200.0,
+                20.0,
+                &Text::translate("gui.done", &[]),
+                true,
+                hover,
+            );
+        });
         self.draw_screen_phase(batch, sunrise_client::screen_draw::RenderPhase::Foreground);
         // Tooltips.
         if let Some(state) = self.client.adv_ui.0.tab_state() {
@@ -1052,6 +1054,14 @@ impl crate::game::ClientGame<'_> {
             ix + f(x.wrapping_add(8)),
             iy + f(y.wrapping_add(5)),
         );
+    }
+    pub(in crate::game) fn advancements_press_child(&mut self, tag: u64) -> bool {
+        if tag != 0 {
+            return false;
+        }
+        self.play_audio("minecraft:ui.button.click", None, 0.25, 1.0);
+        self.close_advancements();
+        true
     }
     /// A left button press or release. Returns whether the screen itself
     /// handled the click (`AdvancementsScreen.mouseClicked` / `mouseReleased`:

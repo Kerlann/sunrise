@@ -170,21 +170,36 @@ impl crate::game::ClientGame<'_> {
             }
             y += SECTION_SPACE;
         }
-        for (x, label) in layout.button_x.into_iter().zip(&intro.buttons) {
+        for (i, (x, label)) in layout.button_x.into_iter().zip(&intro.buttons).enumerate() {
             let y = layout.button_y;
-            ui::button(
-                batch,
-                atlas,
-                x,
-                y,
-                BUTTON_WIDTH,
-                BUTTON_HEIGHT,
-                label,
-                true,
-                ui::hovered(self.client.cursor, x, y, BUTTON_WIDTH, BUTTON_HEIGHT),
-            );
+            sunrise_client::widgets::with_native_action(i as u64, || {
+                ui::button(
+                    batch,
+                    atlas,
+                    x,
+                    y,
+                    BUTTON_WIDTH,
+                    BUTTON_HEIGHT,
+                    label,
+                    true,
+                    ui::hovered(self.client.cursor, x, y, BUTTON_WIDTH, BUTTON_HEIGHT),
+                );
+            });
         }
         self.draw_screen_phase(batch, sunrise_client::screen_draw::RenderPhase::Foreground);
+    }
+
+    pub(in crate::game) fn demo_intro_press_child(&mut self, tag: u64) -> bool {
+        if self.client.demo_intro.is_none() || tag > 1 {
+            return false;
+        }
+        self.play_audio_button_click();
+        if tag == 0 {
+            self.confirm_trusted_link(BUY_MINECRAFT_JAVA, Screen::Playing);
+        } else {
+            self.close_demo_intro();
+        }
+        true
     }
 
     pub fn demo_intro_click(&mut self) -> bool {
@@ -193,26 +208,15 @@ impl crate::game::ClientGame<'_> {
         };
         let (w, h) = self.gui_size();
         let layout = intro.layout(&self.client.gui.atlas, w, h);
-        let Some(button) =
-            layout
-                .button_x
-                .into_iter()
-                .zip(&intro.buttons)
-                .position(|(x, label)| {
-                    ui::hovered(
-                        self.client.cursor,
-                        x,
-                        layout.button_y,
-                        BUTTON_WIDTH,
-                        BUTTON_HEIGHT,
-                    ) && sunrise_client::widgets::matches_selected_engine_widget(
-                        sunrise_client::widgets::WidgetBucket::Button,
-                        Some(label),
-                        None,
-                        0,
-                    )
-                })
-        else {
+        let Some(button) = layout.button_x.into_iter().position(|x| {
+            ui::hovered(
+                self.client.cursor,
+                x,
+                layout.button_y,
+                BUTTON_WIDTH,
+                BUTTON_HEIGHT,
+            )
+        }) else {
             return false;
         };
         self.play_audio_button_click();

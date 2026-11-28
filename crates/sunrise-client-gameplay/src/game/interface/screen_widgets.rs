@@ -44,6 +44,7 @@ pub(in crate::game) struct EngineChildSlot {
     pub(in crate::game) default_message: Option<ApiText>,
     pub(in crate::game) default_active: bool,
     pub(in crate::game) default_tab_order_group: i32,
+    pub(in crate::game) native_action: Option<u64>,
 }
 
 /// How an incoming pointer click should be routed against active engine widget overrides.
@@ -52,6 +53,7 @@ pub(in crate::game) enum EngineClickRoute {
     PassThrough,
     Select {
         key: widgets::EngineWidgetKey,
+        native_action: Option<u64>,
         resolved: [f32; 4],
         original: [f32; 4],
     },
@@ -64,6 +66,7 @@ pub(in crate::game) enum EngineClickRoute {
 pub(in crate::game) struct ActiveEngineTarget {
     pub(in crate::game) key: widgets::EngineWidgetKey,
     pub(in crate::game) button: i32,
+    pub(in crate::game) native_action: Option<u64>,
     pub(in crate::game) redirect: Option<([f32; 4], [f32; 4])>,
 }
 
@@ -581,6 +584,7 @@ pub(in crate::game) fn build_engine_hits(
                     resolved_rect: slot.default_rect,
                     interactive: false,
                     blocks_original: true,
+                    native_action: slot.native_action,
                 };
             }
             let ov = maps.overrides.get(&slot.key);
@@ -593,6 +597,7 @@ pub(in crate::game) fn build_engine_hits(
                     resolved_rect: slot.default_rect,
                     interactive: false,
                     blocks_original: true,
+                    native_action: slot.native_action,
                 };
             }
             let resolved_rect = ov.and_then(|o| o.rect).unwrap_or(slot.default_rect);
@@ -604,6 +609,7 @@ pub(in crate::game) fn build_engine_hits(
                 resolved_rect,
                 interactive: active,
                 blocks_original: moved || (!active && slot.default_active),
+                native_action: slot.native_action,
             }
         })
         .collect()
@@ -1091,6 +1097,7 @@ impl crate::game::ClientGame<'_> {
                 default_message,
                 default_active: item.active,
                 default_tab_order_group: item.tab_order_group,
+                native_action: item.native_action,
             });
         }
         let old_ids: Vec<ScreenWidgetId> = inner.engine_children.iter().map(|s| s.id).collect();
@@ -1166,6 +1173,7 @@ impl crate::game::ClientGame<'_> {
                     default_message,
                     default_active: item.active,
                     default_tab_order_group: item.tab_order_group,
+                    native_action: item.native_action,
                 });
             }
             let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
@@ -1480,6 +1488,7 @@ impl crate::game::ClientGame<'_> {
         {
             return EngineClickRoute::Select {
                 key: hit.key.clone(),
+                native_action: hit.native_action,
                 resolved: hit.resolved_rect,
                 original: hit.original_rect,
             };
@@ -1558,6 +1567,113 @@ impl crate::game::ClientGame<'_> {
         }
     }
 
+    /// Dispatch a press directly to the selected engine child's native action bound on its
+    /// reconciled widget record, without re-entering whole-screen coordinate hit-testing.
+    /// Returns `Ok(Some(handled))` when the active screen owns bound child dispatch, or `Ok(None)`
+    /// for screens that still use specialized routing (`Options`, `Title`, `Paused`, containers).
+    fn dispatch_selected_child_press(
+        &mut self,
+        tag: u64,
+        button: MouseButton,
+        mapped_cursor: (f32, f32),
+        original_rect: [f32; 4],
+    ) -> Result<Option<bool>> {
+        let left = button == MouseButton::Left;
+        if self.client.command_prompt.0.is_some() {
+            return Ok(Some(left && self.command_prompt_press_child(tag)));
+        }
+        if self.client.link_prompt.is_some() {
+            return Ok(Some(left && self.link_prompt_press_child(tag)));
+        }
+        if self.client.code_of_conduct.is_some() {
+            return Ok(Some(if left {
+                self.code_of_conduct_press_child(tag)?
+            } else {
+                false
+            }));
+        }
+        if self.client.server_packs.0.prompt.is_some() {
+            return Ok(Some(if left {
+                self.pack_prompt_press_child(tag)?
+            } else {
+                false
+            }));
+        }
+        if self.dialog_open() {
+            return Ok(Some(if left {
+                self.dialog_press_child(tag, mapped_cursor, original_rect)?
+            } else {
+                false
+            }));
+        }
+        if self.remote_loading() {
+            return Ok(Some(if left {
+                self.connect_screen_press_child(tag)?
+            } else {
+                false
+            }));
+        }
+        if self.client.book.is_some() {
+            return Ok(Some(left && self.book_press_child(tag, mapped_cursor)));
+        }
+        if self.client.sign_edit.is_some() {
+            return Ok(Some(left && self.sign_edit_press_child(tag)));
+        }
+        match self.client.screen {
+            super::Screen::BlockEditor => Ok(Some(
+                left && self.block_editor_press_child(tag, mapped_cursor, original_rect),
+            )),
+            super::Screen::Stats => Ok(Some(left && self.stats_press_child(tag))),
+            super::Screen::DebugOptions => Ok(Some(
+                left && self.debug_options_press_child(tag, mapped_cursor),
+            )),
+            super::Screen::DemoIntro => Ok(Some(left && self.demo_intro_press_child(tag))),
+            super::Screen::Dead => Ok(Some(if left {
+                self.death_press_child(tag)?
+            } else {
+                false
+            })),
+            super::Screen::ServerLinks => Ok(Some(if left {
+                self.server_links_press_child(tag)?
+            } else {
+                false
+            })),
+            super::Screen::ConfirmLink => Ok(Some(left && self.confirm_link_press_child(tag))),
+            super::Screen::DialogWarning => Ok(Some(if left {
+                self.dialog_warning_press_child(tag)?
+            } else {
+                false
+            })),
+            super::Screen::CommandBlock => Ok(Some(
+                left && self.command_block_press_child(tag, mapped_cursor),
+            )),
+            super::Screen::Advancements => Ok(Some(left && self.advancements_press_child(tag))),
+            _ => Ok(None),
+        }
+    }
+
+    /// Cancel any in-flight native drag on the active screen when the captured widget becomes
+    /// ineligible (hidden, disabled, removed, or replaced) mid-drag.
+    fn cancel_active_engine_drag(&mut self) {
+        if self.dialog_open() {
+            self.dialog_cancel_drag();
+            return;
+        }
+        match self.client.screen {
+            super::Screen::BlockEditor => self.block_editor_cancel_drag(),
+            super::Screen::WorldOptions => {
+                let _ = self.world_options_release();
+            }
+            super::Screen::Stats => {
+                let _ = self.stats_release();
+            }
+            super::Screen::DebugOptions => {
+                let _ = self.debug_options_release();
+            }
+            _ => {}
+        }
+    }
+
     /// Route a real mouse drag through any active selected/redirected engine widget before calling
     /// [`Self::screen_drag_response`].
     pub(in crate::game) fn screen_drag_response_with_overrides(
@@ -1607,6 +1723,7 @@ impl crate::game::ClientGame<'_> {
                             DragTarget::Ready(ActiveEngineTarget {
                                 key: t.key.clone(),
                                 button: t.button,
+                                native_action: hit.native_action,
                                 redirect,
                             })
                         }
@@ -1618,7 +1735,11 @@ impl crate::game::ClientGame<'_> {
             }
         };
         match drag_target {
-            DragTarget::WrongButton | DragTarget::Ineligible => Ok(false),
+            DragTarget::WrongButton => Ok(false),
+            DragTarget::Ineligible => {
+                self.cancel_active_engine_drag();
+                Ok(false)
+            }
             DragTarget::Ready(target) => self.dispatch_selected_engine_target(&target, |game| {
                 game.screen_drag_response(overlay, button, framebuffer, gui)
             }),
@@ -1658,26 +1779,29 @@ impl crate::game::ClientGame<'_> {
             return res;
         }
         if !pressed {
-            let target = {
+            enum ReleaseTarget {
+                None,
+                WrongButton,
+                Matched(ActiveEngineTarget),
+            }
+            let release = {
                 let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
-                if inner
-                    .active_redirect
-                    .as_ref()
-                    .is_some_and(|t| t.button == code)
-                {
-                    inner.active_redirect.take()
-                } else {
-                    None
+                match inner.active_redirect.as_ref() {
+                    None => ReleaseTarget::None,
+                    Some(t) if t.button != code => ReleaseTarget::WrongButton,
+                    Some(_) => ReleaseTarget::Matched(inner.active_redirect.take().unwrap()),
                 }
             };
-            if let Some(target) = target {
-                return self.dispatch_selected_engine_target(&target, |game| {
+            return match release {
+                ReleaseTarget::WrongButton => Ok(false),
+                ReleaseTarget::Matched(target) => self
+                    .dispatch_selected_engine_target(&target, |game| {
+                        game.route_screen_button(button, code, false, double_click)
+                    }),
+                ReleaseTarget::None => self.with_screen_input_overrides(|game| {
                     game.route_screen_button(button, code, false, double_click)
-                });
-            }
-            return self.with_screen_input_overrides(|game| {
-                game.route_screen_button(button, code, false, double_click)
-            });
+                }),
+            };
         }
         let generation = self.client.screen_state.0.widgets.generation();
         let direct_override_screen = self.title_input_active()
@@ -1740,6 +1864,7 @@ impl crate::game::ClientGame<'_> {
             }
             EngineClickRoute::Select {
                 key,
+                native_action,
                 resolved,
                 original,
             } => {
@@ -1748,6 +1873,7 @@ impl crate::game::ClientGame<'_> {
                 let target = ActiveEngineTarget {
                     key,
                     button: code,
+                    native_action,
                     redirect,
                 };
                 self.client
@@ -1757,9 +1883,22 @@ impl crate::game::ClientGame<'_> {
                     .inner
                     .borrow_mut()
                     .active_redirect = Some(target.clone());
-                let res = self.dispatch_selected_engine_target(&target, |game| {
-                    game.route_screen_button(button, code, true, double_click)
-                });
+                let mapped_cursor = if resolved != original {
+                    Self::map_redirect_cursor(self.client.cursor, resolved, original)
+                } else {
+                    self.client.cursor
+                };
+                let direct = if let Some(tag) = native_action {
+                    self.dispatch_selected_child_press(tag, button, mapped_cursor, original)?
+                } else {
+                    None
+                };
+                let res = match direct {
+                    Some(handled) => Ok(handled),
+                    None => self.dispatch_selected_engine_target(&target, |game| {
+                        game.route_screen_button(button, code, true, double_click)
+                    }),
+                };
                 if !matches!(res, Ok(true)) {
                     self.client
                         .screen_state
@@ -1944,6 +2083,7 @@ impl crate::game::ClientGame<'_> {
                     resolved_rect: item.rect,
                     interactive: false,
                     blocks_original: true,
+                    native_action: item.native_action,
                 });
             }
         } else {
@@ -1963,6 +2103,7 @@ impl crate::game::ClientGame<'_> {
                     default_message: api_msg,
                     default_active: item.active,
                     default_tab_order_group: item.tab_order_group,
+                    native_action: item.native_action,
                 });
             }
         }
@@ -3496,7 +3637,7 @@ impl ScreenWidgets for crate::game::ClientGame<'_> {
         let generation = self.client.screen_state.0.widgets.generation();
         enum TargetKind {
             MountedButton(usize),
-            Engine(widgets::EngineWidgetKey, [f32; 4]),
+            Engine(widgets::EngineWidgetKey, Option<u64>, [f32; 4]),
         }
         let target = {
             let inner = self.client.screen_state.0.widgets.inner.borrow();
@@ -3546,7 +3687,11 @@ impl ScreenWidgets for crate::game::ClientGame<'_> {
                         .map(|h| h.original_rect)
                         .unwrap_or(slot.default_rect)
                 };
-                Some(TargetKind::Engine(slot.key.clone(), target_rect))
+                Some(TargetKind::Engine(
+                    slot.key.clone(),
+                    slot.native_action,
+                    target_rect,
+                ))
             } else {
                 None
             }
@@ -3562,22 +3707,31 @@ impl ScreenWidgets for crate::game::ClientGame<'_> {
                 }
                 accepted == Some(true)
             }
-            Some(TargetKind::Engine(key, [ox, oy, ow, oh])) => {
+            Some(TargetKind::Engine(key, native_action, rect @ [ox, oy, ow, oh])) => {
                 if ow <= 0.0 || oh <= 0.0 {
                     return false;
                 }
-                let prev_cursor = self.client.cursor;
-                self.client.cursor = (ox + ow * 0.5, oy + oh * 0.5);
-                let handled = widgets::with_selected_engine_widget(&key, || {
-                    self.with_redirecting_engine_click(|game| {
-                        game.with_screen_input_overrides(|game| {
-                            game.route_screen_button(MouseButton::Left, 0, true, false)
+                let center = (ox + ow * 0.5, oy + oh * 0.5);
+                let handled = if let Some(tag) = native_action
+                    && let Ok(Some(direct)) =
+                        self.dispatch_selected_child_press(tag, MouseButton::Left, center, rect)
+                {
+                    direct
+                } else {
+                    let prev_cursor = self.client.cursor;
+                    self.client.cursor = center;
+                    let handled = widgets::with_selected_engine_widget(&key, || {
+                        self.with_redirecting_engine_click(|game| {
+                            game.with_screen_input_overrides(|game| {
+                                game.route_screen_button(MouseButton::Left, 0, true, false)
+                            })
                         })
                     })
-                })
-                .unwrap_or(false);
+                    .unwrap_or(false);
+                    self.client.cursor = prev_cursor;
+                    handled
+                };
                 self.settle_title_mode();
-                self.client.cursor = prev_cursor;
                 if self.client.screen_state.0.widgets.generation() == generation {
                     if handled {
                         let discovered =

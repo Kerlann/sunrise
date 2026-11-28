@@ -234,16 +234,26 @@ impl crate::game::ClientGame<'_> {
             if let Some(action) = action {
                 sunrise_client::widgets::declare_action(action, [x, y, bw, 20.0], true);
             }
-            ui::button_as(
-                batch,
-                atlas,
-                [x, y, bw, 20.0],
-                &s.label(b),
-                true,
-                hover,
-                None,
-                |rect| s.narration(b, rect, &super::screen_info::tr),
-            );
+            let btn_tag = match b {
+                Button::Output => 1,
+                Button::Mode => 2,
+                Button::Conditional => 3,
+                Button::Auto => 4,
+                Button::Done => 5,
+                Button::Cancel => 6,
+            };
+            sunrise_client::widgets::with_native_action(btn_tag, || {
+                ui::button_as(
+                    batch,
+                    atlas,
+                    [x, y, bw, 20.0],
+                    &s.label(b),
+                    true,
+                    hover,
+                    None,
+                    |rect| s.narration(b, rect, &super::screen_info::tr),
+                );
+            });
         }
         // The command box, then its suggestions over the widgets: the build
         // made it at this size.
@@ -258,7 +268,9 @@ impl crate::game::ClientGame<'_> {
         let s = self.client.command_block_screen.0.as_mut().unwrap();
         let draws = s.command.draw(&m, mouse, blink, 0);
         sunrise_client::widgets::move_narratables(mark, 0);
-        let tooltip = sunrise_client::screen_draw::paint(batch, atlas, &draws);
+        let tooltip = sunrise_client::widgets::with_native_action(0, || {
+            sunrise_client::screen_draw::paint(batch, atlas, &draws)
+        });
         self.draw_screen_phase(batch, sunrise_client::screen_draw::RenderPhase::Foreground);
         sunrise_client::screen_draw::paint_tooltip(batch, atlas, &draws, tooltip);
     }
@@ -300,6 +312,65 @@ impl crate::game::ClientGame<'_> {
         };
         s.command.server_suggestions(&m, &c, id, range, list);
         self.client.command_block_screen.0 = Some(s);
+    }
+    pub(in crate::game) fn command_block_press_child(
+        &mut self,
+        tag: u64,
+        mapped_cursor: (f32, f32),
+    ) -> bool {
+        let Some(mut s) = self.client.command_block_screen.0.take() else {
+            return false;
+        };
+        if tag == 0 {
+            let m = Measure(&self.client.gui.atlas.font);
+            let c = Commands {
+                dispatcher: super::chat::chat_tree(&self.client.remote),
+                registries: &self.common.ui.registries,
+            };
+            let (x, y) = (f64::from(mapped_cursor.0), f64::from(mapped_cursor.1));
+            let double_click = s.command.live_double_click(x, y);
+            let handled = s.command.click(&m, &c, x, y, double_click);
+            self.client.command_block_screen.0 = Some(s);
+            return handled;
+        }
+        match tag {
+            1 => {
+                self.play_audio_button_click();
+                s.track_output = !s.track_output;
+                if let Some(block) = self.edit_base(&s) {
+                    s.show_previous(block);
+                }
+            }
+            2 => {
+                self.play_audio_button_click();
+                s.mode = s.mode.next();
+            }
+            3 => {
+                self.play_audio_button_click();
+                s.conditional = !s.conditional;
+            }
+            4 => {
+                self.play_audio_button_click();
+                s.auto = !s.auto;
+            }
+            5 => {
+                self.play_audio_button_click();
+                self.set_command_block(&s);
+                self.close_command_block();
+                return true;
+            }
+            6 => {
+                self.play_audio_button_click();
+                self.close_command_block();
+                return true;
+            }
+            _ => {
+                self.client.command_block_screen.0 = Some(s);
+                return false;
+            }
+        }
+        self.client.command_block_screen.0 = Some(s);
+        true
     }
     pub(in crate::game::client_side) fn command_block_click(&mut self) -> bool {
         let Some(mut s) = self.client.command_block_screen.0.take() else {

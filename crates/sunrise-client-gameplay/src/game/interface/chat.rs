@@ -1108,6 +1108,22 @@ impl crate::game::ClientGame<'_> {
             super::packs::open_uri(&prompt.url);
         }
     }
+    pub(in crate::game) fn link_prompt_press_child(&mut self, tag: u64) -> bool {
+        let Some(prompt) = self.client.link_prompt.clone() else {
+            return false;
+        };
+        let button = tag as usize;
+        if button > 2 {
+            return false;
+        }
+        self.play_audio_button_click();
+        if button == LINK_COPY {
+            use sunrise_client::clipboard::Clipboard;
+            self.client.clipboard.0.set(&prompt.url);
+        }
+        self.answer_link_prompt(button == LINK_YES);
+        true
+    }
     pub(in crate::game::client_side) fn link_prompt_click(&mut self) -> bool {
         let Some(prompt) = self.client.link_prompt.clone() else {
             return false;

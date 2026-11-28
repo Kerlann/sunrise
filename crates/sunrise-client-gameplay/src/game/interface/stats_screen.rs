@@ -499,21 +499,23 @@ impl crate::game::ClientGame<'_> {
                 tab_tip = true;
             }
             let label = Text::translate(key, &[]);
-            ui::tab_button(
-                batch,
-                atlas,
-                ui::TabButtonSpec {
-                    rect: [x, 0.0, tw, TAB_H],
-                    label: &label,
-                    selected,
-                    active,
-                    hovered: hover,
-                    now_ms: sunrise_client::hud_overlays::now_ms(),
-                    header_bar: false,
-                    record_label: false,
-                    target_when_inactive: false,
-                },
-            );
+            sunrise_client::widgets::with_native_action(i as u64, || {
+                ui::tab_button(
+                    batch,
+                    atlas,
+                    ui::TabButtonSpec {
+                        rect: [x, 0.0, tw, TAB_H],
+                        label: &label,
+                        selected,
+                        active,
+                        hovered: hover,
+                        now_ms: sunrise_client::hud_overlays::now_ms(),
+                        header_bar: false,
+                        record_label: false,
+                        target_when_inactive: false,
+                    },
+                );
+            });
         }
         // The list.
         let (row_h, rows) = self.stats_rows();
@@ -616,16 +618,21 @@ impl crate::game::ClientGame<'_> {
                             tab_order_group,
                             tooltip_hint,
                             msg_plain,
-                        ) = match sunrise_client::widgets::resolve_engine_widget(
-                            sunrise_client::widgets::EngineWidgetInput {
-                                bucket: sunrise_client::widgets::WidgetBucket::Button,
-                                rect: sort_rect,
-                                label: Some(&label),
-                                explicit_key: Some(&key),
-                                active: true,
-                                hovered: hover,
-                                focused: false,
-                                tab_order_group: 0,
+                        ) = match sunrise_client::widgets::with_native_action(
+                            (1 << 32) | (c as u64),
+                            || {
+                                sunrise_client::widgets::resolve_engine_widget(
+                                    sunrise_client::widgets::EngineWidgetInput {
+                                        bucket: sunrise_client::widgets::WidgetBucket::Button,
+                                        rect: sort_rect,
+                                        label: Some(&label),
+                                        explicit_key: Some(&key),
+                                        active: true,
+                                        hovered: hover,
+                                        focused: false,
+                                        tab_order_group: 0,
+                                    },
+                                )
                             },
                         ) {
                             sunrise_client::widgets::ResolvedEngineWidget::Skip => continue,
@@ -791,18 +798,53 @@ impl crate::game::ClientGame<'_> {
         let atlas = &self.client.gui.atlas;
         let (bx, by) = ((w / 2.0 - 100.0).floor(), h - FOOTER + 6.0);
         let hover = ui::hovered(self.client.cursor, bx, by, 200.0, 20.0);
-        ui::action_button(
-            batch,
-            atlas,
-            sunrise_client::widgets::Action::Done,
-            bx,
-            by,
-            200.0,
-            20.0,
-            &Text::translate("gui.done", &[]),
-            true,
-            hover,
-        );
+        sunrise_client::widgets::with_native_action(2 << 32, || {
+            ui::action_button(
+                batch,
+                atlas,
+                sunrise_client::widgets::Action::Done,
+                bx,
+                by,
+                200.0,
+                20.0,
+                &Text::translate("gui.done", &[]),
+                true,
+                hover,
+            );
+        });
+    }
+    /// Directly activate the selected Stats child by its bound native action tag without
+    /// coordinate re-hit-testing (never touching the scrollbar or sibling controls).
+    pub(in crate::game) fn stats_press_child(&mut self, tag: u64) -> bool {
+        let kind = tag >> 32;
+        let payload = (tag & 0xFFFF_FFFF) as usize;
+        match kind {
+            0 if payload < 3 => {
+                if self.client.stats_ui.tab != payload && self.stats_tab_active(payload) {
+                    self.client.stats_ui.tab = payload;
+                    self.client.stats_ui.scroll.amount = 0.0;
+                    self.play_audio("minecraft:ui.button.click", None, 0.25, 1.0);
+                    true
+                } else {
+                    false
+                }
+            }
+            1 if self.client.stats_ui.tab == 1 && payload < COLUMNS.len() => {
+                self.client.stats_ui.sort = match self.client.stats_ui.sort {
+                    Some((sc, -1)) if sc == payload => Some((payload, 1)),
+                    Some((sc, _)) if sc == payload => None,
+                    _ => Some((payload, -1)),
+                };
+                self.play_audio("minecraft:ui.button.click", None, 0.25, 1.0);
+                true
+            }
+            2 => {
+                self.play_audio("minecraft:ui.button.click", None, 0.25, 1.0);
+                self.set_screen(Screen::Paused);
+                true
+            }
+            _ => false,
+        }
     }
     /// `StatsScreen.keyPressed`: the tab bar sees the key first
     /// (`MenuTabBar.keyPressed`), and the rest of `Screen.keyPressed` is
