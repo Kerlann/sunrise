@@ -388,66 +388,125 @@ pub(in crate::game) mod tests {
     #[test]
     #[ignore = "daily"]
     fn the_bound_tag_decides_what_a_blow_turns_and_what_is_picked() {
-        crate::game::native_entity_refs::tests::with_game(|game| {
-            let wind = wind_charge();
-            let arrow = Projectile::new(
-                ProjectileKind::Arrow {
-                    base_damage: 2.0,
-                    critical: false,
-                    effect: None,
-                },
-                Vec3::new(0.0, 70.0, 0.0),
-                Some(Who::Player),
-            );
-            let mut stuck = arrow.clone();
-            stuck.stuck = true;
-            let bullet = Projectile::new(
-                ProjectileKind::ShulkerBullet {
-                    target: Some(Who::Player),
-                    dir: None,
-                    steps: 0,
-                    delta: [0.0; 3],
-                    seed: 0,
-                },
-                Vec3::new(0.0, 70.0, 0.0),
-                None,
-            );
-            let answers = |game: &ServerGame<'_>, p: &Projectile| {
-                (
-                    game.projectile_redirectable(p),
-                    game.projectile_is_pickable(p),
-                )
-            };
-            // Vanilla's own tag.
-            assert_eq!(answers(game, &wind), (true, true));
-            assert_eq!(answers(game, &arrow), (false, false));
-            // A shulker bullet is pickable (`ShulkerBullet.isPickable`), but a blow hurts it.
-            assert_eq!(answers(game, &bullet), (false, true));
+        sunrise_gameplay_common::game::in_own_process(
+            "game::server_side::deflect::tests::the_bound_tag_decides_what_a_blow_turns_and_what_is_picked",
+            || {
+                crate::game::native_entity_refs::tests::with_game(|game| {
+                    let wind = wind_charge();
+                    let arrow = Projectile::new(
+                        ProjectileKind::Arrow {
+                            base_damage: 2.0,
+                            critical: false,
+                            effect: None,
+                        },
+                        Vec3::new(0.0, 70.0, 0.0),
+                        Some(Who::Player),
+                    );
+                    let mut stuck = arrow.clone();
+                    stuck.stuck = true;
+                    let bullet = Projectile::new(
+                        ProjectileKind::ShulkerBullet {
+                            target: Some(Who::Player),
+                            dir: None,
+                            steps: 0,
+                            delta: [0.0; 3],
+                            seed: 0,
+                        },
+                        Vec3::new(0.0, 70.0, 0.0),
+                        None,
+                    );
+                    let answers = |game: &ServerGame<'_>, p: &Projectile| {
+                        (
+                            game.projectile_redirectable(p),
+                            game.projectile_is_pickable(p),
+                        )
+                    };
+                    // Vanilla's own tag.
+                    assert_eq!(answers(game, &wind), (true, true));
+                    assert_eq!(answers(game, &arrow), (false, false));
+                    // A shulker bullet is pickable (`ShulkerBullet.isPickable`), but a blow hurts it.
+                    assert_eq!(answers(game, &bullet), (false, true));
 
-            bind_redirectable(
-                game,
-                &["minecraft:fireball", "minecraft:breeze_wind_charge"],
-            );
-            assert_eq!(answers(game, &wind), (false, false));
+                    bind_redirectable(
+                        game,
+                        &["minecraft:fireball", "minecraft:breeze_wind_charge"],
+                    );
+                    assert_eq!(answers(game, &wind), (false, false));
 
-            bind_redirectable(
-                game,
-                &[
-                    "minecraft:fireball",
-                    "minecraft:wind_charge",
-                    "minecraft:breeze_wind_charge",
-                    "minecraft:arrow",
-                ],
-            );
-            assert_eq!(answers(game, &wind), (true, true));
-            assert_eq!(answers(game, &arrow), (true, true));
-            assert_eq!(answers(game, &stuck), (false, false));
+                    bind_redirectable(
+                        game,
+                        &[
+                            "minecraft:fireball",
+                            "minecraft:wind_charge",
+                            "minecraft:breeze_wind_charge",
+                            "minecraft:arrow",
+                        ],
+                    );
+                    assert_eq!(answers(game, &wind), (true, true));
+                    assert_eq!(answers(game, &arrow), (true, true));
+                    assert_eq!(answers(game, &stuck), (false, false));
 
-            // `Player.attack` tries `deflectProjectile` first: a shulker bullet in the tag
-            // is turned (`attack_redirectable`, the LAN attack), not hurt.
-            bind_redirectable(game, &["minecraft:shulker_bullet"]);
-            assert_eq!(answers(game, &bullet), (true, true));
-        });
+                    // `Player.attack` tries `deflectProjectile` first: a shulker bullet in the tag
+                    // is turned (`attack_redirectable`, the LAN attack), not hurt.
+                    bind_redirectable(game, &["minecraft:shulker_bullet"]);
+                    assert_eq!(answers(game, &bullet), (true, true));
+                });
+            },
+        );
+    }
+
+    /// A spectator's click reaches the camera through `handleSpectatorAction`, whose entity must have
+    /// a box and be pickable. A trident in flight and a firework rocket are in neither the projectile
+    /// list nor the object lookups, yet the bound tag makes them pickable.
+    #[test]
+    #[ignore = "daily"]
+    fn a_spectators_click_reaches_a_tagged_trident_and_rocket() {
+        sunrise_gameplay_common::game::in_own_process(
+            "game::server_side::deflect::tests::a_spectators_click_reaches_a_tagged_trident_and_rocket",
+            || {
+                crate::game::native_guest_turn_tests::with_guests(|game| {
+                    use sunrise_protocol::packets::play::{Serverbound, SpectatorAction};
+                    let (trident, rocket) = (5001, 5002);
+                    // Beside the guest at (3, 64, 5), inside entity interaction range.
+                    let at = Vec3::new(3.0, 65.0, 6.5);
+                    game.server.next_entity = game.server.next_entity.max(rocket);
+                    game.common
+                        .tridents
+                        .push(sunrise_sim::thrown_trident::ThrownTrident::remote(
+                            trident, at, 0.0, 0.0,
+                        ));
+                    game.common.rockets.push(
+                        sunrise_gameplay_common::game::fireworks::Rocket::remote(
+                            rocket,
+                            at,
+                            Vec3::ZERO,
+                        ),
+                    );
+                    game.server.lan.as_mut().unwrap().hub.guests.update(0, |g| {
+                        g.loaded = true;
+                        g.game_mode = sunrise_sim::lan::guest::SPECTATOR;
+                    });
+                    let camera = |game: &ServerGame<'_>| {
+                        game.server.cmds.0.guest_cameras.get(&12).map(|c| c.id)
+                    };
+                    let click = |game: &mut ServerGame<'_>, id: i32| {
+                        game.guest_set_camera(0, None);
+                        game.lan_guest_packet(
+                            12,
+                            Serverbound::SpectatorAction(SpectatorAction { target: Some(id) }),
+                        );
+                        camera(game)
+                    };
+                    // Vanilla's tag has neither.
+                    assert_eq!(click(game, trident as i32), None);
+                    assert_eq!(click(game, rocket as i32), None);
+
+                    bind_redirectable(game, &["minecraft:trident", "minecraft:firework_rocket"]);
+                    assert_eq!(click(game, trident as i32), Some(trident as i32));
+                    assert_eq!(click(game, rocket as i32), Some(rocket as i32));
+                });
+            },
+        );
     }
 
     #[test]

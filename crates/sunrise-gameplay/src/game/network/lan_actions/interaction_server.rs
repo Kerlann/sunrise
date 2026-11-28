@@ -537,12 +537,25 @@ impl crate::game::ServerGame<'_> {
                 Vec3::new(p.x + half, p.y + knot.height, p.z + half),
             ));
         }
-        self.common
+        if let Some(p) = self
+            .common
             .creatures
             .projectiles
             .iter()
             .find(|p| p.id != 0 && p.id as i32 == id)
-            .map(|p| p.bounds())
+        {
+            return Some(p.bounds());
+        }
+        // Tridents and firework rockets live in their own lists, not the projectile list.
+        let id = u32::try_from(id).ok().filter(|&id| id != 0)?;
+        if let Some(t) = self.common.tridents.iter().find(|t| t.id == id) {
+            return Some(sunrise_gameplay_common::game::entity::Entity::bounds(t));
+        }
+        self.common
+            .rockets
+            .iter()
+            .find(|r| r.id == id)
+            .map(sunrise_gameplay_common::game::entity::Entity::bounds)
     }
     pub(in crate::game::server_side) fn guest_tick_death(&mut self, gi: usize) {
         let removed = self.server.lan.as_mut().and_then(|host| {
