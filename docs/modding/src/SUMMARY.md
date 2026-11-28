@@ -47,6 +47,7 @@
 
 - [The manifest and the package](reference/manifest.md)
 - [FML loader APIs and their Sunrise routes](reference/fml-loader-apis.md)
+- [Porting a 1.7.10 mod to Sunrise](reference/porting-from-1.7.10.md)
 - [The registry index and `.spack`](reference/registry-index.md)
 - [The mod API reference](reference/api.md)
 <!-- The api-reference preprocessor supplies this chapter and its published URL from catalog and host declarations. -->
