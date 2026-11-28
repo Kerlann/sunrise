@@ -1333,9 +1333,7 @@ pub struct ServerState {
     pub server_loot: ServerOnly<sunrise_sim::structure_blocks::LootSnapshot>,
     /// A server's levels other than the one in place (game/world/levels.rs).
     pub levels: ServerOnly<levels::Levels>,
-    pub tickets: ServerShared<sunrise_sim::ticket_levels::ChunkTickets>,
-    pub(in crate::game::server_side) random_tick_sections:
-        ServerOnly<sunrise_sim::random_tick_sections::RandomTickSections>,
+    pub chunk_ticking: levels::ChunkTickingLevelState,
     /// Entities of types Sunrise does not simulate.
     pub others: ServerShared<sunrise_sim::join_seq::ResidentList<commands::OtherEntity>>,
     /// Item entities spawned and block entities removed while the block
@@ -1570,8 +1568,7 @@ impl ServerState {
             world_tables: ws.world_tables,
             server_loot: ws.server_loot,
             levels: ws.levels,
-            tickets: ws.tickets,
-            random_tick_sections: ws.random_tick_sections,
+            chunk_ticking: ws.chunk_ticking,
             others: ServerShared::new(Default::default()),
             spill: ws.spill,
             creative_catalog,

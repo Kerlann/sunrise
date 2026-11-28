@@ -971,7 +971,7 @@ impl crate::game::ServerGame<'_> {
     /// tickets keep them only while a mod listens (`update_chunk_tickets`).
     pub(in crate::game::server_side) fn run_chunk_ticket_level_updates(&mut self) {
         use sunrise_sim::ticket_levels::UNLOADED;
-        let changes = self.server.tickets.0.take_changes();
+        let changes = self.server.chunk_ticking.tickets.take_changes();
         if changes.is_empty() {
             return;
         }

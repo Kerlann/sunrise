@@ -119,8 +119,8 @@ pub(in crate::game) fn record_arrival_ticket(game: &ServerGame<'_>, changed: boo
             let [x, _, z] = END_SPAWN;
             let present = game
                 .server
+                .chunk_ticking
                 .tickets
-                .0
                 .portal_tickets()
                 .iter()
                 .any(|ticket| ticket.chunk == (x >> 4, z >> 4));
@@ -466,8 +466,8 @@ fn spectator_arrival(role: ExecutionRole, mode: Travel) {
             assert_eq!(&*game.block_name([x, y - 1, z]), "minecraft:air");
             assert!(
                 game.server
+                    .chunk_ticking
                     .tickets
-                    .0
                     .portal_tickets()
                     .iter()
                     .any(|ticket| ticket.chunk == (cx, cz))

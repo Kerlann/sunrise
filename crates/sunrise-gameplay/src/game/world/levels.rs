@@ -163,6 +163,13 @@ fn should_run_idle_maintenance(paused: bool) -> bool {
     !paused
 }
 
+/// Per-level chunk ticket levels and random-tick section cache.
+#[derive(Default)]
+pub struct ChunkTickingLevelState {
+    pub tickets: ChunkTickets,
+    pub(in crate::game::server_side) random_tick_sections: RandomTickSections,
+}
+
 /// A level that is not in place: every per-level field of `Game`.
 pub struct Parked {
     pub world: World,
@@ -171,8 +178,7 @@ pub struct Parked {
     pub save: Arc<SaveDir>,
     block_ticks: Ticks,
     tick_chunks: TickChunkMembership,
-    tickets: ChunkTickets,
-    random_tick_sections: RandomTickSections,
+    chunk_ticking: ChunkTickingLevelState,
     level_events: Vec<LevelEvent>,
     /// Entity portal processes and cooldowns belong to this level's entities.
     pub portal_states: PortalLevelState,
@@ -1010,8 +1016,7 @@ fn box_parked(
         save,
         block_ticks: Ticks::new(seed as i32),
         tick_chunks: Default::default(),
-        tickets: Default::default(),
-        random_tick_sections: Default::default(),
+        chunk_ticking: Default::default(),
         level_events: Vec::new(),
         portal_states: Default::default(),
         falling: Default::default(),
@@ -1229,7 +1234,7 @@ impl crate::game::ServerGame<'_> {
             Self::load_saved_level_tickets(
                 &self.server.save.0,
                 &mut self.server.streaming,
-                &mut self.server.tickets.0,
+                &mut self.server.chunk_ticking.tickets,
             );
             self.validate_mod_chunk_tickets(dim);
         }
@@ -1262,7 +1267,11 @@ impl crate::game::ServerGame<'_> {
     /// tickets at once. Mod tickets still wait for validation after `level_load`.
     pub fn open_runtime_level(&self, dim: Dim) -> Result<Box<Parked>> {
         let mut level = self.open_level(dim)?;
-        Self::load_saved_level_tickets(&level.save, &mut level.streaming, &mut level.tickets);
+        Self::load_saved_level_tickets(
+            &level.save,
+            &mut level.streaming,
+            &mut level.chunk_ticking.tickets,
+        );
         Ok(level)
     }
 
@@ -1281,7 +1290,7 @@ impl crate::game::ServerGame<'_> {
         }
         loop {
             self.update_chunk_tickets();
-            let levels = self.server.tickets.0.levels();
+            let levels = self.server.chunk_ticking.tickets.levels();
             let streaming = &self.server.streaming;
             let ready = streaming
                 .forced
@@ -1321,11 +1330,7 @@ impl crate::game::ServerGame<'_> {
         swap(&mut self.server.save.0, &mut p.save);
         swap(&mut self.common.block_ticks, &mut p.block_ticks);
         swap(&mut self.server.tick_chunks, &mut p.tick_chunks);
-        swap(&mut self.server.tickets.0, &mut p.tickets);
-        swap(
-            &mut self.server.random_tick_sections.0,
-            &mut p.random_tick_sections,
-        );
+        swap(&mut self.server.chunk_ticking, &mut p.chunk_ticking);
         swap(&mut self.common.level_events, &mut p.level_events);
         self.server.portals.swap_level(&mut p.portal_states);
         swap(&mut self.common.falling, &mut p.falling);
@@ -2063,28 +2068,33 @@ impl crate::game::ServerGame<'_> {
             return true;
         }
         if dim == self.common.dim {
-            self.server.tickets.0.spawn_areas().next().is_some()
+            self.server
+                .chunk_ticking
+                .tickets
+                .spawn_areas()
+                .next()
+                .is_some()
         } else {
             self.server
                 .levels
                 .0
                 .parked
                 .get(&dim)
-                .is_some_and(|p| p.tickets.spawn_areas().next().is_some())
+                .is_some_and(|p| p.chunk_ticking.tickets.spawn_areas().next().is_some())
         }
     }
 
     /// The portal tickets of `dim`'s level (`placePortalTicket`, or saved).
     pub(in crate::game::server_side) fn portal_tickets_in(&self, dim: Dim) -> &[PortalTicket] {
         if dim == self.common.dim {
-            self.server.tickets.0.portal_tickets()
+            self.server.chunk_ticking.tickets.portal_tickets()
         } else {
             self.server
                 .levels
                 .0
                 .parked
                 .get(&dim)
-                .map_or(&[], |p| p.tickets.portal_tickets())
+                .map_or(&[], |p| p.chunk_ticking.tickets.portal_tickets())
         }
     }
 
@@ -2096,8 +2106,8 @@ impl crate::game::ServerGame<'_> {
     pub(in crate::game::server_side) fn portal_ticket_areas(&self) -> Vec<((i32, i32), i32)> {
         let block_ticking = i32::from(sunrise_sim::ticket_levels::BLOCK_TICKING);
         self.server
+            .chunk_ticking
             .tickets
-            .0
             .portal_tickets()
             .iter()
             .map(|t| (t.chunk, (block_ticking - t.level).max(1)))

@@ -279,7 +279,7 @@ impl<'a> LevelWrite<'a> {
     #[inline(always)]
     pub(super) fn active(game: &'a mut ServerGame<'_>) -> Self {
         Self {
-            tickets: &mut game.server.tickets.0,
+            tickets: &mut game.server.chunk_ticking.tickets,
         }
     }
 

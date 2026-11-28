@@ -778,8 +778,8 @@ pub(crate) fn credit_pig(game: &mut sunrise_gameplay::game::ServerGame<'_>) {
         .chunks
         .insert((0, 0), Arc::new(sunrise_level::chunk::Chunk::empty(0, 0)));
     game.server
+        .chunk_ticking
         .tickets
-        .0
         .update(Some(sunrise_sim::ticket_levels::Sources {
             players: vec![(0, 0)],
             forced: Vec::new(),

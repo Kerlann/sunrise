@@ -986,7 +986,7 @@ impl crate::game::ServerGame<'_> {
         }
         // ChunkMap.tick sends the changes of an entity outside the
         // entity-ticking range only when it changed section or needs sync.
-        let levels = self.server.tickets.0.levels();
+        let levels = self.server.chunk_ticking.tickets.levels();
         let idle_at = |p: sunrise_core::geometry::Vec3| {
             !levels.in_entity_ticking_range((p.x.floor() as i32) >> 4, (p.z.floor() as i32) >> 4)
         };
@@ -2499,7 +2499,7 @@ impl crate::game::ServerGame<'_> {
                 log::error!("could not open {}: {e}", level.id());
                 return;
             }
-            self.server.tickets.0.add_spawn(
+            self.server.chunk_ticking.tickets.add_spawn(
                 prepared.chunk(),
                 sunrise_sim::ticket_levels::SpawnTicketKind::Player,
             );

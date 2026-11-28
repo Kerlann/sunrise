@@ -121,8 +121,8 @@ impl RaidLevel for Lvl<'_, '_> {
             && self
                 .game
                 .server
+                .chunk_ticking
                 .tickets
-                .0
                 .levels()
                 .entity_ticking_at(p[0], p[2])
     }

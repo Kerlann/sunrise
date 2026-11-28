@@ -517,7 +517,7 @@ impl ServerGame<'_> {
     /// Single-position read without copying the pending-entity set.
     pub(in crate::game) fn block_ticking_at(&self, x: i32, z: i32) -> bool {
         block_ticking_at(
-            &self.server.tickets.0.levels(),
+            &self.server.chunk_ticking.tickets.levels(),
             &self.common.world.entities_pending,
             x,
             z,

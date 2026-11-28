@@ -686,7 +686,7 @@ impl crate::game::ServerGame<'_> {
         // every player's tickets (`update_chunk_tickets`), once the chunk is
         // lit: asked once per chunk, as the sensors share few chunks. Nothing
         // a sculk tick does loads, unloads or lights a chunk or moves a ticket.
-        let levels = self.server.tickets.0.levels();
+        let levels = self.server.chunk_ticking.tickets.levels();
         let chunks = &self.common.world.chunks;
         let pending = &self.common.world.entities_pending;
         let mut ticking = FxHashMap::<(i32, i32), bool>::default();

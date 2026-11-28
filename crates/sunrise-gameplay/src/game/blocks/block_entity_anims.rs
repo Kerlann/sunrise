@@ -335,7 +335,7 @@ impl ServerGame<'_> {
     }
     /// Updates `be_anims.level.conduit_servers` from block-ticking chunks, preserving existing state.
     pub(in crate::game::server_side) fn find_conduits(&mut self) {
-        let levels = self.server.tickets.0.levels();
+        let levels = self.server.chunk_ticking.tickets.levels();
         let kinds = &self.server.be_anims.kinds;
         let is_conduit = |id: u32| matches!(kinds.get(id as usize), Some(Some(Ticker::Conduit)));
         let mut found = Vec::new();
@@ -381,8 +381,8 @@ impl ServerGame<'_> {
         }
         if !self
             .server
+            .chunk_ticking
             .tickets
-            .0
             .levels()
             .block_ticking_at(pos[0], pos[2])
             || !self

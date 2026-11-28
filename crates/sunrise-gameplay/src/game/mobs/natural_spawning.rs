@@ -1505,7 +1505,7 @@ impl<'a> crate::game::ServerGame<'a> {
     /// holds (`getNaturalSpawnChunkCount`).
     pub fn spawning_chunks(&self, players: &[LevelPlayer], scratch: &mut SpawnScratch) -> i32 {
         let tickets = self.server.streaming.mod_tickets();
-        let levels = self.server.tickets.0.levels();
+        let levels = self.server.chunk_ticking.tickets.levels();
         scratch.collect(
             players,
             |chunk| tickets.forces_natural_spawning(chunk),
@@ -2982,7 +2982,7 @@ mod tests {
         use sunrise_sim::ticket_levels::{Sources, ViewedTicket};
         with_game(|game| {
             spawn_check_world(game, Vec3::new(0.5, 70.0, 0.5));
-            game.server.tickets.0.update(Some(Sources {
+            game.server.chunk_ticking.tickets.update(Some(Sources {
                 viewed: vec![ViewedTicket {
                     center: (0, 0),
                     radius: 0,

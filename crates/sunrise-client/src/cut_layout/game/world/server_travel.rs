@@ -529,7 +529,7 @@ pub(crate) mod tests {
                 game,
                 sunrise_core::position::ChunkPos::new(0, 0),
             );
-            game.server.tickets.0.add_portal((0, 0));
+            game.server.chunk_ticking.tickets.add_portal((0, 0));
             game.update_chunk_tickets();
             assert!(game.entity_ticking_area()(1, 2));
             // Supply the block's real inside notification, then exercise the actual
