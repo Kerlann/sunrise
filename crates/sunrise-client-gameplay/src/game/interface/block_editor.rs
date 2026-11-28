@@ -325,12 +325,16 @@ impl crate::game::ClientGame<'_> {
             }
             fn cancel(&mut self, _entity: &mut BlockEntity) {}
         }
+        use sunrise_level::structure_block::{StructureBlock, StructureMode};
+
         let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         self.common
             .world
             .block_entities
             .entry(pos)
-            .or_insert_with(|| BlockEntity::StructureBlock(Box::default()));
+            .or_insert_with(|| {
+                BlockEntity::StructureBlock(Box::new(StructureBlock::new(StructureMode::Load)))
+            });
         self.open_block_editor(
             pos,
             Box::new(CoincidentEditor {
