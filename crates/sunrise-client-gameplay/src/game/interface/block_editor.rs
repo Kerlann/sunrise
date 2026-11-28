@@ -331,8 +331,7 @@ impl crate::game::ClientGame<'_> {
         self.common
             .world
             .block_entities
-            .entry(pos)
-            .or_insert_with(|| {
+            .get_or_insert_with(pos, || {
                 BlockEntity::StructureBlock(Box::new(StructureBlock::new(StructureMode::Load)))
             });
         self.open_block_editor(
