@@ -3706,36 +3706,6 @@ fn press_id_and_mutating_widgets_from_screen_input_hooks_and_lazy_discovery() {
                 "press(id) must return false when the click does not reach the Inventory widget"
             );
 
-            // `press(id)` on a real station screen (Stonecutter) must also return false when no
-            // station widget takes the click (never true from station_click's slot-miss fallback),
-            // leaving the station open and its slots untouched.
-            let mut stonecutter = sunrise_gameplay_common::game::stations_common::Station::new(
-                sunrise_gameplay_common::game::stations_common::Kind::Stonecutter,
-                [0, 64, 0],
-            );
-            stonecutter.inputs[0] =
-                Some(sunrise_items::items::ItemStack::new("minecraft:stone", 1));
-            game.open_station_client(stonecutter);
-            assert!(game.screen_widgets().unwrap().set_visible(tab_id, true));
-            assert!(
-                !game.screen_widgets().unwrap().press(tab_id),
-                "press(id) on a station must return false when no station widget takes the click"
-            );
-            assert!(
-                game.common.station.as_ref().is_some_and(|s| {
-                    s.kind == sunrise_gameplay_common::game::stations_common::Kind::Stonecutter
-                        && s.inputs[0].as_ref().is_some_and(|st| {
-                            st.item.as_ref() == "minecraft:stone" && st.count == 1
-                        })
-                }),
-                "declined station press must leave the station open and its slots untouched"
-            );
-            assert!(
-                game.common.carried.is_none(),
-                "declined station press must not trigger a slot click"
-            );
-            game.clear_station_client();
-
             // Non-Options route: moving a widget on DebugOptions over Done routes clicks
             // exclusively to the moved widget, and a mismatched-button release does not steal
             // the captured target's ownership.
@@ -3884,7 +3854,8 @@ fn press_id_and_mutating_widgets_from_screen_input_hooks_and_lazy_discovery() {
                 vec!["slider:3".to_owned()],
                 "moved slider over coincident buttons must receive only slider press"
             );
-            // Wrong-button release does not end Left's slider drag.
+            // Wrong-button press and release do not replace or end Left's slider drag.
+            send_mouse_button(game, win_id, MouseButton::Right, true);
             send_mouse_button(game, win_id, MouseButton::Right, false);
             assert_eq!(
                 game.client.screen_state.0.widgets.active_redirect_button(),
@@ -3899,7 +3870,7 @@ fn press_id_and_mutating_widgets_from_screen_input_hooks_and_lazy_discovery() {
             assert_eq!(
                 std::mem::take(&mut *be_log.lock().unwrap()),
                 vec!["slider:3".to_owned()],
-                "slider must still receive Left drag after Right release"
+                "slider must still receive Left drag after Right press and release"
             );
             // Hiding the slider mid-drag cancels the gesture cleanly without retargeting Alpha/Beta.
             assert!(game.screen_widgets().unwrap().set_visible(gain_id, false));

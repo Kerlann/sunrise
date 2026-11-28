@@ -1896,9 +1896,17 @@ impl crate::game::ClientGame<'_> {
         }))
     }
     pub(crate) fn track_drag_button(&mut self, button: MouseButton, pressed: bool) {
-        // Any release ends the drag, as vanilla's `MouseHandler.onButton` clears `activeButton`:
-        // left down, right down, left up sends no drag while right is still held.
-        self.client.drag_button = pressed.then_some(button);
+        if pressed {
+            if self
+                .client
+                .drag_button
+                .is_none_or(|active| !self.client.physical_buttons.contains(&active))
+            {
+                self.client.drag_button = Some(button);
+            }
+        } else if self.client.drag_button == Some(button) {
+            self.client.drag_button = None;
+        }
     }
     /// Opens `screen` (`Gui.setScreen`; `Screen::Playing` is vanilla's null).
     pub fn set_screen(&mut self, screen: Screen) {

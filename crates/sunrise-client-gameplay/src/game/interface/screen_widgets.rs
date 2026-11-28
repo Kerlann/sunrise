@@ -1871,39 +1871,55 @@ impl crate::game::ClientGame<'_> {
                 self.client.screen,
                 super::Screen::Inventory | super::Screen::Creative
             );
+        let foreign_owner_active = self
+            .client
+            .screen_state
+            .0
+            .widgets
+            .inner
+            .borrow()
+            .active_redirect
+            .as_ref()
+            .is_some_and(|active| active.button != code);
         let res = match self.resolve_engine_click_cursor(self.client.cursor) {
             EngineClickRoute::PassThrough => {
-                self.client
-                    .screen_state
-                    .0
-                    .widgets
-                    .inner
-                    .borrow_mut()
-                    .active_redirect = None;
+                if !foreign_owner_active {
+                    self.client
+                        .screen_state
+                        .0
+                        .widgets
+                        .inner
+                        .borrow_mut()
+                        .active_redirect = None;
+                }
                 self.with_screen_input_overrides(|game| {
                     game.route_screen_button(button, code, true, double_click)
                 })
             }
             EngineClickRoute::Block if direct_override_screen => {
-                self.client
-                    .screen_state
-                    .0
-                    .widgets
-                    .inner
-                    .borrow_mut()
-                    .active_redirect = None;
+                if !foreign_owner_active {
+                    self.client
+                        .screen_state
+                        .0
+                        .widgets
+                        .inner
+                        .borrow_mut()
+                        .active_redirect = None;
+                }
                 self.with_screen_input_overrides(|game| {
                     game.route_screen_button(button, code, true, double_click)
                 })
             }
             EngineClickRoute::Block if container_screen => {
-                self.client
-                    .screen_state
-                    .0
-                    .widgets
-                    .inner
-                    .borrow_mut()
-                    .active_redirect = None;
+                if !foreign_owner_active {
+                    self.client
+                        .screen_state
+                        .0
+                        .widgets
+                        .inner
+                        .borrow_mut()
+                        .active_redirect = None;
+                }
                 widgets::with_blocking_engine_widget_click(|| {
                     self.with_screen_input_overrides(|game| {
                         game.route_screen_button(button, code, true, double_click)
@@ -1911,13 +1927,15 @@ impl crate::game::ClientGame<'_> {
                 })
             }
             EngineClickRoute::Block => {
-                self.client
-                    .screen_state
-                    .0
-                    .widgets
-                    .inner
-                    .borrow_mut()
-                    .active_redirect = None;
+                if !foreign_owner_active {
+                    self.client
+                        .screen_state
+                        .0
+                        .widgets
+                        .inner
+                        .borrow_mut()
+                        .active_redirect = None;
+                }
                 Ok(false)
             }
             EngineClickRoute::Select {
@@ -1934,13 +1952,15 @@ impl crate::game::ClientGame<'_> {
                     native_action,
                     redirect,
                 };
-                self.client
-                    .screen_state
-                    .0
-                    .widgets
-                    .inner
-                    .borrow_mut()
-                    .active_redirect = Some(target.clone());
+                if !foreign_owner_active {
+                    self.client
+                        .screen_state
+                        .0
+                        .widgets
+                        .inner
+                        .borrow_mut()
+                        .active_redirect = Some(target.clone());
+                }
                 let mapped_cursor = if resolved != original {
                     Self::map_redirect_cursor(self.client.cursor, resolved, original)
                 } else {
@@ -1953,7 +1973,7 @@ impl crate::game::ClientGame<'_> {
                         game.route_screen_button(button, code, true, double_click)
                     })
                 };
-                if !matches!(res, Ok(true)) {
+                if !foreign_owner_active && !matches!(res, Ok(true)) {
                     self.client
                         .screen_state
                         .0
