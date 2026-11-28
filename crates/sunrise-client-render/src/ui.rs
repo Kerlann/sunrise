@@ -3358,6 +3358,7 @@ mod tests {
         );
         crate::widgets::end_frame(9_010);
         crate::widgets::set_narrating(true);
+        crate::widgets::begin_screen(|| crate::widgets::ScreenInfo::new("test", "Test"));
         let mut batch = HudBatch::scratch([640, 480]);
         let ((), output) = crate::widgets::with_widget_overrides(
             &mut maps,

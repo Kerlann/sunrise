@@ -3066,7 +3066,13 @@ fn engine_screens_enumerate_stable_ids_and_modify_widgets_across_frames() {
         return;
     }
 
-    with_mods(Vec::new().into(), || {
+    struct ProbeMod;
+
+    #[mod_api::__subscriptions]
+    impl Hooks for ProbeMod {}
+
+    let mods = vec![ModEntry::new("enum_probe", Box::new(ProbeMod))].into();
+    with_mods(mods, || {
         with_client_game(|game| {
             let (_el, win_id) = attach_offscreen_window(game);
 
@@ -3074,7 +3080,8 @@ fn engine_screens_enumerate_stable_ids_and_modify_widgets_across_frames() {
             let check_two_frames_stable =
                 |game: &mut sunrise_client_gameplay::game::ClientGame<'_>,
                  serial: u64,
-                 screen_name: &str| {
+                 screen_name: &str|
+                 -> Vec<ScreenWidgetId> {
                     let ids_before: Vec<ScreenWidgetId> = game
                         .screen_widgets()
                         .unwrap_or_else(|| panic!("{screen_name} should expose widgets"))
@@ -3098,6 +3105,7 @@ fn engine_screens_enumerate_stable_ids_and_modify_widgets_across_frames() {
                         ids_before, ids_after,
                         "{screen_name} widget ids must stay stable across two frames"
                     );
+                    ids_after
                 };
 
             // Pause screen
@@ -3247,8 +3255,10 @@ fn engine_screens_enumerate_stable_ids_and_modify_widgets_across_frames() {
             let saves = std::env::temp_dir().join("sunrise-widgets-enum-test-no-saves");
             game.client.title.0 = Some(game.new_title(saves));
             game.observe_screen();
-            check_two_frames_stable(game, 50_050, "title");
+            let title_ids = check_two_frames_stable(game, 50_050, "title");
 
+            // In-place Title sub-page change (Mode::Main -> Mode::Create when saves is empty):
+            // drops the old page's widget IDs and keeps the new page's IDs stable across frames.
             game.client
                 .title
                 .0
@@ -3256,7 +3266,20 @@ fn engine_screens_enumerate_stable_ids_and_modify_widgets_across_frames() {
                 .unwrap()
                 .open_by_id("world_select");
             game.observe_screen();
-            check_two_frames_stable(game, 50_060, "world_select");
+            let create_ids = check_two_frames_stable(game, 50_060, "world_create");
+            assert!(
+                title_ids.iter().all(|id| !create_ids.contains(id)),
+                "in-place Title Mode::Main -> Mode::Create must give up old page IDs"
+            );
+            {
+                let widgets = game.screen_widgets().unwrap();
+                for &old_id in &title_ids {
+                    assert!(
+                        !widgets.set_visible(old_id, false),
+                        "old Title Mode::Main widget id {old_id:?} must be stale after switching to Mode::Create"
+                    );
+                }
+            }
         });
     });
 }

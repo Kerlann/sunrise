@@ -256,12 +256,12 @@ pub fn with_widget_collector<R>(f: impl FnOnce() -> R) -> (R, Vec<CollectedWidge
         prev_has_overrides: bool,
         prev_bypass: bool,
         prev_collector: Option<CollectorState>,
-        out: Vec<CollectedWidget>,
+        restored_collector: bool,
     }
     impl Drop for Guard {
         fn drop(&mut self) {
-            if let Some(finished) = COLLECTOR.replace(self.prev_collector.take()) {
-                self.out = finished.widgets;
+            if !self.restored_collector {
+                let _ = COLLECTOR.replace(self.prev_collector.take());
             }
             COLLECTING.set(self.prev_collecting);
             HAS_OVERRIDES.set(self.prev_has_overrides);
@@ -284,22 +284,20 @@ pub fn with_widget_collector<R>(f: impl FnOnce() -> R) -> (R, Vec<CollectedWidge
             widgets: Vec::new(),
             counts: HashMap::new(),
         })),
-        out: Vec::new(),
+        restored_collector: false,
     };
     let result = f();
     let collected = COLLECTOR
         .replace(guard.prev_collector.take())
         .map_or_else(Vec::new, |s| s.widgets);
-    // Keep Drop from overwriting `prev_collector` again.
-    guard.prev_collector = None;
-    let _ = guard.out;
+    guard.restored_collector = true;
     drop(guard);
     (result, collected)
 }
 
 /// Run `f` with `maps` active for engine widget override lookup and hit-map capture. `maps` is
-/// moved into thread-local storage for the duration of `f` and unconditionally restored (with
-/// updated `hover_since` timestamps) on exit or unwind.
+/// moved into thread-local storage for the duration of `f` and unconditionally restored on exit or
+/// unwind (`hover_since` timestamps are committed on normal completion and preserved on unwind).
 pub fn with_widget_overrides<R>(
     maps: &mut EngineOverrideMaps,
     cursor: (f32, f32),
@@ -314,13 +312,16 @@ pub fn with_widget_overrides<R>(
     }
     impl Drop for Guard<'_> {
         fn drop(&mut self) {
+            let normal_exit = self.finished.is_some();
             let active = self
                 .finished
                 .take()
                 .or_else(|| ACTIVE_OVERRIDES.replace(self.prev_pass.take()));
             HAS_OVERRIDES.set(self.prev_has_overrides);
             if let Some(mut pass) = active {
-                pass.maps.hover_since = pass.next_hover_since;
+                if normal_exit {
+                    pass.maps.hover_since = pass.next_hover_since;
+                }
                 *self.dest = pass.maps;
             }
         }
@@ -886,6 +887,7 @@ mod tests {
         assert!(panicked.is_err());
         assert!(!in_override_pass());
         assert!(maps.overrides.contains_key(&done_key_1));
+        assert_eq!(maps.hover_since.get(&done_key_1), Some(&t0));
         // Tooltip delay has not elapsed yet on frame 0.
         assert!(out0.pending_tooltip.is_none());
         assert_eq!(out0.hits.len(), 2);
