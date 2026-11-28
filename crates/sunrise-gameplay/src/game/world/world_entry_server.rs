@@ -926,6 +926,27 @@ impl crate::game::ServerGame<'_> {
             (&sources, &recipes),
         )?;
         self.prepare_professions(root, &items, &overlay, &mut stations)?;
+        // Vanilla reads tags of these registries too: `LootTable.LIST_CODEC` (advancement
+        // rewards, the loot table trigger) and `Recipe.LIST_CODEC` (the recipe triggers).
+        // Bind them before `WorldRegistries` / `DataMaps::load` so data maps on `loot_table`
+        // or `recipe` see their tags too.
+        pack_tags.insert(
+            "loot_table".to_owned(),
+            loot.registry_tags("loot_table")
+                .into_iter()
+                .flatten()
+                .map(|(tag, members)| (tag.clone(), members.iter().cloned().collect()))
+                .collect(),
+        );
+        pack_tags.insert(
+            "recipe".to_owned(),
+            sunrise_world::tag_layers::load(root, "recipe", &overlay, |id| {
+                stations.recipe_index.contains(id)
+            })?
+            .into_iter()
+            .map(|(tag, members)| (tag, members.into_iter().collect()))
+            .collect(),
+        );
         // Use the same candidate's IDs and bound tags for data map targets.
         let (datapack_registries, datapack_vanilla_values) = match datapack_candidate? {
             Some((candidate, values)) => (
@@ -1007,25 +1028,6 @@ impl crate::game::ServerGame<'_> {
             biomes.table.registered_keys().iter().cloned(),
         ));
         drop(registries);
-        // Vanilla reads tags of these registries too: `LootTable.LIST_CODEC` (advancement
-        // rewards, the loot table trigger) and `Recipe.LIST_CODEC` (the recipe triggers).
-        pack_tags.insert(
-            "loot_table".to_owned(),
-            loot.registry_tags("loot_table")
-                .into_iter()
-                .flatten()
-                .map(|(tag, members)| (tag.clone(), members.iter().cloned().collect()))
-                .collect(),
-        );
-        pack_tags.insert(
-            "recipe".to_owned(),
-            sunrise_world::tag_layers::load(root, "recipe", &overlay, |id| {
-                stations.recipe_index.contains(id)
-            })?
-            .into_iter()
-            .map(|(tag, members)| (tag, members.into_iter().collect()))
-            .collect(),
-        );
         // `HolderSetCodec.lookupTag`: an advancement naming a tag that is not bound is refused.
         let unbound = advancements.unbound_tags(|registry, tag| {
             pack_tags
