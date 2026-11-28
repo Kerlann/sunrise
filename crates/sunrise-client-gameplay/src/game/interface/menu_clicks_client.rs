@@ -174,10 +174,7 @@ impl crate::game::ClientGame<'_> {
         true
     }
     pub(in crate::game::client_side) fn click_inventory(&mut self, right: bool) -> bool {
-        if self.mod_browser_press(right) || self.mount_click(right) {
-            return true;
-        }
-        if self.recipe_book_click(right) {
+        if self.mount_click(right) {
             return true;
         }
         if self.station_click(right) {
