@@ -73,6 +73,8 @@ struct Statement {
 enum Kind {
     /// `in`, `out`, `attribute`, `varying`: storage, names and types (with array suffixes).
     Interface(&'static str, Vec<(String, String)>),
+    /// An unflattened `in`/`out` interface block, left in place so its authored lines stay intact.
+    InterfaceBlock,
     /// `layout(...) in;` or `out;` without a variable.
     Layout(&'static str),
     Buffer(String),
@@ -198,6 +200,7 @@ fn classify(tokens: &[&str], range: std::ops::Range<usize>) -> Statement {
         }
         match words.get(k) {
             None | Some(&";") => Kind::Layout(storage),
+            Some(_) if words[k..].contains(&"{") => Kind::InterfaceBlock,
             Some(ty) => {
                 let mut vars = Vec::new();
                 let mut j = k + 1;
@@ -880,6 +883,47 @@ mod tests {
         let fsh = "#version 430\nuniform float far;\nin float gDepth;\n\
                    void main() {\n    gl_FragData[0] = vec4(gDepth / far);\n}\n";
         fold(vsh, gsh, fsh).unwrap_or_else(|e| panic!("{e:?}"));
+    }
+
+    /// An unflattened `out` or `in` interface block (such as one with a malformed empty member)
+    /// stays in place rather than being blanked and rebuilt in the generated head, so its refusal
+    /// points at the authored stage file and line.
+    #[test]
+    fn malformed_unflattened_interface_blocks_keep_their_authored_lines() {
+        let bad_vsh = "#version 430\nout VertexData {\n    vec2 uv;\n    ;\n} vOut;\n\
+                       void main() {\n    gl_Position = ftransform();\n}\n";
+        let Err(errors) = fold(bad_vsh, PASS_GSH, PASS_FSH) else {
+            panic!("a malformed vertex out block must be refused");
+        };
+        assert!(
+            errors.iter().any(|error| {
+                error.file == "shadow.vsh"
+                    && error.line == 4
+                    && error.message.contains("found Semicolon")
+            }),
+            "{errors:?}"
+        );
+
+        let good_vsh = "#version 430\nout vec3 vNormal;\nvoid main() {\n    \
+                        vNormal = vec3(0.0);\n    gl_Position = ftransform();\n}\n";
+        let bad_gsh = "#version 430\nlayout(triangles) in;\n\
+                       layout(triangle_strip, max_vertices = 3) out;\n\
+                       in VertexData {\n    vec2 uv;\n    ;\n} vIn[];\n\
+                       out vec3 gNormal;\nvoid main() {\n    \
+                       for (int i = 0; i < 3; i++) {\n        gNormal = vec3(0.0);\n        \
+                       gl_Position = gl_in[i].gl_Position;\n        EmitVertex();\n    }\n    \
+                       EndPrimitive();\n}\n";
+        let Err(errors) = fold(good_vsh, bad_gsh, PASS_FSH) else {
+            panic!("a malformed geometry in block must be refused");
+        };
+        assert!(
+            errors.iter().any(|error| {
+                error.file == "shadow.gsh"
+                    && error.line == 6
+                    && error.message.contains("found Semicolon")
+            }),
+            "{errors:?}"
+        );
     }
 
     #[test]
