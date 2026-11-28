@@ -560,6 +560,11 @@ impl PackScreen {
             x >= bx as f64 && y >= by as f64 && x < (bx + 150) as f64 && y < (by + 20) as f64
         })
     }
+    pub fn cancel_drag(&mut self) {
+        for l in &mut self.lists {
+            l.held = None;
+        }
+    }
     /// A left click (`Screen.mouseClicked`).
     pub fn click(&mut self, m: &Measure, x: f64, y: f64) -> Action {
         self.click_with_outcome(m, x, y).0
@@ -569,7 +574,14 @@ impl PackScreen {
         if self.confirm.is_some() {
             return self.confirm_click(m, x, y);
         }
-        if self.search.contains(x, y) {
+        if self.search.contains(x, y)
+            && crate::widgets::matches_selected_engine_widget(
+                crate::widgets::WidgetBucket::Field,
+                None,
+                None,
+                0,
+            )
+        {
             self.search.click(m, x, false, false);
             self.set_focus(Focus::Search);
             return (Action::None, true);
@@ -628,8 +640,19 @@ impl PackScreen {
             }
             return (Action::None, took);
         }
+        let footer_labels = [tr("pack.openFolder"), tr("gui.done")];
         for (i, (bx, by)) in self.footer().into_iter().enumerate() {
-            if x >= bx as f64 && y >= by as f64 && x < (bx + 150) as f64 && y < (by + 20) as f64 {
+            if x >= bx as f64
+                && y >= by as f64
+                && x < (bx + 150) as f64
+                && y < (by + 20) as f64
+                && crate::widgets::matches_selected_engine_widget(
+                    crate::widgets::WidgetBucket::Button,
+                    Some(&footer_labels[i]),
+                    None,
+                    0,
+                )
+            {
                 self.set_focus(Focus::Button(i));
                 let action = if i == 0 {
                     Action::OpenFolder

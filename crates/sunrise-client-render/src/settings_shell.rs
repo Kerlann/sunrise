@@ -1262,16 +1262,6 @@ pub(crate) fn reach<T>(
     }
 }
 
-/// Where Tab or Shift+Tab goes among `n` controls.
-pub(crate) fn tab_step(n: usize, current: Option<usize>, shift: bool) -> usize {
-    match (current, shift) {
-        (Some(i), false) => (i + 1) % n,
-        (Some(i), true) => (i + n - 1) % n,
-        (None, false) => 0,
-        (None, true) => n - 1,
-    }
-}
-
 /// Where an arrow key goes among the controls. Nothing focused in view: going down, the first
 /// setting from the view's top on (the next past its bottom where greyed rows fill it); going
 /// up, the last one down to its bottom. `is_row`: a control that is a setting's row.
@@ -1836,6 +1826,8 @@ pub(crate) trait Hosted {
     }
     /// Lets go of a slider or scrollbar; returns its events and whether it accepted the release.
     fn release_with_outcome(&mut self) -> (Option<Vec<Output>>, bool);
+    /// Clears an active drag without emitting slider release actions.
+    fn cancel_drag(&mut self);
     /// A controller's or the keyboard's focus is on the row at `rect`: if the list hides part of
     /// it, it scrolls all into view (`AbstractSelectionList.setSelected`). How far the row moved
     /// down, when it moved.
@@ -2521,17 +2513,103 @@ impl<S: Screen> Shell<S> {
             }
         }
     }
-    /// What Tab steps through, in order, with where each is on screen (`reach`).
-    fn focusables(
+    /// Collector widget bucket and label for a shell row, shared by focus discovery and click
+    /// identity matching so both derive the exact same `EngineWidgetKey` as `draw_view`.
+    fn row_widget_spec(
+        &self,
+        row: &Row<S::Row>,
+    ) -> Option<(crate::widgets::WidgetBucket, Option<Text>)> {
+        let waits = self.waits(row);
+        let value = row
+            .value_text()
+            .map(|text| if waits { format!("> {text} <") } else { text });
+        match &row.value {
+            Value::Read(_) => Some((
+                crate::widgets::WidgetBucket::Button,
+                Some(Text::literal(row.label(value.as_deref()))),
+            )),
+            Value::Switch(_) => Some((crate::widgets::WidgetBucket::Checkbox, None)),
+            Value::Slider { .. } => Some((
+                crate::widgets::WidgetBucket::Slider,
+                value.as_deref().map(Text::literal),
+            )),
+            Value::Binding(b) if matches!(b.shown, Shown::Pad { .. }) => Some((
+                crate::widgets::WidgetBucket::Button,
+                Some(Text::literal(row.label(value.as_deref()))),
+            )),
+            Value::Choice(_) | Value::Binding(_) => Some((
+                crate::widgets::WidgetBucket::Button,
+                value.as_deref().map(Text::literal),
+            )),
+            Value::Press => Some((
+                crate::widgets::WidgetBucket::Button,
+                Some(Text::literal(&row.name)),
+            )),
+            Value::Note => None,
+        }
+    }
+    /// What Tab steps through, in order, with where each is on screen (`reach`) and its resolved
+    /// `tab_order_group`, filtered through `resolve_engine_input`.
+    fn focusables_with_groups(
         &self,
         view: &View<S::Page, S::Row>,
         near: bool,
-    ) -> Vec<(Target<S::Page, S::Row>, [f32; 4])> {
+    ) -> Vec<(Target<S::Page, S::Row>, [f32; 4], i32)> {
         let cols = &view.cols;
-        let mut out = vec![(Target::Search, cols.search())];
+        let mut counts: std::collections::HashMap<(String, crate::widgets::WidgetBucket), u32> =
+            std::collections::HashMap::new();
+        let mut resolve = |bucket: crate::widgets::WidgetBucket,
+                           label: Option<&Text>,
+                           rect: [f32; 4],
+                           active: bool,
+                           count_occurrence: bool|
+         -> Option<([f32; 4], i32)> {
+            let key_str = label
+                .map(crate::widgets::stable_key_from_text)
+                .unwrap_or_default();
+            let occ = if count_occurrence {
+                let entry = counts.entry((key_str, bucket)).or_insert(0);
+                let o = *entry;
+                *entry += 1;
+                o
+            } else {
+                0
+            };
+            let resolved_rect =
+                crate::widgets::resolve_engine_input(bucket, label, None, occ, rect, active)?;
+            let group = crate::widgets::resolve_engine_tab_order_group(bucket, label, None, occ, 0);
+            Some((resolved_rect, group))
+        };
+
+        let mut out = Vec::new();
+        let search_msg =
+            (!self.search.message.is_empty()).then(|| Text::literal(&self.search.message));
+        if let Some((rect, group)) = resolve(
+            crate::widgets::WidgetBucket::Field,
+            search_msg.as_ref(),
+            cols.search(),
+            true,
+            true,
+        ) {
+            out.push((Target::Search, rect, group));
+        }
         for (page, rect, _) in self.places(view).places {
-            if self.has(page, view) {
-                out.push((Target::Page(page), rect));
+            let name = view
+                .pages
+                .iter()
+                .find(|p| p.id == page)
+                .map(|p| p.name.as_str())
+                .unwrap_or_default();
+            let label = Text::literal(name);
+            let active = self.has(page, view);
+            if let Some((resolved_rect, group)) = resolve(
+                crate::widgets::WidgetBucket::Button,
+                Some(&label),
+                rect,
+                active,
+                true,
+            ) {
+                out.push((Target::Page(page), resolved_rect, group));
             }
         }
         let rows: Vec<(&Row<S::Row>, f32, bool)> = self
@@ -2542,14 +2620,61 @@ impl<S: Screen> Shell<S> {
             if !live {
                 continue;
             }
-            out.push((Target::Row(row.id), row_rect(row, cols, y)));
+            let Some((bucket, label_text)) = self.row_widget_spec(row) else {
+                continue;
+            };
+            let visible = y + style::ROW > cols.top && y < cols.bottom;
+            if let Some((resolved_rect, group)) = resolve(
+                bucket,
+                label_text.as_ref(),
+                row_rect(row, cols, y),
+                live,
+                visible,
+            ) {
+                out.push((Target::Row(row.id), resolved_rect, group));
+            }
             // A binding's reset, right of it, only while it would do something.
             if row.binding().is_some_and(|b| b.reset == Reset::Changed) {
-                out.push((Target::Reset(row.id), reset_rect(cols, y)));
+                let reset_label = Text::literal(lang::get("controls.reset"));
+                if let Some((resolved_rect, group)) = resolve(
+                    crate::widgets::WidgetBucket::Button,
+                    Some(&reset_label),
+                    reset_rect(cols, y),
+                    true,
+                    visible,
+                ) {
+                    out.push((Target::Reset(row.id), resolved_rect, group));
+                }
             }
         }
-        out.extend(self.foot(cols));
+        for (target, rect) in self.foot(cols) {
+            let label = Text::literal(lang::get(match target {
+                Target::Undo => UNDO,
+                Target::Apply => APPLY,
+                _ => DONE,
+            }));
+            if let Some((resolved_rect, group)) = resolve(
+                crate::widgets::WidgetBucket::Button,
+                Some(&label),
+                rect,
+                true,
+                true,
+            ) {
+                out.push((target, resolved_rect, group));
+            }
+        }
         out
+    }
+    /// What Tab steps through, in order, with where each is on screen (`reach`).
+    fn focusables(
+        &self,
+        view: &View<S::Page, S::Row>,
+        near: bool,
+    ) -> Vec<(Target<S::Page, S::Row>, [f32; 4])> {
+        self.focusables_with_groups(view, near)
+            .into_iter()
+            .map(|(target, rect, _)| (target, rect))
+            .collect()
     }
     /// Where Down from the search field goes on a screen with no page list, whose foot is under the
     /// field instead: the first row to use that is all in view.
@@ -2937,7 +3062,16 @@ impl<S: Screen + Default> Hosted for Shell<S> {
         {
             return (Vec::new(), true);
         }
-        if at(cols.search()) {
+        let search_msg =
+            (!self.search.message.is_empty()).then(|| Text::literal(&self.search.message));
+        if at(cols.search())
+            && crate::widgets::matches_selected_engine_widget(
+                crate::widgets::WidgetBucket::Field,
+                search_msg.as_ref(),
+                None,
+                0,
+            )
+        {
             if !self.search.value.is_empty() && at(cols.clear()) {
                 self.search.set_value("");
                 self.searched();
@@ -2952,7 +3086,19 @@ impl<S: Screen + Default> Hosted for Shell<S> {
             self.focus = None;
         }
         for (target, rect) in self.foot(&cols) {
-            if !at(rect) {
+            let label = Text::literal(lang::get(match target {
+                Target::Undo => UNDO,
+                Target::Apply => APPLY,
+                _ => DONE,
+            }));
+            if !at(rect)
+                || !crate::widgets::matches_selected_engine_widget(
+                    crate::widgets::WidgetBucket::Button,
+                    Some(&label),
+                    None,
+                    0,
+                )
+            {
                 continue;
             }
             let outputs = match target {
@@ -2973,23 +3119,108 @@ impl<S: Screen + Default> Hosted for Shell<S> {
             return (outputs, true);
         }
         for (page, rect, _) in self.places(&view).places {
-            if at(rect) && self.has(page, &view) {
+            let name = view
+                .pages
+                .iter()
+                .find(|p| p.id == page)
+                .map(|p| p.name.as_str())
+                .unwrap_or_default();
+            let label = Text::literal(name);
+            if at(rect)
+                && self.has(page, &view)
+                && crate::widgets::matches_selected_engine_widget(
+                    crate::widgets::WidgetBucket::Button,
+                    Some(&label),
+                    None,
+                    0,
+                )
+            {
                 self.focus = Some(Target::Page(page));
                 self.pick(page, &view);
                 return (vec![CLICK], true);
             }
         }
-        let Some((row, row_y)) = self.row_at(&view, (x, y)).filter(|(row, _)| row.live) else {
-            return (Vec::new(), false);
-        };
-        self.focus = Some(Target::Row(row.id));
-        if row.binding().is_some_and(|b| b.reset == Reset::Changed) && at(reset_rect(&cols, row_y))
-        {
-            return (self.reset(s, row.id), true);
+        // Match the clicked row or its reset button against the selected widget identity (using
+        // the exact visible draw-order occurrence counts from `draw_view`).
+        let mut counts: std::collections::HashMap<(String, crate::widgets::WidgetBucket), u32> =
+            std::collections::HashMap::new();
+        for (page, _, _) in self.places(&view).places {
+            let name = view
+                .pages
+                .iter()
+                .find(|p| p.id == page)
+                .map(|p| p.name.as_str())
+                .unwrap_or_default();
+            let key_str = crate::widgets::stable_key_from_text(&Text::literal(name));
+            *counts
+                .entry((key_str, crate::widgets::WidgetBucket::Button))
+                .or_insert(0) += 1;
         }
-        // A press on the track sets the value there; on the name, only focuses.
-        let track = (x >= cols.track().0).then(|| cols.slider_at(x));
-        (self.activate(s, row, shift, track, self.clicks_step), true)
+        if y < cols.top || y >= cols.bottom {
+            return (Vec::new(), false);
+        }
+        let reset_label = Text::literal(lang::get("controls.reset"));
+        let reset_key_str = crate::widgets::stable_key_from_text(&reset_label);
+        for (row, row_y) in self.placed(&view) {
+            if row_y + style::ROW <= cols.top || row_y >= cols.bottom {
+                continue;
+            }
+            let Some((bucket, label_text)) = self.row_widget_spec(row) else {
+                continue;
+            };
+            let key_str = label_text
+                .as_ref()
+                .map(crate::widgets::stable_key_from_text)
+                .unwrap_or_default();
+            let row_occ = {
+                let entry = counts.entry((key_str, bucket)).or_insert(0);
+                let o = *entry;
+                *entry += 1;
+                o
+            };
+            let reset_occ = if row.binding().is_some_and(|b| b.reset.shown()) {
+                let entry = counts
+                    .entry((reset_key_str.clone(), crate::widgets::WidgetBucket::Button))
+                    .or_insert(0);
+                let o = *entry;
+                *entry += 1;
+                Some(o)
+            } else {
+                None
+            };
+            if !row.live || !at(cols.row(row_y)) {
+                continue;
+            }
+            if row.binding().is_some_and(|b| b.reset == Reset::Changed)
+                && at(reset_rect(&cols, row_y))
+            {
+                if let Some(occ) = reset_occ
+                    && crate::widgets::matches_selected_engine_widget(
+                        crate::widgets::WidgetBucket::Button,
+                        Some(&reset_label),
+                        None,
+                        occ,
+                    )
+                {
+                    self.focus = Some(Target::Row(row.id));
+                    return (self.reset(s, row.id), true);
+                }
+                continue;
+            }
+            if !crate::widgets::matches_selected_engine_widget(
+                bucket,
+                label_text.as_ref(),
+                None,
+                row_occ,
+            ) {
+                continue;
+            }
+            self.focus = Some(Target::Row(row.id));
+            // A press on the track sets the value there; on the name, only focuses.
+            let track = (x >= cols.track().0).then(|| cols.slider_at(x));
+            return (self.activate(s, row, shift, track, self.clicks_step), true);
+        }
+        (Vec::new(), false)
     }
     fn drag(
         &mut self,
@@ -3076,6 +3307,10 @@ impl<S: Screen + Default> Hosted for Shell<S> {
         } else {
             (None, scrolled)
         }
+    }
+    fn cancel_drag(&mut self) {
+        self.dragging = None;
+        self.scroll.release();
     }
     fn reveal(&mut self, s: &Settings, size: (f32, f32), [x, y, w, h]: [f32; 4]) -> Option<f32> {
         let view = self.view(s, size);
@@ -3238,14 +3473,24 @@ impl<S: Screen + Default> Hosted for Shell<S> {
             self.reveal_page(next, &view);
             return Vec::new();
         }
-        let focusables = self.focusables(&view, key != K::Tab);
+        let near = matches!(
+            key,
+            K::ArrowUp | K::ArrowDown | K::ArrowLeft | K::ArrowRight
+        );
+        let focusables = self.focusables_with_groups(&view, near);
+        if focusables.is_empty() {
+            return Vec::new();
+        }
         let current = self
             .focus
-            .and_then(|f| focusables.iter().position(|&(t, _)| t == f));
+            .and_then(|f| focusables.iter().position(|&(t, _, _)| t == f));
         if key == K::Tab {
-            let next = tab_step(focusables.len(), current, shift);
-            self.keyed = true;
-            self.focus_on(focusables[next], &view);
+            let groups: Vec<i32> = focusables.iter().map(|&(_, _, g)| g).collect();
+            if let Some(next) = crate::options_ui::tab_step_grouped(&groups, current, shift) {
+                let (target, rect, _) = focusables[next];
+                self.keyed = true;
+                self.focus_on((target, rect), &view);
+            }
             return Vec::new();
         }
         if key == K::ArrowDown
@@ -3288,15 +3533,22 @@ impl<S: Screen + Default> Hosted for Shell<S> {
             key,
             K::ArrowUp | K::ArrowDown | K::ArrowLeft | K::ArrowRight
         ) {
+            let arrow_targets: Vec<(Target<S::Page, S::Row>, [f32; 4])> =
+                focusables.iter().map(|&(t, r, _)| (t, r)).collect();
             let is_row = |t| matches!(t, Target::Row(_));
-            if let Some(next) = arrow_step(&focusables, current, key, &view.cols, is_row) {
+            if let Some(next) = arrow_step(&arrow_targets, current, key, &view.cols, is_row) {
                 self.keyed = true;
-                self.focus_on(focusables[next], &view);
+                self.focus_on(arrow_targets[next], &view);
                 self.can_change_value = false;
             }
             return Vec::new();
         }
         if !matches!(key, K::Space | K::Enter | K::NumpadEnter) {
+            return Vec::new();
+        }
+        if let Some(target) = self.focus
+            && !focusables.iter().any(|&(t, _, _)| t == target)
+        {
             return Vec::new();
         }
         match self.focus {

@@ -697,6 +697,11 @@ impl ModsScreen {
     }
 
     /// A left click: what it asks of the game, and whether it sounds as a button.
+    pub fn cancel_drag(&mut self) {
+        self.list.held = None;
+        self.panel.held = None;
+    }
+
     pub fn click(&mut self, m: &Measure, x: f64, y: f64) -> (Action, bool) {
         let (action, sound, _) = self.click_with_outcome(m, x, y);
         (action, sound)
@@ -710,8 +715,16 @@ impl ModsScreen {
     ) -> (Action, bool, bool) {
         self.place();
         let g = self.geo();
+        let footer_labels = [tr("sunrise.mods.open_folder"), tr("gui.back")];
         for (i, r) in g.footer.into_iter().enumerate() {
-            if hit(r, x, y) {
+            if hit(r, x, y)
+                && crate::widgets::matches_selected_engine_widget(
+                    crate::widgets::WidgetBucket::Button,
+                    Some(&footer_labels[i]),
+                    None,
+                    0,
+                )
+            {
                 self.search.focused = false;
                 let action = if i == 0 {
                     Action::OpenFolder
@@ -721,14 +734,30 @@ impl ModsScreen {
                 return (action, true, true);
             }
         }
-        if hit(g.search, x, y) {
+        if hit(g.search, x, y)
+            && crate::widgets::matches_selected_engine_widget(
+                crate::widgets::WidgetBucket::Field,
+                None,
+                None,
+                0,
+            )
+        {
             self.search.focused = true;
             self.list_focused = false;
             self.search.click(m, x, false, false);
             return (Action::None, false, true);
         }
         self.search.focused = false;
-        if hit(g.sort, x, y) {
+        let sort_name = if self.descending { "z_to_a" } else { "a_to_z" };
+        let sort_label = tr(&format!("sunrise.mods.screen.sort.{sort_name}"));
+        if hit(g.sort, x, y)
+            && crate::widgets::matches_selected_engine_widget(
+                crate::widgets::WidgetBucket::Button,
+                Some(&sort_label),
+                None,
+                0,
+            )
+        {
             self.descending = !self.descending;
             self.refresh();
             return (Action::None, true, true);

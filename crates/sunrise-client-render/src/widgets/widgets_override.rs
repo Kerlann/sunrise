@@ -263,6 +263,11 @@ pub fn with_input_overrides<R>(maps: &mut EngineOverrideMaps, f: impl FnOnce() -
     f()
 }
 
+/// Whether input overrides (`with_input_overrides`) are active on this thread.
+pub fn has_input_overrides() -> bool {
+    HAS_INPUT_OVERRIDES.get()
+}
+
 /// Restrict engine widget input dispatch within `f` to the single widget identified by `key`,
 /// matching vanilla `ContainerEventHandler` delivering press/drag/release to the selected child.
 pub fn with_selected_engine_widget<R>(key: &EngineWidgetKey, f: impl FnOnce() -> R) -> R {
@@ -312,6 +317,38 @@ pub fn matches_selected_engine_widget(
     })
 }
 
+/// Resolve an engine widget's interactive rectangle for input dispatch from an already-derived
+/// [`EngineWidgetKey`].
+pub fn resolve_engine_key_input(
+    key: &EngineWidgetKey,
+    default_rect: [f32; 4],
+    default_active: bool,
+) -> Option<[f32; 4]> {
+    if SELECTED_ENGINE_WIDGET.with_borrow(|slot| slot.as_ref().is_some_and(|s| s != key)) {
+        return None;
+    }
+    if !HAS_INPUT_OVERRIDES.get() {
+        return default_active.then_some(default_rect);
+    }
+    INPUT_OVERRIDES.with_borrow(|slot| {
+        let Some(maps) = slot.as_ref() else {
+            return default_active.then_some(default_rect);
+        };
+        if maps.suppress_all {
+            return None;
+        }
+        let ov = maps.overrides.get(key);
+        if ov.is_some_and(|o| o.removed || o.visible == Some(false)) {
+            return None;
+        }
+        let active = ov.and_then(|o| o.active).unwrap_or(default_active);
+        if !active {
+            return None;
+        }
+        Some(ov.and_then(|o| o.rect).unwrap_or(default_rect))
+    })
+}
+
 /// Resolve an engine widget's interactive rectangle for input dispatch (mouse click, keyboard
 /// Enter/Space activation, controller focus) against the active `EngineOverrideMaps`.
 /// Returns `None` when the widget is suppressed, removed, hidden, or inactive (`visible && active`
@@ -324,29 +361,20 @@ pub fn resolve_engine_input(
     default_rect: [f32; 4],
     default_active: bool,
 ) -> Option<[f32; 4]> {
-    if !matches_selected_engine_widget(bucket, label, explicit_key, occurrence) {
-        return None;
-    }
-    if !HAS_INPUT_OVERRIDES.get() {
-        return default_active.then_some(default_rect);
-    }
     let key = engine_widget_key(bucket, label, explicit_key, occurrence);
+    resolve_engine_key_input(&key, default_rect, default_active)
+}
+
+/// Resolve an engine widget's `tab_order_group` from an already-derived [`EngineWidgetKey`].
+pub fn resolve_engine_key_tab_order_group(key: &EngineWidgetKey, default_group: i32) -> i32 {
+    if !HAS_INPUT_OVERRIDES.get() {
+        return default_group;
+    }
     INPUT_OVERRIDES.with_borrow(|slot| {
-        let Some(maps) = slot.as_ref() else {
-            return default_active.then_some(default_rect);
-        };
-        if maps.suppress_all {
-            return None;
-        }
-        let ov = maps.overrides.get(&key);
-        if ov.is_some_and(|o| o.removed || o.visible == Some(false)) {
-            return None;
-        }
-        let active = ov.and_then(|o| o.active).unwrap_or(default_active);
-        if !active {
-            return None;
-        }
-        Some(ov.and_then(|o| o.rect).unwrap_or(default_rect))
+        slot.as_ref()
+            .and_then(|maps| maps.overrides.get(key))
+            .and_then(|ov| ov.tab_order_group)
+            .unwrap_or(default_group)
     })
 }
 
@@ -363,12 +391,7 @@ pub fn resolve_engine_tab_order_group(
         return default_group;
     }
     let key = engine_widget_key(bucket, label, explicit_key, occurrence);
-    INPUT_OVERRIDES.with_borrow(|slot| {
-        slot.as_ref()
-            .and_then(|maps| maps.overrides.get(&key))
-            .and_then(|ov| ov.tab_order_group)
-            .unwrap_or(default_group)
-    })
+    resolve_engine_key_tab_order_group(&key, default_group)
 }
 
 /// Mark the active [`with_widget_overrides`] pass as vetoed by `ScreenEvent.Render.Pre` so this

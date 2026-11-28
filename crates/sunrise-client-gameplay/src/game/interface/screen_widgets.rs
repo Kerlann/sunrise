@@ -1541,6 +1541,13 @@ impl crate::game::ClientGame<'_> {
         framebuffer: [u32; 2],
         gui: (f32, f32),
     ) -> Result<bool> {
+        let options_screen =
+            self.observed_overlay_now().is_none() && self.client.screen == super::Screen::Options;
+        if options_screen {
+            return self.with_screen_input_overrides(|game| {
+                game.screen_drag_response(overlay, button, framebuffer, gui)
+            });
+        }
         let target = self
             .client
             .screen_state
@@ -1572,6 +1579,24 @@ impl crate::game::ClientGame<'_> {
         pressed: bool,
         double_click: bool,
     ) -> Result<bool> {
+        let options_screen =
+            self.observed_overlay_now().is_none() && self.client.screen == super::Screen::Options;
+        if options_screen {
+            let generation = self.client.screen_state.0.widgets.generation();
+            let res = self.with_screen_input_overrides(|game| {
+                game.route_screen_button(button, code, pressed, double_click)
+            });
+            if pressed
+                && matches!(res, Ok(true))
+                && self.client.screen_state.0.widgets.generation() == generation
+            {
+                let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+                if inner.discovered {
+                    inner.needs_engine_resync = true;
+                }
+            }
+            return res;
+        }
         if !pressed {
             let target = self
                 .client
@@ -3441,8 +3466,9 @@ impl ScreenWidgets for crate::game::ClientGame<'_> {
                 }
                 let direct_override_screen = self.title_input_active()
                     || (self.observed_overlay_now().is_none()
-                        && self.client.screen == super::Screen::Paused
-                        && self.client.pause_menu);
+                        && ((self.client.screen == super::Screen::Paused
+                            && self.client.pause_menu)
+                            || self.client.screen == super::Screen::Options));
                 let target_rect = if direct_override_screen {
                     ov.and_then(|o| o.rect).unwrap_or(slot.default_rect)
                 } else {

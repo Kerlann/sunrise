@@ -345,7 +345,11 @@ impl crate::game::ClientGame<'_> {
             if right {
                 return Ok(false);
             }
-            let (events, handled) = self.client.chat_ui.options.release_with_outcome();
+            let size = self.gui_size();
+            let mut ui = std::mem::take(&mut self.client.chat_ui.options);
+            let (events, handled) =
+                ui.release_with_outcome(&self.client.settings, &self.client.gui.atlas, size);
+            self.client.chat_ui.options = ui;
             self.handle_option_events(events)?;
             return Ok(handled);
         }

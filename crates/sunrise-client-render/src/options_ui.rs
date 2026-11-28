@@ -3,7 +3,9 @@
 //! Language and Resource Packs, laid out like vanilla's HeaderAndFooter /
 //! OptionsList screens and drawn with the shared widgets.
 mod draw;
+mod input_resolver;
 mod pack_drop;
+pub(crate) use input_resolver::tab_step_grouped;
 
 use std::time::Instant;
 
@@ -1780,6 +1782,7 @@ pub struct MusicGroup {
 }
 pub struct OptionsUi {
     frame_draw: Option<draw::FrameDraw>,
+    active_pointer: Option<input_resolver::ActivePointerTarget>,
     pub stack: Vec<Page>,
     scroll: f32,
     pub(crate) dragging: Option<Opt>,
@@ -1907,6 +1910,7 @@ impl Default for OptionsUi {
         settings_search.focused = false;
         Self {
             frame_draw: None,
+            active_pointer: None,
             stack: vec![Page::Main],
             scroll: 0.0,
             dragging: None,
@@ -2388,6 +2392,7 @@ impl OptionsUi {
         self.pending_mod_key = None;
     }
     fn push(&mut self, page: Page) {
+        self.active_pointer = None;
         self.relayout();
         self.stack.push(page);
         self.scroll = 0.0;
@@ -2975,7 +2980,30 @@ impl OptionsUi {
             let (handled, events) = self.drag(s, atlas, (x, y), size, framebuffer, right);
             return (events, handled);
         }
-        let (events, handled) = self.click_unrevised(s, atlas, x, y, size, framebuffer, right);
+        self.active_pointer = None;
+        let (events, handled) = if crate::widgets::has_input_overrides() {
+            match self.resolve_pointer_press(s, atlas, (x, y), size, right) {
+                input_resolver::PointerPressRoute::Block => (Vec::new(), false),
+                input_resolver::PointerPressRoute::PassThrough => {
+                    self.click_unrevised(s, atlas, x, y, size, framebuffer, right)
+                }
+                input_resolver::PointerPressRoute::Select {
+                    target,
+                    mapped: (mx, my),
+                } => {
+                    let (events, handled) =
+                        crate::widgets::with_selected_engine_widget(&target.key, || {
+                            self.click_unrevised(s, atlas, mx, my, size, framebuffer, right)
+                        });
+                    if handled && self.sub_page_key() == target.page_key {
+                        self.active_pointer = Some(target);
+                    }
+                    (events, handled)
+                }
+            }
+        } else {
+            self.click_unrevised(s, atlas, x, y, size, framebuffer, right)
+        };
         // A click that changed nothing the layout reads (an empty spot, a
         // focus move) keeps the built layout.
         if !events.is_empty() {
@@ -2995,6 +3023,20 @@ impl OptionsUi {
         right: bool,
     ) -> (bool, Vec<Event>) {
         self.capture_video_atlas(s);
+        if let Some(res) = self.drag_resolved(s, atlas, (x, y), size, framebuffer, right) {
+            return res;
+        }
+        self.drag_inner(s, atlas, (x, y), size, framebuffer, right)
+    }
+    pub(super) fn drag_inner(
+        &mut self,
+        s: &mut Settings,
+        atlas: &HudAtlas,
+        (x, y): (f32, f32),
+        size: (f32, f32),
+        framebuffer: [i32; 2],
+        right: bool,
+    ) -> (bool, Vec<Event>) {
         if self.resource_error.is_some() {
             return (false, Vec::new());
         }
@@ -3431,11 +3473,23 @@ impl OptionsUi {
         }
     }
     pub fn release(&mut self) -> Vec<Event> {
-        self.release_with_outcome().0
+        self.active_pointer = None;
+        self.release_inner().0
     }
 
     /// The release's events and whether an active slider/scrollbar accepted it.
-    pub fn release_with_outcome(&mut self) -> (Vec<Event>, bool) {
+    pub fn release_with_outcome(
+        &mut self,
+        s: &Settings,
+        atlas: &HudAtlas,
+        size: (f32, f32),
+    ) -> (Vec<Event>, bool) {
+        if let Some(res) = self.release_resolved(s, atlas, size) {
+            return res;
+        }
+        self.release_inner()
+    }
+    pub(super) fn release_inner(&mut self) -> (Vec<Event>, bool) {
         let mut handled = self.scrollbar_drag_y.take().is_some();
         if let Some(p) = &mut self.pack_screen {
             handled |= p.release();
@@ -3795,6 +3849,7 @@ impl OptionsUi {
             .map(|c| c.picture(&atlas.font, size))
     }
     pub fn back(&mut self, s: &mut Settings) -> Vec<Event> {
+        self.active_pointer = None;
         self.relayout();
         let mut events = Vec::new();
         // A pack's screen goes back to the one that opened it.
@@ -4346,29 +4401,15 @@ impl OptionsUi {
 
         // 1. Tab / Shift+Tab navigation (ordered stably by resolved tab_order_group)
         if key == K::Tab {
-            let mut tab_order: Vec<usize> = (0..focusables.len()).collect();
-            tab_order.sort_by_key(|&i| focusables[i].3);
+            let groups: Vec<i32> = focusables.iter().map(|&(_, _, _, g)| g).collect();
             let at = self
                 .focus
                 .as_ref()
-                .and_then(|fid| tab_order.iter().position(|&i| &focusables[i].0 == fid));
-            let next_pos = match at {
-                None => {
-                    if shift {
-                        tab_order.len() - 1
-                    } else {
-                        0
-                    }
-                }
-                Some(p) => {
-                    if shift {
-                        (p + tab_order.len() - 1) % tab_order.len()
-                    } else {
-                        (p + 1) % tab_order.len()
-                    }
-                }
+                .and_then(|fid| focusables.iter().position(|(id, ..)| id == fid));
+            let Some(next_idx) = input_resolver::tab_step_grouped(&groups, at, shift) else {
+                return (false, Vec::new());
             };
-            let (next_id, rect, in_list, _) = &focusables[tab_order[next_pos]];
+            let (next_id, rect, in_list, _) = &focusables[next_idx];
             self.focus = Some(next_id.clone());
             self.focus_from_keyboard = true;
             self.can_change_value = matches!(next_id, FocusId::Slider(_));
@@ -8584,6 +8625,7 @@ mod tests {
     fn options_keyboard_space_enter_emits_button_click_for_cycle_and_default_buttons() {
         use winit::keyboard::KeyCode;
         let mut ui = OptionsUi::default();
+        ui.show(Page::Accessibility);
         let mut s = Settings::default();
         let atlas = atlas();
 
@@ -9089,6 +9131,507 @@ mod tests {
             Some(FocusId::Act(Act::Done)),
             "Shift+Tab from FOV must step back to the negative-group Done button"
         );
+    }
+
+    #[test]
+    fn single_options_entry_resolver_hosted_settings_page() {
+        let atlas = atlas();
+        let mut s = Settings::default();
+        let size = (854.0, 480.0);
+        let fb = [854, 480];
+
+        // 1. First click after switching Main -> Graphics BEFORE any draw resolves against
+        // Graphics's current layout and overrides (not Main's).
+        let mut ui = OptionsUi::default();
+        ui.open(true);
+        ui.size = size;
+        ui.push(Page::Graphics);
+        let collected = ui.collect_page_widgets(&s, &atlas, size);
+        let done_rect = ui
+            .sunrise
+            .foot_at(&s, size)
+            .into_iter()
+            .find_map(|(target, rect)| (target == shell::Target::Done).then_some(rect))
+            .expect("Graphics foot exposes Done target");
+        let done = collected
+            .iter()
+            .find(|w| w.key.bucket == crate::widgets::WidgetBucket::Button && w.rect == done_rect)
+            .expect("Graphics exposes Done button");
+        let search = collected
+            .iter()
+            .find(|w| w.key.bucket == crate::widgets::WidgetBucket::Field)
+            .expect("Graphics exposes Search field");
+        let mut maps = crate::widgets::EngineOverrideMaps::default();
+        maps.overrides.insert(
+            done.key.clone(),
+            crate::widgets::EngineWidgetOverride {
+                visible: Some(false),
+                ..Default::default()
+            },
+        );
+        let (events, handled) = crate::widgets::with_input_overrides(&mut maps, || {
+            ui.click_with_outcome(
+                &mut s,
+                &atlas,
+                done.rect[0] + done.rect[2] * 0.5,
+                done.rect[1] + done.rect[3] * 0.5,
+                size,
+                fb,
+                false,
+                false,
+            )
+        });
+        assert!(
+            !handled,
+            "hidden Done on newly switched Graphics page must be blocked"
+        );
+        assert!(events.is_empty());
+        assert_eq!(ui.page(), Page::Graphics);
+
+        // 2. Overlapping moved widgets: move Done over Search; clicking overlap fires Done
+        // (pops back to Main) and does NOT focus Search.
+        let mut overlap_maps = crate::widgets::EngineOverrideMaps::default();
+        overlap_maps.overrides.insert(
+            done.key.clone(),
+            crate::widgets::EngineWidgetOverride {
+                rect: Some(search.rect),
+                ..Default::default()
+            },
+        );
+        let (events, handled) = crate::widgets::with_input_overrides(&mut overlap_maps, || {
+            ui.click_with_outcome(
+                &mut s,
+                &atlas,
+                search.rect[0] + search.rect[2] * 0.5,
+                search.rect[1] + search.rect[3] * 0.5,
+                size,
+                fb,
+                false,
+                false,
+            )
+        });
+        assert!(handled);
+        assert!(events.contains(&Event::ButtonClick));
+        assert_eq!(
+            ui.page(),
+            Page::Main,
+            "moved Done over Search must activate Done"
+        );
+        assert_ne!(ui.sunrise.focused(), Some(shell::Target::Search));
+
+        // 3. Hidden focused Done takes no Enter/Space; Tab follows tab_order_group in both
+        // directions; focused Search consumes Space without activating any button.
+        ui.push(Page::Graphics);
+        ui.sunrise.set_focus(Some(shell::Target::Done));
+        for key in [
+            winit::keyboard::KeyCode::Enter,
+            winit::keyboard::KeyCode::Space,
+        ] {
+            let (handled, events) = crate::widgets::with_input_overrides(&mut maps, || {
+                ui.key_input(&mut s, &atlas, key, None, false)
+            });
+            assert!(!handled, "hidden focused Done must ignore {key:?}");
+            assert!(events.is_empty());
+            assert_eq!(ui.page(), Page::Graphics);
+        }
+
+        ui.sunrise.set_focus(None);
+        let mut group_maps = crate::widgets::EngineOverrideMaps::default();
+        group_maps.overrides.insert(
+            done.key.clone(),
+            crate::widgets::EngineWidgetOverride {
+                tab_order_group: Some(-10),
+                ..Default::default()
+            },
+        );
+        crate::widgets::with_input_overrides(&mut group_maps, || {
+            let _ = ui.key_input(&mut s, &atlas, winit::keyboard::KeyCode::Tab, None, false);
+        });
+        assert_eq!(ui.sunrise.focused(), Some(shell::Target::Done));
+        crate::widgets::with_input_overrides(&mut group_maps, || {
+            let _ = ui.key_input(&mut s, &atlas, winit::keyboard::KeyCode::Tab, None, false);
+        });
+        assert_eq!(ui.sunrise.focused(), Some(shell::Target::Search));
+        crate::widgets::with_input_overrides(&mut group_maps, || {
+            let _ = ui.key_input(&mut s, &atlas, winit::keyboard::KeyCode::Tab, None, true);
+        });
+        assert_eq!(ui.sunrise.focused(), Some(shell::Target::Done));
+
+        // Focused Search consumes Space instead of activating a button.
+        ui.sunrise.set_focus(Some(shell::Target::Search));
+        let (handled, events) = crate::widgets::with_input_overrides(&mut group_maps, || {
+            ui.key_input(
+                &mut s,
+                &atlas,
+                winit::keyboard::KeyCode::Space,
+                Some(" "),
+                false,
+            )
+        });
+        assert!(!handled);
+        assert!(events.is_empty());
+        assert_eq!(ui.page(), Page::Graphics);
+
+        // 4. Hosted row identity: a click dispatched with a different selected widget identity
+        // must not activate or start dragging the hosted row under the pointer.
+        let graphics_widgets = ui.collect_page_widgets(&s, &atlas, size);
+        let hosted_slider = graphics_widgets
+            .iter()
+            .find(|w| w.key.bucket == crate::widgets::WidgetBucket::Slider)
+            .expect("Graphics exposes at least one hosted slider row");
+        let other_key = done.key.clone();
+        let (row_events, row_handled) =
+            crate::widgets::with_selected_engine_widget(&other_key, || {
+                ui.click_unrevised(
+                    &mut s,
+                    &atlas,
+                    hosted_slider.rect[0] + hosted_slider.rect[2] * 0.5,
+                    hosted_slider.rect[1] + hosted_slider.rect[3] * 0.5,
+                    size,
+                    fb,
+                    false,
+                )
+            });
+        assert!(
+            !row_handled,
+            "hosted row must not activate when a different widget identity is selected"
+        );
+        assert!(row_events.is_empty());
+    }
+
+    #[test]
+    fn single_options_entry_resolver_mods_and_packs_pages() {
+        let atlas = atlas();
+        let mut s = Settings::default();
+        let size = (854.0, 480.0);
+        let fb = [854, 480];
+
+        // 1. Mods: switch Main -> Mods and click before draw; move OpenFolder over Back.
+        let mut ui = OptionsUi::default();
+        ui.open(true);
+        ui.size = size;
+        ui.push(Page::Mods);
+        let mods_widgets = ui.collect_page_widgets(&s, &atlas, size);
+        let open_folder = mods_widgets
+            .iter()
+            .find(|w| w.key.key == "sunrise.mods.open_folder")
+            .expect("Mods exposes OpenFolder button");
+        let back = mods_widgets
+            .iter()
+            .find(|w| w.key.key == "gui.back")
+            .expect("Mods exposes Back button");
+        let mut mods_maps = crate::widgets::EngineOverrideMaps::default();
+        mods_maps.overrides.insert(
+            open_folder.key.clone(),
+            crate::widgets::EngineWidgetOverride {
+                rect: Some(back.rect),
+                ..Default::default()
+            },
+        );
+        let (events, handled) = crate::widgets::with_input_overrides(&mut mods_maps, || {
+            ui.click_with_outcome(
+                &mut s,
+                &atlas,
+                back.rect[0] + back.rect[2] * 0.5,
+                back.rect[1] + back.rect[3] * 0.5,
+                size,
+                fb,
+                false,
+                false,
+            )
+        });
+        assert!(handled);
+        assert!(
+            events.contains(&Event::OpenModFolder),
+            "moved OpenFolder over Back must trigger OpenModFolder"
+        );
+        assert_eq!(ui.page(), Page::Mods, "Back underneath must not run");
+
+        // 2. Packs: switch to Packs and click before draw; move OpenFolder over Done, hide Done.
+        ui.push(Page::Packs);
+        let packs_widgets = ui.collect_page_widgets(&s, &atlas, size);
+        let pack_folder = packs_widgets
+            .iter()
+            .find(|w| w.key.key == "pack.openFolder")
+            .expect("Packs exposes OpenFolder button");
+        let pack_done = packs_widgets
+            .iter()
+            .find(|w| w.key.key == "gui.done")
+            .expect("Packs exposes Done button");
+        let mut pack_maps = crate::widgets::EngineOverrideMaps::default();
+        pack_maps.overrides.insert(
+            pack_folder.key.clone(),
+            crate::widgets::EngineWidgetOverride {
+                rect: Some(pack_done.rect),
+                ..Default::default()
+            },
+        );
+        let (events, handled) = crate::widgets::with_input_overrides(&mut pack_maps, || {
+            ui.click_with_outcome(
+                &mut s,
+                &atlas,
+                pack_done.rect[0] + pack_done.rect[2] * 0.5,
+                pack_done.rect[1] + pack_done.rect[3] * 0.5,
+                size,
+                fb,
+                false,
+                false,
+            )
+        });
+        assert!(handled);
+        assert!(
+            events.contains(&Event::OpenPackFolder),
+            "moved OpenFolder over Done must trigger OpenPackFolder"
+        );
+        assert_eq!(ui.page(), Page::Packs, "Done underneath must not run");
+    }
+
+    #[test]
+    fn single_options_entry_resolver_hdr_calibration_and_radial_name() {
+        let atlas = atlas();
+        let mut s = Settings::default();
+        let size = (854.0, 480.0);
+        let fb = [854, 480];
+
+        // 1. HDR Calibration: move slider over Cancel -> press/drag updates slider without Cancel;
+        // hiding slider mid-drag cancels drag without emitting ButtonClick/Changed on release;
+        // hiding Next blocks Enter while Escape still cancels.
+        let mut ui = OptionsUi::default();
+        ui.open(true);
+        ui.size = size;
+        ui.calibration = Some(crate::hdr_calibration::Calibration::new(
+            &s,
+            &crate::gfx::EffectiveOutput::NONE,
+        ));
+        ui.push(Page::HdrCalibration);
+        let hdr_widgets = ui.collect_page_widgets(&s, &atlas, size);
+        let slider = hdr_widgets
+            .iter()
+            .find(|w| w.key.bucket == crate::widgets::WidgetBucket::Slider)
+            .expect("HDR exposes calibration slider");
+        let cancel = hdr_widgets
+            .iter()
+            .find(|w| w.key.key == lang::get_or("gui.cancel", "Cancel"))
+            .expect("HDR exposes Cancel button");
+        let next = hdr_widgets
+            .iter()
+            .find(|w| w.key.key == lang::get("Next"))
+            .expect("HDR exposes Next button");
+
+        let mut hdr_maps = crate::widgets::EngineOverrideMaps::default();
+        hdr_maps.overrides.insert(
+            slider.key.clone(),
+            crate::widgets::EngineWidgetOverride {
+                rect: Some(cancel.rect),
+                ..Default::default()
+            },
+        );
+        let (_, handled) = crate::widgets::with_input_overrides(&mut hdr_maps, || {
+            ui.click_with_outcome(
+                &mut s,
+                &atlas,
+                cancel.rect[0] + 4.0,
+                cancel.rect[1] + cancel.rect[3] * 0.5,
+                size,
+                fb,
+                false,
+                false,
+            )
+        });
+        assert!(handled);
+        assert_eq!(
+            ui.page(),
+            Page::HdrCalibration,
+            "moved slider over Cancel must not trigger Cancel"
+        );
+        let (dragged, _) = crate::widgets::with_input_overrides(&mut hdr_maps, || {
+            ui.drag(
+                &mut s,
+                &atlas,
+                (
+                    cancel.rect[0] + cancel.rect[2] - 4.0,
+                    cancel.rect[1] + cancel.rect[3] * 0.5,
+                ),
+                size,
+                fb,
+                false,
+            )
+        });
+        assert!(dragged, "moved slider must continue receiving drag");
+
+        // Hide the slider mid-drag: drag cancels and release emits no action.
+        hdr_maps.overrides.insert(
+            slider.key.clone(),
+            crate::widgets::EngineWidgetOverride {
+                visible: Some(false),
+                ..Default::default()
+            },
+        );
+        let (dragged_after_hide, drag_events) =
+            crate::widgets::with_input_overrides(&mut hdr_maps, || {
+                ui.drag(
+                    &mut s,
+                    &atlas,
+                    (cancel.rect[0] + 10.0, cancel.rect[1] + 5.0),
+                    size,
+                    fb,
+                    false,
+                )
+            });
+        assert!(
+            !dragged_after_hide,
+            "hiding slider mid-drag must cancel drag"
+        );
+        assert!(drag_events.is_empty());
+        let (rel_events, rel_handled) = crate::widgets::with_input_overrides(&mut hdr_maps, || {
+            ui.release_with_outcome(&s, &atlas, size)
+        });
+        assert!(!rel_handled);
+        assert!(rel_events.is_empty());
+
+        // Press slider, then hide it BEFORE release with NO intervening drag: fresh lookup on
+        // release must cancel the drag without firing ButtonClick or Changed.
+        hdr_maps.overrides.insert(
+            slider.key.clone(),
+            crate::widgets::EngineWidgetOverride {
+                rect: Some(cancel.rect),
+                ..Default::default()
+            },
+        );
+        let (_, pressed_again) = crate::widgets::with_input_overrides(&mut hdr_maps, || {
+            ui.click_with_outcome(
+                &mut s,
+                &atlas,
+                cancel.rect[0] + 4.0,
+                cancel.rect[1] + cancel.rect[3] * 0.5,
+                size,
+                fb,
+                false,
+                false,
+            )
+        });
+        assert!(pressed_again);
+        hdr_maps.overrides.insert(
+            slider.key.clone(),
+            crate::widgets::EngineWidgetOverride {
+                visible: Some(false),
+                ..Default::default()
+            },
+        );
+        let (stale_rel_events, stale_rel_handled) =
+            crate::widgets::with_input_overrides(&mut hdr_maps, || {
+                ui.release_with_outcome(&s, &atlas, size)
+            });
+        assert!(
+            !stale_rel_handled,
+            "release without intervening drag must cancel when widget became ineligible"
+        );
+        assert!(stale_rel_events.is_empty());
+
+        // Hidden Next blocks Enter; Escape still cancels.
+        hdr_maps.overrides.insert(
+            next.key.clone(),
+            crate::widgets::EngineWidgetOverride {
+                visible: Some(false),
+                ..Default::default()
+            },
+        );
+        let (enter_handled, enter_events) =
+            crate::widgets::with_input_overrides(&mut hdr_maps, || {
+                ui.key_input(&mut s, &atlas, winit::keyboard::KeyCode::Enter, None, false)
+            });
+        assert!(!enter_handled, "hidden HDR Next must block Enter");
+        assert!(enter_events.is_empty());
+        assert_eq!(ui.page(), Page::HdrCalibration);
+        let (esc_handled, _) = crate::widgets::with_input_overrides(&mut hdr_maps, || {
+            ui.key_input(
+                &mut s,
+                &atlas,
+                winit::keyboard::KeyCode::Escape,
+                None,
+                false,
+            )
+        });
+        assert!(esc_handled);
+        assert_eq!(
+            ui.page(),
+            Page::Main,
+            "Escape must remain a page cancel action"
+        );
+
+        // 2. RadialName: focused field consumes Space; hidden Done blocks Enter; Escape goes Back;
+        // moved Done over Cancel applies Done and does not Cancel.
+        ui.radial.screen.naming = Some(crate::radial_editor::NameEntry::new(0, "Alpha"));
+        ui.push(Page::ControllerRadialName);
+        let rn_widgets = ui.collect_page_widgets(&s, &atlas, size);
+        let rn_done = rn_widgets
+            .iter()
+            .find(|w| w.key.key == lang::get("gui.done"))
+            .expect("RadialName exposes Done button");
+        let rn_cancel = rn_widgets
+            .iter()
+            .find(|w| w.key.key == lang::get("gui.cancel"))
+            .expect("RadialName exposes Cancel button");
+
+        let mut rn_maps = crate::widgets::EngineOverrideMaps::default();
+        rn_maps.overrides.insert(
+            rn_done.key.clone(),
+            crate::widgets::EngineWidgetOverride {
+                visible: Some(false),
+                ..Default::default()
+            },
+        );
+        let (_, space_events) = crate::widgets::with_input_overrides(&mut rn_maps, || {
+            ui.key_input(
+                &mut s,
+                &atlas,
+                winit::keyboard::KeyCode::Space,
+                Some(" "),
+                false,
+            )
+        });
+        assert!(space_events.is_empty());
+        assert_eq!(
+            ui.radial.screen.naming.as_ref().unwrap().value(),
+            "Alpha ",
+            "focused RadialName field must consume Space"
+        );
+        let (enter_handled, enter_events) =
+            crate::widgets::with_input_overrides(&mut rn_maps, || {
+                ui.key_input(&mut s, &atlas, winit::keyboard::KeyCode::Enter, None, false)
+            });
+        assert!(!enter_handled, "hidden RadialName Done must block Enter");
+        assert!(enter_events.is_empty());
+        assert_eq!(ui.page(), Page::ControllerRadialName);
+
+        // Move Done over Cancel: clicking overlap fires Done (Event::Changed + pops back).
+        let mut rn_overlap = crate::widgets::EngineOverrideMaps::default();
+        rn_overlap.overrides.insert(
+            rn_done.key.clone(),
+            crate::widgets::EngineWidgetOverride {
+                rect: Some(rn_cancel.rect),
+                ..Default::default()
+            },
+        );
+        let (events, handled) = crate::widgets::with_input_overrides(&mut rn_overlap, || {
+            ui.click_with_outcome(
+                &mut s,
+                &atlas,
+                rn_cancel.rect[0] + rn_cancel.rect[2] * 0.5,
+                rn_cancel.rect[1] + rn_cancel.rect[3] * 0.5,
+                size,
+                fb,
+                false,
+                false,
+            )
+        });
+        assert!(handled);
+        assert!(
+            ui.radial.screen.naming.is_none(),
+            "moved Done over Cancel must apply Done (taking naming), not Cancel"
+        );
+        assert!(events.contains(&Event::Changed));
+        assert_eq!(ui.page(), Page::Main);
     }
 }
 
