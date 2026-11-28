@@ -5538,7 +5538,13 @@ impl crate::game::ClientGame<'_> {
                     || (!title.has_caret_field()
                         && (title.list_focused() || title.focused_button.is_some())) =>
             {
-                let (action, sound) = title.confirm_key_size(size);
+                let (action, sound) = self.with_screen_input_overrides(|game| {
+                    game.client
+                        .title
+                        .0
+                        .as_mut()
+                        .map_or((Action::None, false), |title| title.confirm_key_size(size))
+                });
                 let handled = sound || !matches!(action, Action::None);
                 self.save_title_options();
                 if sound {

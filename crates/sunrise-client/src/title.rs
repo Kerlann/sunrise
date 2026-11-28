@@ -2262,15 +2262,43 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
             }
         }
         if matches!(self.mode, Mode::Main) {
-            let [bx, by, bw, bh] = self.credits_button.get();
-            if (bx..bx + bw).contains(&x) && (by..by + bh).contains(&y) {
+            let credits_text = Text::translate(CREDITS_KEY, &[]);
+            if let Some([bx, by, bw, bh]) = crate::widgets::resolve_engine_input(
+                crate::widgets::WidgetBucket::Button,
+                Some(&credits_text),
+                None,
+                0,
+                self.credits_button.get(),
+                true,
+            ) && (bx..bx + bw).contains(&x)
+                && (by..by + bh).contains(&y)
+            {
                 return (Action::Credits, true, true);
             }
         }
+        let mut counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
         let hit = self
             .buttons(w, h)
             .into_iter()
-            .find(|b| b.enabled && x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + 20.0)
+            .find(|b| {
+                let label = b.display_text();
+                let key = crate::widgets::stable_key_from_text(label.as_ref());
+                let occ = {
+                    let c = counts.entry(key).or_insert(0);
+                    let cur = *c;
+                    *c = cur.saturating_add(1);
+                    cur
+                };
+                crate::widgets::resolve_engine_input(
+                    crate::widgets::WidgetBucket::Button,
+                    Some(label.as_ref()),
+                    None,
+                    occ,
+                    [b.x, b.y, b.w, 20.0],
+                    b.enabled,
+                )
+                .is_some_and(|[bx, by, bw, bh]| x >= bx && x < bx + bw && y >= by && y < by + bh)
+            })
             .map(|b| b.id);
         if hit.is_some() {
             self.focused_button = hit;
@@ -2997,7 +3025,28 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
         if let Some(id) = self.focused_button {
             let (w, h) = size;
             let buttons = self.buttons(w, h);
-            if let Some(b) = buttons.into_iter().find(|b| b.id == id && b.enabled) {
+            let mut counts: std::collections::HashMap<String, u32> =
+                std::collections::HashMap::new();
+            if let Some(b) = buttons.into_iter().find(|b| {
+                let label = b.display_text();
+                let key = crate::widgets::stable_key_from_text(label.as_ref());
+                let occ = {
+                    let c = counts.entry(key).or_insert(0);
+                    let cur = *c;
+                    *c = cur.saturating_add(1);
+                    cur
+                };
+                b.id == id
+                    && crate::widgets::resolve_engine_input(
+                        crate::widgets::WidgetBucket::Button,
+                        Some(label.as_ref()),
+                        None,
+                        occ,
+                        [b.x, b.y, b.w, 20.0],
+                        b.enabled,
+                    )
+                    .is_some()
+            }) {
                 let action = self.click_action(b.x, b.y, (w, h), Some(id), &mut true);
                 return (action, true);
             }

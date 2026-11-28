@@ -1415,9 +1415,27 @@ impl crate::game::ClientGame<'_> {
         EngineClickRoute::PassThrough
     }
 
-    /// Route a real mouse button edge through [`Self::resolve_engine_click_cursor`] before calling
-    /// [`Self::route_screen_button`], so moved engine widgets click at their new rectangle and
-    /// removed/hidden/disabled/moved-away widgets never accept clicks at their old rectangle.
+    /// Run an input handler with a snapshot of the active screen's `EngineOverrideMaps` exposed
+    /// via `widgets::resolve_engine_input`.
+    pub(in crate::game) fn with_screen_input_overrides<R>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let maps = {
+            let inner = self.client.screen_state.0.widgets.inner.borrow();
+            if !inner.overrides_active {
+                return f(self);
+            }
+            inner.engine_overrides.clone()
+        };
+        let mut maps = maps;
+        widgets::with_input_overrides(&mut maps, || f(self))
+    }
+
+    /// Route a real mouse button edge through active engine widget overrides before calling
+    /// [`Self::route_screen_button`], so moved engine widgets click at their new rectangle,
+    /// removed/hidden/disabled/suppressed widgets never activate, and container screens still
+    /// dispatch slots when an engine widget is blocked.
     pub(in crate::game) fn route_screen_button_with_overrides(
         &mut self,
         button: MouseButton,
@@ -1426,22 +1444,48 @@ impl crate::game::ClientGame<'_> {
         double_click: bool,
     ) -> Result<bool> {
         if !pressed {
-            return self.route_screen_button(button, code, false, double_click);
+            return self.with_screen_input_overrides(|game| {
+                game.route_screen_button(button, code, false, double_click)
+            });
         }
         let generation = self.client.screen_state.0.widgets.generation();
-        let res = match self.resolve_engine_click_cursor(self.client.cursor) {
-            EngineClickRoute::PassThrough => {
-                self.route_screen_button(button, code, true, double_click)
-            }
-            EngineClickRoute::Block => Ok(false),
-            EngineClickRoute::Redirect(mapped) => {
-                let prev = self.client.cursor;
-                self.client.cursor = mapped;
-                let res = self.with_redirecting_engine_click(|game| {
+        let direct_override_screen = self.title_input_active()
+            || (self.observed_overlay_now().is_none()
+                && self.client.screen == super::Screen::Paused
+                && self.client.pause_menu);
+        let container_screen = self.observed_overlay_now().is_none()
+            && matches!(
+                self.client.screen,
+                super::Screen::Inventory | super::Screen::Creative
+            );
+        let res = if direct_override_screen {
+            self.with_screen_input_overrides(|game| {
+                game.route_screen_button(button, code, true, double_click)
+            })
+        } else {
+            match self.resolve_engine_click_cursor(self.client.cursor) {
+                EngineClickRoute::PassThrough => self.with_screen_input_overrides(|game| {
                     game.route_screen_button(button, code, true, double_click)
-                });
-                self.client.cursor = prev;
-                res
+                }),
+                EngineClickRoute::Block if container_screen => {
+                    widgets::with_blocking_engine_widget_click(|| {
+                        self.with_screen_input_overrides(|game| {
+                            game.route_screen_button(button, code, true, double_click)
+                        })
+                    })
+                }
+                EngineClickRoute::Block => Ok(false),
+                EngineClickRoute::Redirect(mapped) => {
+                    let prev = self.client.cursor;
+                    self.client.cursor = mapped;
+                    let res = self.with_redirecting_engine_click(|game| {
+                        game.with_screen_input_overrides(|game| {
+                            game.route_screen_button(button, code, true, double_click)
+                        })
+                    });
+                    self.client.cursor = prev;
+                    res
+                }
             }
         };
         if matches!(res, Ok(true)) && self.client.screen_state.0.widgets.generation() == generation
@@ -1603,8 +1647,21 @@ impl crate::game::ClientGame<'_> {
             );
         }
 
+        let mut suppressed_hits: Vec<widgets::EngineHitEntry> = Vec::new();
         if pre_canceled {
             engine_overrides.suppress_all = true;
+            // Pure discovery populates suppressed hit rects immediately so a press before the
+            // first draw cannot reach the original engine controls, while keeping `children()`
+            // free of engine widgets.
+            for item in self.discover_screen_widgets() {
+                suppressed_hits.push(widgets::EngineHitEntry {
+                    key: item.key,
+                    original_rect: item.rect,
+                    resolved_rect: item.rect,
+                    interactive: false,
+                    blocks_original: true,
+                });
+            }
         } else {
             let collected = self.discover_screen_widgets();
             for item in collected {
@@ -1666,7 +1723,11 @@ impl crate::game::ClientGame<'_> {
                 .position(|entry| entry.id == id && entry.can_focus())
         });
         let order: Vec<ScreenWidgetId> = mount.children.iter().map(|c| c.id).collect();
-        let engine_hits = build_engine_hits(&engine_children, &engine_overrides);
+        let engine_hits = if pre_canceled {
+            suppressed_hits
+        } else {
+            build_engine_hits(&engine_children, &engine_overrides)
+        };
         let engine_id_by_key: HashMap<widgets::EngineWidgetKey, ScreenWidgetId> = engine_children
             .iter()
             .map(|slot| (slot.key.clone(), slot.id))
@@ -3137,13 +3198,21 @@ impl ScreenWidgets for crate::game::ClientGame<'_> {
                 if removed || !visible || !active {
                     return false;
                 }
-                let orig_rect = inner
-                    .engine_hits
-                    .iter()
-                    .find(|h| h.key == slot.key)
-                    .map(|h| h.original_rect)
-                    .unwrap_or(slot.default_rect);
-                Some(TargetKind::Engine(orig_rect))
+                let direct_override_screen = self.title_input_active()
+                    || (self.observed_overlay_now().is_none()
+                        && self.client.screen == super::Screen::Paused
+                        && self.client.pause_menu);
+                let target_rect = if direct_override_screen {
+                    ov.and_then(|o| o.rect).unwrap_or(slot.default_rect)
+                } else {
+                    inner
+                        .engine_hits
+                        .iter()
+                        .find(|h| h.key == slot.key)
+                        .map(|h| h.original_rect)
+                        .unwrap_or(slot.default_rect)
+                };
+                Some(TargetKind::Engine(target_rect))
             } else {
                 None
             }
@@ -3167,7 +3236,9 @@ impl ScreenWidgets for crate::game::ClientGame<'_> {
                 self.client.cursor = (ox + ow * 0.5, oy + oh * 0.5);
                 let handled = self
                     .with_redirecting_engine_click(|game| {
-                        game.route_screen_button(MouseButton::Left, 0, true, false)
+                        game.with_screen_input_overrides(|game| {
+                            game.route_screen_button(MouseButton::Left, 0, true, false)
+                        })
                     })
                     .unwrap_or(false);
                 self.settle_title_mode();

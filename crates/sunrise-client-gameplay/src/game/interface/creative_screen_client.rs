@@ -23,8 +23,9 @@ impl crate::game::ClientGame<'_> {
         let (ox, oy) = Self::creative_origin(&batch);
         let (cx, cy) = self.client.cursor;
         // NeoForge's page buttons, when mods add tabs.
-        if let Some(step) =
-            Self::creative_page_button(ox, oy, (cx, cy), self.client.creative_screen.0.pages())
+        if !sunrise_client::widgets::is_blocking_engine_widget_click()
+            && let Some(step) =
+                Self::creative_page_button(ox, oy, (cx, cy), self.client.creative_screen.0.pages())
         {
             // Page buttons are outside the inventory panel; their release must
             // not throw a carried stack, including when the button is disabled.
@@ -83,7 +84,10 @@ impl crate::game::ClientGame<'_> {
             }
             return false;
         }
-        if !right && self.creative_search_click(ox, oy) {
+        if !right
+            && !sunrise_client::widgets::is_blocking_engine_widget_click()
+            && self.creative_search_click(ox, oy)
+        {
             return true;
         }
         // Holding the scrollbar scrolls as the mouse moves (mouseDragged).

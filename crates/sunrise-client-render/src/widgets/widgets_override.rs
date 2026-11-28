@@ -183,14 +183,104 @@ struct ActiveOverridePass {
 thread_local! {
     static COLLECTING: Cell<bool> = const { Cell::new(false) };
     static HAS_OVERRIDES: Cell<bool> = const { Cell::new(false) };
+    static HAS_INPUT_OVERRIDES: Cell<bool> = const { Cell::new(false) };
+    static BLOCKING_ENGINE_WIDGET_CLICK: Cell<bool> = const { Cell::new(false) };
     static BYPASS_OVERRIDES: Cell<bool> = const { Cell::new(false) };
     static COLLECTOR: RefCell<Option<CollectorState>> = const { RefCell::new(None) };
     static ACTIVE_OVERRIDES: RefCell<Option<ActiveOverridePass>> = const { RefCell::new(None) };
+    static INPUT_OVERRIDES: RefCell<Option<EngineOverrideMaps>> = const { RefCell::new(None) };
 }
 
 /// Whether a widget discovery pass is currently running on this thread.
 pub fn is_collecting_widgets() -> bool {
     COLLECTING.get()
+}
+
+/// Whether the current container-screen press landed on a suppressed/removed/disabled/moved-away
+/// engine widget, so widget-level click handlers must ignore the press while container slots
+/// continue normal dispatch.
+pub fn is_blocking_engine_widget_click() -> bool {
+    BLOCKING_ENGINE_WIDGET_CLICK.get()
+}
+
+/// Run `f` with `BLOCKING_ENGINE_WIDGET_CLICK` set, unconditionally restoring the prior flag.
+pub fn with_blocking_engine_widget_click<R>(f: impl FnOnce() -> R) -> R {
+    struct Guard(bool);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            BLOCKING_ENGINE_WIDGET_CLICK.set(self.0);
+        }
+    }
+    let _guard = Guard(BLOCKING_ENGINE_WIDGET_CLICK.replace(true));
+    f()
+}
+
+/// Run `f` with `maps` exposed for input override resolution (`resolve_engine_input`),
+/// unconditionally restoring `maps` on normal return or unwind.
+pub fn with_input_overrides<R>(maps: &mut EngineOverrideMaps, f: impl FnOnce() -> R) -> R {
+    struct Guard<'a> {
+        dest: &'a mut EngineOverrideMaps,
+        prev_has: bool,
+        prev_maps: Option<EngineOverrideMaps>,
+    }
+    impl Drop for Guard<'_> {
+        fn drop(&mut self) {
+            HAS_INPUT_OVERRIDES.set(self.prev_has);
+            if let Some(current) = INPUT_OVERRIDES.replace(self.prev_maps.take()) {
+                *self.dest = current;
+            }
+        }
+    }
+    let taken = std::mem::take(maps);
+    let _guard = Guard {
+        dest: maps,
+        prev_has: HAS_INPUT_OVERRIDES.replace(true),
+        prev_maps: INPUT_OVERRIDES.replace(Some(taken)),
+    };
+    f()
+}
+
+/// Resolve an engine widget's interactive rectangle for input dispatch (mouse click, keyboard
+/// Enter/Space activation, controller focus) against the active `EngineOverrideMaps`.
+/// Returns `None` when the widget is suppressed, removed, hidden, or inactive (`visible && active`
+/// per vanilla `AbstractButton.onClick` / `keyPressed`).
+pub fn resolve_engine_input(
+    bucket: WidgetBucket,
+    label: Option<&Text>,
+    explicit_key: Option<&str>,
+    occurrence: u32,
+    default_rect: [f32; 4],
+    default_active: bool,
+) -> Option<[f32; 4]> {
+    if !HAS_INPUT_OVERRIDES.get() {
+        return default_active.then_some(default_rect);
+    }
+    let key_str = match explicit_key {
+        Some(explicit) => explicit.to_owned(),
+        None => label.map(stable_key_from_text).unwrap_or_default(),
+    };
+    let key = EngineWidgetKey {
+        key: key_str,
+        bucket,
+        occurrence,
+    };
+    INPUT_OVERRIDES.with_borrow(|slot| {
+        let Some(maps) = slot.as_ref() else {
+            return default_active.then_some(default_rect);
+        };
+        if maps.suppress_all {
+            return None;
+        }
+        let ov = maps.overrides.get(&key);
+        if ov.is_some_and(|o| o.removed || o.visible == Some(false)) {
+            return None;
+        }
+        let active = ov.and_then(|o| o.active).unwrap_or(default_active);
+        if !active {
+            return None;
+        }
+        Some(ov.and_then(|o| o.rect).unwrap_or(default_rect))
+    })
 }
 
 /// Take the deferred tooltip scheduled by an overridden engine widget during the active

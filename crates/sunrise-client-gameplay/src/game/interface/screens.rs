@@ -556,14 +556,29 @@ impl crate::game::ClientGame<'_> {
                 &fallback
             }
         };
+        let additions = self.pause_screen_additions();
+        let pause_button_label = |key: &'static str, id: u8| -> Text {
+            match (id, &additions) {
+                (14, Some((label, _))) => label.clone(),
+                _ => Text::translate(key, &[]),
+            }
+        };
         let icons = layout.icons;
         let hit = layout
             .buttons
             .iter()
             .copied()
             .find(|b| {
-                b.5 && !self.engine_rect_blocked([b.0, b.1, b.2, 20.0])
-                    && ui::hovered(self.client.cursor, b.0, b.1, b.2, 20.0)
+                let label = pause_button_label(b.3, b.4);
+                widgets::resolve_engine_input(
+                    widgets::WidgetBucket::Button,
+                    Some(&label),
+                    None,
+                    0,
+                    [b.0, b.1, b.2, 20.0],
+                    b.5,
+                )
+                .is_some_and(|[rx, ry, rw, rh]| ui::hovered(self.client.cursor, rx, ry, rw, rh))
             })
             .map(|b| b.4)
             .or_else(|| {
@@ -571,26 +586,35 @@ impl crate::game::ClientGame<'_> {
                 [0, 1, 3]
                     .into_iter()
                     .find(|&i| {
-                        !self.engine_rect_blocked([icons[i].0, icons[i].1, 20.0, 20.0])
-                            && ui::hovered(self.client.cursor, icons[i].0, icons[i].1, 20.0, 20.0)
+                        let label = Text::translate(ICON_LABELS[i], &[]);
+                        widgets::resolve_engine_input(
+                            widgets::WidgetBucket::Button,
+                            Some(&label),
+                            None,
+                            0,
+                            [icons[i].0, icons[i].1, 20.0, 20.0],
+                            true,
+                        )
+                        .is_some_and(|[rx, ry, rw, rh]| {
+                            ui::hovered(self.client.cursor, rx, ry, rw, rh)
+                        })
                     })
                     .map(|i| 12 + i as u8)
             })
             .or_else(|| {
+                let label = Text::translate(ICON_LABELS[FRIENDS_ICON], &[]);
                 (self.friends_shown()
-                    && !self.engine_rect_blocked([
-                        icons[FRIENDS_ICON].0,
-                        icons[FRIENDS_ICON].1,
-                        20.0,
-                        20.0,
-                    ])
-                    && ui::hovered(
-                        self.client.cursor,
-                        icons[FRIENDS_ICON].0,
-                        icons[FRIENDS_ICON].1,
-                        20.0,
-                        20.0,
-                    ))
+                    && widgets::resolve_engine_input(
+                        widgets::WidgetBucket::Button,
+                        Some(&label),
+                        None,
+                        0,
+                        [icons[FRIENDS_ICON].0, icons[FRIENDS_ICON].1, 20.0, 20.0],
+                        true,
+                    )
+                    .is_some_and(|[rx, ry, rw, rh]| {
+                        ui::hovered(self.client.cursor, rx, ry, rw, rh)
+                    }))
                 .then_some(10)
             });
         if let Some(id) = hit {
@@ -602,6 +626,9 @@ impl crate::game::ClientGame<'_> {
         Ok(hit.is_some())
     }
     pub(in crate::game::client_side) fn pause_key(&mut self, key: KeyCode) -> Result<bool> {
+        self.with_screen_input_overrides(|game| game.pause_key_inner(key))
+    }
+    fn pause_key_inner(&mut self, key: KeyCode) -> Result<bool> {
         let (w, h) = {
             let size = self
                 .client
@@ -620,16 +647,32 @@ impl crate::game::ClientGame<'_> {
                 &fallback
             }
         };
-        // The widget tuples are `Copy`: one small copy per press keeps the
-        // build readable while the focus moves.
-        let buttons: Vec<_> = layout
+        let additions = self.pause_screen_additions();
+        let pause_button_label = |key: &'static str, id: u8| -> Text {
+            match (id, &additions) {
+                (14, Some((label, _))) => label.clone(),
+                _ => Text::translate(key, &[]),
+            }
+        };
+        let buttons: Vec<(u8, [f32; 4])> = layout
             .buttons
             .iter()
             .copied()
-            .filter(|b| b.5 && !self.engine_rect_suppressed([b.0, b.1, b.2, 20.0]))
+            .filter_map(|b| {
+                let label = pause_button_label(b.3, b.4);
+                let rect = widgets::resolve_engine_input(
+                    widgets::WidgetBucket::Button,
+                    Some(&label),
+                    None,
+                    0,
+                    [b.0, b.1, b.2, 20.0],
+                    b.5,
+                )?;
+                Some((b.4, rect))
+            })
             .collect();
         let icons = layout.icons;
-        let mut active_ids: Vec<u8> = buttons.iter().map(|b| b.4).collect();
+        let mut active_ids: Vec<u8> = buttons.iter().map(|b| b.0).collect();
         let friends = self.friends_shown();
         active_ids.extend(pause_icon_focus_ids(friends).into_iter().filter(|&id| {
             let idx = if id == 10 {
@@ -637,7 +680,16 @@ impl crate::game::ClientGame<'_> {
             } else {
                 usize::from(id - 12)
             };
-            !self.engine_rect_suppressed([icons[idx].0, icons[idx].1, 20.0, 20.0])
+            let label = Text::translate(ICON_LABELS[idx], &[]);
+            widgets::resolve_engine_input(
+                widgets::WidgetBucket::Button,
+                Some(&label),
+                None,
+                0,
+                [icons[idx].0, icons[idx].1, 20.0, 20.0],
+                icon_active(idx, friends),
+            )
+            .is_some()
         }));
         if active_ids.is_empty() {
             return Ok(false);
@@ -677,13 +729,23 @@ impl crate::game::ClientGame<'_> {
                 Ok(true)
             }
             KeyCode::ArrowUp | KeyCode::ArrowDown | KeyCode::ArrowLeft | KeyCode::ArrowRight => {
-                let mut rects: Vec<(u8, f32, f32, f32)> =
-                    buttons.iter().map(|b| (b.4, b.0, b.1, b.2)).collect();
+                let mut rects: Vec<(u8, f32, f32, f32)> = buttons
+                    .iter()
+                    .map(|&(id, [x, y, bw, _])| (id, x, y, bw))
+                    .collect();
                 let friends = self.friends_shown();
                 for (i, &(x, y, _)) in icons.iter().enumerate() {
                     let id = if i == FRIENDS_ICON { 10 } else { 12 + i as u8 };
-                    if icon_active(i, friends) && !self.engine_rect_suppressed([x, y, 20.0, 20.0]) {
-                        rects.push((id, x, y, 20.0));
+                    let label = Text::translate(ICON_LABELS[i], &[]);
+                    if let Some([rx, ry, rw, _]) = widgets::resolve_engine_input(
+                        widgets::WidgetBucket::Button,
+                        Some(&label),
+                        None,
+                        0,
+                        [x, y, 20.0, 20.0],
+                        icon_active(i, friends),
+                    ) {
+                        rects.push((id, rx, ry, rw));
                     }
                 }
                 let cur_id = self.client.pause_focus.unwrap_or(0);
