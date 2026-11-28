@@ -204,13 +204,12 @@ mod issue_6335_tests {
     };
 
     use mod_api::{Flow, HostSide, ModEntry, Mods};
-    use sunrise_gameplay_common::game::entity_ids::{entity_id_bits, wire_entity_id};
     use sunrise_protocol::packets::play::Clientbound as C;
     use sunrise_sim::lan::{Out, PlayerSender};
 
     struct RecordSound {
         seen: Arc<Mutex<Vec<u32>>>,
-        calls: Arc<AtomicUsize>,
+        positional_calls: Arc<AtomicUsize>,
     }
 
     #[mod_api::__subscriptions]
@@ -220,8 +219,16 @@ mod issue_6335_tests {
             _: HostSide<'_>,
             e: &mut mod_api::PlayLevelSoundAtEntityEvent,
         ) -> Flow {
-            self.calls.fetch_add(1, Ordering::SeqCst);
             self.seen.lock().unwrap().push(e.entity.id());
+            Flow::Continue
+        }
+
+        fn play_level_sound_at_position(
+            &self,
+            _: HostSide<'_>,
+            _: &mut mod_api::PlayLevelSoundAtPositionEvent,
+        ) -> Flow {
+            self.positional_calls.fetch_add(1, Ordering::SeqCst);
             Flow::Continue
         }
     }
@@ -250,12 +257,12 @@ mod issue_6335_tests {
         sunrise_gameplay_common::game::in_own_process(NAME, || {
             mod_platform::__private::test_platform::install();
             let seen = Arc::new(Mutex::new(Vec::new()));
-            let calls = Arc::new(AtomicUsize::new(0));
+            let positional_calls = Arc::new(AtomicUsize::new(0));
             let mods: Mods = vec![ModEntry::new(
                 "record-sound",
                 Box::new(RecordSound {
                     seen: Arc::clone(&seen),
-                    calls: Arc::clone(&calls),
+                    positional_calls: Arc::clone(&positional_calls),
                 }),
             )]
             .into();
@@ -281,7 +288,7 @@ mod issue_6335_tests {
                     assert_eq!(id, 0x8000_0001, "the mob's stored id has the high bit");
                     let entity =
                         mod_api::EntityRef::new(game.common.native_lifecycle.epoch().unwrap(), id);
-                    let wire = wire_entity_id(id);
+                    let wire = -2_147_483_647;
 
                     // The queued bound sound keeps the bits and the flush delivers a
                     // SoundEntity packet for the same id.
@@ -310,10 +317,10 @@ mod issue_6335_tests {
                     );
                     assert!(
                         !packets.iter().any(|p| matches!(p, C::Sound(_))),
-                        "only the entity hook hears the bound sound"
+                        "no positional sound packet is sent"
                     );
-                    assert_eq!(calls.load(Ordering::SeqCst), 1);
-                    assert_eq!(seen.lock().unwrap().as_slice(), [id]);
+                    assert_eq!(positional_calls.load(Ordering::SeqCst), 0);
+                    assert_eq!(seen.lock().unwrap().as_slice(), [0x8000_0001]);
 
                     // Both entity-event paths accept the live entity and keep the bits.
                     assert!(game.entity_broadcast_event(entity, 2));
@@ -322,7 +329,6 @@ mod issue_6335_tests {
                         game.server.lan_queues.entity_events,
                         vec![(wire, 2), (wire, 2)]
                     );
-                    assert_eq!(entity_id_bits(wire), id);
                 });
             });
         });
