@@ -38,6 +38,9 @@ impl OptionsUi {
         batch: &mut HudBatch,
         atlas: &HudAtlas,
     ) {
+        if crate::widgets::is_collecting_widgets() {
+            return;
+        }
         self.discard_draw();
         self.output = output;
         let (w, h) = (batch.width, batch.height);
@@ -94,6 +97,48 @@ impl OptionsUi {
         atlas: &HudAtlas,
         cursor: (f32, f32),
     ) {
+        if crate::widgets::is_collecting_widgets() {
+            let (w, h) = (batch.width, batch.height);
+            let page = self.page();
+            let in_world = self.in_world;
+            let waiting = self.waiting();
+            if self.resource_error.is_some() {
+                self.draw_resource_error(batch, atlas, cursor);
+            } else if page == Page::HdrCalibration
+                && let Some(calibration) = self.calibration.as_ref()
+            {
+                let layout = calibration.draw_background(batch, atlas);
+                calibration.draw_contents(batch, atlas, cursor, layout);
+            } else if page == Page::ControllerRadialName && self.radial.screen.naming.is_some() {
+                self.radial
+                    .screen
+                    .naming
+                    .as_mut()
+                    .expect("name entry remains open")
+                    .draw_contents(batch, atlas, cursor);
+            } else if let Some(shell) = self.shell_mut() {
+                shell.draw_background(s, batch, atlas, in_world, waiting);
+                shell.draw_contents(batch, atlas, cursor);
+                shell.discard_draw();
+            } else if matches!(page, Page::Mods | Page::Packs) {
+                let size = (w, h);
+                let blink = self.pack_focus.elapsed().as_millis() as u64;
+                let m = crate::screen_draw::Measure(&atlas.font);
+                let mouse = (cursor.0.floor() as i32, cursor.1.floor() as i32);
+                let draws = if page == Page::Mods {
+                    let screen = self.mods_page(s, size);
+                    screen.draw(&m, mouse, blink, crate::hud_overlays::now_ms())
+                } else {
+                    let screen = self.packs(atlas, size);
+                    screen.draw(&m, mouse, blink, crate::hud_overlays::now_ms())
+                };
+                let _ = crate::screen_draw::paint(batch, atlas, &draws);
+            } else {
+                let layout = self.built_layout(s, w, h);
+                let _ = self.draw_standard_contents(s, batch, atlas, cursor, &layout);
+            }
+            return;
+        }
         let frame = self
             .frame_draw
             .take()
@@ -153,6 +198,9 @@ impl OptionsUi {
     }
     /// Paint deferred overlays and consume this frame's continuation.
     pub fn draw_overlays(&mut self, batch: &mut HudBatch, atlas: &HudAtlas, cursor: (f32, f32)) {
+        if crate::widgets::is_collecting_widgets() {
+            return;
+        }
         match self
             .frame_draw
             .take()
@@ -431,7 +479,9 @@ impl OptionsUi {
                     true,
                 );
             }
-            self.language_search = search;
+            if !crate::widgets::is_collecting_widgets() {
+                self.language_search = search;
+            }
         }
         if matches!(self.page(), Page::Video | Page::Controls | Page::KeyBinds) {
             let mut search = self.settings_search.clone();
@@ -457,7 +507,9 @@ impl OptionsUi {
                     true,
                 );
             }
-            self.settings_search = search;
+            if !crate::widgets::is_collecting_widgets() {
+                self.settings_search = search;
+            }
         }
         FrameDraw::Tooltip(tooltip, tooltip_rect)
     }

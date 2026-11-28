@@ -319,18 +319,30 @@ impl crate::game::ClientGame<'_> {
         }
         if tab.search {
             // CreativeModeInventoryScreen: an unbordered EditBox of 50 at (82, 6).
-            let search = &mut self.client.creative_screen.0.search;
-            search.x = ox + 82.0;
-            search.y = oy + 6.0;
-            search.width = 80.0;
-            search.bordered = false;
-            search.focused = true;
-            search.text_color = u32::MAX;
-            search.max_length = clipboard::CREATIVE_SEARCH_CHARS;
-            if sunrise_client::widgets::narrating() {
-                search.message = screen_info::tr("itemGroup.search", &[]);
+            if sunrise_client::widgets::is_collecting_widgets() {
+                let mut search = self.client.creative_screen.0.search.clone();
+                search.x = ox + 82.0;
+                search.y = oy + 6.0;
+                search.width = 80.0;
+                search.bordered = false;
+                search.focused = true;
+                search.text_color = u32::MAX;
+                search.max_length = clipboard::CREATIVE_SEARCH_CHARS;
+                search.draw(batch, atlas, None);
+            } else {
+                let search = &mut self.client.creative_screen.0.search;
+                search.x = ox + 82.0;
+                search.y = oy + 6.0;
+                search.width = 80.0;
+                search.bordered = false;
+                search.focused = true;
+                search.text_color = u32::MAX;
+                search.max_length = clipboard::CREATIVE_SEARCH_CHARS;
+                if sunrise_client::widgets::narrating() {
+                    search.message = screen_info::tr("itemGroup.search", &[]);
+                }
+                search.draw(batch, atlas, None);
             }
-            search.draw(batch, atlas, None);
         }
         // The hovered stack, and whether it is a grid slot (`CustomCreativeSlot`).
         let mut hovered: Option<(ItemStack, bool)> = None;

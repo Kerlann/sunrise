@@ -3932,3 +3932,111 @@ fn custom_widget_mouse_moved_and_should_take_focus_after_interaction() {
         });
     });
 }
+
+#[test]
+#[ignore = "daily"]
+fn discovery_replay_has_no_callback_or_live_state_side_effects() {
+    if run_fresh_cases(
+        "cut_layout::game::client_side::native_hooks_client::base::screen_widgets_tests::discovery_replay_has_no_callback_or_live_state_side_effects",
+        "SUNRISE_WIDGETS_DISCOVERY_PURE_CHILD",
+        &["window"],
+    ) {
+        return;
+    }
+
+    struct BgProbe {
+        bg_calls: Arc<AtomicUsize>,
+    }
+
+    #[mod_api::__subscriptions]
+    impl Hooks for BgProbe {
+        fn screen_transparent_background(
+            &self,
+            _host: &dyn ClientHost,
+            _event: &mut mod_api::ScreenTransparentBackgroundEvent<'_>,
+        ) -> Flow {
+            self.bg_calls.fetch_add(1, Ordering::SeqCst);
+            Flow::Continue
+        }
+    }
+
+    let bg_calls = Arc::new(AtomicUsize::new(0));
+    let mods = vec![ModEntry::new(
+        "bg_probe",
+        Box::new(BgProbe {
+            bg_calls: bg_calls.clone(),
+        }),
+    )]
+    .into();
+    with_mods(mods, || {
+        with_client_game(|game| {
+            let (_el, _win_id) = attach_offscreen_window(game);
+
+            // 1. Inventory discovery must not dispatch `screen_transparent_background`.
+            game.set_screen(Screen::Inventory);
+            game.observe_screen();
+            let _ = game.screen_widgets().expect("inventory screen widgets");
+            assert_eq!(
+                bg_calls.load(Ordering::SeqCst),
+                0,
+                "discovery replay must not dispatch screen_transparent_background"
+            );
+
+            // 2. Creative Search discovery must not mutate live `creative_screen.0.search` fields.
+            game.set_screen(Screen::Creative);
+            let search_tab = game
+                .client
+                .creative_screen
+                .0
+                .tabs
+                .iter()
+                .position(|t| t.search)
+                .expect("creative search tab");
+            game.client.creative_screen.0.selected = search_tab;
+            game.client.creative_screen.0.search.x = 7.0;
+            game.client.creative_screen.0.search.y = 9.0;
+            game.client.creative_screen.0.search.focused = false;
+            game.client.creative_screen.0.search.bordered = true;
+            game.client.creative_screen.0.search.text_color = 0xFF11_2233;
+            game.client.creative_screen.0.search.max_length = 12;
+            game.observe_screen();
+            let _ = game.screen_widgets().expect("creative screen widgets");
+            assert_eq!(game.client.creative_screen.0.search.x, 7.0);
+            assert_eq!(game.client.creative_screen.0.search.y, 9.0);
+            assert!(!game.client.creative_screen.0.search.focused);
+            assert!(game.client.creative_screen.0.search.bordered);
+            assert_eq!(game.client.creative_screen.0.search.text_color, 0xFF11_2233);
+            assert_eq!(game.client.creative_screen.0.search.max_length, 12);
+
+            // 3. Options discovery must not consume or overwrite an in-flight `frame_draw`.
+            game.open_options(false);
+            game.observe_screen();
+            let mut batch = HudBatch::new([640, 480], game.client.settings.gui_scale_inputs());
+            let output = game
+                .client
+                .renderer
+                .0
+                .as_ref()
+                .map_or(Default::default(), |r| r.output());
+            game.client.chat_ui.options.draw_background(
+                &game.client.settings,
+                output,
+                &mut batch,
+                &game.client.gui.atlas,
+            );
+            let _ = game.screen_widgets().expect("options screen widgets");
+            // Completing the in-flight live Options draw must still succeed without panicking.
+            game.client.chat_ui.options.draw_contents(
+                &game.client.settings,
+                &mut batch,
+                &game.client.gui.atlas,
+                game.client.cursor,
+            );
+            game.client.chat_ui.options.draw_overlays(
+                &mut batch,
+                &game.client.gui.atlas,
+                game.client.cursor,
+            );
+        });
+    });
+}

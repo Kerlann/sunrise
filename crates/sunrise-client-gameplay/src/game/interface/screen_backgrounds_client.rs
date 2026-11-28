@@ -230,6 +230,9 @@ impl crate::game::ClientGame<'_> {
         screen: &str,
         batch: &mut HudBatch,
     ) {
+        if sunrise_client::widgets::is_collecting_widgets() {
+            return;
+        }
         let mut canceled = false;
         self.native_screen_transparent_background(screen, batch, &mut canceled);
         if !canceled {

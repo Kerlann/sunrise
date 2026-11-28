@@ -605,7 +605,7 @@ impl crate::game::ClientGame<'_> {
                 );
             }
         }
-        if s.screen.has_draw() {
+        if s.screen.has_draw() && !sunrise_client::widgets::is_collecting_widgets() {
             let frame = s.frame(batch, (ox, oy), self.client.cursor);
             let mut draw = crate::game::host::draw::GameDrawContext::new(self, batch);
             s.screen.draw(self, frame, &mut draw);
@@ -631,6 +631,9 @@ impl crate::game::ClientGame<'_> {
     }
     /// The open mod screen's tooltip under the cursor.
     pub(crate) fn draw_native_screen_tooltip(&mut self, batch: &mut HudBatch) {
+        if sunrise_client::widgets::is_collecting_widgets() {
+            return;
+        }
         // Over no item: an empty slot still gets the mod's hint (which fuel it takes).
         // A carried stack hides only slot tooltips, as AbstractContainerScreen's;
         // the screen's other parts keep theirs, as a vanilla widget's tooltip does.

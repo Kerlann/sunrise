@@ -1252,22 +1252,16 @@ impl crate::game::ClientGame<'_> {
                 self.draw_debug_options(&mut batch);
             } else if self.client.screen == super::Screen::Mod && self.client.title.0.is_some() {
                 // Mod-owned screens have no built-in engine widgets.
-            } else if self.client.title.0.is_some() {
-                let mods = self.client.settings.mods.installed.len();
-                if let Some(title) = &mut self.client.title.0 {
-                    title.mods = mods;
-                }
-                if let Some(title) = &self.client.title.0 {
-                    title.draw_with_items(
-                        &self.client.gui.atlas,
-                        Some(&self.client.client_pack.item_renderer),
-                        &mut batch,
-                        self.client.cursor,
-                        self.client.settings.file.bool("hideSplashTexts"),
-                        self.client.settings.file.bool("hideServerAddress"),
-                        &mut |_, _| {},
-                    );
-                }
+            } else if let Some(title) = &self.client.title.0 {
+                title.draw_with_items(
+                    &self.client.gui.atlas,
+                    Some(&self.client.client_pack.item_renderer),
+                    &mut batch,
+                    self.client.cursor,
+                    self.client.settings.file.bool("hideSplashTexts"),
+                    self.client.settings.file.bool("hideServerAddress"),
+                    &mut |_, _| {},
+                );
             } else if self.remote_loading() {
                 let _ = self.remote_overlay(&mut batch);
             } else {
