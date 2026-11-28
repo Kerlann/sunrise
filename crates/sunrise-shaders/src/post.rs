@@ -1983,46 +1983,58 @@ impl Loader<'_> {
     }
 
     /// Stage file `path` through the preprocessor; the pack's images declared without a format
-    /// (GLSL lets a write-only image omit it) get the one `image.*` gives them.
+    /// (GLSL lets a write-only image omit it) get the one `image.*` gives them. A rewrite that
+    /// changes the line count is recorded as a refusal on the stage file.
     fn preprocess(&self, path: &str) -> Preprocessed {
         #[cfg(test)]
         tests::STAGES_READ.with_borrow_mut(|read| read.push(path.to_owned()));
-        let pp = preprocess(self.pack, path, self.macros);
+        let mut pp = preprocess(self.pack, path, self.macros);
         if self.post.images.is_empty() || !pp.code().contains("image") {
             return pp;
         }
-        pp.map_lines(|n, source| {
-            let line = source[n];
-            // A qualifier on the line before (`layout(r32ui)` then `uniform uimage3D v;`).
-            let qualified = line.contains("layout")
-                || source[..n]
+        let source: Vec<&str> = pp.code().split('\n').collect();
+        let lines: Vec<String> = source
+            .iter()
+            .enumerate()
+            .map(|(n, &line)| {
+                // A qualifier on the line before (`layout(r32ui)` then `uniform uimage3D v;`).
+                let qualified = line.contains("layout")
+                    || source[..n]
+                        .iter()
+                        .rev()
+                        .find(|l| !l.trim().is_empty())
+                        .is_some_and(|l| l.trim_start().starts_with("layout") && !l.contains(';'));
+                let words: Vec<&str> = line
+                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .collect();
+                let image = self
+                    .post
+                    .images
                     .iter()
-                    .rev()
-                    .find(|l| !l.trim().is_empty())
-                    .is_some_and(|l| l.trim_start().starts_with("layout") && !l.contains(';'));
-            let words: Vec<&str> = line
-                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-                .collect();
-            let image = self
-                .post
-                .images
-                .iter()
-                .find(|i| words.contains(&i.name.as_str()));
-            match image {
-                Some(i)
-                    if words.contains(&"uniform")
-                        && !qualified
-                        && words.iter().any(|w| {
-                            ["image1D", "image2D", "image3D"]
-                                .iter()
-                                .any(|d| w.ends_with(d))
-                        }) =>
-                {
-                    format!("layout({}) {line}", i.qualifier)
+                    .find(|i| words.contains(&i.name.as_str()));
+                match image {
+                    Some(i)
+                        if words.contains(&"uniform")
+                            && !qualified
+                            && words.iter().any(|w| {
+                                ["image1D", "image2D", "image3D"]
+                                    .iter()
+                                    .any(|d| w.ends_with(d))
+                            }) =>
+                    {
+                        format!("layout({}) {line}", i.qualifier)
+                    }
+                    _ => line.to_owned(),
                 }
-                _ => line.to_owned(),
+            })
+            .collect();
+        match pp.with_code("image format rewrite", lines.join("\n")) {
+            Ok(out) => out,
+            Err(error) => {
+                pp.refuse(error.message);
+                pp
             }
-        })
+        }
     }
 
     /// A program with a geometry stage, folded into its vertex stage. A refusal notes the

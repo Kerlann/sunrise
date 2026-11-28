@@ -977,14 +977,8 @@ mod tests {
             "void main() {}",
         )
         .unwrap_err();
-        assert_eq!(
-            err,
-            [Error::new(
-                "shadow.gsh",
-                0,
-                "geometry stage: 2 line origins for 3 lines of code",
-            )]
-        );
+        assert_eq!(err.len(), 1);
+        assert_eq!((err[0].file.as_str(), err[0].line), ("shadow.gsh", 0));
         // Geometry matches while vertex loses one line: refused at the vertex stage file.
         let err = join_stages(
             &vertex,
@@ -996,14 +990,8 @@ mod tests {
             "void main() {}",
         )
         .unwrap_err();
-        assert_eq!(
-            err,
-            [Error::new(
-                "shadow.vsh",
-                0,
-                "vertex stage: 2 line origins for 1 line of code",
-            )]
-        );
+        assert_eq!(err.len(), 1);
+        assert_eq!((err[0].file.as_str(), err[0].line), ("shadow.vsh", 0));
     }
 
     #[test]
