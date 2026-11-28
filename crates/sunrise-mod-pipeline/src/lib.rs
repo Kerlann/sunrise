@@ -162,9 +162,10 @@ pub fn linear_fragment_finish(out_name: &str) -> String {
 /// Returns the GLSL output variable name bound to fragment `location = 0` in `module`, if any.
 ///
 /// Relies on the vendored `naga` 30.0.1 GLSL frontend's entry-point lowering
-/// (`third_party/naga/src/front/glsl/functions.rs`, `Frontend::add_entry_point`), which always
-/// builds a `TypeInner::Struct` entry-point result with `binding: None` whose member carrying
-/// `Binding::Location { location: 0, .. }` holds the GLSL `out` variable's name.
+/// (`third_party/naga/src/front/glsl/functions.rs`, `Frontend::add_entry_point`): when the entry
+/// point has outputs, it builds a `TypeInner::Struct` result with `binding: None` whose member
+/// carrying `Binding::Location { location: 0, .. }` holds the GLSL `out` variable's name (and
+/// sets `result: None` when the entry point has no outputs).
 fn fragment_loc0_output_name(module: &naga::Module) -> Option<&str> {
     let ep = module
         .entry_points
