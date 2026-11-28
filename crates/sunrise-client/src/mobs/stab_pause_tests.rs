@@ -1,5 +1,6 @@
-use crate::test_resources::{STREAMING_INPUTS, prepared_root};
+use crate::prepared_test_root::prepared_root;
 use sunrise_core::geometry::Vec3;
+use sunrise_core::prepared_test_support::STREAMING_INPUTS;
 use sunrise_sim::mobs::{
     Mob, MobEvent, WeaponAttack, WeaponHit, Who, ai, riders,
     sensor_scan_tests::kind,

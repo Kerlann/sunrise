@@ -18,7 +18,7 @@ use sunrise_world::{
     food::{Difficulty, FoodData},
     living_damage::{DamageStat, DamageState},
     living_hurt::{HurtState, HurtTag, HurtWorld, PendingHurt},
-    player_health::{PlayerAttributeHealth, PlayerFloatIds},
+    player_health::PlayerFloatIds,
     player_hurt::{CausingEntity, PlayerHurtWorld, ServerPlayerHurtWorld},
     server_player_combat::CombatEnvironment,
     server_player_damage::{PlayerBodyRead, ServerDamageEnvironment},
