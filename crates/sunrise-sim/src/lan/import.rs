@@ -577,7 +577,10 @@ pub fn import_player(
     // for a player loaded into an empty guest and wrong here: the held player holds what its
     // own file gave it on this server, and an imported inventory REPLACES that, a slot the
     // record leaves empty being empty afterwards.
+    let whole = request.parts.len() == PARTS.len();
     hub.guests.update(i, |g| {
+        let previous_effects =
+            (!whole && request.parts.contains(&"effects")).then(|| std::mem::take(&mut g.effects));
         if request.parts.contains(&"inventory") {
             g.inventory.iter_mut().for_each(|slot| *slot = None);
             g.armor = Default::default();
@@ -607,7 +610,17 @@ pub fn import_player(
         {
             body.velocity = velocity;
         }
-        g.apply_loaded_motion(request.parts.len() == PARTS.len());
+        if let Some(previous) = previous_effects
+            && let Some(body) = g.motion.as_mut()
+        {
+            for effect in previous.list {
+                body.write_effect_modifiers(effect.registry_index, None);
+            }
+            for effect in &g.effects.list {
+                body.write_effect_modifiers(effect.registry_index, Some(effect.amplifier));
+            }
+        }
+        g.apply_loaded_motion(whole);
     });
     // Everything the import changed reaches the client now, so that a proxy sees the
     // player as it will be; the player stays held until it is placed or dropped.
