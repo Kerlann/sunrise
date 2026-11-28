@@ -1,0 +1,5 @@
+# PACKAGE TEST TARGET daily REASON; exact logical libtest identities, sorted.
+# The flat-draw cases of the shader-pack frame fixtures: they need a hardware Vulkan adapter and are reported as SKIPPED without one (#6947).
+sunrise-client cut_layout::game::pack_layer_frame_tests::layer_rules_move_states_between_the_packs_shadow_programs_with_flat_draws lib daily hardware-gpu
+sunrise-client cut_layout::game::pack_layer_frame_tests::layer_rules_move_states_between_the_packs_terrain_programs_with_flat_draws lib daily hardware-gpu
+sunrise-client cut_layout::game::pack_tag_id_frame_tests::a_tags_id_reaches_the_terrain_and_follows_the_tags_with_flat_draws lib daily hardware-gpu
