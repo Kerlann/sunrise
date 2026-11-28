@@ -1377,7 +1377,8 @@ impl crate::game::ServerGame<'_> {
                 continue;
             }
             // A portal's trip (`start_server_trip`): its client waits to land.
-            let portal = trip.end || trip.plan.is_some();
+            let nether = trip.plan.is_some();
+            let portal = trip.end || nether;
             self.resolve_arrivals();
             let Some(host) = self.server.lan.as_ref() else {
                 return;
@@ -1447,17 +1448,19 @@ impl crate::game::ServerGame<'_> {
             if !trip.hold {
                 host.play.entry(trip.conn).or_default().portal.cooldown = 10;
             }
-            host.hub.guests.update(i, |g| {
-                g.yaw = yaw;
-                if let Some(body) = g.motion.as_mut() {
-                    body.yaw = yaw;
-                    body.position = position;
-                }
-            });
-            let at = [position.x, position.y, position.z];
+            let at = position.components();
             if portal {
-                host.hub.land(i, at);
+                // Nether and End entry keep Relative.DELTA (including ROTATE_DELTA).
+                // The End exit's respawn transition instead has no relatives.
+                host.hub.land(i, at, yaw, nether || trip.entering);
             } else {
+                host.hub.guests.update(i, |g| {
+                    g.yaw = yaw;
+                    if let Some(body) = g.motion.as_mut() {
+                        body.yaw = yaw;
+                        body.position = position;
+                    }
+                });
                 host.hub.teleport(i, Some(at));
             }
             self.tell_mods_changed_dimension(trip.conn, trip.left, trip.dim);

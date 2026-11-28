@@ -465,13 +465,29 @@ impl Hub {
     /// The rest of a portal's [`Self::finish_level_change`] once its exit is found:
     /// the position, LEVEL_CHUNKS_LOAD_START (the client's loading screen
     /// closes once its chunk is in) and TeleportTransition.PLAY_PORTAL_SOUND.
-    pub fn land(&mut self, i: usize, at: [f64; 3]) {
-        {
-            let value = false;
-            self.guests.update(i, |guest| guest.landing = value);
-        }
-        self.guests.update(i, |g| g.place(at)); // hold the exit chunk
-        self.teleport(i, Some(at));
+    pub fn land(&mut self, i: usize, at: [f64; 3], yaw: f32, rotate_delta: bool) {
+        let velocity = self.guests.update(i, |g| {
+            g.landing = false;
+            g.above_ground_ticks = 0;
+            g.place(at); // hold the exit chunk
+            let old_yaw = std::mem::replace(&mut g.yaw, yaw);
+            let body = g.motion.as_mut()?;
+            body.yaw = yaw;
+            // Neither transition with Relative.DELTA changes pitch. Apply the
+            // same absolute delta to the body and the client's position correction.
+            use sunrise_core::geometry::Vec3;
+            body.velocity = if rotate_delta {
+                let turn = f64::from(old_yaw - yaw).to_radians() as f32;
+                body.velocity
+                    .rotate_x(0.0)
+                    .rotate_y(turn)
+                    .add_vector(Vec3::ZERO)
+            } else {
+                Vec3::ZERO
+            };
+            Some(body.velocity.components())
+        });
+        self.send_position_correction(i, Some(at), 0, [0.0; 3], velocity);
         let g = &self.guests[i];
         g.send(&C::GameEvent(play::GameEvent {
             event: game_event::LEVEL_CHUNKS_LOAD_START,

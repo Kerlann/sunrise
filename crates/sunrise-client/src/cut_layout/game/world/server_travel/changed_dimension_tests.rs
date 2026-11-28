@@ -207,6 +207,50 @@ fn finish_trip(game: &mut sunrise_gameplay::game::ServerGame<'_>, dim: Dim) {
     game.enter_level(home).unwrap();
 }
 
+#[test]
+#[ignore = "daily"]
+fn deferred_end_entry_turns_the_server_and_client_motion_to_the_west_facing_arrival() {
+    use sunrise_protocol::{buf::Reader, packets::play::Clientbound};
+    use sunrise_sim::lan::Out;
+    with_server(ExecutionRole::DedicatedServer, |game| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        game.server
+            .lan
+            .as_mut()
+            .unwrap()
+            .hub
+            .update_guest(CONN, |g| {
+                g.sender = PlayerSender::new(tx, Arc::default());
+                g.yaw = 0.0;
+                g.pitch = 24.0;
+                g.motion.as_mut().unwrap().velocity = Vec3::new(1.0, 0.25, 0.0);
+            })
+            .unwrap();
+        game.start_server_trip(CONN, Dim::End, None);
+        finish_trip(game, Dim::End);
+        let guest = game.server.lan.as_ref().unwrap().hub.guest(CONN).unwrap();
+        assert_eq!(guest.dimension, Dim::End.id());
+        let body = guest.motion.as_deref().unwrap();
+        assert_eq!(body.velocity.y, 0.25);
+        assert_eq!(body.velocity.z, 1.0);
+        let correction = rx
+            .try_iter()
+            .find_map(|out| {
+                let Out::Packet(bytes) = out else { return None };
+                let mut reader = Reader::new(&bytes);
+                let id = reader.varint().unwrap();
+                match Clientbound::decode(id, reader.rest()) {
+                    Ok(Clientbound::PlayerPosition(packet)) => Some(packet),
+                    _ => None,
+                }
+            })
+            .expect("End portal position correction");
+        assert_eq!((correction.yaw, correction.pitch), (90.0, 24.0));
+        assert_eq!(correction.relatives, 0);
+        assert_eq!(correction.delta, body.velocity.components());
+    });
+}
+
 fn place_anchor(game: &mut sunrise_gameplay::game::ServerGame<'_>, pos: [i32; 3]) {
     light(game, pos[0] >> 4, pos[2] >> 4);
     let registry = game.pack.assets.registry;

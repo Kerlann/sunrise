@@ -5863,6 +5863,54 @@ pub(super) mod tests {
         sent
     }
 
+    #[test]
+    #[ignore = "daily"]
+    fn nether_portal_landing_rotates_the_same_body_and_sends_its_delta() {
+        use sunrise_core::geometry::Vec3;
+        let fixture = crate::test_fixtures::vanilla().expect("prepared vanilla resources");
+        let at = [10.5, 70.0, 10.5];
+        for (yaw, expected_z) in [(15.0, 0.0), (105.0, 1.0)] {
+            let (mut hub, rx) = hub_with_a_guest();
+            let mut body = Box::new(crate::motion::PlayerMotion::new(
+                &fixture.motion,
+                Vec3::ZERO,
+            ));
+            body.velocity = Vec3::new(1.0, 0.25, 0.0);
+            let identity = std::ptr::from_ref(body.as_ref());
+            hub.guests.update(0, |g| {
+                g.motion = Some(body);
+                g.yaw = 15.0;
+                g.landing = true;
+            });
+            hub.land(0, at, yaw, true);
+            let body = hub.guests[0].motion.as_deref().unwrap();
+            assert_eq!(std::ptr::from_ref(body), identity);
+            assert_eq!(body.position.components(), at);
+            assert_eq!(body.yaw, yaw);
+            assert_eq!(body.velocity.y, 0.25);
+            assert_eq!(body.velocity.z, expected_z);
+            if yaw == 15.0 {
+                assert_eq!(body.velocity.x, 1.0);
+            }
+            let correction = rx
+                .try_iter()
+                .find_map(|out| {
+                    let crate::lan::Out::Packet(bytes) = out else {
+                        return None;
+                    };
+                    let mut reader = sunrise_protocol::buf::Reader::new(&bytes);
+                    let id = reader.varint().unwrap();
+                    match C::decode(id, reader.rest()) {
+                        Ok(C::PlayerPosition(packet)) => Some(packet),
+                        _ => None,
+                    }
+                })
+                .expect("portal position correction");
+            assert_eq!(correction.relatives, 0);
+            assert_eq!(correction.delta, body.velocity.components());
+        }
+    }
+
     /// A command's teleport carries its relative axes as the position
     /// packet's DELTA flags (`TeleportCommand.performTeleport` builds them
     /// with `Relative.direction`, and `ServerPlayer.teleport` passes them to
