@@ -369,9 +369,13 @@ impl RegisteredDataMap {
         discard(owner, Box::new(self.remove_partial));
     }
 
-    /// Project a merged NBT value for client sync. If projection returns `None` or panics,
-    /// logs once and omits the entry from the client snapshot (containment rule).
+    /// Project a merged NBT value for client sync. If the owning mod is disabled, returns
+    /// `None` without running the callback. If projection returns `None` or panics, logs once
+    /// and omits the entry from the client snapshot (containment rule).
     pub fn project_network_value(&self, entry: &str, value: &Tag) -> Option<Tag> {
+        if !crate::runtime::mod_enabled(self.owner_mod) {
+            return None;
+        }
         let projected = crate::runtime::contain_callback(
             || (self.network_value)(value),
             |payload| {
@@ -405,20 +409,24 @@ impl RegisteredDataMap {
 
     /// Run this map's merger inside `runtime.rs`'s `Callback::DataMapMerge` panic boundary.
     pub fn merge(&self, entry: &Identifier, existing: &Tag, incoming: &Tag) -> Result<Tag, String> {
+        if !crate::runtime::mod_enabled(self.owner_mod) {
+            return Err(format!(
+                "mod {}: data_map_merge ({} on {}) skipped because the mod is disabled",
+                self.owner_mod, self.id_str, self.registry_str
+            ));
+        }
         if self.merge_poisoned.load(Ordering::Acquire) {
             return Err(format!(
                 "mod {}: data_map_merge ({} on {}) is disabled after an earlier panic",
                 self.owner_mod, self.id_str, self.registry_str
             ));
         }
-        if crate::runtime::installed().is_some()
-            && !crate::runtime::session_named_callback_enabled(
-                crate::runtime::Callback::DataMapMerge,
-                self.owner_mod,
-                Some(&self.registry),
-                &self.id,
-            )
-        {
+        if crate::runtime::session_named_callback_poisoned(
+            crate::runtime::Callback::DataMapMerge,
+            self.owner_mod,
+            Some(&self.registry),
+            &self.id,
+        ) {
             self.merge_poisoned.store(true, Ordering::Release);
             return Err(format!(
                 "mod {}: data_map_merge ({} on {}) is disabled after an earlier panic",
@@ -448,20 +456,24 @@ impl RegisteredDataMap {
         existing: &Tag,
         remover: &Tag,
     ) -> Result<Option<Tag>, String> {
+        if !crate::runtime::mod_enabled(self.owner_mod) {
+            return Err(format!(
+                "mod {}: data_map_remove ({} on {}) skipped because the mod is disabled",
+                self.owner_mod, self.id_str, self.registry_str
+            ));
+        }
         if self.remove_poisoned.load(Ordering::Acquire) {
             return Err(format!(
                 "mod {}: data_map_remove ({} on {}) is disabled after an earlier panic",
                 self.owner_mod, self.id_str, self.registry_str
             ));
         }
-        if crate::runtime::installed().is_some()
-            && !crate::runtime::session_named_callback_enabled(
-                crate::runtime::Callback::DataMapRemove,
-                self.owner_mod,
-                Some(&self.registry),
-                &self.id,
-            )
-        {
+        if crate::runtime::session_named_callback_poisoned(
+            crate::runtime::Callback::DataMapRemove,
+            self.owner_mod,
+            Some(&self.registry),
+            &self.id,
+        ) {
             self.remove_poisoned.store(true, Ordering::Release);
             return Err(format!(
                 "mod {}: data_map_remove ({} on {}) is disabled after an earlier panic",
@@ -1083,6 +1095,88 @@ mod tests {
             block_map.remove_partial(&entry, &Tag::Int(9), &Tag::Int(1)),
             Ok(Some(Tag::Int(9)))
         );
+
+        crate::runtime::TEST_MODS.set(previous);
+    }
+
+    #[test]
+    fn disabled_owner_skips_callbacks_without_poisoning_and_resumes_when_reenabled() {
+        use std::sync::atomic::AtomicUsize;
+
+        struct EmptyHooks;
+        impl crate::Hooks for EmptyHooks {}
+
+        let previous = crate::runtime::TEST_MODS.get();
+        let _ = crate::runtime::install(Arc::from([crate::runtime::ModEntry::new(
+            "toggle_mod",
+            Box::new(EmptyHooks),
+        )]));
+
+        let merge_calls = Arc::new(AtomicUsize::new(0));
+        let remove_calls = Arc::new(AtomicUsize::new(0));
+        let project_calls = Arc::new(AtomicUsize::new(0));
+        let m_calls = merge_calls.clone();
+        let r_calls = remove_calls.clone();
+        let p_calls = project_calls.clone();
+
+        let map = RegisteredDataMap::from_raw(
+            "toggle_mod",
+            Identifier::parse_namespaced("minecraft:item").unwrap(),
+            Identifier::parse_namespaced("toggle_mod:weights").unwrap(),
+            RawDataMap::new("minecraft:item", "toggle_mod:weights")
+                .network_value(move |tag| {
+                    p_calls.fetch_add(1, Ordering::Relaxed);
+                    Some(tag.clone())
+                })
+                .merge(move |_, existing, incoming| {
+                    m_calls.fetch_add(1, Ordering::Relaxed);
+                    match (existing, incoming) {
+                        (Tag::Int(a), Tag::Int(b)) => Ok(Tag::Int(a + b)),
+                        _ => Ok(incoming.clone()),
+                    }
+                })
+                .remove_partial(move |_, existing, _| {
+                    r_calls.fetch_add(1, Ordering::Relaxed);
+                    Ok(Some(existing.clone()))
+                }),
+        );
+        let entry = Identifier::parse_namespaced("minecraft:coal").unwrap();
+
+        // Off: callbacks do not run, projection omits, and nothing is poisoned.
+        assert!(crate::runtime::set_mod_enabled("toggle_mod", false));
+        let merge_err = map.merge(&entry, &Tag::Int(1), &Tag::Int(2)).unwrap_err();
+        assert!(merge_err.contains("disabled"), "got {merge_err}");
+        let remove_err = map
+            .remove_partial(&entry, &Tag::Int(1), &Tag::Int(2))
+            .unwrap_err();
+        assert!(remove_err.contains("disabled"), "got {remove_err}");
+        assert_eq!(
+            map.project_network_value("minecraft:coal", &Tag::Int(5)),
+            None
+        );
+        assert_eq!(merge_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(remove_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(project_calls.load(Ordering::Relaxed), 0);
+        assert!(crate::runtime::take_hook_panics().is_empty());
+
+        // On: the same descriptor resumes merging, removing, and projecting.
+        assert!(crate::runtime::set_mod_enabled("toggle_mod", true));
+        assert_eq!(
+            map.merge(&entry, &Tag::Int(1), &Tag::Int(2)),
+            Ok(Tag::Int(3))
+        );
+        assert_eq!(
+            map.remove_partial(&entry, &Tag::Int(3), &Tag::Int(1)),
+            Ok(Some(Tag::Int(3)))
+        );
+        assert_eq!(
+            map.project_network_value("minecraft:coal", &Tag::Int(5)),
+            Some(Tag::Int(5))
+        );
+        assert_eq!(merge_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(remove_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(project_calls.load(Ordering::Relaxed), 1);
+        assert!(crate::runtime::take_hook_panics().is_empty());
 
         crate::runtime::TEST_MODS.set(previous);
     }

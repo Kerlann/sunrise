@@ -616,6 +616,31 @@ pub(crate) fn contain_callback<T>(
     }
 }
 
+pub(crate) fn mod_enabled(owner: &'static str) -> bool {
+    installed().is_none_or(|installed| {
+        installed
+            .by_id
+            .get(owner)
+            .is_none_or(|&index| mod_index_on(index))
+    })
+}
+
+pub(crate) fn session_named_callback_poisoned(
+    callback: Callback,
+    owner: &'static str,
+    scope: Option<&Identifier>,
+    id: &Identifier,
+) -> bool {
+    installed().is_some_and(|installed| {
+        installed
+            .named_poison
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(callback.index(), owner))
+            .is_some_and(|poisoned| poisoned.contains(&(scope.cloned(), id.clone())))
+    })
+}
+
 pub(crate) fn session_named_callback_enabled(
     callback: Callback,
     owner: &'static str,
