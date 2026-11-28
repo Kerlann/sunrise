@@ -303,6 +303,7 @@ def compare(left, right, ignored=()):
               for name in GROUPS}
     earliest = None
     has_members = False
+    has_paired_members = False
     for a, b in zip_longest(left.points, right.points):
         a_line = a.row.line if a else left.footer.line
         b_line = b.row.line if b else right.footer.line
@@ -313,6 +314,7 @@ def compare(left, right, ignored=()):
                                     f'{left.path}:{a_line} ({a_key}) for the same script')
         differences, matched = point_differences(a, b)
         has_members |= bool(a.members or b.members)
+        has_paired_members |= matched > 0
         unmatched = differences['ids']
         for name, group in groups.items():
             unknown_left = unknown_at_point(name, a)
@@ -347,8 +349,11 @@ def compare(left, right, ignored=()):
         if group['ignored']:
             group['status'] = 'ignored'
             continue
-        group['status'] = ('different' if group['first'] else
-                           'not compared' if group['first_uncompared'] else 'identical')
+        if name in MEMBER_GROUPS and not has_paired_members:
+            group['status'] = 'not compared'
+        else:
+            group['status'] = ('different' if group['first'] else
+                               'not compared' if group['first_uncompared'] else 'identical')
         for first in (group['first'], group['first_uncompared']):
             if first is None:
                 continue

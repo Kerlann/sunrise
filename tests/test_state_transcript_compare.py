@@ -114,6 +114,13 @@ class StateTranscriptCompareTests(unittest.TestCase):
                 code, _ = self.cli(empty, right, '--ignore-group', 'ids', '--ignore-group', 'membership_order')
                 self.assertEqual(code, 1)
 
+    def test_unmatched_unknown_is_counted_without_claiming_state_was_compared(self):
+        left = transcript(point(0, members=()))
+        right = transcript(point(0, changes={'1': {'uuid': '?'}}))
+        group = self.compare(left, right)['groups']['uuid']
+        self.assertEqual(group['unknown_values'], 1)
+        self.assertEqual(group['status'], 'not compared')
+
     def test_repeated_turn_id_is_compared_in_sequence(self):
         left = transcript(point(1, turns=(PIG, PIG))).replace(
             'n=0\tid=1\ttype=minecraft:pig\trole=root\tvehicle=-',
