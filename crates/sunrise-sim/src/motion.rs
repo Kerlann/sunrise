@@ -5841,9 +5841,7 @@ mod tests {
     fn datapack_damage_landing_uses_world_armor_tags_and_exhaustion() {
         use crate::{assets::Assets, motion::MotionResources, world::World};
         use sunrise_world::loot::PackOverlay;
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../.local/sunrise-client")
-            .join(sunrise_core::VANILLA_VERSION);
+        let root = crate::prepared_test_root::prepared_root(&[]);
         let assets = Assets::load(&root).unwrap();
         let collision = crate::collisions::load(&root, assets.registry).unwrap();
         let resources = MotionResources::load(&root, &assets).unwrap();

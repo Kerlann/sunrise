@@ -3,7 +3,6 @@
 //! and the armor instances a hit leaves behind.
 use super::PlayerMotion;
 use crate::health::{self, *};
-use std::path::Path;
 
 /// What the hook of these tests saw: entity, damage type (a mob's kind)
 /// and causing entity, amount.
@@ -66,15 +65,11 @@ fn set_hook() -> (health::DamageHooks, fn(i32) -> Vec<(String, f32)>) {
 }
 
 #[test]
+#[ignore = "daily"]
 fn a_hit_in_the_hurt_cooldown_knocks_nobody_back() {
     let mut test_level = crate::health::TestLevel::new(0);
     let level = &mut test_level.level();
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../.local/sunrise-client")
-        .join(sunrise_core::VANILLA_VERSION);
-    if !root.join("movement-properties.nbt").exists() {
-        return;
-    }
+    let root = crate::prepared_test_root::prepared_root(&[]);
     let assets = crate::assets::Assets::load(&root).unwrap();
     let resources = crate::motion::MotionResources::load(&root, &assets).unwrap();
     let mut player =
@@ -98,6 +93,7 @@ fn a_hit_in_the_hurt_cooldown_knocks_nobody_back() {
 }
 
 #[test]
+#[ignore = "daily"]
 fn player_post_records_fresh_hit_decision() {
     struct Observed {
         should_cause_side_effects: bool,
@@ -118,12 +114,7 @@ fn player_post_records_fresh_hit_decision() {
             invulnerability_reduction: container.reduction(health::Reduction::Invulnerability),
         });
     }
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../.local/sunrise-client")
-        .join(sunrise_core::VANILLA_VERSION);
-    if !root.join("movement-properties.nbt").exists() {
-        return;
-    }
+    let root = crate::prepared_test_root::prepared_root(&[]);
     let assets = crate::assets::Assets::load(&root).unwrap();
     let resources = crate::motion::MotionResources::load(&root, &assets).unwrap();
     let mut player = crate::motion::PlayerMotion::new(&resources, Default::default());
@@ -173,16 +164,12 @@ fn player_post_records_fresh_hit_decision() {
 /// so a shield that stops all 3 blocks fully (`damageBlocked >= damage`)
 /// and `blockedByItem` must not pull the player toward the mob.
 #[test]
+#[ignore = "daily"]
 fn a_shield_fully_blocks_a_hit_scaled_down_by_easy() {
     let mut test_level = crate::health::TestLevel::new(0);
     let level = &mut test_level.level();
     use sunrise_world::blocking_rules::{BlockingRules, DamageReduction, ItemDamageFunction};
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../.local/sunrise-client")
-        .join(sunrise_core::VANILLA_VERSION);
-    if !root.join("movement-properties.nbt").exists() {
-        return;
-    }
+    let root = crate::prepared_test_root::prepared_root(&[]);
     let assets = crate::assets::Assets::load(&root).unwrap();
     let resources = crate::motion::MotionResources::load(&root, &assets).unwrap();
     let mut player =
@@ -223,14 +210,10 @@ fn a_shield_fully_blocks_a_hit_scaled_down_by_easy() {
 /// #7309: on Hard a mob's 4 is scaled to 6 (`Player.hurtServer`), on
 /// Normal it stays 4, and a non-mob source is never scaled.
 #[test]
+#[ignore = "daily"]
 fn hard_scales_a_mob_hit_by_one_and_a_half() {
     use sunrise_world::food::Difficulty;
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../.local/sunrise-client")
-        .join(sunrise_core::VANILLA_VERSION);
-    if !root.join("movement-properties.nbt").exists() {
-        return;
-    }
+    let root = crate::prepared_test_root::prepared_root(&[]);
     let assets = crate::assets::Assets::load(&root).unwrap();
     let resources = crate::motion::MotionResources::load(&root, &assets).unwrap();
     let health = &resources.health;
@@ -268,15 +251,11 @@ fn hard_scales_a_mob_hit_by_one_and_a_half() {
 /// them: `LivingEntity.hurt` leaves the health at zero and `Player.die`
 /// follows.
 #[test]
+#[ignore = "daily"]
 fn an_arrow_kills_a_player_at_one_health() {
     let mut test_level = crate::health::TestLevel::new(0);
     let level = &mut test_level.level();
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../.local/sunrise-client")
-        .join(sunrise_core::VANILLA_VERSION);
-    if !root.join("movement-properties.nbt").exists() {
-        return;
-    }
+    let root = crate::prepared_test_root::prepared_root(&[]);
     let assets = crate::assets::Assets::load(&root).unwrap();
     let resources = crate::motion::MotionResources::load(&root, &assets).unwrap();
     let mut player =
@@ -293,16 +272,12 @@ fn an_arrow_kills_a_player_at_one_health() {
 /// Needs the prepared data in `.local/sunrise-client/26.3`; skipped
 /// without it.
 #[test]
+#[ignore = "daily"]
 fn the_native_damage_hook_changes_or_cancels_a_players_hit() {
     let (hooks, seen) = set_hook();
     let mut test_level = crate::health::TestLevel::with_hooks(0, hooks);
     let level = &mut test_level.level();
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../.local/sunrise-client")
-        .join(sunrise_core::VANILLA_VERSION);
-    if !root.join("movement-properties.nbt").exists() {
-        return;
-    }
+    let root = crate::prepared_test_root::prepared_root(&[]);
     let assets = crate::assets::Assets::load(&root).unwrap();
     let resources = crate::motion::MotionResources::load(&root, &assets).unwrap();
     let (health, rules) = (&resources.health, health::HealthRules::default());
@@ -329,15 +304,11 @@ fn the_native_damage_hook_changes_or_cancels_a_players_hit() {
 /// term spares a respawned player the void until the client has loaded the
 /// world; once it has, the void hurts again.
 #[test]
+#[ignore = "daily"]
 fn the_void_spares_a_player_whose_client_has_not_loaded() {
     let mut test_level = crate::health::TestLevel::new(0);
     let level = &mut test_level.level();
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../.local/sunrise-client")
-        .join(sunrise_core::VANILLA_VERSION);
-    if !root.join("movement-properties.nbt").exists() {
-        return;
-    }
+    let root = crate::prepared_test_root::prepared_root(&[]);
     let assets = crate::assets::Assets::load(&root).unwrap();
     let resources = crate::motion::MotionResources::load(&root, &assets).unwrap();
     let mut player =
@@ -365,15 +336,11 @@ fn the_void_spares_a_player_whose_client_has_not_loaded() {
 /// instances dirty with creation's zero cache when it bypasses the armour,
 /// and recompute them when it does not.
 #[test]
+#[ignore = "daily"]
 fn a_bypassing_hit_leaves_the_armor_instances_dirty() {
     let mut test_level = crate::health::TestLevel::new(0);
     let level = &mut test_level.level();
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../.local/sunrise-client")
-        .join(sunrise_core::VANILLA_VERSION);
-    if !root.join("movement-properties.nbt").exists() {
-        return;
-    }
+    let root = crate::prepared_test_root::prepared_root(&[]);
     let assets = crate::assets::Assets::load(&root).unwrap();
     let resources = crate::motion::MotionResources::load(&root, &assets).unwrap();
     let (health, rules) = (&resources.health, health::HealthRules::default());
@@ -443,9 +410,7 @@ fn a_bypassing_hit_leaves_the_armor_instances_dirty() {
 #[ignore = "daily"]
 fn datapack_damage_uses_custom_identity_armor_fire_and_reloaded_tags() {
     use sunrise_world::loot::PackOverlay;
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../.local/sunrise-client")
-        .join(sunrise_core::VANILLA_VERSION);
+    let root = crate::prepared_test_root::prepared_root(&[]);
     let assets = crate::assets::Assets::load(&root).unwrap();
     let resources = crate::motion::MotionResources::load(&root, &assets).unwrap();
     let files = vec![
