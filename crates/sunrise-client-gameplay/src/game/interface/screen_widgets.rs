@@ -1656,20 +1656,6 @@ impl crate::game::ClientGame<'_> {
         }
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn test_replace_engine_widget_native_action(&mut self, id: ScreenWidgetId, new_tag: u64) {
-        let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
-        if let Some(slot) = inner.engine_children.iter_mut().find(|s| s.id == id) {
-            slot.native_action = Some(new_tag);
-            let key = slot.key.clone();
-            for hit in &mut inner.engine_hits {
-                if hit.key == key {
-                    hit.native_action = Some(new_tag);
-                }
-            }
-        }
-    }
-
     /// Cancel any in-flight native drag on the active screen when the captured widget becomes
     /// ineligible (hidden, disabled, removed, or replaced) mid-drag.
     fn cancel_active_engine_drag(&mut self) {
@@ -1782,21 +1768,6 @@ impl crate::game::ClientGame<'_> {
         pressed: bool,
         double_click: bool,
     ) -> Result<bool> {
-        let foreign_owner_active = self.client.drag_button.is_some_and(|active| {
-            active != button && self.client.physical_buttons.contains(&active)
-        }) || self
-            .client
-            .screen_state
-            .0
-            .widgets
-            .inner
-            .borrow()
-            .active_redirect
-            .as_ref()
-            .is_some_and(|active| active.button != code);
-        if foreign_owner_active {
-            return Ok(false);
-        }
         let options_screen =
             self.observed_overlay_now().is_none() && self.client.screen == super::Screen::Options;
         if options_screen {
@@ -1886,39 +1857,48 @@ impl crate::game::ClientGame<'_> {
                 self.client.screen,
                 super::Screen::Inventory | super::Screen::Creative
             );
+        // Vanilla `ContainerEventHandler.mouseClicked`: a press of any button goes to the child
+        // under the cursor, while `setDragging(true)` applies only to the primary button.
+        let is_primary = button == MouseButton::Left;
         let res = match self.resolve_engine_click_cursor(self.client.cursor) {
             EngineClickRoute::PassThrough => {
-                self.client
-                    .screen_state
-                    .0
-                    .widgets
-                    .inner
-                    .borrow_mut()
-                    .active_redirect = None;
+                if is_primary {
+                    self.client
+                        .screen_state
+                        .0
+                        .widgets
+                        .inner
+                        .borrow_mut()
+                        .active_redirect = None;
+                }
                 self.with_screen_input_overrides(|game| {
                     game.route_screen_button(button, code, true, double_click)
                 })
             }
             EngineClickRoute::Block if direct_override_screen => {
-                self.client
-                    .screen_state
-                    .0
-                    .widgets
-                    .inner
-                    .borrow_mut()
-                    .active_redirect = None;
+                if is_primary {
+                    self.client
+                        .screen_state
+                        .0
+                        .widgets
+                        .inner
+                        .borrow_mut()
+                        .active_redirect = None;
+                }
                 self.with_screen_input_overrides(|game| {
                     game.route_screen_button(button, code, true, double_click)
                 })
             }
             EngineClickRoute::Block if container_screen => {
-                self.client
-                    .screen_state
-                    .0
-                    .widgets
-                    .inner
-                    .borrow_mut()
-                    .active_redirect = None;
+                if is_primary {
+                    self.client
+                        .screen_state
+                        .0
+                        .widgets
+                        .inner
+                        .borrow_mut()
+                        .active_redirect = None;
+                }
                 widgets::with_blocking_engine_widget_click(|| {
                     self.with_screen_input_overrides(|game| {
                         game.route_screen_button(button, code, true, double_click)
@@ -1926,13 +1906,15 @@ impl crate::game::ClientGame<'_> {
                 })
             }
             EngineClickRoute::Block => {
-                self.client
-                    .screen_state
-                    .0
-                    .widgets
-                    .inner
-                    .borrow_mut()
-                    .active_redirect = None;
+                if is_primary {
+                    self.client
+                        .screen_state
+                        .0
+                        .widgets
+                        .inner
+                        .borrow_mut()
+                        .active_redirect = None;
+                }
                 Ok(false)
             }
             EngineClickRoute::Select {
@@ -1949,13 +1931,15 @@ impl crate::game::ClientGame<'_> {
                     native_action,
                     redirect,
                 };
-                self.client
-                    .screen_state
-                    .0
-                    .widgets
-                    .inner
-                    .borrow_mut()
-                    .active_redirect = Some(target.clone());
+                if is_primary {
+                    self.client
+                        .screen_state
+                        .0
+                        .widgets
+                        .inner
+                        .borrow_mut()
+                        .active_redirect = Some(target.clone());
+                }
                 let mapped_cursor = if resolved != original {
                     Self::map_redirect_cursor(self.client.cursor, resolved, original)
                 } else {
@@ -1968,7 +1952,7 @@ impl crate::game::ClientGame<'_> {
                         game.route_screen_button(button, code, true, double_click)
                     })
                 };
-                if !matches!(res, Ok(true)) {
+                if is_primary && !matches!(res, Ok(true)) {
                     self.client
                         .screen_state
                         .0

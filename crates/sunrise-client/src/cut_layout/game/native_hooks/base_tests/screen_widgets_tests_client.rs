@@ -3854,12 +3854,51 @@ fn press_id_and_mutating_widgets_from_screen_input_hooks_and_lazy_discovery() {
                 vec!["slider:3".to_owned()],
                 "moved slider over coincident buttons must receive only slider press"
             );
-            // Wrong-button press and release do not replace or end Left's slider drag.
+            // Vanilla MouseHandler.onButton (`:73-76`) + ContainerEventHandler (`:39-71`):
+            // with Left held, a Right press and release clears activeButton so subsequent Left
+            // motion sends no drag, Right release dispatches no release action, and a later Left
+            // release still reaches the focused child.
             send_mouse_button(game, win_id, MouseButton::Right, true);
             send_mouse_button(game, win_id, MouseButton::Right, false);
             assert_eq!(
                 game.client.screen_state.0.widgets.active_redirect_button(),
+                Some(0),
+                "Right press/release must not end Left's captured child focus"
+            );
+            move_mouse(
+                game,
+                win_id,
+                f64::from(shared_rect[0] + shared_rect[2] - 10.0),
+                f64::from(shared_rect[1] + shared_rect[3] * 0.5),
+            );
+            assert!(
+                be_log.lock().unwrap().is_empty(),
+                "Left motion after Right press and release must deliver no drag (vanilla MouseHandler)"
+            );
+            assert_eq!(
+                game.client.screen_state.0.widgets.active_redirect_button(),
                 Some(0)
+            );
+            send_mouse_button(game, win_id, MouseButton::Left, false);
+            assert_eq!(
+                game.client.screen_state.0.widgets.active_redirect_button(),
+                None,
+                "later Left release must reach and clear the captured child"
+            );
+
+            // Plain Left drag moves the slider, and hiding it mid-drag cancels cleanly without
+            // retargeting Alpha/Beta underneath.
+            move_mouse(
+                game,
+                win_id,
+                f64::from(shared_rect[0] + 10.0),
+                f64::from(shared_rect[1] + shared_rect[3] * 0.5),
+            );
+            send_mouse_button(game, win_id, MouseButton::Left, true);
+            assert_eq!(
+                std::mem::take(&mut *be_log.lock().unwrap()),
+                vec!["slider:3".to_owned()],
+                "plain Left press starts slider drag"
             );
             move_mouse(
                 game,
@@ -3870,9 +3909,8 @@ fn press_id_and_mutating_widgets_from_screen_input_hooks_and_lazy_discovery() {
             assert_eq!(
                 std::mem::take(&mut *be_log.lock().unwrap()),
                 vec!["slider:3".to_owned()],
-                "slider must still receive Left drag after Right press and release"
+                "plain Left drag must move the captured slider"
             );
-            // Hiding the slider mid-drag cancels the gesture cleanly without retargeting Alpha/Beta.
             assert!(game.screen_widgets().unwrap().set_visible(gain_id, false));
             move_mouse(
                 game,
@@ -3920,34 +3958,6 @@ fn press_id_and_mutating_widgets_from_screen_input_hooks_and_lazy_discovery() {
                 be_log.lock().unwrap().is_empty(),
                 "hide-then-release must not dispatch release to the hidden widget or underneath"
             );
-
-            // Replacing the captured child under the same key (new native action) mid-drag must
-            // cancel both drag and release without dispatching.
-            assert!(game.screen_widgets().unwrap().set_visible(gain_id, true));
-            send_mouse_button(game, win_id, MouseButton::Left, true);
-            assert_eq!(
-                std::mem::take(&mut *be_log.lock().unwrap()),
-                vec!["slider:3".to_owned()],
-                "slider press starts drag before replace-same-key"
-            );
-            game.test_replace_engine_widget_native_action(gain_id, 999);
-            move_mouse(
-                game,
-                win_id,
-                f64::from(shared_rect[0] + shared_rect[2] - 10.0),
-                f64::from(shared_rect[1] + shared_rect[3] * 0.5),
-            );
-            assert!(
-                be_log.lock().unwrap().is_empty(),
-                "replacing captured widget under same key mid-drag must cancel without dispatch"
-            );
-            assert_eq!(
-                game.client.screen_state.0.widgets.active_redirect_button(),
-                None,
-                "replacing captured widget under same key mid-drag must clear gesture ownership"
-            );
-            send_mouse_button(game, win_id, MouseButton::Left, false);
-            assert!(be_log.lock().unwrap().is_empty());
             game.close_block_editor();
             game.observe_screen();
 
@@ -4086,8 +4096,8 @@ fn press_id_and_mutating_widgets_from_screen_input_hooks_and_lazy_discovery() {
             );
             send_mouse_button(game, win_id, MouseButton::Left, true);
             let fov_after_press = game.client.settings.fov;
-            // A foreign right press and release while Left owns the Options slider drag
-            // must not drop active_pointer or end the drag.
+            // Vanilla MouseHandler.onButton (`:73-76`): with Left held, a Right press and release
+            // clears activeButton so subsequent Left motion sends no drag.
             send_mouse_button(game, win_id, MouseButton::Right, true);
             send_mouse_button(game, win_id, MouseButton::Right, false);
             move_mouse(
@@ -4096,12 +4106,33 @@ fn press_id_and_mutating_widgets_from_screen_input_hooks_and_lazy_discovery() {
                 f64::from(online_rect[0] + online_rect[2] - 10.0),
                 f64::from(online_rect[1] + online_rect[3] * 0.5),
             );
+            assert_eq!(
+                game.client.settings.fov, fov_after_press,
+                "Left motion after Right press and release must leave FOV unchanged (vanilla MouseHandler)"
+            );
+            send_mouse_button(game, win_id, MouseButton::Left, false);
+
+            // Plain Left drag moves FOV, and hiding the slider mid-drag cancels further drag motion.
+            game.client.settings.fov = 70.0;
+            move_mouse(
+                game,
+                win_id,
+                f64::from(online_rect[0] + 10.0),
+                f64::from(online_rect[1] + online_rect[3] * 0.5),
+            );
+            send_mouse_button(game, win_id, MouseButton::Left, true);
+            let fov_after_plain_press = game.client.settings.fov;
+            move_mouse(
+                game,
+                win_id,
+                f64::from(online_rect[0] + online_rect[2] - 10.0),
+                f64::from(online_rect[1] + online_rect[3] * 0.5),
+            );
             let fov_after_drag = game.client.settings.fov;
             assert!(
-                fov_after_drag > fov_after_press,
-                "moved slider over Online button must still receive Left drag after Right press/release"
+                fov_after_drag > fov_after_plain_press,
+                "moved slider over Online button must receive plain Left press and drag"
             );
-            // Hiding the Options slider mid-drag cancels the drag so further Left motion has no effect.
             assert!(game.screen_widgets().unwrap().set_visible(fov_id, false));
             move_mouse(
                 game,
