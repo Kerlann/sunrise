@@ -1588,6 +1588,24 @@ impl crate::game::ClientGame<'_> {
         }
     }
 
+    /// The renderer is on another device (`ClientGame::set_renderer`): an open Shader Options
+    /// page is read again with its macros, whose device answers (`IRIS_FEATURE_PER_BUFFER_BLENDING`
+    /// among them) may differ from those the page was read with. The values chosen on the page and
+    /// the screens opened carry over (`ShaderOptions::carry_over`). No page open: nothing read.
+    pub(in crate::game) fn reread_shader_options(&mut self) {
+        let Some(open) = &self.client.settings.shader_options else {
+            return;
+        };
+        let macros = shader_options_macros(self.client.renderer.0.as_deref());
+        let mode = self.client.settings.sunrise.iris_compat_of(&open.pack);
+        let read = read_shader_options(&open.pack, &self.client.settings.language, &macros, mode);
+        let read = read.map(|mut read| {
+            read.carry_over(open);
+            read
+        });
+        self.client.settings.shader_options = read;
+    }
+
     /// The pick's files may have changed (the pack list read again): its identity answer is read
     /// again, so a pack replaced under its name that answers otherwise loads again. A scan this
     /// starts runs on a thread of its own; the frames after take its answer once it has landed

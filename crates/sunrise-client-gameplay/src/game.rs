@@ -268,16 +268,21 @@ impl ClientGame<'_> {
         self.client.mod_gpu.as_ref()
     }
 
-    /// Installs `renderer`. A pack refused on another device is tried again on this one
-    /// (`native_shaders::follow_device`).
+    /// Installs `renderer`. On another device than the last renderer's (`Renderer::device_id`: a
+    /// device recovery, any newly opened device), a pack refused before is tried again
+    /// (`native_shaders::follow_device`) and an open Shader Options page is read again with this
+    /// renderer's macros (`reread_shader_options`).
     pub fn set_renderer(&mut self, renderer: Box<Renderer>) {
-        client_side::native_shaders::follow_device(&renderer.device_pack_macros());
+        let new_device = client_side::native_shaders::follow_device(renderer.device_id());
         let gpu = renderer.mod_gpu();
         if let Some(previous) = &self.client.mod_gpu {
             gpu.continue_ids_from(previous);
         }
         self.client.mod_gpu = Some(gpu.clone());
         self.client.renderer.0 = Some(renderer);
+        if new_device {
+            self.reread_shader_options();
+        }
     }
 
     #[cfg(any(test, feature = "test-support"))]

@@ -18,28 +18,23 @@ thread_local! {
     // Loader outcomes survive renderer replacement; rejected files must not cause a rebuild loop.
     static OUTCOMES: std::cell::RefCell<std::collections::HashMap<PathBuf, Outcome>> =
         std::cell::RefCell::default();
-    // What the device of the renderer the outcomes were given on decides of a pack's macros
-    // (`Renderer::device_pack_macros`); `None` before a renderer was installed.
-    static DEVICE: std::cell::RefCell<Option<sunrise_shaders::Macros>> =
-        std::cell::RefCell::default();
+    // The device (`Renderer::device_id`) of the renderer installed last; `None` before one was.
+    static DEVICE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
 
-/// A renderer whose device decides `device` of a pack's macros is installed
-/// (`ClientGame::set_renderer`). Where that differs from the device the outcomes were given on,
-/// every refusal is forgotten: the same files read with that device's macros (its feature
-/// answers, such as `IRIS_FEATURE_PER_BUFFER_BLENDING`, and its subgroup extensions) are other
-/// build inputs, tried again once. Acceptances are kept, and the same device keeps everything.
-pub(in crate::game) fn follow_device(device: &sunrise_shaders::Macros) {
-    let changed = DEVICE.with_borrow_mut(|was| {
-        let changed = was.as_ref().is_some_and(|was| was != device);
-        if was.as_ref() != Some(device) {
-            *was = Some(device.clone());
-        }
-        changed
-    });
+/// A renderer on the device `device` (`Renderer::device_id`) is installed
+/// (`ClientGame::set_renderer`). On another device than the last renderer's (a device recovery,
+/// any newly opened device) every refusal is forgotten: the same files on another device are
+/// other build inputs (its feature answers, such as `IRIS_FEATURE_PER_BUFFER_BLENDING`, its
+/// extensions and its limits), tried again once. Acceptances are kept, and a renderer made again
+/// on the same device keeps everything, so a refusal never makes a rebuild loop. Whether the
+/// device is another than the last one's.
+pub(in crate::game) fn follow_device(device: u64) -> bool {
+    let changed = DEVICE.replace(Some(device)) != Some(device);
     if changed {
         OUTCOMES.with_borrow_mut(|packs| packs.retain(|_, (_, _, accepted)| *accepted));
     }
+    changed
 }
 
 /// Whether the loader accepted the pack at `path` with the Iris compatibility switch `mode`;
@@ -160,8 +155,9 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// A refusal is forgotten when a renderer with another device is installed, and kept when
-    /// the same device is installed again; an acceptance is kept either way.
+    /// A refusal is forgotten when a renderer on another device is installed, whatever that
+    /// device answers, and kept when a renderer is made again on the same device; an acceptance
+    /// is kept either way.
     #[test]
     fn a_refusal_is_tried_again_on_another_device() {
         let root = std::env::temp_dir().join(format!("sunrise-device-{}", std::process::id()));
@@ -170,27 +166,23 @@ mod tests {
             std::fs::create_dir_all(pack).unwrap();
             std::fs::write(pack.join("post.fsh"), "files").unwrap();
         }
-        let mut unable = sunrise_shaders::Macros::default();
-        unable.set_per_buffer_blending(false);
-        let mut able = unable.clone();
-        able.set_per_buffer_blending(true);
-        follow_device(&unable);
+        assert!(follow_device(7));
         remember(&refused_pack, fingerprint(&refused_pack), ON, false);
         remember(&accepted_pack, fingerprint(&accepted_pack), ON, true);
-        // The same device again: nothing to try again.
-        follow_device(&unable);
+        // A renderer made again on the same device: nothing to try again.
+        assert!(!follow_device(7));
         assert!(refused(&refused_pack, fingerprint(&refused_pack), ON));
         // Another device: the refusal is tried again, the acceptance stays.
-        follow_device(&able);
+        assert!(follow_device(8));
         assert!(!refused(&refused_pack, fingerprint(&refused_pack), ON));
         assert_eq!(outcome(&refused_pack, ON), None);
         assert_eq!(outcome(&accepted_pack, ON), Some(true));
         // Refused on that device too: kept while it stays.
         remember(&refused_pack, fingerprint(&refused_pack), ON, false);
-        follow_device(&able);
+        assert!(!follow_device(8));
         assert!(refused(&refused_pack, fingerprint(&refused_pack), ON));
-        // Back to the first device: tried again.
-        follow_device(&unable);
+        // Back to the first device's number: still another device than the last.
+        assert!(follow_device(7));
         assert!(!refused(&refused_pack, fingerprint(&refused_pack), ON));
         std::fs::remove_dir_all(root).unwrap();
     }

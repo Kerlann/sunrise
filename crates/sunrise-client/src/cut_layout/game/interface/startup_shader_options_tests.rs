@@ -45,7 +45,14 @@ fn the_title_screens_options_page_reads_the_startup_renderers_device() {
         return;
     }
     let _gpu = sunrise_client_render::gfx::lock_test_gpu();
-    super::native_entity_refs::tests::with_client_game(|game| {
+    // The prepared data the client game boots from, checked before the boot reads it.
+    let root = crate::prepared_test_root::prepared_root(&[
+        sunrise_core::prepared_test_support::STREAMING_INPUTS,
+        sunrise_core::prepared_test_support::SERVER_INPUTS,
+        &["entity-models.json", "gameplay-facts.json"],
+    ]);
+    let role = sunrise_gameplay_common::game::execution_role::ExecutionRole::Client;
+    super::native_entity_refs::tests::with_game_role_client(root, role, |game| {
         let root = tempfile::tempdir().unwrap();
         let pack = guarded_pack(root.path());
         game.options.offscreen = true;

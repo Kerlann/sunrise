@@ -652,27 +652,13 @@ impl Renderer {
     /// (`define_device_features`).
     pub fn define_pack_macros(&self, macros: &mut sunrise_shaders::Macros) {
         macros.define_renderer(self.mipmaps);
-        self.define_device_macros(macros);
-        for (name, value) in crate::mod_pipelines::pack_defines() {
-            macros.define(name, value);
-        }
-    }
-
-    /// The part of `define_pack_macros` this renderer's device decides: the feature flags it
-    /// answers (`define_device_features`) and the subgroup extensions, when it has them.
-    fn define_device_macros(&self, macros: &mut sunrise_shaders::Macros) {
         define_device_features(macros, self.adapter.get_downlevel_capabilities().flags);
         if self.device.features().contains(wgpu::Features::SUBGROUP) {
             macros.define_subgroups();
         }
-    }
-
-    /// What this renderer's device decides of a pack's macros (`define_device_macros`), alone:
-    /// two renderers whose values differ may load or refuse the same pack differently.
-    pub fn device_pack_macros(&self) -> sunrise_shaders::Macros {
-        let mut macros = sunrise_shaders::Macros::default();
-        self.define_device_macros(&mut macros);
-        macros
+        for (name, value) in crate::mod_pipelines::pack_defines() {
+            macros.define(name, value);
+        }
     }
 
     /// How the active translated shader pack binds mod pipeline `slot`.
