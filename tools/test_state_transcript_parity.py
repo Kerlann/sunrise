@@ -244,7 +244,7 @@ def main(argv=None):
     lab.write_json(manifest, {'preset': 'minecraft:flat', 'view_distance': scenes.DISTANCE,
                               'simulation_distance': scenes.DISTANCE, 'world': fixture})
     fixture_hash = lab.digest(manifest, 'sha256')
-    env = dict(os.environ, PARITY_JAVA_CACHE='0', DISPLAY=':99', SUNRISE_NO_AUDIO='1')
+    env = dict(os.environ, PARITY_JAVA_CACHE='0', DISPLAY=':99')
     for name in ('WAYLAND_DISPLAY', 'WAYLAND_SOCKET', 'SUNRISE_HARNESS_LOADED_FIXTURE',
                  'SUNRISE_HARNESS_TERRAIN_ONLY', 'SUNRISE_SESSION_FILE'):
         env.pop(name, None)

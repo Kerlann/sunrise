@@ -403,7 +403,7 @@ paths = [
   "crates/sunrise-client-gameplay/src/game.rs", "crates/sunrise-client/src/cut_layout/game.rs", "crates/sunrise-gameplay-common/src/game.rs", "crates/sunrise-gameplay/src/game.rs", "crates/sunrise-client/src/cut_layout/game/world/ordered_tick.rs", "crates/sunrise-gameplay/src/game/world/level_tick.rs", "crates/sunrise-gameplay/src/game/world/ordered_tick.rs",
   "crates/sunrise-sim/src/join_seq.rs",
 ]
-harnesses = ["tick_order", "chunk_entity_order", "entity_lookup_order"]
+harnesses = ["tick_order", "chunk_entity_order", "entity_lookup_order", "state_transcript"]
 
 [[area]]
 name = "client-packets"
