@@ -4,6 +4,8 @@ pub mod server_side;
 #[cfg(test)]
 #[path = "game/entities/entity_tick_families_tests.rs"]
 mod entity_tick_families_tests;
+#[path = "game/state_seam.rs"]
+mod state_seam;
 #[allow(unused_imports)]
 pub(in crate::game) use server_side::acting_state;
 #[allow(unused_imports)]
@@ -715,9 +717,7 @@ pub(in crate::game) struct WrappedServerInit {
     world_tables: server_side::ServerShared<Option<WorldTables>>,
     server_loot: server_side::ServerOnly<sunrise_sim::structure_blocks::LootSnapshot>,
     levels: server_side::ServerOnly<levels::Levels>,
-    tickets: server_side::ServerShared<sunrise_sim::ticket_levels::ChunkTickets>,
-    random_tick_sections:
-        server_side::ServerOnly<sunrise_sim::random_tick_sections::RandomTickSections>,
+    chunk_ticking: levels::ChunkTickingLevelState,
     spill: server_side::ServerOnly<spill_common::Spill>,
     game_tests: server_side::ServerOnly<game_tests::GameTests>,
     native_commands:
@@ -760,8 +760,7 @@ impl<const NO_SLOT: bool> ConstructInit<NO_SLOT> {
             world_tables: server_side::ServerShared::new(None),
             server_loot: server_side::ServerOnly::new(Default::default()),
             levels: server_side::ServerOnly::new(Default::default()),
-            tickets: server_side::ServerShared::new(Default::default()),
-            random_tick_sections: server_side::ServerOnly::new(Default::default()),
+            chunk_ticking: Default::default(),
             spill: server_side::ServerOnly::new(Default::default()),
             game_tests: server_side::ServerOnly::new(game_tests::GameTests::default()),
             native_commands: server_side::ServerOnly::new(Default::default()),

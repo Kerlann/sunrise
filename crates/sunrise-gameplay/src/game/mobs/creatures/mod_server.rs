@@ -1316,13 +1316,13 @@ impl crate::game::ServerGame<'_> {
     /// simulation distance: the chunks whose entities are on `ServerLevel`'s entity tick list
     /// (`Visibility.fromFullChunkStatus`), so they check despawning.
     pub fn entity_tick_listed_area(&self) -> impl Fn(i32, i32) -> bool + use<> {
-        let levels = self.server.tickets.0.levels();
+        let levels = self.server.chunk_ticking.tickets.levels();
         move |x, z| levels.loaded_entity_ticking(x >> 4, z >> 4)
     }
     /// `DistanceManager.inEntityTickingRange` in an entity-ticking chunk
     /// (block coordinates), from every player's tickets (`update_chunk_tickets`).
     pub fn entity_ticking_area(&self) -> impl Fn(i32, i32) -> bool + use<> {
-        let levels = self.server.tickets.0.levels();
+        let levels = self.server.chunk_ticking.tickets.levels();
         move |x, z| levels.entity_ticking_at(x, z)
     }
     /// Complete `AbstractArrow.stepMoveAndHit` for any non-trident arrow entity hit batch.
@@ -2013,6 +2013,7 @@ impl crate::game::ServerGame<'_> {
                         && source_mob.is_some_and(|id| {
                             self.server
                                 .portals
+                                .level
                                 .entities
                                 .get(&id)
                                 .is_some_and(|p| p.cooldown > 0)
