@@ -373,6 +373,10 @@ pub fn handle_known_data_maps(
 
 /// Encode `sunrise:data_map_sync` (S->C in play) for one registry
 /// (`RegistryDataMapSyncPayload`).
+///
+/// Entries whose projected NBT cannot be encoded on the wire (including `Tag::End`,
+/// strings exceeding modified UTF-8 limits, or tags exceeding NBT depth limits) are
+/// logged once per map and omitted rather than substituting `Tag::End`.
 pub fn encode_sync_payload(
     registry: &str,
     maps: &[(String, Vec<(String, Tag)>)],
@@ -382,14 +386,35 @@ pub fn encode_sync_payload(
     let map_count = i32::try_from(maps.len())
         .map_err(|_| format!("Too many data maps for registry {registry}."))?;
     w.varint(map_count);
+    let limits = sunrise_core::nbt::Limits::default();
     for (map_id, entries) in maps {
+        let mut encoded_entries: Vec<(&str, Vec<u8>)> = Vec::with_capacity(entries.len());
+        let mut warned = false;
+        for (entry_id, tag) in entries {
+            let encoded = if matches!(tag, Tag::End) {
+                Err("Tag::End cannot be synced as a data map value".to_owned())
+            } else {
+                sunrise_core::nbt::write_network(tag, limits).map_err(|error| error.to_string())
+            };
+            match encoded {
+                Ok(bytes) => encoded_entries.push((entry_id.as_str(), bytes)),
+                Err(error) => {
+                    if !warned {
+                        warned = true;
+                        log::warn!(
+                            "Sunrise: data map {map_id} on {registry}: failed to encode projected value for entry {entry_id} ({error}); omitting entry from client sync"
+                        );
+                    }
+                }
+            }
+        }
         w.string(map_id);
-        let entry_count = i32::try_from(entries.len())
+        let entry_count = i32::try_from(encoded_entries.len())
             .map_err(|_| format!("Too many entries in data map {map_id}."))?;
         w.varint(entry_count);
-        for (entry_id, tag) in entries {
+        for (entry_id, nbt_bytes) in encoded_entries {
             w.string(entry_id);
-            w.nbt(tag);
+            w.bytes(&nbt_bytes);
         }
     }
     Ok(w.data)
@@ -397,35 +422,62 @@ pub fn encode_sync_payload(
 
 /// Decode `sunrise:data_map_sync` (S->C in play) for one registry
 /// (`RegistryDataMapSyncPayload`). Entries in each map are sorted by entry ID.
+///
+/// Any malformed payload or `Tag::End` value fails the whole registry decode with an
+/// error naming the registry (and map when known) so the client disconnects without
+/// applying partial state.
 pub fn decode_sync_payload(
     bytes: &[u8],
 ) -> Result<(String, HashMap<String, Vec<(String, Tag)>>), String> {
     let mut r = Reader::new(bytes);
-    let registry = r.string(MAX_STRING_LEN).map_err(|e| e.to_string())?;
-    let map_count = r.varint().map_err(|e| e.to_string())?;
+    let registry = r
+        .string(MAX_STRING_LEN)
+        .map_err(|e| format!("invalid registry id in sunrise:data_map_sync: {e}"))?;
+    let map_count = r
+        .varint()
+        .map_err(|e| format!("invalid map count for registry {registry}: {e}"))?;
     if map_count < 0 {
-        return Err("Negative map count in sunrise:data_map_sync payload.".into());
+        return Err(format!(
+            "negative map count for registry {registry} in sunrise:data_map_sync payload"
+        ));
     }
     let mut maps = HashMap::with_capacity((map_count as usize).min(256));
     for _ in 0..(map_count as usize) {
-        let map_id = r.string(MAX_STRING_LEN).map_err(|e| e.to_string())?;
-        let entry_count = r.varint().map_err(|e| e.to_string())?;
+        let map_id = r
+            .string(MAX_STRING_LEN)
+            .map_err(|e| format!("invalid map id for registry {registry}: {e}"))?;
+        let entry_count = r
+            .varint()
+            .map_err(|e| format!("invalid entry count for data map {map_id} ({registry}): {e}"))?;
         if entry_count < 0 {
             return Err(format!(
-                "Negative entry count for data map {map_id} in sunrise:data_map_sync payload."
+                "negative entry count for data map {map_id} ({registry}) in sunrise:data_map_sync payload"
             ));
         }
         let mut entries = Vec::with_capacity((entry_count as usize).min(4096));
         for _ in 0..(entry_count as usize) {
-            let entry_id = r.string(MAX_STRING_LEN).map_err(|e| e.to_string())?;
-            let tag = r.nbt().map_err(|e| e.to_string())?;
+            let entry_id = r
+                .string(MAX_STRING_LEN)
+                .map_err(|e| format!("invalid entry id in data map {map_id} ({registry}): {e}"))?;
+            let tag = r.nbt().map_err(|e| {
+                format!(
+                    "undecodable NBT in data map {map_id} ({registry}) for entry {entry_id}: {e}"
+                )
+            })?;
+            if matches!(tag, Tag::End) {
+                return Err(format!(
+                    "unexpected Tag::End value in data map {map_id} ({registry}) for entry {entry_id}"
+                ));
+            }
             entries.push((entry_id, tag));
         }
         entries.sort_by(|a, b| a.0.cmp(&b.0));
         maps.insert(map_id, entries);
     }
     if r.remaining() != 0 {
-        return Err("Trailing bytes in sunrise:data_map_sync payload.".into());
+        return Err(format!(
+            "trailing bytes in sunrise:data_map_sync payload for registry {registry}"
+        ));
     }
     Ok((registry, maps))
 }
@@ -539,6 +591,60 @@ mod tests {
         let mut with_trailing = encoded;
         with_trailing.push(0xAA);
         assert!(decode_sync_payload(&with_trailing).is_err());
+    }
+
+    #[test]
+    fn unencodable_values_are_omitted_and_receiver_refuses_tag_end_or_corrupt_nbt() {
+        let oversized = "x".repeat(70_000);
+        let encoded = encode_sync_payload(
+            "minecraft:item",
+            &[(
+                "chemlib:fuel".to_owned(),
+                vec![
+                    ("minecraft:coal".to_owned(), Tag::Int(1600)),
+                    (
+                        "minecraft:stick".to_owned(),
+                        Tag::String(oversized.as_str().into()),
+                    ),
+                    ("minecraft:paper".to_owned(), Tag::End),
+                ],
+            )],
+        )
+        .unwrap();
+        let (registry, maps) = decode_sync_payload(&encoded).unwrap();
+        assert_eq!(registry, "minecraft:item");
+        assert_eq!(
+            maps["chemlib:fuel"],
+            vec![("minecraft:coal".to_owned(), Tag::Int(1600))]
+        );
+
+        // Receiver must refuse Tag::End with an error naming both registry and map.
+        let mut end_payload = Writer::new();
+        end_payload.string("minecraft:item");
+        end_payload.varint(1);
+        end_payload.string("chemlib:fuel");
+        end_payload.varint(1);
+        end_payload.string("minecraft:stick");
+        end_payload.u8(0);
+        let err = decode_sync_payload(&end_payload.data).unwrap_err();
+        assert!(
+            err.contains("minecraft:item") && err.contains("chemlib:fuel"),
+            "unexpected Tag::End error: {err}"
+        );
+
+        // Receiver must refuse truncated NBT with an error naming both registry and map.
+        let mut truncated = Writer::new();
+        truncated.string("minecraft:item");
+        truncated.varint(1);
+        truncated.string("chemlib:fuel");
+        truncated.varint(1);
+        truncated.string("minecraft:coal");
+        truncated.u8(3); // TAG_Int with missing 4-byte payload
+        let err = decode_sync_payload(&truncated.data).unwrap_err();
+        assert!(
+            err.contains("minecraft:item") && err.contains("chemlib:fuel"),
+            "unexpected truncated NBT error: {err}"
+        );
     }
 
     #[test]
