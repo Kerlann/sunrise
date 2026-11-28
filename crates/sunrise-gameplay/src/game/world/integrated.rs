@@ -432,15 +432,11 @@ impl crate::game::ServerGame<'_> {
         let view_distance = self.server.settings.render_distance.max(2);
         #[cfg(feature = "state-digest")]
         if let Ok(raw) = std::env::var("SUNRISE_STATE_TRANSCRIPT_SIMULATION_DISTANCE") {
-            let parsed = raw
-                .parse::<i32>()
-                .ok()
-                .filter(|&d| (2..=32).contains(&d))
-                .ok_or_else(|| {
-                    format!(
-                        "invalid SUNRISE_STATE_TRANSCRIPT_SIMULATION_DISTANCE: {raw:?} (expected integer 2..=32)"
-                    )
-                })?;
+            let parsed = raw.parse::<i32>().map_err(|_| {
+                format!(
+                    "invalid SUNRISE_STATE_TRANSCRIPT_SIMULATION_DISTANCE: {raw:?} (expected an integer)"
+                )
+            })?;
             self.server.settings.simulation_distance = parsed;
         }
         let config = HubConfig {

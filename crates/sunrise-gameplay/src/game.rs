@@ -645,7 +645,6 @@ pub(in crate::game) use server_side::spawner_server;
 #[allow(unused_imports)]
 pub(in crate::game) use server_side::state_digest;
 #[cfg(feature = "state-digest")]
-#[allow(unused_imports)]
 pub(in crate::game) use server_side::state_transcript;
 
 #[cfg(feature = "state-digest")]
@@ -660,7 +659,6 @@ macro_rules! record_turn {
 macro_rules! record_turn {
     ($dim:expr, $id:expr, $ty:expr, $vehicle:expr) => {};
 }
-#[allow(unused_imports)]
 pub(in crate::game) use record_turn;
 
 #[cfg(feature = "state-digest")]
@@ -675,7 +673,6 @@ macro_rules! record_departure {
 macro_rules! record_departure {
     ($dim:expr, $id:expr, $ty:expr, $reason:expr) => {};
 }
-#[allow(unused_imports)]
 pub(in crate::game) use record_departure;
 #[allow(unused_imports)]
 pub use server_side::stats;

@@ -549,8 +549,8 @@ impl ServerGame<'_> {
                         let resident = g.world.chunks.contains_key(&(x, z));
                         #[cfg(feature = "state-digest")]
                         if check_entity_ticking {
-                            entity_ticking =
-                                resident && g.server.chunk_ticking.tickets.levels().entity_ticking(x, z);
+                            entity_ticking = resident
+                                && g.server.chunk_ticking.tickets.levels().entity_ticking(x, z);
                         }
                         Ok([
                             resident,
