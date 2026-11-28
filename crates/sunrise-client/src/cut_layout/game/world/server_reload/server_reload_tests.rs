@@ -1340,6 +1340,7 @@ fn data_maps_updated_fires_for_each_registry_on_first_open_and_every_reload() {
         seen: seen.clone(),
         reads: reads.clone(),
     };
+    let _data_map_publication = sunrise_sim::data_map_net::isolate_server_publication();
     mod_platform::testing::with_mods(vec![ModEntry::new("probe", Box::new(probe))].into(), || {
         with_game(|game| {
             game.options.dedicated = Some(Vec::new());
