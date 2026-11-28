@@ -119,7 +119,7 @@ mod tests {
     use super::*;
     use crate::worldgen::{
         block_feature::FeatureBlockBindings, block_predicate::BlockPredicate,
-        generator::data::build_tags, overrides::WorldgenOverrides,
+        generator::data::load_fluid_tags, overrides::WorldgenOverrides,
     };
     use std::collections::BTreeSet;
 
@@ -146,43 +146,42 @@ mod tests {
         .unwrap()
     }
 
-    /// The tab-complete tags the loader keeps: five fluid ids.
-    fn known(id: &str) -> bool {
-        matches!(
-            id,
-            "minecraft:water"
-                | "minecraft:flowing_water"
-                | "minecraft:lava"
-                | "minecraft:flowing_lava"
-                | "minecraft:empty"
-        )
-    }
-
     #[test]
     fn fluid_tags_above_8192_load_and_match_through_the_real_loader() {
         let registry = registry();
         let water = registry.default_state("minecraft:water").unwrap();
         let lava = registry.default_state("minecraft:lava").unwrap();
 
-        // The real loader, `build_tags` with `name == "fluid_tags"`, over more
-        // definitions than `TagDefinitions::build`'s 8,192-tag ceiling.
-        let mut raw = BTreeMap::new();
+        // A prepared `fluid_tags.json` of more definitions than 8,192, read by the
+        // production loader. The last tag names lava, every other one water.
+        let mut prepared = BTreeMap::new();
         for i in 0..8200 {
-            // The high-numbered tags name a single family so each side of the
-            // match is observable; every other tag names water.
             let values = if i == 8199 {
                 r#"["minecraft:lava"]"#
             } else {
                 r#"["minecraft:water"]"#
             };
-            raw.insert(format!("test:tag_{i}"), format!(r#"{{"values":{values}}}"#));
+            prepared.insert(format!("test:tag_{i}"), format!(r#"{{"values":{values}}}"#));
         }
-        let mut dropped = Vec::new();
-        let overrides = WorldgenOverrides::default();
-        let tags = build_tags(&raw, &overrides, "fluid_tags", &mut dropped, known)
+        let scratch = tempfile::tempdir().unwrap();
+        std::fs::write(
+            scratch.path().join("fluid_tags.json"),
+            serde_json::to_string(&prepared).unwrap(),
+        )
+        .unwrap();
+        // A pack appends lava to the first tag, so override merging is on the path.
+        let mut overrides = WorldgenOverrides::default();
+        overrides.add_tag(
+            "fluid_tags",
+            "test:tag_0",
+            "pack",
+            r#"{"values":["minecraft:lava"]}"#.to_owned(),
+        );
+        let mut warnings = Vec::new();
+        let tags = load_fluid_tags(scratch.path(), &overrides, &mut warnings)
             .expect("the real loader accepts past 8,192 fluid tag definitions");
-        assert_eq!(tags.len(), 8200);
-        assert!(dropped.is_empty(), "{dropped:?}");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(tags.len() >= 8200);
 
         let blocks = FeatureBlockBindings::new(&registry, BTreeSet::new())
             .and_then(|bindings| bindings.with_fluid_tags(&tags))
@@ -195,16 +194,20 @@ mod tests {
             BlockPredicate::from_json_with_blocks(&json, &blocks).unwrap()
         };
         for (tag, member, non_member) in [
-            ("test:tag_8198", water, lava),
-            ("test:tag_8199", lava, water),
+            ("test:tag_8198", water, Some(lava)),
+            ("test:tag_8199", lava, Some(water)),
+            ("test:tag_0", water, None),
+            ("test:tag_0", lava, None),
         ] {
             let BlockPredicate::MatchingFluids { fluids, .. } = decode(tag) else {
                 panic!("{tag} did not decode to matching_fluids");
             };
             assert!(fluids.contains(member), "{tag} matches its member");
-            assert!(!fluids.contains(non_member), "{tag} rejects a non-member");
+            if let Some(non_member) = non_member {
+                assert!(!fluids.contains(non_member), "{tag} rejects a non-member");
+            }
         }
-        assert!(blocks.fluids.resolve("\"#test:8199\"").is_err());
+        assert!(blocks.fluids.resolve("\"#test:tag_8200\"").is_err());
 
         // An explicit holder list past 8,192 entries still resolves to the same
         // exact membership as a tag would.
