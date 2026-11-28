@@ -12,10 +12,12 @@
 //! braces, and every vanilla 26.3 core shader sits well below every bound (checked by the daily
 //! test `vanilla_core_shaders_pass_guard_with_margin`).
 //!
-//! Bounds applied to every expanded GLSL stage (on top of `sunrise_glsl::expand_includes`'s
-//! include depth 16, 1,024 pastes, 1 MiB expanded and 8 MiB scanned memory containment):
-//! - [`MAX_EXPANDED_BYTES`] (1 MiB, matching `sunrise_glsl::MAX_EXPANDED`): caps total expanded
-//!   work per stage so pathological input cannot exhaust memory or stack via declaration chains.
+//! Bounds applied to every expanded GLSL stage (aligned with `sunrise_glsl::expand_includes`'s
+//! include depth 16, 1,024 pastes, 1 MiB expanded and 8 MiB scanned memory containment in
+//! `crates/sunrise-glsl/src/lib.rs`):
+//! - [`MAX_EXPANDED_BYTES`]: re-exports `sunrise_glsl::MAX_EXPANDED` (1 MiB) so the guard enforces
+//!   the exact same expanded-stage ceiling as the preprocessor; every vanilla 26.3 core shader
+//!   sits more than 10× below it (`vanilla_core_shaders_pass_guard_with_margin`).
 //! - [`MAX_CHAINED_OPERATORS`] (200): caps binary operators, member accesses and indexings in
 //!   one expression; naga lowers left-associative chains recursively, and 200 stays well inside
 //!   both the 64 MiB checking thread (`STACK_BYTES`) and a default 2 MiB debug thread.
