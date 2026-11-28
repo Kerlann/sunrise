@@ -2,7 +2,7 @@
 pub(crate) mod small_values;
 
 #[cfg(feature = "client")]
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn resolve_cached_block_definitions(
     cached_registry: &'static sunrise_world::registry::BlockRegistry,
 ) -> Result<&'static sunrise_world::registry::BlockRegistry, String> {

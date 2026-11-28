@@ -1,4 +1,4 @@
-#![cfg(test)]
+#![cfg(any(test, feature = "test-support"))]
 use crate::settings::Settings;
 use std::sync::Arc;
 use std::time::Instant;
@@ -10,13 +10,13 @@ use sunrise_client_gameplay::game::packs;
 use sunrise_game_data::Result;
 use sunrise_gameplay_common::game::mods;
 use sunrise_gameplay_common::game::resource_load::{Progress, with_skip_facts_memo};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "resource_load/test_cache.rs"]
 pub(crate) mod test_cache;
 
 /// Fixture helper for tests without a launch mod state.
 #[allow(clippy::too_many_arguments)]
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn load_resources(
     roots: impl Into<packs::PackRoots>,
     additional_data: Vec<Arc<sunrise_level::datapack::DataPack>>,
@@ -75,7 +75,7 @@ pub(crate) fn load_resources_skip_lang(
 
 /// Private, uncached [`load_resources`] for tests that mutate `Resources` or test distinct loads.
 #[allow(clippy::too_many_arguments)]
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn load_resources_uncached(
     roots: impl Into<packs::PackRoots>,
     additional_data: Vec<Arc<sunrise_level::datapack::DataPack>>,
