@@ -216,14 +216,10 @@ class Difference:
         }
 
 
-def differs(left, right):
-    return left != right or left.startswith('?') or right.startswith('?')
-
-
 def field_differences(left, right, fields, entity=None):
     for name in fields:
         a, b = left.fields[name], right.fields[name]
-        if differs(a, b):
+        if a != b and not (a.startswith('?') or b.startswith('?')):
             yield Difference(name, a, b, left.line, right.line, entity)
 
 
@@ -299,7 +295,7 @@ def compare(left, right, ignored=()):
             raise InvalidTranscript(f'{right.path}:1: {name} {b} does not match {left.path}:1 ({a})')
 
     groups = {name: {'ignored': name in ignored, 'differing_points': 0, 'unknown_values': 0,
-                     'uncompared_points': 0, 'first': None, 'first_uncompared': None}
+                     'uncompared_points': 0, 'first': None, 'first_unknown': None, 'first_uncompared': None}
               for name in GROUPS}
     earliest = None
     has_members = False
@@ -321,12 +317,13 @@ def compare(left, right, ignored=()):
             unknown_right = unknown_at_point(name, b)
             group['unknown_values'] += len(unknown_left) + len(unknown_right)
             difference = differences.get(name)
-            if difference is None and (unknown_left or unknown_right):
+            if group['first_unknown'] is None and (unknown_left or unknown_right):
                 row, field_name = (unknown_left or unknown_right)[0]
                 value = row.fields[field_name]
                 entity = row.identity if 'id' in row.fields else None
-                difference = (Difference(field_name, value, None, row.line, b_line, entity) if unknown_left
-                              else Difference(field_name, None, value, a_line, row.line, entity))
+                unknown = (Difference(field_name, value, None, row.line, b_line, entity) if unknown_left
+                           else Difference(field_name, None, value, a_line, row.line, entity))
+                group['first_unknown'] = unknown.report(a.key)
             if difference:
                 group['differing_points'] += 1
                 if group['first'] is None:
@@ -349,14 +346,9 @@ def compare(left, right, ignored=()):
         if group['ignored']:
             group['status'] = 'ignored'
             continue
-        if name in MEMBER_GROUPS and not has_paired_members:
-            group['status'] = 'not compared'
-        else:
-            group['status'] = ('different' if group['first'] else
-                               'not compared' if group['first_uncompared'] else 'identical')
-        for first in (group['first'], group['first_uncompared']):
-            if first is None:
-                continue
+        first = group['first']
+        if first:
+            group['status'] = 'different'
             key = first['step'], first['ord']
             if earliest is None or key < (earliest['step'], earliest['ord']):
                 earliest = {
@@ -365,6 +357,12 @@ def compare(left, right, ignored=()):
                     'right_context': right.context(first['right_line']),
                     'note': 'Later differences may be consequences of this one.',
                 }
+        elif name in MEMBER_GROUPS and not has_paired_members:
+            group['status'] = 'not compared'
+        elif group['first_unknown']:
+            group['status'] = 'unknown'
+        else:
+            group['status'] = 'not compared' if group['first_uncompared'] else 'identical'
     return {'left': str(left.path), 'right': str(right.path), 'groups': groups, 'earliest': earliest}
 
 
@@ -382,12 +380,15 @@ def print_report(report):
               f'{group["unknown_values"]} unknown values, {group["uncompared_points"]} uncompared points)')
         if group['first']:
             print(f'  {describe(group["first"])}')
+        if group['first_unknown']:
+            first_unknown = group['first_unknown']
+            side = 'left' if first_unknown['left'] is not None else 'right'
+            print(f'  First unknown ({side}) at {describe(first_unknown)}')
         if group['first_uncompared']:
             print(f'  Not compared at {describe(group["first_uncompared"])}')
     first = report['earliest']
     if first:
-        label = 'Earliest unverified point' if first['field'] == 'uncompared_members' else 'Earliest difference'
-        print(f'\n{label} ({first["group"]}): {describe(first)}')
+        print(f'\nEarliest difference ({first["group"]}): {describe(first)}')
         for side in ('left', 'right'):
             print(f'  {report[side]}:')
             for line in first[f'{side}_context']:
@@ -400,7 +401,7 @@ def report_comparison(left, right, ignored=(), json_path=None):
     print_report(report)
     if json_path is not None:
         Path(json_path).write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
-    return int(report['earliest'] is not None)
+    return int(any(group['status'] not in ('identical', 'ignored') for group in report['groups'].values()))
 
 
 def main(argv=None):

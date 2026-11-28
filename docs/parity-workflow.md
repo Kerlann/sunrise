@@ -262,7 +262,8 @@ earliest differing point first, then the first difference in each group. The rep
 field, values from both files, and nearby lines for the earliest difference. Later differences can follow
 from that first one. Member state is paired by id and type up to the first divergence in the id sequence
 at each point. The report counts any points with unmatched member state as uncompared. An unknown value
-is counted even when both engines report it. Repeat `--ignore-group GROUP`
+is counted even when both engines report it. Only differences between known values enter the earliest
+difference or differing-point count. Repeat `--ignore-group GROUP`
 to keep a group visible while omitting it from the result. Use `--json PATH` to save the report.
 The comparator exits with 0 when the included groups match and have full coverage, 1 for a difference,
 unknown value or uncompared state, and 2 for invalid input.

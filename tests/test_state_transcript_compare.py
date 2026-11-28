@@ -191,15 +191,37 @@ class StateTranscriptCompareTests(unittest.TestCase):
         right = transcript(point(0, changes={'2': {'random': '?unmodeled'}}))
         report = self.compare(left, right)
         self.assertEqual(report['groups']['entity_random']['unknown_values'], 1)
-        self.assertEqual(report['earliest']['entity'], COW)
+        self.assertIsNone(report['earliest'])
+        self.assertEqual(report['groups']['entity_random']['first_unknown']['entity'], COW)
         self.assertEqual(self.cli(left, right)[0], 1)
 
-    def test_identical_unknowns_are_differences(self):
+    def test_equal_unknowns_leave_no_difference(self):
         data = transcript(point(0, changes={'2': {'random': '?unmodeled'}}))
         report = self.compare(data, data)
         self.assertEqual(report['groups']['entity_random']['unknown_values'], 2)
-        self.assertEqual(report['groups']['entity_random']['differing_points'], 1)
-        self.assertEqual(self.cli(data, data)[0], 1)
+        group = report['groups']['entity_random']
+        self.assertEqual(group['status'], 'unknown')
+        self.assertEqual(group['differing_points'], 0)
+        self.assertIsNone(group['first'])
+        self.assertIsNone(report['earliest'])
+        code, output = self.cli(data, data)
+        self.assertEqual(code, 1)
+        self.assertIn('First unknown', output)
+        self.assertNotIn('Earliest difference', output)
+        self.assertEqual(self.cli(data, data, '--ignore-group', 'entity_random')[0], 0)
+
+    def test_unknowns_before_a_real_difference_in_the_same_group(self):
+        unknown = point(0, changes={'2': {'health': '?unmodeled'}})
+        left = transcript(unknown, point(1))
+        right = transcript(unknown, point(1, changes={'2': {'health': '40a00000'}}))
+        report = self.compare(left, right)
+        group = report['groups']['health']
+        self.assertEqual(group['status'], 'different')
+        self.assertEqual(group['unknown_values'], 2)
+        self.assertEqual(group['differing_points'], 1)
+        self.assertEqual(group['first_unknown']['step'], 0)
+        self.assertEqual(group['first']['step'], 1)
+        self.assertEqual(report['earliest']['step'], 1)
 
     def test_truncated_file_rejected(self):
         data = transcript(point(0))
@@ -216,7 +238,8 @@ class StateTranscriptCompareTests(unittest.TestCase):
         data = transcript(point(1, departures=[(PIG, '?')]))
         report = self.compare(data, data)
         self.assertEqual(report['groups']['departures']['unknown_values'], 2)
-        self.assertEqual(report['earliest']['field'], 'reason')
+        self.assertEqual(report['groups']['departures']['first_unknown']['field'], 'reason')
+        self.assertIsNone(report['earliest'])
 
     def test_validates_both_optional_distance_fields(self):
         suffix = '\tview_distance=4\tsimulation_distance=4'
