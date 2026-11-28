@@ -214,11 +214,11 @@ fn terrain_unload_keeps_entities_in_a_pending_entity_chunk() {
     mod_platform::testing::with_mods(Default::default(), || {
         with_game(|game| {
             game.server.save.0 = Arc::new(open_save());
-            for (x, z) in [a, b] {
-                game.world
-                    .chunks
-                    .insert((x, z), Arc::new(Chunk::empty(x, z)));
-            }
+            // B becomes resident only after the first save: a resident, empty B
+            // would make that save delete B's unread record.
+            game.world
+                .chunks
+                .insert(a, Arc::new(Chunk::empty(a.0, a.1)));
             let target = game
                 .summon_with_nbt("minecraft:text_display", at_a, "{UUID:[I;0,0,0,2]}")
                 .unwrap()
@@ -228,6 +228,9 @@ fn terrain_unload_keeps_entities_in_a_pending_entity_chunk() {
                 .unwrap();
             game.save_entities(true).unwrap();
             assert_eq!(game.server.save.0.load_entities(a.0, a.1).unwrap().len(), 1);
+            game.world
+                .chunks
+                .insert(b, Arc::new(Chunk::empty(b.0, b.1)));
             assert!(display.teleport_to(game, at_b, None));
 
             let chunk_a = game.world.chunks.remove(&a).unwrap();
