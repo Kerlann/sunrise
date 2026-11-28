@@ -234,24 +234,26 @@ impl ClientGame<'_> {
         let still = Poses::new(pole);
         let white = 0xFFFF_FFFF;
         let base_uv = uv("entity/banner/banner_base");
-        let resolved_layers: Vec<([f32; 4], u32)> = std::iter::once(("base", "white"))
-            .chain(sunrise_items::item_data::OMINOUS_LAYERS)
-            .filter_map(|(pattern, dye)| {
-                let r = uv(&format!("entity/banner/{pattern}"))?;
+        let mut resolved_layers = [None; 1 + sunrise_items::item_data::OMINOUS_LAYERS.len()];
+        for (slot, (pattern, dye)) in resolved_layers
+            .iter_mut()
+            .zip(std::iter::once(("base", "white")).chain(sunrise_items::item_data::OMINOUS_LAYERS))
+        {
+            *slot = uv(&format!("entity/banner/{pattern}")).map(|r| {
                 let index = render::DYE_NAMES
                     .iter()
                     .position(|n| *n == dye)
                     .unwrap_or(0);
-                Some((r, render::abgr(render::dye(index))))
-            })
-            .collect();
+                (r, render::abgr(render::dye(index)))
+            });
+        }
         for &head in &heads[..head_count] {
             let m = banner_matrix(head);
             if let Some(r) = base_uv {
                 render::draw(pole, m, &still, r, white, light, 0, out);
                 render::draw(flag, m, &flag_poses, r, white, light, 0, out);
             }
-            for &(r, color) in &resolved_layers {
+            for &(r, color) in resolved_layers.iter().flatten() {
                 render::draw(flag, m, &flag_poses, r, color, light, 0, out);
             }
         }

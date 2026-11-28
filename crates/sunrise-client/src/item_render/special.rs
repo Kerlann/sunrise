@@ -638,8 +638,8 @@ pub(super) enum Prepared<'a> {
         patterns: Vec<(Rect, u32)>,
     },
     DecoratedPot {
-        base_parts: Vec<(&'a ModelPart, &'static str, Rect)>,
-        side_draws: Vec<(&'a ModelPart, &'static str, Rect)>,
+        base_parts: [Option<(&'a ModelPart, &'static str, Rect)>; 3],
+        side_draws: [Option<(&'a ModelPart, &'static str, Rect)>; 4],
     },
 }
 
@@ -875,35 +875,28 @@ pub(super) fn prepare<'a>(
         }
         SpecialKind::DecoratedPot => {
             let sides = pot_sides(argument);
-            let base_parts: Vec<(&ModelPart, &'static str, Rect)> = renderer
+            let base_parts = renderer
                 .part("decorated_pot_base")
                 .zip(
                     sprites
                         .get("entity/decorated_pot/decorated_pot_base")
                         .copied(),
                 )
-                .map(|(base, r)| {
-                    ["neck", "top", "bottom"]
-                        .into_iter()
-                        .filter_map(|name| child(base, name).map(|p| (p, name, r)))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let side_draws: Vec<(&ModelPart, &'static str, Rect)> = renderer
+                .map_or([None; 3], |(base, r)| {
+                    ["neck", "top", "bottom"].map(|name| child(base, name).map(|p| (p, name, r)))
+                });
+            let side_draws = renderer
                 .part("decorated_pot_sides")
-                .map(|side_parts| {
-                    ["back", "left", "right", "front"]
-                        .into_iter()
-                        .enumerate()
-                        .filter_map(|(i, name)| {
-                            let texture = pot_side(sides[i].as_deref());
-                            let p = child(side_parts, name)?;
-                            let r = sprites.get(&texture).copied()?;
-                            Some((p, name, r))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+                .map_or([None; 4], |side_parts| {
+                    let mut draws = [None; 4];
+                    for (i, name) in ["back", "left", "right", "front"].into_iter().enumerate() {
+                        let texture = pot_side(sides[i].as_deref());
+                        draws[i] = child(side_parts, name)
+                            .zip(sprites.get(&texture).copied())
+                            .map(|(p, r)| (p, name, r));
+                    }
+                    draws
+                });
             Prepared::DecoratedPot {
                 base_parts,
                 side_draws,
@@ -1127,7 +1120,7 @@ impl Prepared<'_> {
             } => {
                 // `DecoratedPotRenderer` draws every part with `entitySolid`.
                 let sink = &mut CullBack(sink);
-                for &(p, name, r) in base_parts {
+                for &(p, name, r) in base_parts.iter().flatten() {
                     draw(
                         p,
                         name,
@@ -1141,7 +1134,7 @@ impl Prepared<'_> {
                         sink,
                     );
                 }
-                for &(p, name, r) in side_draws {
+                for &(p, name, r) in side_draws.iter().flatten() {
                     draw(
                         p,
                         name,
