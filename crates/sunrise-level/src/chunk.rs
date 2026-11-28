@@ -376,6 +376,12 @@ pub mod test_support {
         }
     }
 
+    impl Default for BlockStatePaletteScope {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl Drop for BlockStatePaletteScope {
         fn drop(&mut self) {
             crate::assets::restore_block_state_palette(
