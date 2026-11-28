@@ -2864,6 +2864,11 @@ borrow = "mutable"
 kind = "local"
 owner = "crate::game::ClientGame"
 
+[host.client."ScreensClientHost::screen_widgets"]
+borrow = "mutable"
+kind = "local"
+owner = "crate::game::ClientGame"
+
 [host.client."ConfigClientHost::set_translations"]
 borrow = "shared"
 kind = "local"

@@ -45,10 +45,13 @@ impl ServerGame<'_> {
         let mut list = self.common.fangs.list.lift();
         #[cfg(any(test, feature = "test-support"))]
         crate::game::server_side::entity_server::taken_pass_tests::after_take(self);
+        #[cfg(feature = "state-digest")]
+        let dim = self.common.dim;
         list.retain_mut(|f| {
             if f.id > through || !ticking(f.pos[0].floor() as i32, f.pos[2].floor() as i32) {
                 return true;
             }
+            crate::game::record_turn!(dim, f.id, "minecraft:evoker_fangs", None);
             self.fangs_fluid_step(f);
             // Entity.baseTick: the fangs burn down; their hurt does nothing.
             if f.fire_ticks > 0 {
@@ -68,7 +71,16 @@ impl ServerGame<'_> {
                 let _pitch = fang_attack_pitch(&mut f.random);
             }
             f.life -= 1;
-            f.life >= 0
+            let keep = f.life >= 0;
+            if !keep {
+                crate::game::record_departure!(
+                    dim,
+                    f.id,
+                    "minecraft:evoker_fangs",
+                    Some("discarded")
+                );
+            }
+            keep
         });
         self.common
             .fangs

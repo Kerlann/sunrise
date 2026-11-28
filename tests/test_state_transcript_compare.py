@@ -1,0 +1,411 @@
+"""Synthetic state transcript comparisons and command scene validation."""
+
+from collections import Counter
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
+import json
+from pathlib import Path
+import tempfile
+import unittest
+
+from tools import state_transcript_compare as compare
+from tools import state_transcript_scenes as scenes
+from tools import test_state_transcript_parity as harness
+
+
+PIG = ('1', 'minecraft:pig')
+COW = ('2', 'minecraft:cow')
+SHEEP = ('3', 'minecraft:sheep')
+RANDOM = '000000012345,-'
+UUID = '00000000-0000-0000-0000-000000000001'
+ZERO = '0000000000000000'
+POS = ','.join([ZERO] * 3)
+HEADER = ('H\tformat=sunrise-state-transcript\tversion=1\tengine=sunrise'
+          f'\tscript_sha256={"a" * 64}\tfixture_sha256={"b" * 64}\tbuild=test\tgame_version=26.3')
+
+
+def row(kind, **fields):
+    return '\t'.join([kind, *(f'{key}={value}' for key, value in fields.items())])
+
+
+def point(step, members=(PIG, COW), turns=(), departures=(), changes=None, ordinal=0, day_time=scenes.NIGHT):
+    changes = changes or {}
+    phase = 'after_tick' if step else 'after_op'
+    rows = [
+        row('P', step=step, phase=phase, ord=ordinal, op=step + ordinal + 1,
+            game_time=100 + step, dim='minecraft:overworld'),
+        row('L', level_random=RANDOM, rand_value=0, last_entity_id=3, members=len(members), day_time=day_time),
+    ]
+    for index, (entity_id, kind) in enumerate(members):
+        fields = dict(pos=POS, motion=POS, rot='00000000,00000000', ground=1, tick_count=step,
+                      fall_distance=ZERO, fire=0, air=300, invulnerable_time=0, no_gravity=0,
+                      vehicle='-', passengers='-', random=RANDOM, health='41200000', uuid=UUID)
+        fields.update(changes.get(entity_id, {}))
+        rows.append(row('M', i=index, id=entity_id, type=kind, **fields))
+    for index, (entity_id, kind) in enumerate(turns):
+        rows.append(row('T', n=index, id=entity_id, type=kind, role='root', vehicle='-'))
+    for index, ((entity_id, kind), reason) in enumerate(departures):
+        rows.append(row('D', n=index, id=entity_id, type=kind, reason=reason))
+    return rows
+
+
+def transcript(*points):
+    rows = [line for p in points for line in p]
+    return '\n'.join([HEADER, *rows, row('Z', points=len(points), rows=len(rows)), ''])
+
+
+class StateTranscriptCompareTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.left = Path(self.directory.name) / 'left.txt'
+        self.right = Path(self.directory.name) / 'right.txt'
+
+    def compare(self, left, right):
+        self.left.write_text(left, encoding='utf-8')
+        self.right.write_text(right, encoding='utf-8')
+        return compare.compare(compare.read_transcript(self.left), compare.read_transcript(self.right))
+
+    def cli(self, left, right, *args):
+        self.left.write_text(left, encoding='utf-8')
+        self.right.write_text(right, encoding='utf-8')
+        output = StringIO()
+        with redirect_stdout(output), redirect_stderr(output):
+            code = compare.main([str(self.left), str(self.right), *args])
+        return code, output.getvalue()
+
+    def test_identical(self):
+        data = transcript(point(0), point(1, turns=(PIG, COW)))
+        report = self.compare(data, data)
+        self.assertIsNone(report['earliest'])
+        self.assertTrue(all(group['status'] == 'identical' for group in report['groups'].values()))
+        self.assertEqual(self.cli(data, data)[0], 0)
+
+    def test_member_present_on_one_side_only(self):
+        data = transcript(point(0))
+        report = self.compare(data, transcript(point(0, members=(PIG, COW, SHEEP))))
+        group = report['groups']['ids']
+        self.assertEqual(group['first']['entity'], SHEEP)
+        self.assertEqual(group['first']['field'], 'unmatched')
+        self.assertEqual(group['first']['left'], [])
+        self.assertEqual(group['first']['right'], [SHEEP])
+        self.assertEqual(report['groups']['kinematics']['status'], 'not compared')
+
+    def test_different_types_prevent_pairing_later_ids(self):
+        left = transcript(point(0))
+        right = transcript(point(0, members=(('1', 'minecraft:wolf'), COW),
+                                 changes={'2': {'health': '40a00000'}}))
+        report = self.compare(left, right)
+        self.assertEqual(report['groups']['ids']['first']['left'], [PIG, COW])
+        self.assertEqual(report['groups']['health']['status'], 'not compared')
+
+        code, _ = self.cli(left, right, '--ignore-group', 'ids', '--ignore-group', 'membership_order')
+        self.assertEqual(code, 1)
+
+    def test_empty_members_do_not_pass_as_compared(self):
+        empty = transcript(point(0, members=()))
+        full = transcript(point(0))
+        for right in (empty, full):
+            with self.subTest(right_empty=right == empty):
+                report = self.compare(empty, right)
+                for name in compare.MEMBER_GROUPS:
+                    self.assertEqual(report['groups'][name]['status'], 'not compared')
+                    self.assertEqual(report['groups'][name]['uncompared_points'], 1)
+                code, _ = self.cli(empty, right, '--ignore-group', 'ids', '--ignore-group', 'membership_order')
+                self.assertEqual(code, 1)
+
+    def test_unmatched_unknown_is_counted_without_claiming_state_was_compared(self):
+        left = transcript(point(0, members=()))
+        right = transcript(point(0, changes={'1': {'uuid': '?'}}))
+        group = self.compare(left, right)['groups']['uuid']
+        self.assertEqual(group['unknown_values'], 1)
+        self.assertEqual(group['status'], 'not compared')
+
+    def test_repeated_turn_id_is_compared_in_sequence(self):
+        left = transcript(point(1, turns=(PIG, PIG))).replace(
+            'n=0\tid=1\ttype=minecraft:pig\trole=root\tvehicle=-',
+            'n=0\tid=1\ttype=minecraft:pig\trole=passenger\tvehicle=2',
+        )
+        report = self.compare(left, transcript(point(1, turns=(PIG, PIG))))
+        self.assertEqual(report['earliest']['field'], 'role')
+        self.assertEqual(report['earliest']['left'], 'passenger')
+
+    def test_repeated_departure_id_is_compared_in_sequence(self):
+        left = transcript(point(1, departures=[(PIG, 'unloaded'), (PIG, 'killed')]))
+        right = transcript(point(1, departures=[(PIG, 'unloaded')]))
+        report = self.compare(left, right)
+        self.assertEqual(report['earliest']['field'], 'departure[1]')
+
+    def test_bare_unknown_member_field(self):
+        data = transcript(point(0, changes={'1': {'uuid': '?'}}))
+        report = self.compare(data, data)
+        self.assertEqual(report['groups']['uuid']['unknown_values'], 2)
+        self.assertEqual(self.cli(data, data)[0], 1)
+
+    def test_footer_requires_terminating_lf(self):
+        data = transcript(point(0))
+        code, output = self.cli(data, data.rstrip('\n'))
+        self.assertEqual(code, 2)
+        self.assertIn(f'{self.right}:6: missing terminating LF', output)
+
+    def test_zero_point_transcript_is_invalid(self):
+        code, output = self.cli(transcript(), transcript())
+        self.assertEqual(code, 2)
+        self.assertIn(f'{self.left}:2: transcript contains no points', output)
+
+    def test_membership_order_independent_of_ids_turns_and_state(self):
+        left = transcript(point(1, turns=(PIG, COW)))
+        right = transcript(point(1, members=(COW, PIG), turns=(PIG, COW)))
+        report = self.compare(left, right)
+        self.assertEqual(report['earliest']['group'], 'membership_order')
+        self.assertEqual([name for name, group in report['groups'].items() if group['first']], ['membership_order'])
+
+    def test_turn_order_independent_of_membership_and_state(self):
+        left = transcript(point(1, turns=(PIG, COW)))
+        right = transcript(point(1, turns=(COW, PIG)))
+        report = self.compare(left, right)
+        self.assertEqual(report['earliest']['group'], 'turns')
+        self.assertEqual([name for name, group in report['groups'].items() if group['first']], ['turns'])
+
+    def test_departure_on_one_side_only(self):
+        left = transcript(point(1, turns=(PIG, COW), departures=[(PIG, 'killed')]))
+        right = transcript(point(1, turns=(PIG, COW)))
+        report = self.compare(left, right)
+        self.assertEqual(report['earliest']['group'], 'departures')
+        self.assertEqual(report['earliest']['entity'], PIG)
+        self.assertEqual(report['groups']['turns']['status'], 'identical')
+
+    def test_first_changed_field_and_differing_point_count(self):
+        unchanged = [point(i) for i in range(5)]
+        changed = unchanged[:2] + [point(i, changes={'2': {'health': '40a00000'}}) for i in range(2, 5)]
+        report = self.compare(transcript(*unchanged), transcript(*changed))
+        self.assertEqual(report['groups']['health']['differing_points'], 3)
+        first = report['earliest']
+        self.assertEqual((first['step'], first['entity'], first['field']), (2, COW, 'health'))
+        self.assertEqual((first['left'], first['right']), ('41200000', '40a00000'))
+        self.assertTrue(any('health=40a00000' in row['text'] for row in first['right_context']))
+        self.assertIn('Later differences', first['note'])
+
+    def test_compares_day_time_in_level_group(self):
+        report = self.compare(transcript(point(0)), transcript(point(0, day_time=13001)))
+        self.assertEqual(report['earliest']['group'], 'level')
+        self.assertEqual(report['earliest']['field'], 'day_time')
+        self.assertEqual(report['earliest']['right'], '13001')
+
+    def test_requires_day_time_at_end_of_level_record(self):
+        data = transcript(point(0))
+        day_time = f'\tday_time={scenes.NIGHT}'
+        for malformed in (data.replace(day_time, ''), data.replace(day_time, '\tday_time=?'),
+                          data.replace('\tmembers=2' + day_time, day_time + '\tmembers=2')):
+            with self.subTest(malformed=malformed):
+                code, output = self.cli(data, malformed)
+                self.assertEqual(code, 2)
+                self.assertIn(f'{self.right}:3:', output)
+
+    def test_unknown_on_one_side(self):
+        left = transcript(point(0))
+        right = transcript(point(0, changes={'2': {'random': '?unmodeled'}}))
+        report = self.compare(left, right)
+        self.assertEqual(report['groups']['entity_random']['unknown_values'], 1)
+        self.assertIsNone(report['earliest'])
+        self.assertEqual(report['groups']['entity_random']['first_unknown']['entity'], COW)
+        self.assertEqual(self.cli(left, right)[0], 1)
+
+    def test_equal_unknowns_leave_no_difference(self):
+        data = transcript(point(0, changes={'2': {'random': '?unmodeled'}}))
+        report = self.compare(data, data)
+        self.assertEqual(report['groups']['entity_random']['unknown_values'], 2)
+        group = report['groups']['entity_random']
+        self.assertEqual(group['status'], 'unknown')
+        self.assertEqual(group['differing_points'], 0)
+        self.assertIsNone(group['first'])
+        self.assertIsNone(report['earliest'])
+        code, output = self.cli(data, data)
+        self.assertEqual(code, 1)
+        self.assertIn('First unknown', output)
+        self.assertNotIn('Earliest difference', output)
+        self.assertEqual(self.cli(data, data, '--ignore-group', 'entity_random')[0], 0)
+
+    def test_unknowns_before_a_real_difference_in_the_same_group(self):
+        unknown = point(0, changes={'2': {'health': '?unmodeled'}})
+        left = transcript(unknown, point(1))
+        right = transcript(unknown, point(1, changes={'2': {'health': '40a00000'}}))
+        report = self.compare(left, right)
+        group = report['groups']['health']
+        self.assertEqual(group['status'], 'different')
+        self.assertEqual(group['unknown_values'], 2)
+        self.assertEqual(group['differing_points'], 1)
+        self.assertEqual(group['first_unknown']['step'], 0)
+        self.assertEqual(group['first']['step'], 1)
+        self.assertEqual(report['earliest']['step'], 1)
+
+    def test_truncated_file_rejected(self):
+        data = transcript(point(0))
+        code, output = self.cli(data, data[:data.index('Z\t')])
+        self.assertEqual(code, 2)
+        self.assertIn(f'{self.right}:6: expected Z record', output)
+
+    def test_missing_point_with_a_valid_footer_is_rejected(self):
+        code, output = self.cli(transcript(point(0), point(1)), transcript(point(0)))
+        self.assertEqual(code, 2)
+        self.assertIn(f'{self.right}:6: point None', output)
+
+    def test_unknown_departure_reason_counts_on_each_side(self):
+        data = transcript(point(1, departures=[(PIG, '?')]))
+        report = self.compare(data, data)
+        self.assertEqual(report['groups']['departures']['unknown_values'], 2)
+        self.assertEqual(report['groups']['departures']['first_unknown']['field'], 'reason')
+        self.assertIsNone(report['earliest'])
+
+    def test_validates_both_optional_distance_fields(self):
+        suffix = '\tview_distance=4\tsimulation_distance=4'
+        data = transcript(point(0)).replace(HEADER, HEADER + suffix)
+        self.assertEqual(self.cli(data, data)[0], 0)
+        for malformed in ('\tview_distance=4', suffix.replace('distance=4', 'distance=?'),
+                          suffix.replace('simulation_distance=4', 'simulation_distance=12')):
+            with self.subTest(malformed=malformed):
+                self.assertEqual(self.cli(data, data.replace(suffix, malformed))[0], 2)
+
+    def test_header_mismatch_rejected(self):
+        data = transcript(point(0))
+        for field, original, replacement in [
+            ('script_sha256', 'a' * 64, 'c' * 64), ('fixture_sha256', 'b' * 64, 'd' * 64),
+            ('version', '1', '2'), ('game_version', '26.3', '26.2'),
+        ]:
+            with self.subTest(field=field):
+                code, output = self.cli(data, data.replace(f'\t{field}={original}', f'\t{field}={replacement}'))
+                self.assertEqual(code, 2)
+                self.assertIn(f'{self.right}:1:', output)
+                self.assertIn(field, output)
+
+    def test_ignored_group_leaves_other_differences_and_json(self):
+        left = transcript(point(1, turns=(PIG, COW)))
+        right = transcript(point(1, turns=(COW, PIG), changes={'2': {'health': '40a00000'}}))
+        json_path = Path(self.directory.name) / 'report.json'
+        code, output = self.cli(left, right, '--ignore-group', 'turns', '--ignore-group', 'uuid',
+                                '--json', str(json_path))
+        self.assertEqual(code, 1)
+        self.assertIn('turns: ignored', output)
+        self.assertIn('uuid: ignored', output)
+        self.assertIn('Earliest difference (health)', output)
+        report = json.loads(json_path.read_text(encoding='utf-8'))
+        self.assertEqual(report['groups']['turns']['status'], 'ignored')
+        self.assertEqual(report['earliest']['group'], 'health')
+        self.assertEqual(self.cli(left, right, '--ignore-group', 'turns', '--ignore-group', 'health')[0], 0)
+
+    def test_malformed_records_rejected(self):
+        data = transcript(point(0), point(1, turns=(PIG, COW)))
+        for original, replacement, line in [
+            ('\tengine=sunrise', '\tengine=unknown', 1),
+            ('\tord=0', '\tord=1', 2),
+            ('\tmembers=2', '\tmembers=3', 3),
+            ('\tground=1', '\tground=maybe', 4),
+            ('\tpos=0000', '\tpos=ABCD', 4),
+            ('\ti=1\tid=2', '\ti=1\tid=1', 5),
+            ('\tn=1\tid=2', '\tn=2\tid=2', 11),
+            ('\tpoints=2', '\tpoints=1', 12),
+            ('\trows=10', '\trows=9', 12),
+        ]:
+            with self.subTest(original=original):
+                code, output = self.cli(data, data.replace(original, replacement, 1))
+                self.assertEqual(code, 2)
+                self.assertIn(f'{self.right}:{line}:', output)
+
+    def test_departure_record_on_after_op_rejected(self):
+        data = transcript(point(0, departures=[(PIG, 'killed')]))
+        code, output = self.cli(data, data)
+        self.assertEqual(code, 2)
+        self.assertIn(f'{self.left}:6:', output)
+
+
+class StateTranscriptSceneTests(unittest.TestCase):
+    def test_baseline_and_vocabulary(self):
+        command_prefix = [
+            '/difficulty peaceful', '/gamerule spawn_mobs false', '/gamerule spawn_wandering_traders false',
+            '/gamerule advance_weather false', '/gamerule random_tick_speed 0', '/tp @s', '/gamemode creative',
+        ]
+        for name in scenes.SCENES:
+            with self.subTest(scene=name):
+                script = scenes.scene_script(name)
+                self.assertTrue(script.endswith('\n'))
+                ops = [json.loads(line) for line in script.splitlines()]
+                allowed = {'cmd', 'settle', 'wait_chunks', 'align_game_time', 'sync_randoms', 'state_transcript',
+                           'tick', 'server_distances', 'chunk_ready'}
+                self.assertLessEqual({op['op'] for op in ops}, allowed)
+                baseline_end = next(i for i, op in enumerate(ops) if op['op'] == 'state_transcript')
+                baseline = ops[:baseline_end + 1]
+                self.assertEqual([op['op'] for op in baseline[:13]],
+                                 ['cmd'] * 7 + ['settle', 'cmd', 'wait_chunks', 'settle', 'align_game_time',
+                                                'server_distances'])
+                for op, prefix in zip(ops, command_prefix):
+                    self.assertTrue(op['cmd'].startswith(prefix))
+                self.assertTrue(ops[8]['cmd'].startswith('/forceload add '))
+                chunks = ops[9]['chunks']
+                self.assertEqual(chunks, ops[10]['required_chunks'])
+                self.assertEqual(baseline[13:-4], [
+                    {'op': 'chunk_ready', 'chunk': chunk, 'entity_ticking': True} for chunk in chunks
+                ])
+                self.assertEqual(baseline[-4]['cmd'], '/difficulty hard')
+                self.assertEqual(baseline[-3]['cmd'], f'/time set {scenes.NIGHT}')
+                self.assertEqual(set(baseline[-2]), {'op', 'uniquifier', 'entity_id', 'level_seed',
+                                                   'rand_value', 'player_seed'})
+                self.assertIs(baseline[-1]['on'], True)
+                self.assertEqual(ops[baseline_end + 1]['cmd'], scenes.BASELINE_PROBE)
+                self.assertEqual([op['n'] for op in ops if op['op'] == 'tick'], [1] * 200)
+                self.assertLessEqual({op['op'] for op in ops[baseline_end + 1:]}, {'cmd', 'tick'})
+
+    def test_base_summons_every_species(self):
+        ops = list(scenes.scene_ops('base'))
+        kinds = Counter(op['cmd'].split()[1] for op in ops if op.get('cmd', '').startswith('/summon '))
+        for species in ('pig', 'cow', 'sheep', 'chicken', 'rabbit', 'zombie', 'skeleton', 'spider', 'wolf'):
+            self.assertEqual(kinds[f'minecraft:{species}'], 20)
+        self.assertNotIn('minecraft:villager', kinds)
+        self.assertIn('minecraft:tnt', kinds)
+        self.assertIn('minecraft:item', kinds)
+
+
+class StateTranscriptHarnessTests(unittest.TestCase):
+    def check(self, op, command, results):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'commands.jsonl'
+            output.write_text(json.dumps({'cmd': command, 'results': results}) + '\n', encoding='utf-8')
+            harness.check_commands(output, [op], 'sunrise')
+
+    def test_rejects_a_different_simulation_distance(self):
+        with self.assertRaisesRegex(ValueError, '#server_distances'):
+            self.check({'op': 'server_distances'}, '#server_distances', [[True, 4], [True, 12]])
+
+    def test_rejects_startup_entities_before_scene_summons(self):
+        ops = [{'op': 'state_transcript', 'on': True}, {'op': 'cmd', 'cmd': scenes.BASELINE_PROBE}]
+        player = ('1', 'minecraft:player')
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'transcript.txt'
+            for members in ((player,), (player, COW)):
+                data = transcript(point(0, members=members)).replace('\top=1', '\top=2')
+                output.write_text(data, encoding='utf-8')
+                if members == (player,):
+                    harness.check_transcript(output, 'sunrise', ops, 'a' * 64, 'b' * 64)
+                else:
+                    with self.assertRaisesRegex(compare.InvalidTranscript, 'expected only the player'):
+                        harness.check_transcript(output, 'sunrise', ops, 'a' * 64, 'b' * 64)
+
+    def test_rejects_wrong_day_time_before_scene_summons(self):
+        ops = [{'op': 'state_transcript', 'on': True}, {'op': 'cmd', 'cmd': scenes.BASELINE_PROBE}]
+        player = ('1', 'minecraft:player')
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'transcript.txt'
+            data = transcript(point(0, members=(player,), day_time=13001)).replace('\top=1', '\top=2')
+            output.write_text(data, encoding='utf-8')
+            with self.assertRaisesRegex(compare.InvalidTranscript, 'expected baseline day_time=13000'):
+                harness.check_transcript(output, 'sunrise', ops, 'a' * 64, 'b' * 64)
+
+    def test_requires_entity_ticking_in_readiness_report(self):
+        op = {'op': 'chunk_ready', 'chunk': [0, 1], 'entity_ticking': True}
+        for results in ([[True, 1]] * 3, [[True, 1]] * 3 + [[True, 0]]):
+            with self.subTest(results=results), self.assertRaisesRegex(ValueError, '#chunk_ready 0 1'):
+                self.check(op, '#chunk_ready 0 1', results)
+        self.check(op, '#chunk_ready 0 1', [[True, 1]] * 4)
+
+
+if __name__ == '__main__':
+    unittest.main()

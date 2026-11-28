@@ -35,8 +35,11 @@ impl<T: ?Sized + 'static, C: 'static> EntityCapabilityKey<T, C> {
 /// An entity's items, as NeoForge 26.3's `Capabilities.Item.ENTITY`. The game answers it for a
 /// player with their inventory (`PlayerInventoryWrapper`): indices as vanilla's `Inventory`
 /// numbers them, 0..36 the main inventory (0..9 the hotbar), 36..40 the armour from feet to
-/// head, 40 the off hand. For a chest or hopper minecart, a chest boat, or a chested donkey,
-/// mule or llama, it answers with their container's slots ([`ItemPlace::EntitySlot`]).
+/// head, 40 the off hand. Extracting a stack with the [`PREVENT_ARMOR_CHANGE`] effect from a
+/// player's armour slot returns `Ok(0)` unless the player is in creative mode
+/// (`ArmorSlot.mayPickup` checks `Player.isCreative`); the infinite-materials ability does not
+/// affect it. For a chest or hopper minecart, a chest boat, or a chested donkey, mule or llama,
+/// it answers with their container's slots ([`ItemPlace::EntitySlot`]).
 pub const ENTITY_ITEMS: EntityCapabilityKey<dyn ResourceHandler<ItemResource>> =
     EntityCapabilityKey {
         name: "sunrise:entity_items",
@@ -464,11 +467,11 @@ impl ResourceHandler<ItemResource> for PlayerItems {
         let Some(place) = self.place(host, index) else {
             return Ok(0);
         };
-        // `ArmorSlot.mayPickup`: bound armour stays on outside creative.
+        // `ArmorSlot.mayPickup`: bound armour stays on outside creative (`Player.isCreative`).
         let bound = resource.has_enchantment_effect(host, PREVENT_ARMOR_CHANGE);
         if (MAIN..OFF_HAND).contains(&index) && bound {
             let player = host.player(self.player);
-            if player.and_then(|player| player.has_infinite_materials(host)) != Some(true) {
+            if player.and_then(|player| player.is_creative(host)) != Some(true) {
                 return Ok(0);
             }
         }

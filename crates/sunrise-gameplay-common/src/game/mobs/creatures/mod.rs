@@ -11,7 +11,7 @@ pub use living_draw::LivingFrame;
 pub mod player_loot_entity;
 pub mod projectile_targets;
 #[allow(unused_imports)]
-pub use projectile_targets::{NonMobHit, ProjectileHitInfo, TargetQuery, is_pickable_projectile};
+pub use projectile_targets::{NonMobHit, ProjectileHitInfo, TargetQuery};
 #[allow(unused_imports)]
 pub use sunrise_gameplay_common::projectile_world::ProjWorld;
 pub mod pufferfish_player;
@@ -210,6 +210,11 @@ pub struct Creatures {
     pub seen_buf: Vec<Seen>,
     /// Per-tick scratch retained between creature ticks.
     pub event_buf: Vec<MobEvent>,
+    pub keep_buf: Vec<bool>,
+    pub seen_grid: sunrise_sim::mobs::seen_grid::SeenGrid,
+    pub seen_index: sunrise_level::fast_hash::FxHashMap<u32, u32>,
+    pub villager_slots_buf: Vec<u32>,
+    pub solid_slots_buf: Vec<u32>,
     pub pickable_projectile_targets: Vec<sunrise_sim::projectiles::TargetCandidate>,
     pub arrow_hit_scratch: sunrise_sim::entities::arrows::ArrowHitScratch,
     /// For each arrow an entity hit in this projectile tick, the projectiles
@@ -256,16 +261,22 @@ pub fn pickable_projectile_hitboxes_into(
     projectiles: &[Projectile],
     alive: &[bool],
     skip: usize,
+    tags: &sunrise_items::items::EntityTypeTags,
     out: &mut Vec<(Who, Aabb)>,
 ) {
+    let redirectable = |q: &Projectile| {
+        !q.stuck
+            && tags.has_flag(
+                q.entity_type(),
+                sunrise_items::items::EntityTypeTags::REDIRECTABLE_PROJECTILE,
+            )
+    };
     out.clear();
     out.extend(
         projectiles
             .iter()
             .enumerate()
-            .filter(|(j, q)| {
-                *j != skip && alive[*j] && crate::game::deflect_common::redirectable(q)
-            })
+            .filter(|(j, q)| *j != skip && alive[*j] && redirectable(q))
             .map(|(j, q)| (Who::Mob(PICKABLE_PROJECTILE_IDS + j as u32), q.aabb())),
     );
 }
@@ -287,9 +298,10 @@ pub fn pickable_projectile_hitboxes(
     projectiles: &[Projectile],
     alive: &[bool],
     skip: usize,
+    tags: &sunrise_items::items::EntityTypeTags,
 ) -> Vec<(Who, Aabb)> {
     let mut out = Vec::new();
-    pickable_projectile_hitboxes_into(projectiles, alive, skip, &mut out);
+    pickable_projectile_hitboxes_into(projectiles, alive, skip, tags, &mut out);
     out
 }
 

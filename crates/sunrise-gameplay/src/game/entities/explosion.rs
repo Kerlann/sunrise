@@ -225,7 +225,7 @@ fn hurt_mob(
     cause: Option<sunrise_sim::mobs::Species>,
     (amount, mut source): (f32, sunrise_sim::mobs::Damage),
 ) -> bool {
-    source.attacker_species = cause;
+    source.attacker_species = cause.map(sunrise_sim::mobs::species::vanilla_id);
     hurtable && m.damage(level, amount, source)
 }
 
@@ -1353,7 +1353,7 @@ impl crate::game::ServerGame<'_> {
                                 }),
                             from: Some(center),
                             direct: None,
-                            attacker_species: cause,
+                            attacker_species: cause.map(sunrise_sim::mobs::species::vanilla_id),
                         };
                         // The blast damage source's direct entity (`getDirectEntity`): the primed
                         // TNT, cart, fireball, skull or crystal that went off, or an explicit
@@ -1500,9 +1500,21 @@ impl crate::game::ServerGame<'_> {
                     match self.refresh_entity_handle(entity, handle) {
                         Some(EntityHandle::Item(i)) => {
                             self.common.dropped.remove(i);
+                            crate::game::record_departure!(
+                                self.common.dim,
+                                entity,
+                                "minecraft:item",
+                                Some("killed")
+                            );
                         }
                         Some(EntityHandle::Orb(i)) => {
                             self.common.orbs.remove(i);
+                            crate::game::record_departure!(
+                                self.common.dim,
+                                entity,
+                                "minecraft:experience_orb",
+                                Some("killed")
+                            );
                         }
                         _ => {}
                     }

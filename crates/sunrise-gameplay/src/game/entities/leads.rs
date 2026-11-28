@@ -49,7 +49,23 @@ impl crate::game::ServerGame<'_> {
     /// of the dead entities' memory (`prune_entity_memory`).
     pub fn forget_untied_knots(&mut self) {
         let fences = self.lead_fences();
-        self.server.knot_ids.retain(|p, _| fences.contains(p));
+        self.server
+            .knot_state
+            .knot_ids
+            .retain(|p, _| fences.contains(p));
+        #[cfg(feature = "state-digest")]
+        if crate::game::state_transcript::is_recording() {
+            for knot in self.common.resident_entities.knots.iter() {
+                if !fences.contains(&knot.fence) {
+                    crate::game::state_transcript::record_departure(
+                        self.common.dim,
+                        knot.id,
+                        "minecraft:leash_knot",
+                        Some("discarded"),
+                    );
+                }
+            }
+        }
         self.common
             .resident_entities
             .knots
@@ -79,7 +95,20 @@ impl crate::game::ServerGame<'_> {
         {
             return;
         }
-        self.server.knot_ids.remove(&fence);
+        self.server.knot_state.knot_ids.remove(&fence);
+        #[cfg(feature = "state-digest")]
+        if crate::game::state_transcript::is_recording() {
+            for knot in self.common.resident_entities.knots.iter() {
+                if knot.fence == fence {
+                    crate::game::state_transcript::record_departure(
+                        self.common.dim,
+                        knot.id,
+                        "minecraft:leash_knot",
+                        Some("discarded"),
+                    );
+                }
+            }
+        }
         self.common
             .resident_entities
             .knots
@@ -91,12 +120,12 @@ impl crate::game::ServerGame<'_> {
     /// it. A fence that already has one keeps it. Call
     /// [`Self::forget_untied_knots`] before the tie.
     pub fn tie_knot(&mut self, fence: [i32; 3]) -> u32 {
-        if let Some(&id) = self.server.knot_ids.get(&fence) {
+        if let Some(&id) = self.server.knot_state.knot_ids.get(&fence) {
             return id;
         }
         self.server.next_entity += 1;
         let id = self.server.next_entity;
-        self.server.knot_ids.insert(fence, id);
+        self.server.knot_state.knot_ids.insert(fence, id);
         self.common.resident_entities.knots.push(Knot {
             attachment_lifetime: Default::default(),
             id,
@@ -150,7 +179,7 @@ impl crate::game::ServerGame<'_> {
             .filter(|boat| boat.leash == holder)
             .map(|boat| boat.id)
             .collect();
-        self.server.knot_ids.remove(&fence);
+        self.server.knot_state.knot_ids.remove(&fence);
         self.common
             .resident_entities
             .knots
@@ -203,6 +232,8 @@ impl crate::game::ServerGame<'_> {
         let facts = self.common.res.facts();
         let fences = self.common.res.items().block_tags.get("minecraft:fences");
         let mut untied = Vec::new();
+        #[cfg(feature = "state-digest")]
+        let dim = self.common.dim;
         self.server.others.0.retain_mut(|knot| {
             let Some(check) = knot.knot_check.as_mut() else {
                 return true;
@@ -211,12 +242,19 @@ impl crate::game::ServerGame<'_> {
             if !ticking(at.x, at.z) || !world.chunks.contains_key(&(at.x >> 4, at.z >> 4)) {
                 return true;
             }
+            crate::game::record_turn!(dim, knot.id, "minecraft:leash_knot", None);
             // Vanilla compares the old postincrement value: first check is tick 101.
             if *check >= 100 {
                 *check = 0;
                 let state = facts.get(world.block(at.x, at.y, at.z));
                 if !fences.is_some_and(|f| f.contains(&*state.name)) {
                     untied.push(knot.position.components());
+                    crate::game::record_departure!(
+                        dim,
+                        knot.id,
+                        "minecraft:leash_knot",
+                        Some("discarded")
+                    );
                     return false;
                 }
             } else {
@@ -254,7 +292,7 @@ impl crate::game::ServerGame<'_> {
         skip: Option<usize>,
     ) -> bool {
         let knot_id = match to {
-            Holder::Knot(fence) => self.server.knot_ids.get(&fence).copied(),
+            Holder::Knot(fence) => self.server.knot_state.knot_ids.get(&fence).copied(),
             _ => None,
         };
         let mut any = false;
@@ -356,7 +394,7 @@ impl crate::game::ServerGame<'_> {
     /// Taking the lead over is no removal, so no unleash hook hears it. False for anything else.
     pub fn set_leash(&mut self, target: Target, holder: Holder, player: Option<[i32; 4]>) -> bool {
         let knot_id = match holder {
-            Holder::Knot(fence) => self.server.knot_ids.get(&fence).copied(),
+            Holder::Knot(fence) => self.server.knot_state.knot_ids.get(&fence).copied(),
             _ => None,
         };
         match target {
@@ -508,10 +546,26 @@ impl crate::game::ServerGame<'_> {
     ) -> bool {
         if let Some(fence) = self.natural_knot(id) {
             let at = leash::knot_state(fence).position.components();
-            self.server.knot_ids.remove(&fence);
+            self.server.knot_state.knot_ids.remove(&fence);
+            #[cfg(feature = "state-digest")]
+            if crate::game::state_transcript::is_recording()
+                && self
+                    .common
+                    .resident_entities
+                    .knots
+                    .iter()
+                    .any(|k| k.id == id)
+            {
+                crate::game::state_transcript::record_departure(
+                    self.common.dim,
+                    id,
+                    "minecraft:leash_knot",
+                    Some("killed"),
+                );
+            }
             self.common.resident_entities.knots.retain(|k| k.id != id);
-            if !self.server.broken_knots.contains(&fence) {
-                self.server.broken_knots.push(fence);
+            if !self.server.knot_state.broken_knots.contains(&fence) {
+                self.server.knot_state.broken_knots.push(fence);
             }
             self.entity_killed_event_by(at, source);
             self.lead_sound("untied", at);
@@ -525,6 +579,12 @@ impl crate::game::ServerGame<'_> {
             .position(|o| o.id == id && o.kind == "minecraft:leash_knot")
         {
             let knot = self.server.others.0.remove(i);
+            crate::game::record_departure!(
+                self.common.dim,
+                knot.id,
+                "minecraft:leash_knot",
+                Some("killed")
+            );
             let at = knot.position.components();
             self.entity_killed_event_by(at, source);
             self.lead_sound("untied", at);
@@ -535,15 +595,15 @@ impl crate::game::ServerGame<'_> {
     /// Holders read from a save become real once the entity is found; a
     /// holder that never shows up drops the lead after 100 ticks.
     pub fn tick_leads(&mut self) {
-        if !self.server.broken_knots.is_empty() {
-            let fences = std::mem::take(&mut self.server.broken_knots);
+        if !self.server.knot_state.broken_knots.is_empty() {
+            let fences = std::mem::take(&mut self.server.knot_state.broken_knots);
             let drop = self
                 .common
                 .ui
                 .rules
                 .bool_at(sunrise_game_data::gamerules::vanilla::ENTITY_DROPS);
             for fence in fences {
-                let live_id = self.server.knot_ids.get(&fence).copied();
+                let live_id = self.server.knot_state.knot_ids.get(&fence).copied();
                 let mobs: Vec<u32> = self
                     .common
                     .mobs

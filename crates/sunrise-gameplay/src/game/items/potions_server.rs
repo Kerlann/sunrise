@@ -578,6 +578,12 @@ impl crate::game::ServerGame<'_> {
                 kept.push(t);
                 continue;
             }
+            crate::game::record_turn!(
+                self.common.dim,
+                t.id,
+                crate::game::state_transcript::thrown_potion_type(&t.stack.item),
+                None
+            );
             t.age += 1;
             let owner = self.shooter_who(t.thrower, t.guest);
             t.previous = t.position;
@@ -733,10 +739,23 @@ impl crate::game::ServerGame<'_> {
                 if item != "minecraft:experience_bottle" {
                     self.native_potion_splash(&item, [hit_at.x, hit_at.y, hit_at.z]);
                 }
+                crate::game::record_departure!(
+                    self.common.dim,
+                    t.id,
+                    crate::game::state_transcript::thrown_potion_type(&item),
+                    Some("discarded")
+                );
                 continue;
             }
             if t.age < 1200 && t.position.y >= below_world {
                 kept.push(t);
+            } else {
+                crate::game::record_departure!(
+                    self.common.dim,
+                    t.id,
+                    crate::game::state_transcript::thrown_potion_type(&t.stack.item),
+                    Some("discarded")
+                );
             }
         }
         self.common.potions.thrown.splice(0..0, kept);
@@ -767,7 +786,7 @@ impl crate::game::ServerGame<'_> {
                 if let Some(player) = self.common.player.as_ref() {
                     let mut cancel = false;
                     let reads = || crate::game::server_side::entity_server::hit_reads_of!(self);
-                    let healed = sunrise_sim::health::LivingLend::player(
+                    let healed = sunrise_sim::mobs::LivingLend::player(
                         player.entity_id,
                         &player.attributes,
                         &player.health.data,
@@ -1937,15 +1956,24 @@ impl crate::game::ServerGame<'_> {
         crate::game::server_side::entity_server::taken_pass_tests::after_take(self);
         let ticking = self.entity_ticking_area();
         let mut expired: Vec<u32> = Vec::new();
+        #[cfg(feature = "state-digest")]
+        let dim = self.common.dim;
         clouds.retain_mut(|c| {
             let keep =
                 c.potion.is_none() || !ticking(c.at[0].floor() as i32, c.at[2].floor() as i32) || {
+                    crate::game::record_turn!(dim, c.id, "minecraft:area_effect_cloud", None);
                     self.cloud_fluid_step(c);
                     // Entity.baseTick: `fireImmune()` clears the fire.
                     c.fire_ticks = c.fire_ticks.min(0);
                     self.tick_potion_cloud(c, &players)
                 };
             if !keep {
+                crate::game::record_departure!(
+                    dim,
+                    c.id,
+                    "minecraft:area_effect_cloud",
+                    Some("discarded")
+                );
                 expired.push(c.id);
             }
             keep

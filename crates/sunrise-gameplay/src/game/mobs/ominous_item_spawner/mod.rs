@@ -109,12 +109,15 @@ impl ServerGame<'_> {
         let mut spawners = self.common.ominous_spawners.lift();
         #[cfg(any(test, feature = "test-support"))]
         crate::game::server_side::entity_server::taken_pass_tests::after_take(self);
+        #[cfg(feature = "state-digest")]
+        let dim = self.common.dim;
         spawners.retain_mut(|s| {
             if s.id > through
                 || !ticking(s.position[0].floor() as i32, s.position[2].floor() as i32)
             {
                 return true;
             }
+            crate::game::record_turn!(dim, s.id, "minecraft:ominous_item_spawner", None);
             // Entity.baseTick: the spawner burns down; its hurt does nothing.
             if s.fire_ticks > 0 {
                 s.fire_ticks -= 1;
@@ -134,7 +137,16 @@ impl ServerGame<'_> {
             }
             if s.tick_count >= s.spawn_item_after {
                 self.spawn_ominous_item(s);
-                return self.forget_finished_spawner(s.id);
+                let keep = self.forget_finished_spawner(s.id);
+                if !keep {
+                    crate::game::record_departure!(
+                        dim,
+                        s.id,
+                        "minecraft:ominous_item_spawner",
+                        Some("discarded")
+                    );
+                }
+                return keep;
             }
             true
         });

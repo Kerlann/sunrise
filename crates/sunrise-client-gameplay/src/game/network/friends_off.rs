@@ -26,6 +26,10 @@ impl crate::game::ClientGame<'_> {
         self.set_screen(Screen::Paused);
     }
 
+    pub(in crate::game) fn friends_screen_press_child(&mut self, _tag: u64) -> bool {
+        false
+    }
+
     pub(in crate::game::client_side) fn friends_screen_click(&mut self) -> bool {
         false
     }

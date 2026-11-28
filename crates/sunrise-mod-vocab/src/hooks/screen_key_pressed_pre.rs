@@ -22,10 +22,9 @@ pub trait Hooks {
     /// `screen_char_typed_pre`.
     #[hook(
         target = "sunrise_client_gameplay::game::native_hooks::base::ClientGame<'_>::native_screen_key_pressed_pre",
-        receiver = "read",
         dispatch = "flat",
         side = "client",
-        version = 2,
+        version = 3,
         contract = "cancel",
         out = "canceled",
         neoforge = "ScreenEvent.KeyPressed.Pre",

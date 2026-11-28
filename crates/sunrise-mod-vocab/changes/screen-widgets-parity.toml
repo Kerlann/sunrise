@@ -1,0 +1,50 @@
+ids = [
+    "hook:screen_init_post",
+    "hook:screen_key_pressed_pre",
+    "hook:screen_key_pressed_post",
+    "hook:screen_key_released_pre",
+    "hook:screen_key_released_post",
+    "hook:screen_char_typed_pre",
+    "hook:screen_char_typed_post",
+    "hook:screen_mouse_button_pressed_pre",
+    "hook:screen_mouse_button_pressed_post",
+    "hook:screen_mouse_button_released_pre",
+    "hook:screen_mouse_button_released_post",
+    "hook:screen_mouse_dragged_pre",
+    "hook:screen_mouse_dragged_post",
+    "hook:screen_mouse_scrolled_pre",
+    "hook:screen_mouse_scrolled_post",
+    "hook:screen_mouse_moved_pre",
+    "method:Hooks::screen_key_pressed_pre",
+    "method:Hooks::screen_key_pressed_post",
+    "method:Hooks::screen_key_released_pre",
+    "method:Hooks::screen_key_released_post",
+    "method:Hooks::screen_char_typed_pre",
+    "method:Hooks::screen_char_typed_post",
+    "method:Hooks::screen_mouse_button_pressed_pre",
+    "method:Hooks::screen_mouse_button_pressed_post",
+    "method:Hooks::screen_mouse_button_released_pre",
+    "method:Hooks::screen_mouse_button_released_post",
+    "method:Hooks::screen_mouse_dragged_pre",
+    "method:Hooks::screen_mouse_dragged_post",
+    "method:Hooks::screen_mouse_scrolled_pre",
+    "method:Hooks::screen_mouse_scrolled_post",
+    "method:Hooks::screen_mouse_moved_pre",
+    "type:client::widgets::ButtonState.label",
+    "type:client::widgets::ScreenChild.label",
+]
+why = """
+Screen widgets reach NeoForge 26.3 parity across every engine-drawn screen (#6741, #972): \
+`ScreenEvent.Init.Pre` (`screen_init_pre`) joins `screen_init_post` (v5), `ScreenWidgets` adds \
+mutators, `clear`, and `press` backed by live `ClientHost::screen_widgets()`, and all 15 screen \
+input hooks now take `&mut dyn ClientHost` so listeners can mutate open screen widgets directly \
+(render hooks stay read-only while drawing reads the widget override table). `ButtonState.label` \
+and `ScreenChild.label` are renamed to `message` to match vanilla's `AbstractWidget.getMessage`.
+"""
+migrate = """
+Rebuild against the new SDK. Rename `.label` to `.message` on `ButtonState` and `ScreenChild`. \
+Change the host parameter on `Hooks::screen_key_*`, `screen_char_*`, and `screen_mouse_*` \
+implementations from `&dyn ClientHost` to `&mut dyn ClientHost`. Listeners inspecting \
+`ScreenWidgets::children()` now see every engine-drawn screen's controls, not only the pause \
+and title screens.
+"""

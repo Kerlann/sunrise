@@ -442,6 +442,77 @@ impl RulesScreen {
         }
         (None, true)
     }
+    /// Dispatch a press directly to a bound child widget without coordinate hit-testing.
+    /// Returns `(clicked_button, exit, handled)`.
+    pub fn press_child(
+        &mut self,
+        atlas: &HudAtlas,
+        tag: u64,
+        mapped_cursor: (f32, f32),
+    ) -> (bool, Option<Exit>, bool) {
+        if self.confirm {
+            return match tag {
+                0 => (true, Some(Exit::Discard), true),
+                1 => {
+                    self.confirm = false;
+                    (true, None, true)
+                }
+                _ => (false, None, false),
+            };
+        }
+        let kind = tag >> 32;
+        let idx = (tag & 0xffff_ffff) as usize;
+        match kind {
+            6 => match idx {
+                0 => {
+                    if !self.invalid() {
+                        (true, Some(Exit::Apply(self.changes())), true)
+                    } else {
+                        (false, None, false)
+                    }
+                }
+                1 => (true, self.close(), true),
+                _ => (false, None, false),
+            },
+            5 => {
+                self.unfocus();
+                self.search.focused = true;
+                self.search.reset_blink();
+                self.search.click(atlas, mapped_cursor.0, false, false);
+                (false, None, true)
+            }
+            3 | 4 => {
+                let rows = self.rows();
+                let Some(Row::Rule(name)) = rows.get(idx) else {
+                    return (false, None, false);
+                };
+                let Some(r) = self.values.rule(name).cloned() else {
+                    return (false, None, false);
+                };
+                match (kind, &r.default) {
+                    (3, Value::Bool(_)) => {
+                        self.unfocus();
+                        let on = matches!(self.values.get(&r.name), Some(Value::Bool(true)));
+                        self.values.set(&r.name, Value::Bool(!on));
+                        (true, None, true)
+                    }
+                    (4, Value::Int(_)) => {
+                        self.unfocus();
+                        if let Some(b) = self.number(&r.name) {
+                            b.focused = true;
+                            b.reset_blink();
+                            b.click(atlas, mapped_cursor.0, false, false);
+                            (false, None, true)
+                        } else {
+                            (false, None, false)
+                        }
+                    }
+                    _ => (false, None, false),
+                }
+            }
+            _ => (false, None, false),
+        }
+    }
     fn unfocus(&mut self) {
         self.search.focused = false;
         for (_, b) in &mut self.numbers {
@@ -575,20 +646,22 @@ impl RulesScreen {
                             };
                             let label = Text::translate(key, &[]);
                             let value = matches!(self.values.get(&r.name), Some(Value::Bool(true)));
-                            ui::button_as(
-                                batch,
-                                atlas,
-                                [x, cy, 44.0, 20.0],
-                                &label,
-                                true,
-                                hover,
-                                None,
-                                |rect| {
-                                    bool_narration(&r, value, rect)
-                                        .key(crate::widgets::key_of(&("game_rules", r.name)))
-                                        .child_of(list, i)
-                                },
-                            );
+                            crate::widgets::with_native_action((3u64 << 32) | (i as u64), || {
+                                ui::button_as(
+                                    batch,
+                                    atlas,
+                                    [x, cy, 44.0, 20.0],
+                                    &label,
+                                    true,
+                                    hover,
+                                    None,
+                                    |rect| {
+                                        bool_narration(&r, value, rect)
+                                            .key(crate::widgets::key_of(&("game_rules", r.name)))
+                                            .child_of(list, i)
+                                    },
+                                );
+                            });
                         }
                         Value::Int(_) => {
                             if let Some(b) = self.number(&r.name) {
@@ -603,7 +676,10 @@ impl RulesScreen {
                                         narration(&r)
                                     );
                                 }
-                                b.draw(batch, atlas, None);
+                                crate::widgets::with_native_action(
+                                    (4u64 << 32) | (i as u64),
+                                    || b.draw(batch, atlas, None),
+                                );
                                 crate::widgets::last_narratable(|n| {
                                     *n = n
                                         .clone()
@@ -644,7 +720,9 @@ impl RulesScreen {
         );
         self.search.x = sx;
         self.search.y = sy;
-        self.search.draw(batch, atlas, None);
+        crate::widgets::with_native_action(5u64 << 32, || {
+            self.search.draw(batch, atlas, None);
+        });
         // The header's search box is added before the list.
         crate::widgets::last_narratable_at(0, |_| {});
         if self.search.value.is_empty() && !self.search.focused {
@@ -658,9 +736,10 @@ impl RulesScreen {
             batch.text_styled(atlas, &hint, hx, hy, u32::MAX, true);
         }
         let invalid = self.invalid();
-        for ((bx, by), (key, active)) in footer(w, h)
+        for (idx, ((bx, by), (key, active))) in footer(w, h)
             .into_iter()
             .zip([("gui.done", !invalid), ("gui.cancel", true)])
+            .enumerate()
         {
             let hover = active && ui::hovered(cursor, bx, by, 150.0, 20.0);
             let label = Text::translate(key, &[]);
@@ -669,9 +748,11 @@ impl RulesScreen {
             } else {
                 crate::widgets::Action::Cancel
             };
-            ui::action_button(
-                batch, atlas, action, bx, by, 150.0, 20.0, &label, active, hover,
-            );
+            crate::widgets::with_native_action((6u64 << 32) | (idx as u64), || {
+                ui::action_button(
+                    batch, atlas, action, bx, by, 150.0, 20.0, &label, active, hover,
+                );
+            });
         }
         // The hovered rule's tooltip: its id, description and default.
         if let Some(Row::Rule(id)) = hovered.map(|i| &rows[i]) {

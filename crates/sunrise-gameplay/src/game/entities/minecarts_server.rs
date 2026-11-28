@@ -12,7 +12,6 @@ use sunrise_gameplay_common::game::minecarts::CART_KEY_Y;
 use sunrise_gameplay_common::game::minecarts::CartKind;
 use sunrise_gameplay_common::game::minecarts::Minecart;
 use sunrise_gameplay_common::game::minecarts::Rail;
-use sunrise_gameplay_common::game::minecarts::SEAT;
 use sunrise_gameplay_common::game::minecarts::Shape;
 use sunrise_gameplay_common::game::minecarts::can_ride_cart;
 use sunrise_gameplay_common::game::minecarts::cart_at;
@@ -23,6 +22,7 @@ use sunrise_gameplay_common::game::minecarts::furnace_speed;
 use sunrise_gameplay_common::game::minecarts::java_degrees;
 use sunrise_gameplay_common::game::minecarts::offered_pickup;
 use sunrise_gameplay_common::game::minecarts::pickup_instead_of_push;
+use sunrise_gameplay_common::game::minecarts::player_cart_seat;
 use sunrise_gameplay_common::game::minecarts::push_along;
 use sunrise_gameplay_common::game::minecarts::takes_push_from_cart;
 use sunrise_gameplay_common::game::minecarts::tnt_ignites_by_collision;
@@ -1647,6 +1647,7 @@ impl crate::game::ServerGame<'_> {
         let v = sunrise_world::living_air::input_vector(input, 1.0, self.common.yaw);
         let intent = [v.x, v.z];
         let id = self.common.carts[i].id;
+        crate::game::record_turn!(self.common.dim, id, self.common.carts[i].kind.id(), None);
         let result =
             self.with_entity_held_out(id, |game| section_steps::tick_riding(game, id, i, intent));
         // A contact hurt lands on the stored row, not the ticked copy; a
@@ -1710,6 +1711,7 @@ impl crate::game::ServerGame<'_> {
             let Some(i) = self.cart_in_world(id, i, &round, kind) else {
                 continue;
             };
+            crate::game::record_turn!(self.common.dim, id, kind, None);
             // The ticked copy takes the loot roll instead of copying it: only
             // opening the cart, a command or a save reads it, never a tick, and
             // a mineshaft's chest cart carries its whole roll as NBT. The

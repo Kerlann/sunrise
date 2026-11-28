@@ -547,9 +547,8 @@ impl crate::game::ClientGame<'_> {
     ) -> (i32, i32, i32, i32) {
         (width as i32 / 2 - 100, height as i32 - 40, 200, 20)
     }
-    /// The Leave Bed button's draws. It registers as a button
-    /// (`widgets::record`), so the pad's and the keyboard's focus reach it (the
-    /// pad's starts on it) and `sunrise-ctl click-button` finds it.
+    /// The Leave Bed button's draws; `screen_draw::button` registers it as a button so
+    /// keyboard focus and `sunrise-ctl click-button` reach it.
     pub(in crate::game::client_side) fn leave_bed_draws(
         m: &Measure,
         mouse: (i32, i32),
@@ -559,11 +558,6 @@ impl crate::game::ClientGame<'_> {
             "multiplayer.stopSleeping",
             "Leave Bed",
         ));
-        sunrise_client::widgets::record(
-            &label.plain(),
-            [x as f32, y as f32, w as f32, h as f32],
-            true,
-        );
         let mut button = Vec::new();
         sunrise_client::screen_draw::button(
             &mut button,
@@ -851,6 +845,42 @@ impl crate::game::ClientGame<'_> {
         let amount = amount.clamp(-1.0, 1.0) * if shift { 1.0 } else { 7.0 };
         self.client.chat_ui.chat.scroll_by(amount as i32, true);
     }
+    pub(in crate::game) fn chat_press_child(
+        &mut self,
+        tag: u64,
+        mapped_cursor: (f32, f32),
+    ) -> bool {
+        match tag {
+            1 => {
+                if self.client.chat_ui.in_bed_chat && self.common.sleeping.is_some() {
+                    self.remote_stop_sleeping();
+                    true
+                } else {
+                    false
+                }
+            }
+            0 => {
+                let m = Measure(&self.client.gui.atlas.font);
+                let c = Commands {
+                    dispatcher: chat_tree(&self.client.remote),
+                    registries: &self.common.ui.registries,
+                };
+                let Some(screen) = self.client.chat_ui.chat_screen.as_mut() else {
+                    return false;
+                };
+                let (x, y) = (f64::from(mapped_cursor.0), f64::from(mapped_cursor.1));
+                let double_click = screen.live_double_click(x, y);
+                if screen.click(&m, &c, x, y, double_click) {
+                    self.notify_chat_suggestion_completion();
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
     pub fn chat_click(&mut self) -> bool {
         let cursor = self.client.cursor;
         let height = self.client.renderer.0.as_ref().map_or(720.0, |r| {
@@ -1114,6 +1144,22 @@ impl crate::game::ClientGame<'_> {
             super::packs::open_uri(&prompt.url);
         }
     }
+    pub(in crate::game) fn link_prompt_press_child(&mut self, tag: u64) -> bool {
+        let Some(prompt) = self.client.link_prompt.clone() else {
+            return false;
+        };
+        let button = tag as usize;
+        if button > 2 {
+            return false;
+        }
+        self.play_audio_button_click();
+        if button == LINK_COPY {
+            use sunrise_client::clipboard::Clipboard;
+            self.client.clipboard.0.set(&prompt.url);
+        }
+        self.answer_link_prompt(button == LINK_YES);
+        true
+    }
     pub(in crate::game::client_side) fn link_prompt_click(&mut self) -> bool {
         let Some(prompt) = self.client.link_prompt.clone() else {
             return false;
@@ -1300,14 +1346,18 @@ impl crate::game::ClientGame<'_> {
             .map_or(0, |t| t.elapsed().as_millis() as u64);
         let draws = screen.draw(&m, mouse, blink, background);
         self.client.chat_ui.chat_screen = Some(screen);
-        let tooltip = sunrise_client::screen_draw::paint(batch, &self.client.gui.atlas, &draws);
+        let tooltip = sunrise_client::widgets::with_native_action(0, || {
+            sunrise_client::screen_draw::paint(batch, &self.client.gui.atlas, &draws)
+        });
         if in_bed {
             let (w, h) = (batch.width, batch.height);
             let rect = self
                 .built_chat(w, h)
                 .map_or_else(|| Self::leave_bed_button(w, h), |l| l.leave_bed);
             let button = Self::leave_bed_draws(&m, mouse, rect);
-            let _ = sunrise_client::screen_draw::paint(batch, &self.client.gui.atlas, &button);
+            let _ = sunrise_client::widgets::with_native_action(1, || {
+                sunrise_client::screen_draw::paint(batch, &self.client.gui.atlas, &button)
+            });
         }
         self.draw_screen_phase(batch, sunrise_client::screen_draw::RenderPhase::Foreground);
         sunrise_client::screen_draw::paint_tooltip(batch, &self.client.gui.atlas, &draws, tooltip);
@@ -2158,6 +2208,15 @@ pub(in crate::game) mod tests {
         crate::game::ClientGame::leave_bed_draws(&m, (0, 0), (x, y, w, h));
         sunrise_client::widgets::end_frame(u64::MAX);
 
+        let bed_rect = [x as f32, y as f32, w as f32, h as f32];
+        assert_eq!(
+            sunrise_client::widgets::last()
+                .iter()
+                .filter(|w| [w.x, w.y, w.w, w.h] == bed_rect)
+                .count(),
+            1,
+            "Leave Bed is recorded exactly once through screen_draw::button"
+        );
         let targets = key_focus::drawn_targets();
         let bed = targets
             .iter()

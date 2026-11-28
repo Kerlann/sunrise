@@ -82,15 +82,20 @@ impl crate::game::ServerGame<'_> {
             return true;
         }
         match self.level_entity(id) {
-            // Projectile.isPickable: the redirectable projectiles
-            // (`#redirectable_projectile`); ShulkerBullet's is `true`.
-            Some(t @ Target::Projectile(_)) => matches!(
-                self.target_type(t).as_str(),
-                "minecraft:fireball"
-                    | "minecraft:wind_charge"
-                    | "minecraft:breeze_wind_charge"
-                    | "minecraft:shulker_bullet"
-            ),
+            // Projectile.isPickable: the bound `#redirectable_projectile`
+            // (ShulkerBullet's is `true`, AbstractArrow's adds not in the ground).
+            Some(Target::Projectile(id)) => self
+                .creatures
+                .projectiles
+                .iter()
+                .find(|p| p.id == id)
+                .is_some_and(|p| self.projectile_is_pickable(p)),
+            Some(Target::Trident(id)) => self
+                .tridents
+                .iter()
+                .find(|t| t.id == id)
+                .is_some_and(|t| self.trident_is_pickable(t)),
+            Some(Target::Rocket(_)) => self.rocket_is_pickable(),
             // LivingEntity: not removed. ArmorStand: not a marker.
             Some(Target::Mob(_)) => self.camera_state(id).is_some(),
             Some(Target::Stand(s)) => self
@@ -287,3 +292,5 @@ impl crate::game::ServerGame<'_> {
 }
 
 use sunrise_gameplay_common::game::commands_common::CommandsCommonGameExt2 as _;
+
+use sunrise_gameplay_common::game::held_items::HeldItemsGameExt1 as _;

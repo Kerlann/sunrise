@@ -513,6 +513,7 @@ impl crate::game::ServerGame<'_> {
                 continue;
             }
             told = Some(id);
+            crate::game::record_turn!(self.common.dim, id, "minecraft:trident", None);
             let mut t = self.common.tridents.remove(i);
             t.previous = t.position;
             t.previous_yaw = t.yaw;
@@ -543,6 +544,12 @@ impl crate::game::ServerGame<'_> {
                 if t.pickup == Pickup::Allowed {
                     self.spawn_at_location(t.position, f64::from(0.1f32), t.stack.clone());
                 }
+                crate::game::record_departure!(
+                    self.common.dim,
+                    t.id,
+                    "minecraft:trident",
+                    Some("discarded")
+                );
                 continue;
             }
             if t.loyalty > 0
@@ -605,6 +612,12 @@ impl crate::game::ServerGame<'_> {
                 } else if t.tick_despawn() {
                     // `discard()`: gone for everything after, so no block
                     // effects (`isAlive`) and no pickup this tick.
+                    crate::game::record_departure!(
+                        self.common.dim,
+                        t.id,
+                        "minecraft:trident",
+                        Some("discarded")
+                    );
                     continue;
                 }
                 t.in_ground_time += 1;
@@ -1098,6 +1111,12 @@ impl crate::game::ServerGame<'_> {
                 if let Some(by) = catchers.iter().find(near)
                     && self.trident_taken(&t, by)
                 {
+                    crate::game::record_departure!(
+                        self.common.dim,
+                        t.id,
+                        "minecraft:trident",
+                        Some("discarded")
+                    );
                     if let Some(frame) = transaction.take() {
                         self.common.tridents.retire_extracted(t.id, t.join);
                         self.close_storage_frame(frame, true);

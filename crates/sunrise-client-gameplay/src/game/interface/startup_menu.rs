@@ -730,10 +730,11 @@ impl Loading {
                 Event::ShaderPack => self.save_menu_settings(),
                 Event::OpenShaderOptions => {
                     let pick = &self.settings.sunrise.shader_pack;
+                    let macros = super::shader_packs::shader_options_macros(self.renderer.as_ref());
                     self.settings.shader_options = super::shader_packs::read_shader_options(
                         pick,
                         &self.settings.language,
-                        &sunrise_shaders::Macros::standard(),
+                        &macros,
                         self.settings.sunrise.iris_compat_of(pick),
                     );
                 }
@@ -1431,8 +1432,9 @@ impl Loading {
             let delta_ticks = now.duration_since(*frame).as_secs_f32() * 20.0;
             *frame = now;
             sunrise_client::widgets::begin_screen(|| win.screen_info());
+            win.advance(delta_ticks);
             win.draw_background(batch, &gui.atlas, Default::default());
-            win.draw_contents(batch, &gui.atlas, delta_ticks);
+            win.draw_contents(batch, &gui.atlas);
             if win.finished(batch.height) {
                 self.menu.win = None;
             }

@@ -26,6 +26,9 @@ static ALLOCATOR: sunrise_threads::GameAllocator = sunrise_threads::GAME_ALLOCAT
 mod cut_layout;
 pub mod game_facade;
 pub use cut_layout::game;
+#[cfg(all(feature = "test-support", feature = "client"))]
+#[doc(hidden)]
+pub use cut_layout::game::native_item_places_test_support;
 #[cfg(all(test, not(feature = "client")))]
 pub(crate) use sunrise_client_lib::settings;
 #[cfg(all(test, not(feature = "client")))]
@@ -37,6 +40,8 @@ pub(crate) use sunrise_level::chunk;
 #[cfg(all(test, not(feature = "client")))]
 pub(crate) use sunrise_sim::{datapack_net, entities, motion, raw_payloads};
 pub use sunrise_sim::{lan, orb_limits, save};
+#[cfg(all(test, feature = "client"))]
+mod fresh_process;
 #[cfg(test)]
 mod test_game_dir;
 

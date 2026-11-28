@@ -165,6 +165,18 @@ impl crate::game::ClientGame<'_> {
             );
         }
     }
+    pub(in crate::game) fn social_press_child(
+        &mut self,
+        tag: u64,
+        mapped_cursor: (f32, f32),
+    ) -> bool {
+        let view = self.social_view();
+        let Some(kind) = social_screen::click_for_tag(tag, &view) else {
+            return false;
+        };
+        self.social_apply_click(kind, mapped_cursor.0)
+    }
+
     pub(in crate::game::client_side) fn social_click(&mut self) -> bool {
         let size = self.gui_size();
         let cursor = self.client.cursor;
@@ -172,6 +184,10 @@ impl crate::game::ClientGame<'_> {
         let Some(kind) = social_screen::click_kind(size, cursor, &view) else {
             return false;
         };
+        self.social_apply_click(kind, cursor.0)
+    }
+
+    fn social_apply_click(&mut self, kind: social_screen::Click, cursor_x: f32) -> bool {
         // The widget first: the search box's `onClick` puts the caret under the
         // pointer, before any list button is considered.
         if let social_screen::Click::Search = kind {
@@ -179,7 +195,7 @@ impl crate::game::ClientGame<'_> {
             self.client
                 .social
                 .search
-                .click(&self.client.gui.atlas, cursor.0, shift, false);
+                .click(&self.client.gui.atlas, cursor_x, shift, false);
             return true;
         }
         let social_screen::Click::Action(action) = kind else {

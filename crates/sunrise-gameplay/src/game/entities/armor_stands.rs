@@ -647,6 +647,12 @@ impl crate::game::ServerGame<'_> {
                 continue;
             };
             told = Some(id);
+            crate::game::record_turn!(
+                self.common.dim,
+                id,
+                TYPE_ID,
+                self.common.armor_stands[i].vehicle
+            );
             self.common.armor_stands[i].enchantment_tick =
                 self.common.armor_stands[i].enchantment_tick.wrapping_add(1);
             if !self.common.armor_stands[i].equipment.is_empty() {
@@ -1233,6 +1239,7 @@ impl crate::game::ServerGame<'_> {
         self.with_vehicle_removal_effects(super::commands::Target::Stand(id), effects, |game| {
             if let Some(i) = game.armor_stands.iter().position(|stand| stand.id == id) {
                 game.armor_stands.remove(i);
+                crate::game::record_departure!(game.common.dim, id, TYPE_ID, None);
             }
         })
         .is_some()

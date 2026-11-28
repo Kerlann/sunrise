@@ -203,6 +203,7 @@ impl crate::game::ServerGame<'_> {
         self.with_destroying_vehicle(super::commands::Target::Cushion(id), |game| {
             let i = game.cushions.iter().position(|c| c.id == id)?;
             let c = game.cushions.remove(i);
+            crate::game::record_departure!(game.common.dim, c.id, "minecraft:cushion", None);
             game.world.modified.insert((c.pos[0] >> 4, c.pos[2] >> 4));
             Some(c)
         })?
@@ -373,6 +374,12 @@ impl crate::game::ServerGame<'_> {
                 i += 1;
                 continue;
             }
+            crate::game::record_turn!(
+                self.common.dim,
+                self.common.cushions[i].id,
+                "minecraft:cushion",
+                None
+            );
             let previous = self.common.cushions[i].check_interval;
             self.common.cushions[i].check_interval += 1;
             if previous < 100 {

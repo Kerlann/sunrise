@@ -37,6 +37,22 @@ impl crate::game::ClientGame<'_> {
         (self.common.player.is_none() && !r.joined && self.client.integrated.is_none())
             .then(|| sunrise_client::level_loading::connect_cancel(w, h))
     }
+    pub(in crate::game) fn connect_screen_press_child(&mut self, tag: u64) -> Result<bool> {
+        if let Some(since) = self.client.remote.as_ref().and_then(|r| r.reconfiguring) {
+            if tag == 0 && self.common.ticks.saturating_sub(since) >= 600 {
+                self.play_audio_button_click();
+                self.leave_server(None)?;
+                return Ok(true);
+            }
+            return Ok(false);
+        }
+        if tag == 1 && self.connect_cancel(self.gui_size()).is_some() {
+            self.play_audio_button_click();
+            self.finish_leave_server(None)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
     /// A click on `ConnectScreen`: Cancel aborts the connection
     /// (`connect.aborted`) and goes back. Escape does nothing there
     /// (`shouldCloseOnEsc` is false).

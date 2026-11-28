@@ -217,6 +217,12 @@ impl crate::game::ServerGame<'_> {
                     };
                     let at = dragon.position;
                     if entity_ticking(at.x.floor() as i32, at.z.floor() as i32) {
+                        crate::game::record_turn!(
+                            self.common.dim,
+                            dragon.id,
+                            "minecraft:ender_dragon",
+                            None
+                        );
                         self.tick_dragon();
                         if let Some(dragon) = self.common.dragon.as_ref().filter(|d| d.join == join)
                         {
@@ -238,6 +244,7 @@ impl crate::game::ServerGame<'_> {
                         && self.entity_position_accessible([at.x, at.y, at.z])
                     {
                         let t = &self.common.tnts[i];
+                        crate::game::record_turn!(self.common.dim, t.id, "minecraft:tnt", None);
                         let area = t.bounds().expand_towards(t.velocity);
                         obstacles
                             .get_or_insert_with(|| {
@@ -265,6 +272,12 @@ impl crate::game::ServerGame<'_> {
                     {
                         events = true;
                         let f = &self.common.falling[i];
+                        crate::game::record_turn!(
+                            self.common.dim,
+                            f.id,
+                            "minecraft:falling_block",
+                            None
+                        );
                         let area = f.bounds().expand_towards(f.velocity);
                         obstacles
                             .get_or_insert_with(|| {
@@ -299,6 +312,12 @@ impl crate::game::ServerGame<'_> {
                     {
                         continue;
                     }
+                    crate::game::record_turn!(
+                        self.common.dim,
+                        self.common.orbs[i].id,
+                        "minecraft:experience_orb",
+                        None
+                    );
                     // ExperienceOrb.tick runs scanForMerges before it moves.
                     // An orb absorbed here is gone before its own turn's
                     // find_join finds it.
@@ -411,6 +430,12 @@ impl crate::game::ServerGame<'_> {
                                     i = current;
                                     if !invulnerable && self.common.orbs[i].hurt(amount) {
                                         self.common.orbs.remove(i);
+                                        crate::game::record_departure!(
+                                            self.common.dim,
+                                            orb_id,
+                                            "minecraft:experience_orb",
+                                            Some("killed")
+                                        );
                                         continue 'entity;
                                     }
                                 }
@@ -506,6 +531,12 @@ impl crate::game::ServerGame<'_> {
                     self.entity_section_step(orb_id, [from.x, from.y, from.z], [to.x, to.y, to.z]);
                     if !stays {
                         self.common.orbs.remove(i);
+                        crate::game::record_departure!(
+                            self.common.dim,
+                            orb_id,
+                            "minecraft:experience_orb",
+                            Some("discarded")
+                        );
                     }
                 }
             }

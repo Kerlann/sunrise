@@ -144,7 +144,7 @@ impl ClientGame<'_> {
         }
     }
 
-    /// New codes and sessions, once a tick and while the pause menu is drawn.
+    /// New codes and sessions, once a client tick (including while paused in singleplayer).
     pub(in crate::game) fn tick_friends(&mut self) {
         // Retire stale sharing if LAN closed or rebound to a different port.
         if let Some(port) = self.client.friends.as_ref().map(|s| s.port)
@@ -213,10 +213,8 @@ impl ClientGame<'_> {
         }
     }
 
-    /// Play with Friends. The world is paused under it in singleplayer, so
-    /// new codes and sessions are read while it is drawn.
+    /// Play with Friends. `tick_friends` runs on every client tick (paused or not).
     pub(in crate::game::client_side) fn draw_friends_screen(&mut self, batch: &mut HudBatch) {
-        self.tick_friends();
         let view = self.friends_view();
         sunrise_client::widgets::begin_screen(|| {
             sunrise_client::widgets::ScreenInfo::new("friends", friends_screen::TITLE)
@@ -230,6 +228,23 @@ impl ClientGame<'_> {
             &mut |phase, batch| self.draw_screen_phase(batch, phase),
         );
     }
+    pub(in crate::game) fn friends_screen_press_child(&mut self, tag: u64) -> bool {
+        let Some(action) = Action::from_tag(tag) else {
+            return false;
+        };
+        let view = self.friends_view();
+        if !friends_screen::has_active_action(
+            &self.client.gui.atlas,
+            self.gui_size(),
+            &view,
+            action,
+        ) {
+            return false;
+        }
+        self.friends_execute_action(action, &view);
+        true
+    }
+
     pub(in crate::game::client_side) fn friends_screen_click(&mut self) -> bool {
         let view = self.friends_view();
         let Some(action) = friends_screen::click(
@@ -240,6 +255,11 @@ impl ClientGame<'_> {
         ) else {
             return false;
         };
+        self.friends_execute_action(action, &view);
+        true
+    }
+
+    fn friends_execute_action(&mut self, action: Action, view: &FriendsView) {
         self.play_audio_button_click();
         match action {
             Action::Share => {
@@ -263,7 +283,6 @@ impl ClientGame<'_> {
             }
             Action::Done => self.set_screen(super::Screen::Paused),
         }
-        true
     }
 
     /// Whether the pause menu offers Play with Friends (a singleplayer world).
