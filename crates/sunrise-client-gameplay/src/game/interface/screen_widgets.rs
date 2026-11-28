@@ -1469,12 +1469,13 @@ impl crate::game::ClientGame<'_> {
     ) -> R {
         let maps = {
             let inner = self.client.screen_state.0.widgets.inner.borrow();
-            if !inner.overrides_active {
-                return f(self);
-            }
-            inner.engine_overrides.clone()
+            inner
+                .overrides_active
+                .then(|| inner.engine_overrides.clone())
         };
-        let mut maps = maps;
+        let Some(mut maps) = maps else {
+            return f(self);
+        };
         widgets::with_input_overrides(&mut maps, || f(self))
     }
 
@@ -1904,6 +1905,10 @@ impl crate::game::ClientGame<'_> {
     pub fn clear_screen_widgets(&mut self) {
         self.client.screen_state.0.widgets.clear();
         self.client.screen_state.0.widgets.children_cache.clear();
+        self.reset_screen_ime();
+    }
+
+    pub(in crate::game) fn reset_screen_ime(&mut self) {
         sunrise_client::preedit::reset();
         self.client.ime_area = None;
     }
@@ -2038,8 +2043,7 @@ impl crate::game::ClientGame<'_> {
             let restored = {
                 let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
                 if inner.order.contains(&entry_id)
-                    && let Some(slot) = inner.entries.get_mut(idx)
-                    && slot.is_none()
+                    && inner.entries.get(idx).is_some_and(Option::is_none)
                 {
                     if entry.disabled || !entry.owner.is_enabled() {
                         entry.disabled = true;
@@ -2050,7 +2054,7 @@ impl crate::game::ClientGame<'_> {
                             inner.dragging = None;
                         }
                     }
-                    *slot = Some(entry);
+                    inner.entries[idx] = Some(entry);
                     None
                 } else {
                     Some(entry)

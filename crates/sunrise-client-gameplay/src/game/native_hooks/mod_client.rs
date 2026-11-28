@@ -890,8 +890,7 @@ impl crate::game::ClientGame<'_> {
                         .suspended_under_overlay
                         .push((prev, saved_widgets));
                 }
-                sunrise_client::preedit::reset();
-                self.client.ime_area = None;
+                self.reset_screen_ime();
                 self.client.screen_state.0.observed = current.clone();
                 if let Some(new) = &current
                     && self.common.options.execution_role.is_client()
