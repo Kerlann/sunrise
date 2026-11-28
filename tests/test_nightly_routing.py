@@ -11,11 +11,14 @@ import tempfile
 import textwrap
 import unittest
 
-from tests.test_ci_runners import jobs
-from tests.test_ci_concurrency import yaml
+from tests.os_support import BASH, needs_runner_shell
+from tools.ci import vendored_yaml
+
+yaml = vendored_yaml.load()
 
 ROOT = Path(__file__).resolve().parents[1]
 GAME = ROOT / ".github/workflows/game-build.yml"
+EXPORTERS = ROOT / ".github/workflows/exporters.yml"
 NIGHTLY = ROOT / ".github/workflows/nightly-build.yml"
 SMOKE = ROOT / "tools/ci/game_smoke.sh"
 
@@ -32,7 +35,8 @@ class NightlyRoutingTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("node"), "Node evaluates GitHub's JavaScript-style expressions")
     def test_real_matrix_routes_both_trust_levels(self):
         game = yaml.safe_load(GAME.read_text())["jobs"]
-        expressions = {name: game[name]["runs-on"][3:-2] for name in ("exporters", "build", "linux-smoke")}
+        expressions = {name: game[name]["runs-on"][3:-2] for name in ("build", "linux-smoke")}
+        expressions["exporters"] = yaml.safe_load(EXPORTERS.read_text())["jobs"]["exporters"]["runs-on"][3:-2]
         smoke = game["linux-smoke"]
         smoke_if = smoke["if"][3:-2]
         rows = game["build"]["strategy"]["matrix"]["include"]
@@ -54,9 +58,8 @@ console.log(JSON.stringify(eval(expression)));
         def evaluate(expression, matrix, trusted, repository="sunrise-org/sunrise"):
             result = subprocess.run(["node", "-e", script], input=json.dumps({"expression": expression, "matrix": matrix, "inputs": {"trusted": trusted}, "vars": variables, "github": {"repository": repository}}), text=True, capture_output=True, check=True)
             return json.loads(result.stdout)
-        bookkeeping = next(expression for expression in re.findall(r"^\s*runs-on:\s*\$\{\{(.*?)\}\}\s*$",
-                                                                  NIGHTLY.read_text(), re.M)
-                           if "NIGHTLY_BOOKKEEPING_RUNNER" in expression)
+        bookkeeping = next(job["runs-on"][3:-2] for job in yaml.safe_load(NIGHTLY.read_text())["jobs"].values()
+                           if "NIGHTLY_BOOKKEEPING_RUNNER" in job.get("runs-on", ""))
         for configured, disabled, trusted, dyna, blacksmith in itertools.product(
             [False, True], [False, True], [False, True], [None, "false", "true"], [None, "off"]
         ):
@@ -92,10 +95,54 @@ console.log(JSON.stringify(eval(expression)));
                 timeout = game["build"]["timeout-minutes"][3:-2]
                 self.assertEqual(evaluate(timeout, row, trusted, repository), expected)
 
+    @unittest.skipUnless(shutil.which("node"), "Node evaluates GitHub's JavaScript-style expressions")
+    def test_only_a_dev_releases_legs_follow_the_owners_blacksmith_and_dyna_switches(self):
+        script = """const state = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+const context = values => new Proxy(values, {get: (values, key) => values[key] ?? ''});
+const matrix = context(state.matrix), vars = context(state.vars), inputs = context(state.inputs);
+console.log(JSON.stringify(eval(state.expression)));
+"""
+        prebuilt = yaml.safe_load((ROOT / ".github/workflows/prebuilt-game-build.yml").read_text())
+        legs = json.loads(prebuilt["jobs"]["fresh"]["steps"][1]["env"]["ALL"])
+        game = yaml.safe_load(GAME.read_text())["jobs"]["build"]
+        builds = {"game": (game, game["strategy"]["matrix"]["include"]), "sdk": (prebuilt["jobs"]["build"], legs)}
+        switches = [None, "off", "on", "true"]
+        platforms = ["DEV_ON_DYNA_LINUX", "DEV_ON_DYNA_WINDOWS", "DEV_ON_DYNA_MACOS"]
+
+        def runs_on(job, row, variables, dev):
+            state = {"expression": job["runs-on"][3:-2], "matrix": row, "vars": variables, "inputs": {"dev": dev}}
+            result = subprocess.run(["node", "-e", script], input=json.dumps(state), text=True,
+                                    capture_output=True, check=True)
+            return json.loads(result.stdout)
+
+        for (what, (job, rows)), switch, every, dev in itertools.product(builds.items(), switches, switches, [False, True]):
+            variables = {"BLACKSMITH": "off"}
+            if switch is not None:
+                variables["BLACKSMITH_DEV_MACOS"] = switch
+            if every is not None:
+                variables["BLACKSMITH_DEV"] = every
+            for row in rows:
+                with self.subTest(build=what, switch=switch, every=every, dev=dev, leg=row["name"]):
+                    blacksmith = dev and (every == "on" or (switch == "on" and row["os"] == "macos-15"))
+                    self.assertEqual(runs_on(job, row, variables, dev), row["blacksmith"] if blacksmith else row["os"])
+
+        # Each DEV_ON_DYNA_<platform>=on moves that platform's legs, game and SDK, to Dyna's runner in a Dev release
+        # whatever the Blacksmith switches say; no other leg moves, and nothing moves for a value but `on` or without dev.
+        for (what, (job, rows)), platform, value, blacksmiths, dev in itertools.product(
+                builds.items(), platforms, switches, [{}, {"BLACKSMITH_DEV": "on"}], [False, True]):
+            for row in rows:
+                with self.subTest(build=what, platform=platform, value=value, blacksmiths=blacksmiths, dev=dev, leg=row["name"]):
+                    variables = {"BLACKSMITH": "off", **blacksmiths, **({} if value is None else {platform: value})}
+                    expected = row["os"] if not blacksmiths else row["blacksmith"]
+                    if dev and value == "on" and row["dyna"] == platform:
+                        expected = "dyna-large"
+                    elif not dev:
+                        expected = row["os"]
+                    self.assertEqual(runs_on(job, row, variables, dev), expected)
+
+    @needs_runner_shell
     def test_any_missing_leg_holds_the_build(self):
-        workflow_jobs = dict(jobs(GAME.read_text()))
-        decide = workflow_jobs["legs"].split("        run: |\n", 1)[1].split("\n      # ", 1)[0].split("\n      - ", 1)[0]
-        decide = textwrap.dedent(decide)
+        decide = next(step["run"] for step in yaml.safe_load(GAME.read_text())["jobs"]["legs"]["steps"] if "run" in step)
         legs = ("linux", "windows", "macos")
         for absent in [None, *legs]:
             with self.subTest(absent=absent), tempfile.TemporaryDirectory() as folder:
@@ -103,7 +150,7 @@ console.log(JSON.stringify(eval(expression)));
                     if leg != absent:
                         os.makedirs(f"{folder}/legs/leg-{leg}")
                 output = Path(folder, "output")
-                ran = subprocess.run(["bash", "-c", decide], cwd=folder, capture_output=True, text=True,
+                ran = subprocess.run([BASH, "-c", decide], cwd=folder, capture_output=True, text=True,
                                      env={**os.environ, "GITHUB_OUTPUT": str(output)})
                 self.assertEqual(ran.returncode == 0, absent is None, ran.stdout)
                 self.assertEqual(output.exists() and output.read_text() == "complete=true\n", absent is None)
@@ -111,7 +158,8 @@ console.log(JSON.stringify(eval(expression)));
     def test_build_timings_are_a_report_and_never_a_signed_or_released_asset(self):
         game = yaml.safe_load(GAME.read_text())
         steps = game["jobs"]["build"]["steps"]
-        self.assertIn("cargo build --release --locked --timings", GAME.read_text())
+        builds = [shlex.split(step["run"].replace("\\\n", " ")) for step in steps if "cargo build" in step.get("run", "")]
+        self.assertIn("--timings", [argument for words in builds for argument in words])
         collect = next(i for i, step in enumerate(steps) if step.get("name") == "The build's timings, by leg")
         upload = collect + 1
         self.assertTrue(steps[upload]["uses"].startswith("actions/upload-artifact@"))
@@ -137,18 +185,19 @@ console.log(JSON.stringify(eval(expression)));
 
     def test_every_shipped_glibc_program_is_checked_by_workflow_owned_tools(self):
         text = GAME.read_text()
-        commands = re.findall(r"check_glibc.py ([^\n]+)", text.replace("\\\n", " "))
+        steps = [step for job in yaml.safe_load(text)["jobs"].values() for step in job.get("steps", [])]
+        commands = re.findall(r"check_glibc.py ([^\n]+)", "\n".join(step.get("run", "") for step in steps).replace("\\\n", " "))
         checked = [{Path(argument).name for argument in shlex.split(command)} for command in commands]
         # Every program each release folder takes (the SDK's input list), and the game program itself.
         routes = json.loads((ROOT / "crates/sunrise-mod-package/src/sdk/inputs.json").read_text())["routes"]
         programs = {route: {name for name in routes[route]["program"] if "." not in name} for route in ["package", "package-server"]}
         self.assertEqual(checked, [programs["package"] | {"sunrise-client"},
                                    programs["package-server"] | {"sunrise-engine"}])
-        tools = [step for step in text.split("\n      - ") if "path: .workflow-tools" in step]
+        tools = [step for step in steps if step.get("with", {}).get("path") == ".workflow-tools"]
         self.assertTrue(tools)
         for checkout in tools:
-            self.assertIn("ref: ${{ github.workflow_sha }}", checkout,
-                          "older build candidates may lack the new workflow's validator/smoke helpers")
+            self.assertEqual(checkout["with"]["ref"], "${{ github.workflow_sha }}",
+                             "older build candidates may lack the new workflow's validator/smoke helpers")
 
     def test_build_stages_the_workflows_rust_pin(self):
         game = yaml.safe_load(GAME.read_text())["jobs"]
@@ -161,26 +210,26 @@ console.log(JSON.stringify(eval(expression)));
 
     def test_hosted_runners_never_use_machine_specific_tool_setup(self):
         # Only the exporters can run on a self-hosted (Dyna) runner; the build legs are fresh machines and take none.
-        workflow_jobs = dict(jobs(GAME.read_text()))
-        self.assertNotIn("runner-env.sh", workflow_jobs["build"])
-        steps = [block for block in workflow_jobs["exporters"].split("\n      - ") if "bash tools/ci/runner-env.sh" in block]
+        self.assertNotIn("runner-env.sh", GAME.read_text())
+        steps = [step for step in yaml.safe_load(EXPORTERS.read_text())["jobs"]["exporters"]["steps"]
+                 if "bash tools/ci/runner-env.sh" in step.get("run", "")]
         self.assertEqual(len(steps), 1)
-        condition = re.search(r"^\s*if:\s*(.*)$", steps[0], re.M).group(1)
+        condition = steps[0]["if"]
         for environment in ["github-hosted", "self-hosted"]:
             expression = condition.replace("runner.environment", repr(environment))
             self.assertEqual(eval(expression, {"__builtins__": {}}), environment == "self-hosted")
 
     @unittest.skipUnless(os.name == "posix", "The pick step runs in Bash on Linux")
     def test_pick_failure_preserves_its_error_without_missing_notes_noise(self):
-        block = NIGHTLY.read_text().split("      - id: pick\n", 1)[1].split("      - name:", 1)[0]
-        shell = textwrap.dedent(block.split("        run: |\n", 1)[1])
+        shell, = [step["run"] for job in yaml.safe_load(NIGHTLY.read_text())["jobs"].values()
+                  for step in job.get("steps", []) if step.get("id") == "pick"]
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             python = root / "python3"
             python.write_text("#!/bin/sh\necho 'no green dyna-checks main base'\nexit 23\n")
             python.chmod(0o755)
             summary = root / "summary"
-            result = subprocess.run(["bash", "-c", shell], cwd=root, env={**os.environ, "FORCE": "", "KIND": "nightly", "GITHUB_STEP_SUMMARY": str(summary), "PATH": str(root) + os.pathsep + os.environ["PATH"]}, text=True, capture_output=True)
+            result = subprocess.run([BASH, "-c", shell], cwd=root, env={**os.environ, "FORCE": "", "KIND": "nightly", "GITHUB_STEP_SUMMARY": str(summary), "PATH": str(root) + os.pathsep + os.environ["PATH"]}, text=True, capture_output=True)
             self.assertEqual(result.returncode, 23)
             self.assertIn("no green dyna-checks main base", summary.read_text())
             self.assertNotIn("nightly-notes.md", result.stderr)
@@ -197,7 +246,7 @@ console.log(JSON.stringify(eval(expression)));
             binary.chmod(0o755)
             for directory in [str(binary_dir), str(binary_dir.relative_to(root))]:
                 with self.subTest(directory=directory):
-                    result = subprocess.run(["bash", "-c", command + '\n"$client"'], cwd=root, env={**os.environ, "BIN": directory}, text=True, capture_output=True)
+                    result = subprocess.run([BASH, "-c", command + '\n"$client"'], cwd=root, env={**os.environ, "BIN": directory}, text=True, capture_output=True)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(result.stdout, "smoke ran")
 
@@ -220,7 +269,7 @@ console.log(JSON.stringify(eval(expression)));
             binary.chmod(0o755)
             env = {**os.environ, "BIN": folder, "RUNNER_TEMP": folder, "RUNNER_OS": "Linux",
                    "DISPLAY": ":invalid", "WAYLAND_DISPLAY": "invalid", "RUST_MIN_STACK": "16777216"}
-            result = subprocess.run(["bash", str(SMOKE)], cwd=ROOT, env=env, text=True, capture_output=True)
+            result = subprocess.run([BASH, str(SMOKE)], cwd=ROOT, env=env, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             report = json.loads((root / "smoke-test.json").read_text())
             self.assertEqual(report["frames"], 1500)
@@ -230,9 +279,8 @@ console.log(JSON.stringify(eval(expression)));
 
     @unittest.skipUnless(os.name == "posix", "The signing gate runs in Bash on Linux")
     def test_fork_dry_run_cannot_pass_without_real_smoke_report(self):
-        text = NIGHTLY.read_text().split("      - name: Ready to publish", 1)[1].split("      - name:", 1)[0]
-        shell = text.split("        run: |\n", 1)[1]
-        shell = "\n".join(line[10:] for line in shell.splitlines())
+        shell, = [step["run"] for job in yaml.safe_load(NIGHTLY.read_text())["jobs"].values()
+                  for step in job.get("steps", []) if step.get("name", "").startswith("Ready to publish")]
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             (root / "tools").symlink_to(ROOT / "tools", target_is_directory=True)
@@ -240,7 +288,7 @@ console.log(JSON.stringify(eval(expression)));
             stub = root / "gh"
             stub.write_text("#!/bin/sh\nprintf '[]'\n")
             stub.chmod(0o755)
-            result = subprocess.run(["bash", "-c", shell], cwd=root, env={**os.environ, "DRY_RUN": "true", "GITHUB_REPOSITORY": "sunrise-org/sunrise", "PATH": str(root) + os.pathsep + os.environ["PATH"]}, text=True, capture_output=True)
+            result = subprocess.run([BASH, "-c", shell], cwd=root, env={**os.environ, "DRY_RUN": "true", "GITHUB_REPOSITORY": "sunrise-org/sunrise", "PATH": str(root) + os.pathsep + os.environ["PATH"]}, text=True, capture_output=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("smoke", result.stdout.lower())
 

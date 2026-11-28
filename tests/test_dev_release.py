@@ -8,8 +8,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.test_ci_concurrency import ROOT, yaml
+from tests.test_ci_concurrency import ROOT
 from tools.ci import nightly
+from tools.ci import vendored_yaml
+
+yaml = vendored_yaml.load()
 
 WORKFLOWS = ROOT / ".github/workflows"
 
@@ -29,9 +32,6 @@ class ReleaseDevTests(unittest.TestCase):
         self.assertEqual(mode["run"], 'python3 tools/release_train.py authorize --publish-kind "$KIND" --dry-run "$DRY_INPUT"')
         self.assertEqual(mode["env"], {"KIND": "${{ inputs.kind }}", "DRY_INPUT": "${{ inputs.dry_run }}"})
         self.assertEqual(self.workflow["on"]["workflow_dispatch"]["inputs"]["dry_run"]["default"], "true")
-        publish = self.dev["dev-sdk-publish"]
-        self.assertEqual(publish["with"]["publish"], "${{ needs.decide.outputs.publish == 'true' }}")
-        self.assertEqual(publish["uses"], "./.github/workflows/sdk-publish.yml")
         # The game is built by `nightly build`, which publishes only when its own dry_run is false: it gets ours.
         run = self.dev["dev"]["steps"][0]["run"]
         self.assertIn('-f dry_run="$DRY_RUN"', run)
@@ -48,17 +48,10 @@ class ReleaseDevTests(unittest.TestCase):
             self.assertIn("inputs.kind == 'dev'", job["if"], name)
         self.assertIn("inputs.kind == 'nightly'", self.jobs["nightly"]["if"])
 
-    def test_the_sdk_is_built_and_published_in_this_run_before_the_game(self):
-        self.assertEqual(self.dev["dev-sdk"]["uses"], "./.github/workflows/prebuilt-game-build.yml")
-        self.assertEqual(self.dev["dev-sdk"]["with"], {"commit": "${{ needs.decide.outputs.head }}"})
-        self.assertEqual(self.dev["dev-sdk-publish"]["with"],
-                         {"commit": "${{ needs.decide.outputs.head }}",
-                          "publish": "${{ needs.decide.outputs.publish == 'true' }}"})
-        game = self.dev["dev"]
-        self.assertEqual(game["needs"], ["decide", "dev-sdk", "dev-sdk-publish"])
-        self.assertIn("needs.dev-sdk.result == 'success'", game["if"])
-        self.assertIn("(needs.dev-sdk-publish.result == 'success' || needs.dev-sdk-publish.result == 'skipped')",
-                      game["if"].replace("\n", " "))
+    def test_the_dev_build_starts_at_once_and_builds_its_own_sdk(self):
+        # The SDK is built and published by `nightly build` itself, beside the game: nothing here waits for it.
+        self.assertEqual(set(self.dev), {"dev"})
+        self.assertEqual(self.dev["dev"]["needs"], "decide")
 
     def test_dev_builds_never_queue_with_nightlies(self):
         self.assertIn("inputs.kind == 'dev' && '-dev'", self.workflow["concurrency"]["group"])
@@ -80,7 +73,21 @@ class NightlyBuildDevTests(unittest.TestCase):
         for never in ("rotate", "keep-source", "daily-green", "release create nightly", "prune --days", "release edit"):
             self.assertNotIn(never, run)
         self.assertIn('--title "Dev $DATE · $SHORT"', run)
-        self.assertLess(run.index("require-sdk"), run.index("gh release create"))
+        self.assertLess(run.index("require-sdk --draft"), run.index("gh release create"))
+
+    def test_a_dev_build_is_a_draft_until_promoted_sdk_first(self):
+        run = self.steps["Publish as the dev-<date>-<short> pre-release"]["run"]
+        self.assertIn('gh release create "$TAG" --draft', run)
+        self.assertNotIn("prune-dev", run)
+        promote = load("promote-dev.yml")
+        self.assertEqual(set(promote["on"]), {"workflow_dispatch"})
+        public = next(step for step in promote["jobs"]["promote"]["steps"] if step.get("id") == "public")["run"]
+        self.assertLess(public.index('gh release edit "sdk-$SHA" --draft=false'),
+                        public.index('gh release edit "$TAG" --draft=false'))
+        self.assertLess(public.index('gh release edit "$TAG" --draft=false'), public.index("prune-dev"))
+        check = next(step for step in promote["jobs"]["promote"]["steps"] if step.get("id") == "check")["run"]
+        self.assertIn('cmp "$game/sdk.json" "$sdk/sdk.json"', check)
+        self.assertLess(check.index("verify-sums"), check.index('echo "sha=$sha"'))
 
     def test_the_channel_signed_and_checked_is_the_kind(self):
         sign = self.workflow["jobs"]["sign"]["steps"][2]
@@ -108,8 +115,9 @@ class NightlyBuildDevTests(unittest.TestCase):
         complete = self.workflow["jobs"]["complete"]
         self.assertEqual(complete["steps"][0]["with"]["name"], "build-complete")
         self.assertEqual(complete["outputs"]["complete"], "${{ steps.marker.outcome == 'success' }}")
-        self.assertEqual(self.workflow["jobs"]["sign"]["needs"], ["pick", "build", "complete", "break-glass"])
-        self.assertEqual(self.workflow["jobs"]["publish"]["needs"], ["pick", "build", "complete", "sign", "break-glass"])
+        self.assertEqual(self.workflow["jobs"]["sign"]["needs"], ["pick", "build", "complete", "break-glass", "sdk-index"])
+        self.assertEqual(self.workflow["jobs"]["publish"]["needs"],
+                         ["pick", "build", "complete", "sign", "break-glass", "sdk-index"])
         for job in ("sign", "publish"):
             self.assertIn("needs.complete.outputs.complete == 'true'", self.workflow["jobs"][job]["if"])
 
@@ -135,6 +143,30 @@ class NightlyBuildDevTests(unittest.TestCase):
                            env=dict(os.environ, KIND="dev", GITHUB_REPOSITORY="sunrise-org/sunrise"))
             self.assertIn("dist/sunrise-macos-arm64.zip", (root / "signed").read_text().split())
 
+    def test_the_sdk_builds_beside_the_game_and_is_published_before_the_game_is_signed(self):
+        jobs = self.workflow["jobs"]
+        # Both wait for the exporters' determinism check, and neither waits for the other.
+        self.assertEqual(jobs["sdk"]["needs"], ["pick", "exporters"])
+        self.assertEqual(jobs["build"]["needs"], ["pick", "exporters"])
+        self.assertEqual(jobs["sdk"]["uses"], "./.github/workflows/prebuilt-game-build.yml")
+        self.assertEqual(jobs["sdk"]["with"]["commit"], "${{ needs.pick.outputs.sha }}")
+        self.assertEqual(jobs["sdk-publish"]["needs"], ["pick", "sdk"])
+        self.assertEqual(jobs["sdk-publish"]["with"], {"commit": "${{ needs.pick.outputs.sha }}",
+                                                       "publish": "${{ needs.pick.outputs.publish == 'true' }}",
+                                                   "draft": "true"})
+        self.assertEqual(jobs["sdk-index"]["needs"], ["pick", "sdk", "sdk-publish"])
+        for name in ("sdk", "sdk-publish", "sdk-index"):
+            self.assertIn("inputs.kind == 'dev'", jobs[name]["if"], name)
+        # A Dev game is signed and published only with its SDK's index, so after sdk-<sha>.
+        for name in ("sign", "publish"):
+            self.assertIn("(inputs.kind != 'dev' || needs.sdk-index.result == 'success')", jobs[name]["if"], name)
+        upload = jobs["sdk-index"]["steps"][-1]
+        self.assertEqual(upload["with"]["name"], "sunrise-sdk-index")
+        self.assertIn("nightly.py sdk-index", jobs["sdk-index"]["steps"][-2]["run"])
+        # The index of the release sdk-publish left, never a write token to read a draft.
+        self.assertNotIn("permissions", jobs["sdk-index"])
+        self.assertIn("sdk-released-index", jobs["sdk-index"]["steps"][1]["with"]["name"])
+
     def test_dev_builds_never_replace_a_waiting_nightly(self):
         group = self.workflow["concurrency"]["group"]
         self.assertIn("'nightly-build'", group)
@@ -156,9 +188,15 @@ class DevToolsTests(unittest.TestCase):
                          ["dev-2026-11-01-aaaaaaa", "dev-2026-11-02-bbbbbbb"])
         # A long quiet spell: the newest stays however old.
         self.assertEqual(nightly.stale_dev_builds(tags[:2], dt.date(2027, 1, 1), 7), ["dev-2026-11-01-aaaaaaa"])
+        # Drafts are neither pruned nor the newest: the newest public build stays beside a newer pending draft.
+        drafts = [{"tagName": "dev-2026-10-01-fffffff", "isPrerelease": True, "isDraft": True},
+                  {"tagName": "dev-2027-01-01-0000000", "isPrerelease": True, "isDraft": True}]
+        self.assertEqual(nightly.stale_dev_builds(tags[:2] + drafts, dt.date(2027, 1, 2), 7), ["dev-2026-11-01-aaaaaaa"])
 
     def test_pick_checks_the_gate_and_names_the_dev_build(self):
         sha = "0c02067" + "a" * 33
+        # The SDK is built in the same run: the pick never asks for a published one.
+        no_sdk = mock.patch.object(nightly, "sdk_ready", side_effect=AssertionError("the pick reads no SDK"))
         with tempfile.TemporaryDirectory() as folder:
             out = Path(folder) / "out"
             back = os.getcwd()
@@ -168,8 +206,7 @@ class DevToolsTests(unittest.TestCase):
                        "GITHUB_REF": "refs/heads/main"}
                 with mock.patch.dict(os.environ, env), mock.patch.object(nightly, "git"), \
                         mock.patch.object(nightly.train, "channel_head", return_value=sha) as gate, \
-                        mock.patch.object(nightly, "sdk_ready", return_value=True), \
-                        mock.patch.object(nightly, "gh", return_value=""):
+                        no_sdk, mock.patch.object(nightly, "gh", return_value=""):
                     nightly.pick_dev()
                 gate.assert_called_once_with("dev", sha)
                 values = dict(line.split("=", 1) for line in out.read_text().splitlines())
@@ -180,26 +217,13 @@ class DevToolsTests(unittest.TestCase):
                 notes = Path("nightly-notes.md").read_text()
                 self.assertIn(f"sunrise-launcher install {values['tag']}", notes)
                 self.assertIn(f"sunrise-release-sign verify --tag {values['tag']} --signature SHA256SUMS.v2.sig", notes)
+                self.assertNotIn("sdk", values)
                 # Published already (the same commit the same day): skipped, never replaced.
                 with mock.patch.dict(os.environ, env), mock.patch.object(nightly, "git"), \
-                        mock.patch.object(nightly.train, "channel_head", return_value=sha), \
-                        mock.patch.object(nightly, "sdk_ready", return_value=True), \
+                        mock.patch.object(nightly.train, "channel_head", return_value=sha), no_sdk, \
                         mock.patch.object(nightly, "gh", return_value='{"tagName": "x"}'):
                     nightly.pick_dev()
                 self.assertIn("build=false", out.read_text().splitlines()[-10:])
-                self.assertIn("sdk=true", out.read_text().splitlines()[-10:])
-                # No published SDK: a dry run builds without it (sdk=false: no sdk.json), a real Dev build stops.
-                with mock.patch.dict(os.environ, {**env, "DRY_RUN": "true"}), mock.patch.object(nightly, "git"), \
-                        mock.patch.object(nightly.train, "channel_head", return_value=sha), \
-                        mock.patch.object(nightly, "sdk_ready", return_value=False):
-                    nightly.pick_dev()
-                self.assertIn("sdk=false", out.read_text().splitlines()[-10:])
-                # No published SDK: a real Dev build stops.
-                with mock.patch.dict(os.environ, env), mock.patch.object(nightly, "git"), \
-                        mock.patch.object(nightly.train, "channel_head", return_value=sha), \
-                        mock.patch.object(nightly, "sdk_ready", return_value=False):
-                    with self.assertRaises(SystemExit):
-                        nightly.pick_dev()
             finally:
                 os.chdir(back)
 

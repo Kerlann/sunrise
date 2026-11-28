@@ -1,6 +1,6 @@
 //! `LivingEntityRenderer.submit` for an invisible body its viewer still sees.
 use super::{
-    Atlas, FrameDraw, Mob, Part, RenderDataSource, Species, base_transform, body_color,
+    Atlas, FrameDraw, Mob, RenderDataSource, Species, WornLayer, base_transform, body_color,
     render_visible, render_with_frame,
 };
 use crate::mesher::Vertex;
@@ -9,7 +9,9 @@ use crate::mesher::Vertex;
 /// team that sees friendly invisibles, so the body it cannot show as visible
 /// draws `forceTransparent`: `RenderTypes.entityTranslucentCull` at `baseColor`
 /// 654311423, `ARGB.multiply`ed with `getModelTint` (`body_color`), and its
-/// layers draw as they would for a visible body.
+/// layers draw as they would for a visible body. Exception: an invisible
+/// illusioner (`IllusionerRenderer.isBodyVisible` is always true) draws its
+/// four mirror images in the normal opaque render type via [`render_with_frame`].
 #[allow(clippy::too_many_arguments)]
 pub fn render_seen_invisible(
     m: &Mob,
@@ -18,7 +20,7 @@ pub fn render_seen_invisible(
     atlas: Atlas,
     light: u32,
     data: &dyn RenderDataSource,
-    extra: &[(&Part, [f32; 4], u32, u32, bool)],
+    extra: &[WornLayer<'_>],
     frame: &mut FrameDraw<'_>,
     out: &mut Vec<Vertex>,
 ) {
@@ -32,6 +34,7 @@ pub fn render_seen_invisible(
     render_visible(
         m,
         alpha,
+        Some(camera),
         [base_transform(m, alpha, camera)],
         atlas,
         light,

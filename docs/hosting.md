@@ -248,18 +248,11 @@ The four caps limit what mods can ask for, counted per level:
 0 refuses every area of that kind. A request over a cap is refused whole, and the mod is told which cap and
 its value. Areas end when the player leaves.
 
-### Levels a mod opens: `sunrise-max-runtime-levels`
+### Levels a mod opens
 
-A mod can open levels of its own while the server runs ([runtime levels](modding/src/how-to/world/runtime-levels.md)).
-The server keeps at most 64 of them open at once, for all mods together; the 65th request is refused
-with `CapReached`. Set another number under `[properties]` in `server.toml`:
-
-```toml
-[properties]
-sunrise-max-runtime-levels = 128
-```
-
-A level frees its place when its mod unloads or deletes it (a delete also removes its folder from `dimensions/`). After 300 ticks with nobody in it, it leaves memory, as any custom level does, but keeps its place: it opens again when someone enters it.
+A mod can [open levels while the server runs](modding/src/how-to/world/runtime-levels.md). An idle level
+leaves memory and opens again when someone enters it. An explicit unload closes the level but keeps its
+folder; deleting the level also removes its folder from `dimensions/`.
 
 Already have a vanilla server? Run `sunrise-server init` in its folder, or `sunrise-server import
 server.properties` to write `server.toml` from it. The world, `ops.json`, `whitelist.json` and the ban lists
@@ -331,15 +324,6 @@ Other clients are turned away while they connect with "This server is for the Su
 playsunrise.net", and the console says which client it was. The check reads the brand a client names itself
 by (`minecraft:brand`), which any client can fake: it keeps out players who didn't install Sunrise, not
 cheaters. The server's own checks (reach, movement) are what protect it.
-
-Sunrise clients can get their far terrain (Sunrise Graphics → LOD Distance) from the server: set
-`sunrise-lod-distance` under `[properties]` to how far, in chunks (1024 at most), and the server samples the
-tiles each player's client asks for out to there. It is off (0) by default: far tiles show the world's terrain
-far past the view distance, which helps players find the seed. A player's own LOD Distance applies when it is
-shorter. Each player may have 8 tiles waiting and ask for 64 a second on average, and one background thread
-samples them for everyone in turn, behind the ticks, so far terrain never slows the server down; a tile past the
-distance or over a player's limits is refused, and a client that keeps breaking the limits is disconnected.
-Tiles are sampled again for each player who asks (there is no cache yet). Vanilla clients never hear of it.
 
 `sunrise-server report` records the running server for 60 seconds (`report 300` for five minutes, up to 600) into
 `reports/profile-<time>Z.hzperf`, a capture the performance tools read ([perf-platform.md](perf-platform.md)), and

@@ -1,5 +1,4 @@
 //! The `player_shear_entity` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0308
 
 pub trait Hooks {
     /// A player shearing a mob is about to do so. Set `cancel` to leave the mob and shears unchanged.
@@ -9,7 +8,7 @@ pub trait Hooks {
     /// stack keeps its item and count; if not, the click is spent and nothing is
     /// sheared.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_player_shear_entity",
+        target = "sunrise_gameplay::game::native_hooks::base::ServerGame<'_>::native_player_shear_entity",
         dispatch = "flat",
         side = "server",
         contract = "cancel",

@@ -85,25 +85,39 @@ pub struct Installed {
     pub native: Option<NativePage>,
 }
 
-/// A native mod's settings page: its keys as Key Binds rows, then the settings it registered
-/// (`Registrar::register_setting`). The keys the player chooses are kept in `ModList::keys`, the
-/// settings in the mod's data folder.
+/// A native mod's settings page: its registered keys as Key Binds rows, then its settings.
+/// The keys the player chooses are kept in `ModList::keys`; settings stay in the mod's data folder.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct NativePage {
-    /// The keys the mod registers on Options > Controls, under its title.
+    /// The keys the mod registers on Options > Controls and its Config page, under its title.
     pub mappings: Vec<KeyMapping>,
     /// Its settings, in registration order, with the values the page shows.
     pub settings: Vec<NativeSetting>,
+    /// The mod registered its own config screen (`Registrar::register_config_screen`): Config
+    /// shows for it and opens that screen, not this page's settings.
+    pub own_screen: bool,
 }
 
 /// A setting on a native mod's page: its key within the mod, the translation keys of its label
-/// and tooltip, and its value.
+/// and tooltip, the translation key of its section, if any, and its value.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NativeSetting {
     pub key: String,
     pub label: String,
     pub tooltip: Option<String>,
     pub value: NativeSettingValue,
+    /// The translation key of the section its row belongs to, if any: settings
+    /// sharing one are drawn under one heading on the mod's page.
+    pub category: Option<String>,
+    /// When present, render this row only while `choice_setting` selects `choice_index`.
+    pub visible_when: Option<SettingVisibility>,
+}
+
+/// A choice on the same native mod page that controls a setting row's visibility.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SettingVisibility {
+    pub choice_setting: String,
+    pub choice_index: usize,
 }
 
 /// A setting's value as its row shows and changes it.
@@ -432,14 +446,6 @@ impl ModList {
                     self.enabled.contains(&m.id)
                 }
         })
-    }
-    /// Turn the installed mod `id` on (nothing when it isn't installed).
-    pub fn turn_on(&mut self, id: &str) {
-        let Some(m) = self.installed.iter().find(|m| m.id == id && !m.dev) else {
-            return;
-        };
-        self.disabled.remove(&m.id);
-        self.enabled.insert(m.id.clone());
     }
     /// Turns installed mod `i` on or off (a dev mod stays on). A native mod's
     /// line says `false` when off, so that the launcher's next build leaves

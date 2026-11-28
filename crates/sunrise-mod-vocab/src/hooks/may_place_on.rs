@@ -1,5 +1,4 @@
 //! The `may_place_on` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0079
 
 pub trait Hooks {
     /// `VegetationBlock.mayPlaceOn` for the plant `state` on `ground` at
@@ -28,7 +27,7 @@ pub trait Hooks {
         scope = "block",
         inert = "signal",
         key = "state",
-        target = "sunrise_client::game::native_hooks::base::LevelView<'_>::native_may_place_on",
+        target = "sunrise_gameplay_common::game::native_hooks::base::LevelView<'_>::native_may_place_on",
         neoforge = "IBlockExtension.canSustainPlant"
     )]
     fn may_place_on(

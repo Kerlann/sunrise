@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 import tempfile
 import subprocess
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -262,6 +263,27 @@ class IgnoredTests(unittest.TestCase):
         self.assertEqual(ran, ["a", "b"])
         self.assertEqual(done.returncode, ignored_tests.TIMED_OUT)
 
+    def test_prebuilt_executables_get_their_folder_first_in_the_library_path_keeping_its_spelling(self):
+        seen = []
+
+        def execute(command, **kwargs):
+            seen.append(kwargs["env"])
+            return subprocess.CompletedProcess(command, 0, "")
+
+        with tempfile.TemporaryDirectory() as folder, \
+                patch.object(ignored_tests.ignored_shards, "workspace_members", return_value={"pkg": (folder, ".")}), \
+                patch.object(ignored_tests.subprocess, "run", side_effect=execute):
+            deps = Path(folder, "deps")
+            # Windows' variable is `PATH`, which its environment may spell `Path`: one entry, the old value kept after.
+            with patch.object(ignored_tests, "LIBRARY_PATH", "PATH"):
+                ignored_tests.run_binaries("pkg", {"lib": str(deps / "a")}, [], {"Path": "old"})
+            with patch.object(ignored_tests, "LIBRARY_PATH", "LD_LIBRARY_PATH"):
+                ignored_tests.run_binaries("pkg", {"lib": str(deps / "a")}, [], {})
+        expected = os.pathsep.join([str(deps), folder])
+        self.assertEqual(seen[0]["Path"], expected + os.pathsep + "old")
+        self.assertNotIn("PATH", seen[0])
+        self.assertEqual(seen[1]["LD_LIBRARY_PATH"], expected)
+
     def test_the_report_names_the_run_in_progress_before_it_ends(self):
         # A job stopped at its time limit kills this script too: what it wrote before the run is what is uploaded.
         with tempfile.TemporaryDirectory() as folder:
@@ -389,13 +411,22 @@ class IgnoredTests(unittest.TestCase):
 
     def test_prebuilt_executables_report_like_cargo_test_and_a_killed_one_is_a_crash(self):
         with tempfile.TemporaryDirectory() as folder:
-            passing, killed = Path(folder, "passes"), Path(folder, "killed")
-            passing.write_text("#!/bin/sh\necho 'running 1 tests'\necho 'test a ... ok'\n"
-                               "echo 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out'\n")
-            killed.write_text("#!/bin/sh\necho 'running 1 tests'\nkill -9 $$\n")
-            for script in (passing, killed):
-                script.chmod(0o755)
-            with contextlib.redirect_stdout(io.StringIO()):
+            passing, killed = Path(folder, "passes.py"), Path(folder, "killed.py")
+            passing.write_text("print('running 1 tests')\nprint('test a ... ok')\n"
+                               "print('test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out')\n")
+            killed.write_text("import os\nprint('running 1 tests', flush=True)\nos.kill(os.getpid(), 9)\n")
+            run = subprocess.run
+
+            def through_python(command, **kwargs):
+                # The stand-in executables are Python scripts, which not every platform runs by themselves.
+                at = next((index for index, word in enumerate(command) if word in (str(passing), str(killed))), None)
+                if at is None:
+                    return run(command, **kwargs)
+                return run([*command[:at], sys.executable, *command[at:]], **kwargs)
+
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    patch.object(ignored_tests.subprocess, "run", side_effect=through_python), \
+                    patch.object(ignored_tests, "workspace_features", return_value={}):
                 self.assertEqual(ignored_tests.run("sunrise-relay", [], only=(["lib"], ["a"]),
                                                    binaries={"lib": str(passing)}), {"a": True})
                 self.assertIsNone(ignored_tests.run("sunrise-relay", [], only=(["lib", "test:it"], ["a", "b"]),
@@ -504,8 +535,23 @@ class IgnoredTests(unittest.TestCase):
                         summary(passed=2))
         result, log = self.run_output(output)
         self.assertEqual(result, {"fixture::case": True, "other": True})
-        self.assertIn("example: test result: ok. 2 passed", log)
-        self.assertNotIn("example: test result: ok. 1 passed", log)
+        self.assertEqual([line for line in log.splitlines() if line.startswith("example: test result:")],
+                         ["example: test result: 2 passed; 0 failed; 0 ignored; 0 measured;"])
+
+    def test_a_completed_target_prints_the_parsed_counters(self):
+        completion = ("test result: SYNTHETIC_LABEL. 1 passed; 2 failed; 3 ignored; 4 measured; "
+                      "SYNTHETIC_TAIL\n")
+        output = target(10, "test good ... ok\ntest bad ... FAILED\ntest worse ... FAILED\n", completion)
+        result, log = self.run_output(output, 101)
+        self.assertEqual(result, {"good": True, "bad": False, "worse": False})
+        self.assertIn("example: test result: 1 passed; 2 failed; 3 ignored; 4 measured;\n", log)
+        self.assertNotIn("SYNTHETIC_", log)
+
+    def test_an_oversized_last_summary_does_not_complete_a_target(self):
+        result, log = self.run_output(target(1, "test good ... ok\n", summary(passed=1) + summary(passed="9" * 5000)))
+        self.assertIsNone(result)
+        self.assertIn("test target did not finish", log)
+        self.assertNotIn("example: test result:", log)
 
     def test_a_target_whose_last_summary_is_a_childs_did_not_complete(self):
         # The parent started two tests; only the child's one-test summary follows.
@@ -526,7 +572,7 @@ class IgnoredTests(unittest.TestCase):
         self.assertIsNone(result)
 
     def test_missing_summary_even_after_parsed_failure(self):
-        result, _ = self.run_output(target(2, "test bad ... FAILED\n", ""), 101)
+        result, _ = self.run_output(target(2, "test bad ... FAILED\ntest skipped ... ignored\n", ""), 101)
         self.assertIsNone(result)
 
     def test_child_summary_cannot_hide_aborted_parent(self):

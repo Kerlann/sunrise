@@ -1,5 +1,4 @@
 //! The `music_layers` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0122
 
 pub trait Hooks {
     /// The tracks to play over (or instead of) the music on this client,
@@ -11,7 +10,7 @@ pub trait Hooks {
     /// fuller arrangement as a village grows). Their sound events should be
     /// `stream: true` in `sounds.json`.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_music_layers",
+        target = "sunrise_client_gameplay::game::native_hooks::base::ClientGame<'_>::native_music_layers",
         receiver = "read",
         dispatch = "flat",
         side = "client",

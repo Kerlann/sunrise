@@ -7,7 +7,7 @@
 //! server's guests, so the groups stay as few as those, and only while timing is recorded.
 
 use std::sync::Arc;
-use sunrise_client::lan::hub::HostEvent;
+use sunrise_sim::lan::hub::HostEvent;
 
 pub struct Burst<W, D> {
     pub kind: &'static str,
@@ -107,6 +107,9 @@ pub fn event_kind(event: &HostEvent) -> EventKind {
     match event {
         HostEvent::Joined(c, _) => ("join", Some(*c), None),
         HostEvent::Left(g) => ("leave", None, Some(g.name.clone())),
+        HostEvent::CloseInvalidContainer { conn, .. } => {
+            ("close invalid container", Some(*conn), None)
+        }
         HostEvent::Packet(c, p) => (p.name(), Some(*c), None),
         HostEvent::InputCredits(_) => ("input credits", None, None),
         HostEvent::RawPayload(_) => ("raw payload", None, None),
@@ -122,8 +125,6 @@ pub fn event_kind(event: &HostEvent) -> EventKind {
         HostEvent::Input { conn, .. } => ("input", Some(*conn), None),
         HostEvent::Kicked { name, .. } => ("kick", None, Some(name.clone())),
         HostEvent::Flight { conn, .. } => ("flight", Some(*conn), None),
-        HostEvent::Chat { .. } => ("chat line", None, None),
-        HostEvent::PlayerChat { .. } => ("chat", None, None),
         HostEvent::Warn(_) => ("warning", None, None),
         HostEvent::Error(_) => ("error", None, None),
     }

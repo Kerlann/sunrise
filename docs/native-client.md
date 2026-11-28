@@ -9,8 +9,7 @@ craft in the 2x2 inventory grid or on a crafting table, and save and reload worl
 in vanilla's Anvil format.
 
 **Status:** playable; players get it through [the launcher](https://github.com/sunrise-org/sunrise-launcher/blob/main/README.md). The [harness table](status.md#what-the-harnesses-compare)
-in the README scores each subsystem against vanilla and lists what is still
-missing; [Rust rewrite status](rust-parity.md) has the details.
+scores each subsystem against vanilla and lists what is still missing.
 
 On Windows, the launcher uses a stable executable path for each game home across
 release and native-mod updates. Its private runtime copy lives under the launcher's
@@ -282,7 +281,7 @@ While Discord runs on the same computer, the player's Discord profile shows
 "Playing Sunrise" and what they are doing: "In the menus", "Singleplayer",
 "Multiplayer" or "Hosting a world" (with the party size, of 8), the dimension
 ("In the Nether") and the time since they entered the world. It never shows a
-world's name or a server's address. The switch is on the Extras page, in its
+world's name or a server's address. The switch is on Sunrise Settings' Gameplay page, in its
 Multiplayer group (**Discord Rich Presence**, on by default; `discordPresence`
 in `sunrise-extras.txt`), and
 `SUNRISE_NO_DISCORD=1` turns it off for one run.

@@ -1,5 +1,4 @@
 //! The `music` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0121
 
 pub trait Hooks {
     /// Choose this client's music, once a client tick: `music` and `volume`
@@ -11,7 +10,7 @@ pub trait Hooks {
     /// ticks between songs, and whether it cuts off a different song playing),
     /// None to keep vanilla's quiet, or change `volume` (0 to 1) to fade it.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_music",
+        target = "sunrise_client_gameplay::game::native_hooks::base::ClientGame<'_>::native_music",
         receiver = "read",
         dispatch = "flat",
         side = "client",

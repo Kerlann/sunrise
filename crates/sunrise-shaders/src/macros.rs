@@ -1,18 +1,22 @@
-//! Object-like macros: the ones packs test in `#if` lines and use inside property values
-//! (spec 1.5, 1.5.1). The GLSL preprocessor's function-like macros are not needed here.
+//! The macros a pack's programs and property files start with (spec 1.5, 1.5.1): `MC_VERSION`,
+//! `MC_*`, the render stages, the biome categories and the renderer's. Defining and expanding
+//! them is `sunrise-glsl`'s preprocessor's ([`sunrise_glsl::Macros`]), which this wraps.
 
-use std::collections::BTreeMap;
+pub(crate) use sunrise_glsl::macros::lex;
 
-/// The feature flags of `iris.features.*` (spec 3.2) Sunrise has. A pack that requires one of
-/// them loads; one it lacks is noted. Sunrise defines no `IRIS_FEATURE_<name>` macro for them
-/// (spec OQ-2, docs/cleanroom/README.md): that macro family names another loader, so packs take
-/// the path they take without it. `BLOCK_EMISSION_ATTRIBUTE`: terrain's
-/// `at_midBlock.w` is the light its block gives. `SEPARATE_HARDWARE_SAMPLERS` (ShaderDoc,
+/// The feature flags of `iris.features.*` (spec 3.2) Sunrise has on every device (and
+/// [`PER_BUFFER_BLENDING`] on a device that draws it). A pack that requires one of them loads;
+/// one it lacks is noted. For each of them the pack lists, in either list, its programs and
+/// property files see `IRIS_FEATURE_<NAME>` (spec 1.5.1, 3.2; decision D-7 and OQ-2 in
+/// docs/cleanroom/): `Macros::define_features`, all but [`UNANSWERED`].
+/// `BLOCK_EMISSION_ATTRIBUTE`: terrain's `at_midBlock.w` is the light its block gives, where the
+/// draw reaches the quad's source block. `SEPARATE_HARDWARE_SAMPLERS` (ShaderDoc,
 /// "Separate Hardware Shadow Samplers"): `shadowtex0`/`shadowtex1` stay plain depth samplers when
 /// hardware filtering is on, `shadowtex0HW`/`shadowtex1HW` compare; Sunrise picks a comparison
 /// sampler by the declared type (`sampler2DShadow`), so they always are. `HIGHER_SHADOWCOLOR`:
-/// `shadowcolor2` to `shadowcolor7` beside the first two. `FADE_VARIABLE`: terrain vertex
-/// programs can read the section's visibility transition as `mc_chunkFade`.
+/// `shadowcolor2` to `shadowcolor7` beside the first two. `FADE_VARIABLE`: gbuffers programs read
+/// `mc_chunkFade`, terrain's the section's visibility transition and every other draw's `-1.0`
+/// (spec 5.1, `post::off_terrain_fade`).
 const FEATURES: [&str; 9] = [
     "BLOCK_EMISSION_ATTRIBUTE",
     "COMPUTE_SHADERS",
@@ -25,10 +29,73 @@ const FEATURES: [&str; 9] = [
     "SSBO",
 ];
 
-/// Whether `name` is one of [`FEATURES`], in any case.
-fn is_feature(name: &str) -> bool {
-    FEATURES.iter().any(|f| f.eq_ignore_ascii_case(name))
+/// The flags of [`FEATURES`] a pack requiring them loads with, but that get no
+/// `IRIS_FEATURE_<NAME>`: Sunrise can't keep their promise on every draw it may take.
+/// `BLOCK_EMISSION_ATTRIBUTE`: terrain drawn from its attributes alone
+/// (`TerrainDraws::Attributes`, when neither the arena's pages nor the normal stream fit the
+/// pack's vertex stage) has no source block, and `at_midBlock.w` is `0` there, so a pack's
+/// emission branch would lose every block's light on that path.
+const UNANSWERED: [&str; 1] = ["BLOCK_EMISSION_ATTRIBUTE"];
+
+/// The one of [`FEATURES`] `name` is, in any case.
+fn feature(name: &str) -> Option<&'static str> {
+    FEATURES
+        .iter()
+        .copied()
+        .find(|f| f.eq_ignore_ascii_case(name))
 }
+
+/// The keys that list the feature flags a pack asks for (spec 3.2).
+pub(crate) const FEATURE_LISTS: [&str; 2] = ["iris.features.optional", "iris.features.required"];
+
+/// The prefix of the macros that answer a pack's feature flags.
+const FEATURE_MACRO: &str = "IRIS_FEATURE_";
+
+/// Whether `name` is one of the macros that answer a pack's feature flags. Sunrise alone
+/// answers them (`Macros::define_features`): a pack's line declaring such a name is no option.
+/// It is not found as one (`options`, `switches_on`, `value_options`), so it is never defined for
+/// the pack's property files, never counted as on in `program.*.enabled`, and a saved choice
+/// never rewrites it (`Pack::with_chosen`, `options::apply`). As written, uncommented, it is the
+/// pack's own directive, with a directive's scope (decision D-7): in a program, the rest of the
+/// stage's preprocessed source; in `shaders.properties`, the rest of that file.
+pub(crate) fn is_feature_answer(name: &str) -> bool {
+    name.starts_with(FEATURE_MACRO)
+}
+
+/// Whether `name` is one of the macros Sunrise alone answers: a feature answer
+/// ([`is_feature_answer`]) or an identity macro (`IS_IRIS`, `IRIS_VERSION`, decision D-8). A
+/// pack's line declaring one is no option (`options`, `switches_on`, `value_options`): it is
+/// never defined for the pack's property files, never counted as on in `program.*.enabled`, and
+/// a saved choice never rewrites it, so neither an option nor a profile changes the answer. As
+/// written, uncommented, it is the pack's own directive, with a directive's scope.
+pub(crate) fn is_reserved(name: &str) -> bool {
+    is_feature_answer(name) || crate::identity::NAMES.contains(&name)
+}
+
+/// The flags `properties` gives under `key`, as the pack wrote them.
+fn flags<'a>(properties: &'a crate::Properties, key: &str) -> std::str::SplitWhitespace<'a> {
+    properties.get(key).unwrap_or_default().split_whitespace()
+}
+
+/// The flags of [`FEATURES`] that `properties` lists in either of [`FEATURE_LISTS`], as
+/// `FEATURES` writes them; a name matches in any case.
+pub(crate) fn listed_features(
+    properties: &crate::Properties,
+) -> impl Iterator<Item = &'static str> {
+    FEATURE_LISTS
+        .iter()
+        .flat_map(|key| flags(properties, key))
+        .filter_map(feature)
+}
+
+/// The feature flag of `iris.features.*` (spec 3.2) Sunrise has only on a device that can draw
+/// it: `PER_BUFFER_BLENDING`, a `blend.<program>.<buffer>` that differs from the program's other
+/// buffers. wgpu creates a pipeline whose colour targets differ in blend or write mask only on a
+/// device with `DownlevelFlags::INDEPENDENT_BLEND` ("Supports different blend operations per
+/// color attachment"); the renderer gives its device's answer (`Macros::set_per_buffer_blending`).
+/// Where it is supported it is answered as [`FEATURES`] are: listed, it gets
+/// `IRIS_FEATURE_PER_BUFFER_BLENDING` (`Macros::define_features`).
+const PER_BUFFER_BLENDING: &str = "PER_BUFFER_BLENDING";
 
 /// `MC_VERSION` of the version Sunrise plays: 26.3 → 260300.
 pub const MC_VERSION: u32 = mc_version(sunrise_core::version::VERSION_ID);
@@ -49,15 +116,43 @@ pub const fn mc_version(id: &str) -> u32 {
     parts[0] * 10000 + parts[1] * 100 + parts[2]
 }
 
-#[derive(Clone, Debug, PartialEq)]
-struct Macro {
-    /// `None` for an object-like macro; the parameter names of a function-like one.
-    params: Option<Vec<String>>,
-    body: String,
+/// The macros at a point of a pack's file: `sunrise-glsl`'s, with the pack's own starting set.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Macros(sunrise_glsl::Macros, Device);
+
+/// What the device the pack's programs run on can do, as far as a pack's feature flags ask
+/// (spec 3.2). No macro: it decides which flags are supported. Without a renderer (the
+/// standard set alone) the device can do none of it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Device {
+    /// [`PER_BUFFER_BLENDING`].
+    per_buffer_blending: bool,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Macros(BTreeMap<String, Macro>);
+impl std::ops::Deref for Macros {
+    type Target = sunrise_glsl::Macros;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Macros {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+/// The macro expansion work one file of a pack may spend ([`Macros::for_file`]), in the units
+/// of [`sunrise_glsl::Macros::bound`] (for each token made, read or copied: 1, its bytes and the
+/// names it hides): a stage file with its includes, a `.properties` file, the option values of
+/// `shaders.properties`' sizes. As many as the tokens of work a core shader's directives may
+/// spend ([`sunrise_glsl::MAX_SCANNED`]). A line of code is charged up to twice: telling whether
+/// a call on it goes on past it expands it too ([`sunrise_glsl::Macros::join_call`]). A line of
+/// expansions that reached the bound held 325 MiB at its peak (a release build); the ten packs
+/// measured for #4135 spend at most 74,004 in a stage file and 104 in a `.properties` file, with
+/// their default options.
+pub const MAX_EXPANSION_WORK: usize = sunrise_glsl::MAX_SCANNED;
 
 /// `MC_RENDER_STAGE_*` in the order the stages draw (spec 5.4); each is its index (OQ-7).
 pub const RENDER_STAGES: [&str; 24] = [
@@ -116,6 +211,14 @@ pub fn render_stage(name: &str) -> u32 {
 }
 
 impl Macros {
+    /// These macros, for one file of the pack: with [`MAX_EXPANSION_WORK`] to spend, whatever
+    /// was spent before. Past it an expansion stops, named at its line by whoever reads the file.
+    pub(crate) fn for_file(&self) -> Self {
+        let mut m = self.clone();
+        m.0.bound(MAX_EXPANSION_WORK);
+        m
+    }
+
     /// The standard macros that need no renderer (spec 1.5.1): `MC_VERSION`, this system's
     /// `MC_OS_*`, the GL and GLSL versions Iris reports, the render stages and the host
     /// settings at their defaults. The GPU vendor and family arrive with the renderer
@@ -146,8 +249,10 @@ impl Macros {
         // default; Iris 1.11.7 defines both too, with or without a resource pack's maps).
         m.define("MC_NORMAL_MAP", "");
         m.define("MC_SPECULAR_MAP", "");
-        // No `IS_IRIS`, `IRIS_VERSION` or `IRIS_HAS_*`: Sunrise is not that loader and does not
-        // claim its identity (spec OQ-2, docs/cleanroom/README.md). Packs take their other path.
+        // No `IS_IRIS`, `IRIS_VERSION` or `IRIS_HAS_*` here (spec OQ-2, docs/cleanroom/README.md):
+        // the identity macros are defined only for a pack whose Iris compatibility is on
+        // (`set_identity`, decision D-8), and the `IRIS_FEATURE_*` answers depend on the pack
+        // (`define_features`).
         // Distant Sunrises' block materials, which Iris defines with or without the mod (packs
         // compare ids with them unguarded: Exposa's `blockID == DH_BLOCK_LEAVES`), numbered as
         // the mod's `EDhApiBlockMaterial` numbers them.
@@ -178,342 +283,97 @@ impl Macros {
         self.define("MC_MIPMAP_LEVEL", mipmap_levels.to_string());
     }
 
-    /// A note for each feature `iris.features.required` names that Sunrise lacks; a name matches
-    /// in any case. Optional features need nothing: no macro is defined for them (see `FEATURES`).
-    pub fn feature_notes(properties: &crate::Properties) -> Vec<String> {
-        properties
-            .get("iris.features.required")
-            .unwrap_or_default()
-            .split_whitespace()
-            .filter(|f| !is_feature(f))
+    /// The `MC_GL_KHR_shader_subgroup_*` macros of a device with subgroup operations
+    /// (`wgpu::Features::SUBGROUP`): the GL extensions the translator then takes.
+    pub fn define_subgroups(&mut self) {
+        for ext in [
+            "basic",
+            "vote",
+            "arithmetic",
+            "ballot",
+            "shuffle",
+            "shuffle_relative",
+        ] {
+            self.define(format!("MC_GL_KHR_shader_subgroup_{ext}"), "");
+        }
+    }
+
+    /// Sunrise's HDR extension, served to a pack that asked for it (`sunrise.hdr`,
+    /// [`crate::Properties::sunrise_hdr`]) and got a frame made for it: `SUNRISE_HDR` at the
+    /// extension's version, 1 (its `final` writes linear light), and `SUNRISE_HDR_TONEMAP_PACK`
+    /// when the pack owns the tone curve (`tonemap`). Sunrise's own names, which no other loader
+    /// defines: there the pack takes its other path. Never part of [`Self::standard`].
+    pub fn define_sunrise_hdr(&mut self, tonemap: crate::Tonemap) {
+        self.define("SUNRISE_HDR", "1");
+        if tonemap == crate::Tonemap::Pack {
+            self.define("SUNRISE_HDR_TONEMAP_PACK", "");
+        }
+    }
+
+    /// Whether the device the pack's programs run on draws a `blend.<program>.<buffer>` that
+    /// differs from the program's other buffers ([`PER_BUFFER_BLENDING`]): the renderer's
+    /// answer, from its device. Defines no macro itself: a pack that lists the flag gets its
+    /// answer from `define_features`. A device without it drops the answer these macros held,
+    /// at once.
+    pub fn set_per_buffer_blending(&mut self, supported: bool) {
+        self.1.per_buffer_blending = supported;
+        if !supported {
+            self.undef(&format!("{FEATURE_MACRO}{PER_BUFFER_BLENDING}"));
+        }
+    }
+
+    /// Drops every answer to a pack's feature flags these macros hold ([`is_feature_answer`]),
+    /// whoever defined it: a set reused for another pack, or after the device changed, holds
+    /// none of the previous answers.
+    pub(crate) fn drop_feature_answers(&mut self) {
+        let answers: Vec<String> = (self.names())
+            .filter(|n| is_feature_answer(n))
+            .map(str::to_owned)
+            .collect();
+        for name in &answers {
+            self.undef(name);
+        }
+    }
+
+    /// The feature flag `name` is (spec 3.2), in any case, as Sunrise writes it, if Sunrise has
+    /// it with these macros' device: one of [`FEATURES`], or [`PER_BUFFER_BLENDING`] on a device
+    /// that draws it.
+    fn supported(&self, name: &str) -> Option<&'static str> {
+        let device = self.1.per_buffer_blending && PER_BUFFER_BLENDING.eq_ignore_ascii_case(name);
+        feature(name).or(device.then_some(PER_BUFFER_BLENDING))
+    }
+
+    /// A note for each feature `iris.features.required` names that Sunrise lacks with these
+    /// macros' device (`supported`); a name matches in any case. The pack still loads.
+    pub fn feature_notes(&self, properties: &crate::Properties) -> Vec<String> {
+        flags(properties, "iris.features.required")
+            .filter(|f| self.supported(f).is_none())
             .map(|f| format!("the pack requires `{f}`, which is not supported yet"))
             .collect()
     }
 
-    pub fn define(&mut self, name: impl Into<String>, value: impl Into<String>) {
-        let body = value.into();
-        self.0.insert(name.into(), Macro { params: None, body });
-    }
-
-    /// The rest of a `#define` line: `NAME body`, or `NAME(a, b) body` (no space before the `(`)
-    /// for a function-like macro.
-    pub(crate) fn define_line(&mut self, rest: &str) -> Result<(), String> {
-        let len = rest
-            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-            .unwrap_or(rest.len());
-        let (name, tail) = rest.split_at(len);
-        if name.is_empty() {
-            return Err("`#define` without a name".into());
+    /// Defines `IRIS_FEATURE_<NAME>` as `1` for each flag Sunrise has with these macros' device
+    /// (`supported`: one of [`FEATURES`], or [`PER_BUFFER_BLENDING`] where the device draws it)
+    /// that `properties` lists in `iris.features.optional` (spec 3.2) or
+    /// `iris.features.required` (decision D-7), a name matching in any case and the macro taking
+    /// the name as Sunrise writes it. A flag Sunrise lacks, and one of [`UNANSWERED`], stays
+    /// undefined. The answers these macros held before are dropped first
+    /// (`drop_feature_answers`), so the set holds this read's answers alone. Whether any was
+    /// defined.
+    pub fn define_features(&mut self, properties: &crate::Properties) -> bool {
+        self.drop_feature_answers();
+        let mut defined = false;
+        let answered: Vec<&'static str> = (FEATURE_LISTS.iter())
+            .flat_map(|key| flags(properties, key))
+            .filter_map(|f| self.supported(f))
+            .filter(|f| !UNANSWERED.contains(f))
+            .collect();
+        for name in answered {
+            self.define(format!("{FEATURE_MACRO}{name}"), "1");
+            defined = true;
         }
-        if let Some(params) = tail.strip_prefix('(') {
-            let Some((params, body)) = params.split_once(')') else {
-                return Err(format!("`#define {name}(` without `)`"));
-            };
-            let params = params
-                .split(',')
-                .map(|p| p.trim().to_owned())
-                .filter(|p| !p.is_empty())
-                .collect();
-            self.define_function(name, params, body.trim());
-        } else {
-            self.define(name, tail.trim());
-        }
-        Ok(())
+        defined
     }
-
-    pub fn define_function(&mut self, name: &str, params: Vec<String>, body: &str) {
-        let body = body.to_owned();
-        self.0.insert(
-            name.to_owned(),
-            Macro {
-                params: Some(params),
-                body,
-            },
-        );
-    }
-
-    pub fn undef(&mut self, name: &str) {
-        self.0.remove(name);
-    }
-
-    pub fn is_defined(&self, name: &str) -> bool {
-        self.0.contains_key(name)
-    }
-
-    /// The value of an object-like macro.
-    pub fn get(&self, name: &str) -> Option<&str> {
-        self.0
-            .get(name)
-            .filter(|m| m.params.is_none())
-            .map(|m| m.body.as_str())
-    }
-
-    /// Whether upcoming source lines continue a call, including one whose expanded name
-    /// ends `text` and whose opening parenthesis is on the next nonempty line.
-    pub(crate) fn unfinished_call(&self, text: &str, upcoming: &[&str]) -> bool {
-        let (tokens, unfinished) = self.expand_tokens(expansion_tokens(text));
-        unfinished
-            || (tokens.iter().rfind(|t| !t.blank()).is_some_and(|t| {
-                self.0.get_key_value(&t.text).is_some_and(|(name, m)| {
-                    m.params.is_some() && !t.hidden.contains(&name.as_str())
-                })
-            }) && upcoming
-                .iter()
-                .map(|line| line.trim_start())
-                .find(|line| !line.is_empty())
-                .is_some_and(|line| line.starts_with('(')))
-    }
-
-    /// `text` with every macro expanded, repeatedly; a macro is not expanded again inside its own
-    /// expansion, so `A` defined as `A + 1` stops. Function-like macros take their arguments
-    /// (expanded first, raw beside `##`, which pastes) when a `(` follows their name.
-    pub fn expand(&self, text: &str) -> String {
-        self.expand_tokens(expansion_tokens(text))
-            .0
-            .iter()
-            .map(|t| t.text.as_str())
-            .collect()
-    }
-
-    fn expand_tokens<'a>(
-        &'a self,
-        mut tokens: Vec<ExpansionToken<'a>>,
-    ) -> (Vec<ExpansionToken<'a>>, bool) {
-        let mut i = 0;
-        let mut unfinished = false;
-        while i < tokens.len() {
-            let Some((name, m)) = self.0.get_key_value(tokens[i].text.as_str()) else {
-                i += 1;
-                continue;
-            };
-            if tokens[i].hidden.contains(&name.as_str()) {
-                i += 1;
-                continue;
-            }
-            let mut hidden = tokens[i].hidden.clone();
-            let (mut body, next) = match &m.params {
-                None => (expansion_tokens(&m.body), i + 1),
-                Some(params) => {
-                    let Some((args, next)) = arguments(&tokens, i + 1) else {
-                        unfinished |= tokens[i + 1..]
-                            .iter()
-                            .find(|t| !t.blank())
-                            .is_some_and(|t| t.text == "(");
-                        i += 1;
-                        continue;
-                    };
-                    // A call can cross a replacement boundary. Only disabling shared by
-                    // its name and closing parenthesis carries into the new replacement.
-                    hidden.retain(|h| tokens[next - 1].hidden.contains(h));
-                    (self.substitute(params, &args, &m.body), next)
-                }
-            };
-            hidden.push(name);
-            for token in &mut body {
-                for h in &hidden {
-                    if !token.hidden.contains(h) {
-                        token.hidden.push(h);
-                    }
-                }
-            }
-            // Rescan the replacement together with the remaining source. Its final name
-            // may consume a call there; source tokens keep their own disabling context.
-            tokens.splice(i..next, body);
-        }
-        (tokens, unfinished)
-    }
-
-    /// A function-like macro's body with its parameters replaced.
-    fn substitute<'a>(
-        &'a self,
-        params: &[String],
-        args: &[Vec<ExpansionToken<'a>>],
-        body: &str,
-    ) -> Vec<ExpansionToken<'a>> {
-        let tokens = lex(body);
-        let pasted = |at: usize, step: isize| {
-            let mut j = at as isize + step;
-            while (0..tokens.len() as isize).contains(&j) && tokens[j as usize].trim().is_empty() {
-                j += step;
-            }
-            (0..tokens.len() as isize).contains(&j) && tokens[j as usize] == "##"
-        };
-        let mut out = Vec::new();
-        for (at, token) in tokens.iter().enumerate() {
-            match params.iter().position(|p| p == token) {
-                Some(k) => {
-                    let arg = args.get(k).map_or(&[][..], |a| a.as_slice());
-                    let from = arg.iter().position(|t| !t.blank()).unwrap_or(arg.len());
-                    let end = arg.iter().rposition(|t| !t.blank()).map_or(from, |n| n + 1);
-                    let arg = arg[from..end].to_vec();
-                    if pasted(at, -1) || pasted(at, 1) {
-                        if arg.is_empty() {
-                            // An empty paste operand must not capture the preceding token.
-                            out.push(ExpansionToken::new(""));
-                        } else {
-                            out.extend(arg);
-                        }
-                    } else {
-                        out.extend(self.expand_tokens(arg).0);
-                    }
-                }
-                None => out.push(ExpansionToken::new(token)),
-            }
-        }
-        // `a ## b` → `ab`.
-        let mut joined: Vec<ExpansionToken<'a>> = Vec::new();
-        let mut paste = false;
-        for token in out {
-            if token.text == "##" {
-                while joined.last().is_some_and(|t| t.blank()) {
-                    joined.pop();
-                }
-                paste = true;
-            } else if paste && token.blank() {
-                continue;
-            } else if paste {
-                if let Some(mut left) = joined.pop() {
-                    // An empty operand leaves the other token, including its hiding, intact.
-                    if left.text.is_empty() {
-                        left = token;
-                    } else if !token.text.is_empty() {
-                        left.text.push_str(&token.text);
-                        left.hidden.retain(|h| token.hidden.contains(h));
-                    }
-                    joined.push(left);
-                } else {
-                    joined.push(token);
-                }
-                paste = false;
-            } else {
-                joined.push(token);
-            }
-        }
-        joined.retain(|t| !t.text.is_empty());
-        // A paste that makes no single token (`b ## (`, Alpha Piscium's
-        // `colors2_colorspaces_ ## a ## _to_ ## b ##(x)`) stays the tokens it is made of, as
-        // GL drivers' preprocessors leave it: the name before the `(` is then rescanned and can
-        // call a macro.
-        joined
-            .into_iter()
-            .flat_map(|token| {
-                let parts = lex(&token.text);
-                if parts.len() < 2 {
-                    return vec![token];
-                }
-                parts
-                    .into_iter()
-                    .map(|text| ExpansionToken {
-                        text: text.into(),
-                        hidden: token.hidden.clone(),
-                    })
-                    .collect()
-            })
-            .collect()
-    }
-}
-
-/// Disabling belongs to each token: rescanning a boundary must neither revive a recursive
-/// replacement token nor hide an independent invocation in the surrounding source.
-#[derive(Clone)]
-struct ExpansionToken<'a> {
-    text: String,
-    hidden: Vec<&'a str>,
-}
-
-impl ExpansionToken<'_> {
-    fn new(text: &str) -> Self {
-        Self {
-            text: text.into(),
-            hidden: Vec::new(),
-        }
-    }
-
-    fn blank(&self) -> bool {
-        !self.text.is_empty() && self.text.trim().is_empty()
-    }
-}
-
-fn expansion_tokens(text: &str) -> Vec<ExpansionToken<'_>> {
-    lex(text).into_iter().map(ExpansionToken::new).collect()
-}
-
-/// The arguments of a call whose `(` is the next non-blank token from `i`, split at top-level
-/// commas, and the index after its `)`. `None` when no `(` follows or it never closes.
-fn arguments<'a>(
-    tokens: &[ExpansionToken<'a>],
-    mut i: usize,
-) -> Option<(Vec<Vec<ExpansionToken<'a>>>, usize)> {
-    while tokens.get(i)?.blank() {
-        i += 1;
-    }
-    if tokens[i].text != "(" {
-        return None;
-    }
-    let (mut depth, mut args, mut from) = (0, Vec::new(), i + 1);
-    for (j, t) in tokens.iter().enumerate().skip(i + 1) {
-        match t.text.as_str() {
-            "(" => depth += 1,
-            ")" if depth == 0 => {
-                args.push(tokens[from..j].to_vec());
-                return Some((args, j + 1));
-            }
-            ")" => depth -= 1,
-            "," if depth == 0 => {
-                args.push(tokens[from..j].to_vec());
-                from = j + 1;
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// Preprocessing tokens: identifiers, numbers (with their suffixes and exponents), runs of
-/// white space, `##`, and single characters. Concatenated they give back `text`.
-pub(crate) fn lex(text: &str) -> Vec<&str> {
-    let bytes = text.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        let c = bytes[i] as char;
-        let start = i;
-        i += 1;
-        if is_ident_start(c) {
-            while i < bytes.len() && is_ident(bytes[i] as char) {
-                i += 1;
-            }
-        } else if c.is_ascii_digit() || (c == '.' && bytes.get(i).is_some_and(u8::is_ascii_digit)) {
-            while i < bytes.len() {
-                let d = bytes[i] as char;
-                let exp_sign = (d == '+' || d == '-') && matches!(bytes[i - 1], b'e' | b'E');
-                if !(is_ident(d) || d == '.' || exp_sign) {
-                    break;
-                }
-                i += 1;
-            }
-        } else if c.is_whitespace() {
-            while i < bytes.len() && (bytes[i] as char).is_whitespace() {
-                i += 1;
-            }
-        } else if c == '#' && bytes.get(i) == Some(&b'#') {
-            i += 1;
-        } else {
-            while !text.is_char_boundary(i) {
-                i += 1;
-            }
-        }
-        out.push(&text[start..i]);
-    }
-    out
-}
-
-pub(crate) fn is_ident_start(c: char) -> bool {
-    c.is_ascii_alphabetic() || c == '_'
-}
-
-pub(crate) fn is_ident(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_'
 }
 
 #[cfg(test)]
@@ -580,9 +440,16 @@ mod tests {
     }
 
     /// A required feature Sunrise has loads without a note, one it lacks gets a note, whatever the
-    /// case it is written in; no `IRIS_FEATURE_*` macro is defined either way (spec OQ-2).
+    /// case it is written in; the standard and renderer sets hold no `IRIS_*` macro (the
+    /// feature answers come from the pack's lists, `define_features`).
+    /// The feature flags a list of notes names, in order: tests check which flags are noted, not the
+    /// English of the note.
+    fn noted_flags(notes: &[String]) -> Vec<&str> {
+        notes.iter().filter_map(|n| n.split('`').nth(1)).collect()
+    }
+
     #[test]
-    fn required_features_are_noted_and_never_defined() {
+    fn required_features_are_noted_and_the_standard_set_names_no_feature() {
         let properties = crate::Properties::parse(
             "iris.features.optional = COMPUTE_SHADERS ssbo NOT_A_FEATURE\n\
              iris.features.required = BLOCK_EMISSION_ATTRIBUTE HIGHER_SHADOWCOLOR custom_images \
@@ -590,13 +457,118 @@ mod tests {
             &Macros::standard(),
         );
         assert_eq!(
-            Macros::feature_notes(&properties),
-            ["the pack requires `Not_A_Feature`, which is not supported yet"]
+            noted_flags(&Macros::standard().feature_notes(&properties)),
+            ["Not_A_Feature"]
         );
         let mut m = Macros::standard();
         m.define_renderer(4);
-        let iris: Vec<_> = m.0.keys().filter(|name| name.contains("IRIS")).collect();
+        let iris: Vec<_> = m.names().filter(|name| name.contains("IRIS")).collect();
         assert!(iris.is_empty(), "{iris:?}");
+    }
+
+    /// Sunrise's HDR macros are absent from the standard set and the renderer's; served, the
+    /// version is 1, and the tone curve's macro follows its owner.
+    #[test]
+    fn sunrise_hdr_macros_appear_only_when_served() {
+        const NAMES: [&str; 2] = ["SUNRISE_HDR", "SUNRISE_HDR_TONEMAP_PACK"];
+        let mut m = Macros::standard();
+        m.define_renderer(4);
+        m.define_subgroups();
+        assert!(NAMES.iter().all(|n| !m.is_defined(n)));
+        let mut pack = m.clone();
+        pack.define_sunrise_hdr(crate::Tonemap::Pack);
+        assert_eq!(pack.get("SUNRISE_HDR"), Some("1"));
+        assert_eq!(pack.get("SUNRISE_HDR_TONEMAP_PACK"), Some(""));
+        let mut sunrise = m.clone();
+        sunrise.define_sunrise_hdr(crate::Tonemap::Sunrise);
+        assert_eq!(sunrise.get("SUNRISE_HDR"), Some("1"));
+        assert!(!sunrise.is_defined("SUNRISE_HDR_TONEMAP_PACK"));
+        // A program's `#ifdef SUNRISE_HDR` path is taken only when served.
+        let fsh = "#version 330\nout vec4 c;\n#ifdef SUNRISE_HDR\nconst float v = 3.0;\n#endif\n\
+                   void main() { c = vec4(v); }\n";
+        assert!(translates(fsh, &m).is_err());
+        translates(fsh, &pack).unwrap();
+    }
+
+    /// A required `PER_BUFFER_BLENDING`, in any case, is supported where the device draws it
+    /// and noted where it does not, as written; the other flags keep their answers, and the
+    /// device's answer defines no macro.
+    #[test]
+    fn per_buffer_blending_follows_the_device() {
+        let properties = crate::Properties::parse(
+            "iris.features.optional = PER_BUFFER_BLENDING
+             iris.features.required = SSBO PER_BUFFER_BLENDING per_Buffer_blending NOT_A_FEATURE
+",
+            &Macros::standard(),
+        );
+        let mut able = Macros::standard();
+        able.define_renderer(4);
+        let mut unable = able.clone();
+        able.set_per_buffer_blending(true);
+        unable.set_per_buffer_blending(false);
+        assert_eq!(
+            noted_flags(&able.feature_notes(&properties)),
+            ["NOT_A_FEATURE"]
+        );
+        assert_eq!(
+            noted_flags(&unable.feature_notes(&properties)),
+            [
+                "PER_BUFFER_BLENDING",
+                "per_Buffer_blending",
+                "NOT_A_FEATURE"
+            ]
+        );
+        // Without a renderer's answer the device draws none of it.
+        assert_eq!(
+            Macros::standard().feature_notes(&properties),
+            unable.feature_notes(&properties)
+        );
+        assert!(able.names().eq(unable.names()));
+        // The answer reaches every file's macros and the properties' read.
+        assert_eq!(
+            able.for_file().feature_notes(&properties),
+            able.feature_notes(&properties)
+        );
+    }
+
+    /// The macro set itself holds no stale answer: a device without per-buffer blending drops
+    /// `IRIS_FEATURE_PER_BUFFER_BLENDING` at once, and `define_features` holds only its own
+    /// read's answers, whatever the set held before.
+    #[test]
+    fn a_stale_feature_answer_leaves_the_macro_set() {
+        const PBB: &str = "IRIS_FEATURE_PER_BUFFER_BLENDING";
+        let parse = |text| crate::Properties::parse(text, &Macros::standard());
+        let listing = parse("iris.features.optional = PER_BUFFER_BLENDING SSBO\n");
+        let other = parse("iris.features.optional = CUSTOM_IMAGES\n");
+        let mut m = Macros::standard();
+        m.set_per_buffer_blending(true);
+        assert!(m.define_features(&listing));
+        assert_eq!(m.get(PBB), Some("1"));
+        assert_eq!(m.get("IRIS_FEATURE_SSBO"), Some("1"));
+        // The device answer turned no: the macro goes with it, the other answers stay.
+        m.set_per_buffer_blending(false);
+        assert!(!m.is_defined(PBB));
+        assert_eq!(m.get("IRIS_FEATURE_SSBO"), Some("1"));
+        // Answered again on that device: still undefined.
+        assert!(m.define_features(&listing));
+        assert!(!m.is_defined(PBB));
+        // A read of another pack holds its answers alone.
+        m.set_per_buffer_blending(true);
+        assert!(m.define_features(&listing));
+        assert_eq!(m.get(PBB), Some("1"));
+        assert!(m.define_features(&other));
+        let answers: Vec<&str> = m
+            .names()
+            .filter(|n| n.starts_with("IRIS_FEATURE_"))
+            .collect();
+        assert_eq!(answers, ["IRIS_FEATURE_CUSTOM_IMAGES"]);
+        // One that lists none Sunrise has holds none.
+        assert!(!m.define_features(&parse("iris.features.optional = NOT_A_FEATURE\n")));
+        assert_eq!(m, {
+            let mut able = Macros::standard();
+            able.set_per_buffer_blending(true);
+            able
+        });
     }
 
     #[test]
@@ -628,34 +600,5 @@ mod tests {
         }
         assert_eq!(m.get("CAT_THE_END"), Some("8"));
         assert_eq!(m.get("PPT_SNOW"), Some("2"));
-    }
-
-    #[test]
-    fn expansion_replaces_whole_words_and_stops_on_recursion() {
-        let mut m = Macros::default();
-        m.define("RES", "SIZE");
-        m.define("SIZE", "512");
-        m.define("LOOP", "LOOP + 1");
-        assert_eq!(m.expand("RES RES 0.5"), "512 512 0.5");
-        assert_eq!(
-            m.expand("RESOLUTION colortex4 LOOP"),
-            "RESOLUTION colortex4 LOOP + 1"
-        );
-        m.define("e5", "x");
-        assert_eq!(m.expand("1e5"), "1e5");
-    }
-
-    #[test]
-    fn function_like_macros_take_arguments_and_paste() {
-        let mut m = Macros::default();
-        m.define("N", "4");
-        m.define_function("SQ", vec!["x".into()], "((x) * (x))");
-        m.define_function("CAT", vec!["a".into(), "b".into()], "a ## b");
-        m.define_function("PI", vec![], "3.14");
-        assert_eq!(m.expand("SQ(N + 1)"), "((4 + 1) * (4 + 1))");
-        assert_eq!(m.expand("SQ(min(N, 2))"), "((min(4, 2)) * (min(4, 2)))");
-        assert_eq!(m.expand("CAT(N, 2) CAT(col, ortex4)"), "N2 colortex4");
-        assert_eq!(m.expand("PI() SQ SQ(1"), "3.14 SQ SQ(1");
-        assert_eq!(m.get("SQ"), None);
     }
 }

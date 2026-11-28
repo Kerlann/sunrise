@@ -18,14 +18,21 @@
 pub mod construction;
 pub mod execution;
 mod image_formats;
+pub mod indirect;
+mod mod_link;
+pub mod mod_pack;
 mod packed;
 pub mod types;
 
-pub use image_formats::{image_binding, image_format, rebinds, storage_formats_of};
+pub use image_formats::{image_binding, image_format, rebinds, sampled_image, storage_formats_of};
 
 pub use construction::*;
 pub use execution::*;
+pub use mod_pack::*;
 pub use types::*;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod blend_target_tests;

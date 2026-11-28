@@ -7,6 +7,15 @@ use crate::*;
 // exhaustive: its field is private, so only registration creates a key
 pub struct BlockKey(pub(crate) u32);
 
+impl BlockKey {
+    /// Whether this block is in `tag` (`BlockState.is(TagKey)`), over `tags`'s current
+    /// authoritative snapshot. An unknown tag is `Some(false)`; unavailable tags or mappings
+    /// return `None`.
+    pub fn is_in_tag(self, tags: &dyn Tags, tag: TagKey<BlockKey>) -> Option<bool> {
+        tags.block_in_tag(self, tag)
+    }
+}
+
 /// A block entity type requested at registration. Its slot remains stable for the process.
 // no wire: decoding validates the u32 slot with BlockEntityTypeKey::from_slot on the host.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -110,6 +119,9 @@ pub enum BlockShapeKind {
     Outline,
     /// Collision shape (`BlockState.getCollisionShape`).
     Collision,
+    /// Visual shape (`BlockState.getVisualShape`), the one `ClipBlock::Visual` rays stop on:
+    /// the collision shape except for the blocks vanilla overrides (see `ClipBlock::Visual`).
+    Visual,
 }
 
 /// A block face for a level support query.
@@ -375,8 +387,9 @@ impl StepOnEvent<'_> {
 
     /// Queue a write to the stepping entity, before inside-block effects.
     /// Returns false on the client. As with `entity_inside`, the body applies
-    /// the writes it supports, in request order. Boats and minecarts (#4177),
-    /// armor stands and projectiles ignore contact hurt.
+    /// the writes it supports, in request order. Boats and minecarts take
+    /// hurt from this contact only (#4177); armor stands and projectiles
+    /// ignore contact hurt.
     pub fn write_entity(&mut self, write: EntityWrite) -> bool {
         if !self.writes.server {
             return false;
@@ -411,19 +424,169 @@ impl EntityInsideEvent<'_> {
     pub fn apply(&mut self, effect: InsideEffect) {
         self.effects.apply(effect);
     }
-    /// Queue a typed write to the swept entity that applies just before `effect` in the
-    /// flush order (`InsideBlockEffectApplier.runBefore`).
-    pub fn run_before(&mut self, effect: InsideEffect, write: EntityWrite) {
-        self.effects.run_before(effect, write);
+    /// Queue a callback that runs just before `effect` in the flush order
+    /// (`InsideBlockEffectApplier.runBefore`), lent an [`InsideEntityView`] over the
+    /// swept entity and its live level.
+    pub fn run_before(
+        &mut self,
+        effect: InsideEffect,
+        callback: impl FnMut(&mut InsideEntityView<'_>) + 'static,
+    ) {
+        self.effects.run_before(effect, callback);
     }
-    /// Queue a typed write to the swept entity that applies just after `effect` in the
-    /// flush order (`InsideBlockEffectApplier.runAfter`).
-    pub fn run_after(&mut self, effect: InsideEffect, write: EntityWrite) {
-        self.effects.run_after(effect, write);
+    /// Queue a callback that runs just after `effect` in the flush order
+    /// (`InsideBlockEffectApplier.runAfter`), lent an [`InsideEntityView`] over the
+    /// swept entity and its live level.
+    pub fn run_after(
+        &mut self,
+        effect: InsideEffect,
+        callback: impl FnMut(&mut InsideEntityView<'_>) + 'static,
+    ) {
+        self.effects.run_after(effect, callback);
     }
-    /// Ask for a write at the touched block. It is applied once the entity's batch has
-    /// ticked, in the order asked, if the block is still the state the entity touched.
-    pub fn request(&mut self, write: InsideWrite) {
-        self.writes.push(write);
+}
+
+/// Context for a player tuning a note block.
+#[derive(Clone, Copy, Debug)]
+// exhaustive: the game builds it with a literal; mods only read it
+// no wire: local hook context for note block tuning.
+pub struct NoteBlockChange {
+    /// The level the note block is in.
+    pub dimension: LevelDimension,
+    /// The note block's position.
+    pub pos: BlockPos,
+    /// The block's instrument before tuning.
+    pub instrument: NoteInstrument,
+    /// The note before tuning, in the range 0 through 24.
+    pub old_note: i32,
+}
+
+/// A note block's instrument (`NoteBlockInstrument`), for `note_block_play`,
+/// in the `instrument` property's order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[derive(sunrise_mod_api_macros::Wire)]
+pub enum NoteInstrument {
+    /// The harp, over most blocks.
+    Harp,
+    /// The bass drum, over stone.
+    Basedrum,
+    /// The snare drum, over sand and gravel.
+    Snare,
+    /// The clicks, over glass.
+    Hat,
+    /// The double bass, over wood.
+    Bass,
+    /// The flute, over clay.
+    Flute,
+    /// The bell, over a gold block.
+    Bell,
+    /// The guitar, over wool.
+    Guitar,
+    /// The chime, over packed ice.
+    Chime,
+    /// The xylophone, over a bone block.
+    Xylophone,
+    /// The iron xylophone, over an iron block.
+    IronXylophone,
+    /// The cow bell, over soul sand.
+    CowBell,
+    /// The didgeridoo, over a pumpkin.
+    Didgeridoo,
+    /// The bit, over an emerald block.
+    Bit,
+    /// The banjo, over hay.
+    Banjo,
+    /// The pling, over glowstone.
+    Pling,
+    /// The trumpet, over a copper block.
+    Trumpet,
+    /// The trumpet, over an exposed copper block.
+    TrumpetExposed,
+    /// The trumpet, over an oxidized copper block.
+    TrumpetOxidized,
+    /// The trumpet, over a weathered copper block.
+    TrumpetWeathered,
+    /// A zombie's sound, over a zombie head.
+    Zombie,
+    /// A skeleton's sound, over a skeleton skull.
+    Skeleton,
+    /// A creeper's sound, over a creeper head.
+    Creeper,
+    /// The ender dragon's sound, over a dragon head.
+    Dragon,
+    /// A wither skeleton's sound, over its skull.
+    WitherSkeleton,
+    /// A piglin's sound, over a piglin head.
+    Piglin,
+    /// The sound set by a player head's own note block sound.
+    CustomHead,
+}
+
+impl NoteInstrument {
+    /// Every instrument, in the `instrument` property's order.
+    pub const ALL: [Self; 27] = {
+        use NoteInstrument::*;
+        [
+            Harp,
+            Basedrum,
+            Snare,
+            Hat,
+            Bass,
+            Flute,
+            Bell,
+            Guitar,
+            Chime,
+            Xylophone,
+            IronXylophone,
+            CowBell,
+            Didgeridoo,
+            Bit,
+            Banjo,
+            Pling,
+            Trumpet,
+            TrumpetExposed,
+            TrumpetOxidized,
+            TrumpetWeathered,
+            Zombie,
+            Skeleton,
+            Creeper,
+            Dragon,
+            WitherSkeleton,
+            Piglin,
+            CustomHead,
+        ]
+    };
+    /// The `instrument` property's value (`harp`, `cow_bell`).
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Harp => "harp",
+            Self::Basedrum => "basedrum",
+            Self::Snare => "snare",
+            Self::Hat => "hat",
+            Self::Bass => "bass",
+            Self::Flute => "flute",
+            Self::Bell => "bell",
+            Self::Guitar => "guitar",
+            Self::Chime => "chime",
+            Self::Xylophone => "xylophone",
+            Self::IronXylophone => "iron_xylophone",
+            Self::CowBell => "cow_bell",
+            Self::Didgeridoo => "didgeridoo",
+            Self::Bit => "bit",
+            Self::Banjo => "banjo",
+            Self::Pling => "pling",
+            Self::Trumpet => "trumpet",
+            Self::TrumpetExposed => "trumpet_exposed",
+            Self::TrumpetOxidized => "trumpet_oxidized",
+            Self::TrumpetWeathered => "trumpet_weathered",
+            Self::Zombie => "zombie",
+            Self::Skeleton => "skeleton",
+            Self::Creeper => "creeper",
+            Self::Dragon => "dragon",
+            Self::WitherSkeleton => "wither_skeleton",
+            Self::Piglin => "piglin",
+            Self::CustomHead => "custom_head",
+        }
     }
 }

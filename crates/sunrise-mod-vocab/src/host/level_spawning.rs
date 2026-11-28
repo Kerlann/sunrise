@@ -23,6 +23,55 @@ pub trait LevelSpawningBackend {
     /// its spawner uses: the chunk is loaded. Reads parked levels and loads
     /// nothing. None on a client and for a stale handle.
     fn level_can_spawn_entities_in_chunk(&self, level: LevelRef, pos: [i32; 2]) -> Option<bool>;
+    /// Side: server.
+    /// `SpawnPlacements.checkSpawnRules` for the entity type `kind` (a full id) at `pos` in the
+    /// level in place: the type's placement predicate (vanilla's, or one a mod registered
+    /// through `register_spawn_placement`) with the light reads `light` names, then the
+    /// `mob_spawn_placement_check` hook as natural spawning asks it (NeoForge's
+    /// `MobSpawnEvent.SpawnPlacementCheck`), so other mods' spawn checks apply. `reason` is
+    /// the reason the rule and the hook are told. A type with no placement entry, a non-mob
+    /// included, passes its vanilla rule, as in `SpawnPlacements.checkSpawnRules`; registered
+    /// predicates and the hook still answer for it.
+    ///
+    /// Peaceful: `SpawnPlacements.checkSpawnRules` refuses a type `EntityType.isAllowedInPeaceful`
+    /// refuses before it asks the predicate, so at Peaceful difficulty such a type (a zombie)
+    /// answers `Ok(false)` whatever `light` says, and neither the predicate nor the hook is
+    /// called.
+    ///
+    /// [`LightOverride::Real`] uses the level's light. [`LightOverride::Level`] supplies one
+    /// value for sky and block light everywhere the predicate reads them, including the sky
+    /// light used to determine sky visibility. It changes what light checks see; it does not
+    /// skip them. Values above vanilla's `LightEngine.MAX_LEVEL` (15) are clamped to 15.
+    /// [`LightOverride::Any`] tries 0 through 15 in order, stopping at the first passing result
+    /// after the hook. The override affects the predicate and thus `default_result`; the hook's
+    /// `level` handle still reads the real level, including its light and sky visibility.
+    ///
+    /// This query does not spawn anything. [`LevelRef::spawn_entity`] does not run placement
+    /// checks; call this query first if the spawn should depend on them.
+    ///
+    /// Random: vanilla's predicate draws advance the caller's `RandomSource`. This call has no
+    /// caller stream: the predicate and the hook draw from one copy of the level random taken
+    /// at the call and never written back. The level's stream does not move, so two calls at
+    /// an unchanged state draw the same rolls; within a call, each `Any` try draws after the
+    /// one before. A listener must be a pure function of its inputs, as it must on replayed
+    /// ticks.
+    ///
+    /// `Ok(false)` for an unloaded position and an id that names no entity type.
+    /// `Err(Stale)` for a stale handle. `Err(Unavailable)` on a client, for a level not in
+    /// place, for a light override this build does not know, and for a call made while
+    /// another runs on this thread (a `mob_spawn_placement_check` listener asking again), so a
+    /// listener cannot recurse. Also `Err(Unavailable)` while the engine holds the level random
+    /// out of the level for its own pass (natural spawning, a spawner's or trial spawner's tick,
+    /// a vault's, a raid's, zombie reinforcements): a listener those passes call cannot ask,
+    /// since there is no level stream to copy until the pass ends.
+    fn level_check_spawn_rules(
+        &self,
+        level: LevelRef,
+        kind: &str,
+        pos: [i32; 3],
+        reason: SpawnReason,
+        light: LightOverride,
+    ) -> Result<bool, LevelReadError>;
 }
 /// The handles' writes of the `level_spawning` area, implemented by the game and reached through [`BackendMut`].
 // hidden: a handle's backend, reached through `Backend`; mods call the handle, never this trait
@@ -63,7 +112,7 @@ pub trait LevelSpawningBackendMut {
     /// - [`SpawnBody::Thrown`]: `Projectile.spawnProjectile`, the route a
     ///   thrown snowball takes. The owner is set before it joins, as
     ///   `Projectile.setOwner` (hit credit, `Owner`, and the shot keeps clear
-    ///   of its owner until it leaves the owner's box); `projectile_launch`
+    ///   of its owner until it leaves the owner's box); `entity_join_level`
     ///   fires. It carries `item` (`ThrowableItemProjectile.setItem`), checked
     ///   as `ServerHost::spawn_projectile_from_rotation` checks its stack. The
     ///   owner is a player, a mob, a boat or a minecart: the shot needs its
@@ -82,15 +131,16 @@ pub trait LevelSpawningBackendMut {
     ///   pitch, which it has no state for.
     /// - [`SpawnBody::General`]: a new row of the general type, with a fresh
     ///   UUID and the type's declared payload version, through the insertion
-    ///   `/summon` and chunk loading share. The owner is kept on the row and
+    ///   `/summon` and chunk loading share. The world must enable the type's
+    ///   required Minecraft feature flags. The owner is kept on the row and
     ///   saved (`Owner`); [`EntityRef::owner`] reads it back, for the type's
     ///   own tick to skip its shooter and credit its damage. The row's state is
     ///   its attachments: write them on the returned handle in the same
     ///   transaction, and the join and the first tracking snapshot see them.
     ///
     /// Velocity is set before the entity joins (`Entity.setDeltaMovement`).
-    /// The level's spawn limits, flags and spawn rules don't apply, as they
-    /// don't to `/summon`; nor does a general type's `summonable`, which is
+    /// The level's natural spawning limits, spawn flags and spawn rules don't
+    /// apply, as they don't to `/summon`; nor does a general type's `summonable`, which is
     /// `/summon`'s alone (`EntityType.canSummon`). The new entity as a handle.
     /// None, with nothing spawned and no random drawn, for a kind that isn't
     /// of `spawn.body`'s family, a position, velocity or rotation that isn't
@@ -111,6 +161,38 @@ pub trait LevelSpawningBackendMut {
         spawn: &EntitySpawn,
     ) -> Option<EntityRef>;
     /// Side: server.
+    /// Spawns a falling block (`FallingBlockEntity`) of `state` at `pos` (its bottom centre)
+    /// with initial `velocity` (blocks a tick, `Entity.setDeltaMovement`) in the level,
+    /// without altering the block at `pos`: it falls, lands and places itself as sand does, or
+    /// drops as an item where it cannot. `falling` controls item dropping (`drop_item`) and
+    /// anvil-style landing damage (`hurts`, 2 a block fallen up to 40). The live entity keeps
+    /// the exact `velocity` (network packets quantize through `LpVec3` on send), accepts any
+    /// valid block state including air (which vanilla discards on its first tick in
+    /// `FallingBlockEntity.tick`), and imposes no per-level count cap.
+    ///
+    /// Uses the named open server level, including one that is parked. A chunk need not
+    /// be loaded, and the call does not load it: section visibility and ticking decide
+    /// when the entity becomes active, not whether it can join (`ServerLevel.addFreshEntity`).
+    /// In the destination level, the returned handle works before the entity is
+    /// discoverable in level lookups.
+    ///
+    /// Returns `Err(LevelWriteError::Stale)` for a stale handle or closed level,
+    /// `Err(LevelWriteError::Unavailable)` on a client,
+    /// and `Err(LevelWriteError::InvalidState(_))` for an unknown block state.
+    /// Returns `Ok(None)` for a non-finite position or velocity, exhausted entity ids,
+    /// or a join veto in `entity_join_level`. Outside a transaction in the destination
+    /// level, the join decision is made before this call returns. Within that level's
+    /// transaction the returned handle is provisional: the join waits for the root commit
+    /// and the handle becomes stale on abort or a veto at commit.
+    fn level_spawn_falling_block(
+        &mut self,
+        level: LevelRef,
+        state: BlockState,
+        pos: [f64; 3],
+        velocity: [f64; 3],
+        falling: Falling,
+    ) -> Result<Option<EntityRef>, LevelWriteError>;
+    /// Side: server.
     /// Sets the level's natural spawning limits ([`SpawnLimits`]), from the next
     /// spawn pass on. They hold until the world closes, while the level is
     /// parked and across its closing and opening again, and are not saved: the
@@ -123,4 +205,28 @@ pub trait LevelSpawningBackendMut {
     /// ([`SpawnFlags`]), from the next spawn pass on. Kept and refused as
     /// `set_spawn_limits`.
     fn level_set_spawn_flags(&mut self, level: LevelRef, flags: SpawnFlags) -> bool;
+    /// Side: server.
+    /// Spawns an entity of `kind` (`minecraft:item_display`) at `pos` in the
+    /// server level `level` names from `nbt` (its compound, as `/summon
+    /// <kind> <pos> <nbt>` takes it — vanilla `SummonCommand.createEntity` /
+    /// `ServerLevel.tryAddFreshEntityWithPassengers`, passengers included): its
+    /// [`EntityRef`]. Routes parked dimensions by handle; returns
+    /// `Err(LevelWriteError::InTransaction)` when summoning into a parked
+    /// dimension while a Host transaction is open, `Err(LevelWriteError::Stale)`
+    /// for a stale or closed level handle, and `Err(LevelWriteError::Unavailable)`
+    /// on a client or outside the world phase. Returns `Ok(None)` for a position
+    /// outside `/summon`'s bounds, an unloaded chunk, a kind Sunrise cannot load or
+    /// admit in Peaceful, exhausted entity ids, or an entity a mod kept out
+    /// (`entity_join_level`). If a UUID of the summon tree is already present in
+    /// the level, no member of the tree is added and the result is `Ok(None)`.
+    /// Inside a transaction its join waits for the root commit, so a mod keeping
+    /// it out is not known at the call: the handle is returned and reads stale
+    /// from the commit on.
+    fn level_summon(
+        &mut self,
+        level: LevelRef,
+        kind: &str,
+        pos: [f64; 3],
+        nbt: Compound,
+    ) -> Result<Option<EntityRef>, LevelWriteError>;
 }

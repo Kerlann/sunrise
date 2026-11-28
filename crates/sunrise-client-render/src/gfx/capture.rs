@@ -3,13 +3,12 @@
 //! replay").
 //!
 //! The renderer keeps no CPU copy of the meshes it uploads, so while capturing is on
-//! (`Renderer::keep_capture_copies`) it keeps one of every section and far tile mesh as it is
-//! handed over, at the mesher-to-renderer seam. A capture writes those of the sections and
-//! tiles it holds, the frame's camera and inputs, and the settings that change GPU work. Only
+//! (`Renderer::keep_capture_copies`) it keeps one of every section mesh as it is
+//! handed over, at the mesher-to-renderer seam. A capture writes the sections it holds, the frame's camera and inputs, and the settings that change GPU work. Only
 //! the build that wrote a capture reads it.
 //!
-//! Files: `scene.json` (`Scene`), `sections.json` and `tiles.json` (one `MeshRecord` per mesh,
-//! in order), `sections.bin` and `tiles.bin` (each mesh's solid then translucent
+//! Files: `scene.json` (`Scene`), `sections.json` (one `MeshRecord` per mesh,
+//! in order), `sections.bin` (each mesh's solid then translucent
 //! `TerrainVertex`es), `celestial.bin` (the sun and moon `Vertex`es).
 use super::{Frame, Renderer, SectionKey};
 use crate::{
@@ -19,7 +18,6 @@ use crate::{
     fog::FogData,
     graphics::GraphicsApi,
     hud::HudBatch,
-    lod::TileKey,
     mesher::{SectionMesh, Sides, TerrainVertex, Vertex},
 };
 use glam::{DVec3, Mat4, Vec3};
@@ -34,7 +32,6 @@ use std::{
 #[derive(Default)]
 pub(crate) struct Copies {
     sections: FxHashMap<SectionKey, SectionMesh>,
-    tiles: FxHashMap<TileKey, SectionMesh>,
 }
 
 impl Copies {
@@ -50,15 +47,6 @@ impl Copies {
         self.sections
             .retain(|&(x, _, z), _| !gone.contains(&(x, z)));
     }
-    pub(super) fn tile(&mut self, key: TileKey, mesh: &SectionMesh) {
-        self.tiles.insert(key, copy(mesh));
-    }
-    pub(super) fn forget_tile(&mut self, key: TileKey) {
-        self.tiles.remove(&key);
-    }
-    pub(super) fn clear_tiles(&mut self) {
-        self.tiles.clear();
-    }
 }
 
 fn copy(mesh: &SectionMesh) -> SectionMesh {
@@ -69,7 +57,6 @@ fn copy(mesh: &SectionMesh) -> SectionMesh {
         translucent: mesh.translucent.clone(),
         translucent_sources: mesh.translucent_sources.clone(),
         packed: mesh.packed.clone(),
-        packed_far: mesh.packed_far,
         solid_tints: Vec::new(),
         visibility: mesh.visibility,
         block_entities: mesh.block_entities.clone(),
@@ -103,7 +90,6 @@ pub struct Settings {
     pub upscale: f32,
     /// Chunks.
     pub render_distance: i32,
-    pub lod_distance: u32,
     /// The game's prepared resources, where the replay loads the block sprites from.
     pub resources: PathBuf,
     /// The block sprites the meshes were made against.
@@ -159,7 +145,6 @@ pub struct RendererState {
     pub section_sides: bool,
     pub gpu_culling: bool,
     pub gamma: f32,
-    pub fullbright: bool,
     pub improved_transparency: bool,
     pub animated_textures: bool,
     /// A shader pack was running; the replay draws without it.
@@ -215,6 +200,10 @@ impl Clouds {
     }
 }
 
+fn identity_matrix() -> [f32; 16] {
+    Mat4::IDENTITY.to_cols_array()
+}
+
 fn default_cloud_height() -> f32 {
     crate::clouds::CLOUD_HEIGHT
 }
@@ -225,6 +214,8 @@ pub struct FrameInputs {
     pub camera: [f64; 3],
     pub yaw: f32,
     pub pitch: f32,
+    #[serde(default)]
+    pub roll: f32,
     pub fov_degrees: f32,
     #[serde(default)]
     pub cull_fov_degrees: Option<f32>,
@@ -232,6 +223,8 @@ pub struct FrameInputs {
     pub eye_rotation: [f32; 2],
     pub first_person: bool,
     pub bob: [f32; 16],
+    #[serde(default = "identity_matrix")]
+    pub view_transform: [f32; 16],
     pub spin: [f32; 16],
     pub sky: Sky,
     pub distance: f32,
@@ -240,8 +233,8 @@ pub struct FrameInputs {
     pub shadow_distance: Option<f32>,
     pub depth_far: f32,
     pub underwater: bool,
-    pub water_plane: Option<f32>,
     pub cave_culling: bool,
+    pub sky_pass: bool,
     pub sky_blocked: bool,
     pub skybox: bool,
     pub end_sky: bool,
@@ -278,16 +271,12 @@ pub struct Scene {
     pub renderer: RendererState,
     pub frame: FrameInputs,
     pub sections: usize,
-    pub tiles: usize,
-    /// The chunk columns far tiles leave out for full-detail sections.
-    pub lod_cutout: Vec<(i32, i32)>,
     /// `celestial.bin`.
     #[serde(skip)]
     pub celestial: Vec<Vertex>,
 }
 
-/// One mesh of `sections.json` or `tiles.json`; its vertices follow the previous mesh's in
-/// the `.bin` file. `key` is (x, section y, z) for a section, (x, z, level) for a tile.
+/// One mesh of `sections.json`, keyed by (x, section y, z). Its vertices follow the previous mesh's in `sections.bin`.
 #[derive(Serialize, Deserialize)]
 struct MeshRecord {
     key: [i32; 3],
@@ -412,16 +401,6 @@ impl Renderer {
                 .iter()
                 .map(|(&(x, y, z), mesh)| ([x, y, z], mesh)),
         )?;
-        let standing = self.standing_lods();
-        let (tiles, tile_bytes) = write_meshes(
-            dir,
-            "tiles",
-            copies
-                .tiles
-                .iter()
-                .filter(|(key, _)| standing.contains(*key))
-                .map(|(key, mesh)| ([key.x, key.z, i32::from(key.level)], mesh)),
-        )?;
         fs::write(
             dir.join("celestial.bin"),
             bytemuck::cast_slice::<Vertex, u8>(frame.celestial),
@@ -439,15 +418,12 @@ impl Renderer {
                 section_sides: self.section_sides(),
                 gpu_culling: self.gpu_culling(),
                 gamma: self.gamma,
-                fullbright: self.fullbright,
                 improved_transparency: self.improved_transparency,
                 animated_textures: self.animated_textures,
-                shader_pack: self.pack_post.is_some() || self.native.is_some(),
+                shader_pack: self.pack_post.is_some(),
             },
             frame: FrameInputs::record(frame),
             sections,
-            tiles,
-            lod_cutout: self.lod_cutout.iter().copied().collect(),
             celestial: Vec::new(),
         };
         let mut out = BufWriter::new(File::create(dir.join("scene.json"))?);
@@ -457,8 +433,7 @@ impl Renderer {
             "ok": true,
             "dir": dir.display().to_string(),
             "sections": sections,
-            "tiles": tiles,
-            "vertex_bytes": section_bytes + tile_bytes,
+            "vertex_bytes": section_bytes,
             "shader_pack_left_out": scene.renderer.shader_pack,
         }))
     }
@@ -470,12 +445,14 @@ impl FrameInputs {
             camera: frame.camera.to_array(),
             yaw: frame.yaw,
             pitch: frame.pitch,
+            roll: frame.roll,
             fov_degrees: frame.fov_degrees,
             cull_fov_degrees: Some(frame.cull_fov_degrees),
             eye: frame.eye.to_array(),
             eye_rotation: frame.eye_rotation,
             first_person: frame.first_person,
             bob: frame.bob.to_cols_array(),
+            view_transform: frame.view_transform.to_cols_array(),
             spin: frame.spin.to_cols_array(),
             sky: frame.sky,
             distance: frame.distance,
@@ -483,8 +460,8 @@ impl FrameInputs {
             shadow_distance: frame.shadow_distance,
             depth_far: frame.depth_far,
             underwater: frame.underwater,
-            water_plane: frame.water_plane,
             cave_culling: frame.cave_culling,
+            sky_pass: frame.sky_pass,
             sky_blocked: frame.sky_blocked,
             skybox: frame.skybox,
             end_sky: frame.end_sky,
@@ -524,12 +501,14 @@ impl FrameInputs {
             camera: DVec3::from_array(f.camera),
             yaw: f.yaw,
             pitch: f.pitch,
+            roll: f.roll,
             fov_degrees: f.fov_degrees,
             cull_fov_degrees: f.cull_fov_degrees.unwrap_or(f.fov_degrees),
             eye: DVec3::from_array(f.eye),
             eye_rotation: f.eye_rotation,
             first_person: f.first_person,
             bob: Mat4::from_cols_array(&f.bob),
+            view_transform: Mat4::from_cols_array(&f.view_transform),
             spin: Mat4::from_cols_array(&f.spin),
             sky: f.sky,
             shadow_scene_revision: (0, 0),
@@ -539,9 +518,9 @@ impl FrameInputs {
             shadow_distance: f.shadow_distance,
             depth_far: f.depth_far,
             underwater: f.underwater,
-            water_plane: f.water_plane,
             cave_culling: f.cave_culling,
             title: false,
+            sky_pass: f.sky_pass,
             sky_blocked: f.sky_blocked,
             skybox: f.skybox,
             end_sky: f.end_sky,
@@ -554,7 +533,6 @@ impl FrameInputs {
             outline: Vec::new(),
             outline_after_terrain: false,
             outline_high_contrast: false,
-            pvp: Default::default(),
             debug_lines: &[],
             debug_lines_on_top: &[],
             debug_crosshair: &[],

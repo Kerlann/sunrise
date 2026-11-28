@@ -1,6 +1,7 @@
 //! Immutable component codec values shared by item templates and protocol codecs.
 use sunrise_core::nbt::{Compound, JavaString, Tag, discard_tag, with_tree_stack};
 pub mod consume_effects;
+pub mod json;
 pub mod source;
 pub mod types;
 pub use source::from_component_tag;
@@ -379,6 +380,11 @@ impl Template {
     /// Project the own patch to its saved form, omitting transients without changing the template.
     pub fn to_tag(&self) -> Result<Tag, String> {
         self.tag(Projection::Tree)
+    }
+    /// Project the own persistent patch to its canonical `components` compound without
+    /// re-validating against the built-in-only registry.
+    pub fn patch_to_tag(&self) -> Result<Option<Tag>, String> {
+        template_patch_tag(&self.patch, Projection::Codec)
     }
     fn tag(&self, projection: Projection) -> Result<Tag, String> {
         let mut fields = vec![("id".into(), Tag::String(self.item.as_str().into()))];

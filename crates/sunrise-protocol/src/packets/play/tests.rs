@@ -72,6 +72,23 @@ fn a_command_tree_with_a_cycle_is_refused() {
         node(1, "b", vec![], Some(1)),
     ];
     assert!(read(redirects).is_err());
+    // The root index must name a root node: an empty tree, an out-of-range index and a
+    // non-root entry are refused.
+    let read_root = |nodes: Vec<CommandNode>, root: i32| {
+        let mut w = Writer::new();
+        Commands::write(&Commands { nodes, root }, &mut w);
+        Commands::read(&mut Reader::new(&w.data))
+    };
+    assert!(read_root(Vec::new(), 0).is_err());
+    assert!(read_root(vec![node(0, "", vec![], None)], 1).is_err());
+    assert!(read_root(vec![node(0, "", vec![], None)], -1).is_err());
+    assert!(
+        read_root(
+            vec![node(0, "", vec![1], None), node(1, "a", vec![], None)],
+            1
+        )
+        .is_err()
+    );
     // A long chain is fine and checked without recursing.
     let mut chain: Vec<_> = (1..=100_000).map(|i| node(1, "x", vec![i], None)).collect();
     chain[0].kind = 0;
@@ -305,7 +322,7 @@ fn tracked_waypoint_bytes() {
     let track = Clientbound::TrackedWaypoint(TrackedWaypoint {
         operation: waypoint_operation::TRACK,
         id: WaypointId::Uuid(0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10),
-        style: "minecraft:default".into(),
+        style: sunrise_core::identifier::Identifier::parse("minecraft:default").unwrap(),
         color: Some(0xFFFF_5555_u32 as i32),
         target: WaypointTarget::Block([1, -2, 300]),
     });
@@ -326,13 +343,24 @@ fn tracked_waypoint_bytes() {
         let packet = Clientbound::TrackedWaypoint(TrackedWaypoint {
             operation: waypoint_operation::UPDATE,
             id: WaypointId::Name("spawn".into()),
-            style: "minecraft:bowtie".into(),
+            style: sunrise_core::identifier::Identifier::parse("minecraft:bowtie").unwrap(),
             color: None,
             target,
         });
         let bytes = packet.encode();
         assert_eq!(Clientbound::decode(141, &bytes[2..]).unwrap(), packet);
     }
+    // `Identifier.STREAM_CODEC` refuses a style that is no identifier (#6064): the packet is
+    // refused at decode, so a reader never sees an unchecked style.
+    let mut bad = vec![0, 1];
+    bad.extend(1..=16u8);
+    bad.push(10);
+    bad.extend(b"Bad Style!");
+    bad.extend([0, 0]);
+    assert!(Clientbound::decode(141, &bad).is_err());
+    let mut good = bad.clone();
+    good[19..29].copy_from_slice(b"mod:flag_1");
+    assert!(Clientbound::decode(141, &good).is_ok());
 }
 
 #[test]
@@ -1211,6 +1239,43 @@ fn sign_packets_match_vanilla_stream_codecs() {
     let body = update.encode();
     assert_eq!(body[9..], [2, b'H', b'i', 0, 1, b'x', 0, 0]);
     round_trip(update, Serverbound::encode, Serverbound::decode);
+
+    // ServerboundSignUpdatePacket.MAX_STRING_LENGTH (384 UTF-16 code units) is enforced on
+    // protocol encode validation too, matching vanilla Utf8String.write(buf, line, 384).
+    let at_limit = Serverbound::SignUpdate(SignUpdate {
+        pos: [1, 64, -2],
+        lines: [
+            "a".repeat(SignLines::MAX_UTF16),
+            "🦀".repeat(SignLines::MAX_UTF16 / 2),
+            String::new(),
+            String::new(),
+        ],
+        front: true,
+    });
+    assert!(at_limit.try_encode().is_ok());
+    assert!(at_limit.try_encode_payload().is_ok());
+    for bad_lines in [
+        [
+            "a".repeat(SignLines::MAX_UTF16 + 1),
+            String::new(),
+            String::new(),
+            String::new(),
+        ],
+        [
+            String::new(),
+            String::new(),
+            "🦀".repeat(SignLines::MAX_UTF16 / 2 + 1),
+            String::new(),
+        ],
+    ] {
+        let too_long = Serverbound::SignUpdate(SignUpdate {
+            pos: [1, 64, -2],
+            lines: bad_lines,
+            front: true,
+        });
+        assert!(too_long.try_encode().is_err());
+        assert!(too_long.try_encode_payload().is_err());
+    }
 }
 
 #[test]

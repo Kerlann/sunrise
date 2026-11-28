@@ -18,6 +18,9 @@ pub(super) struct Overlay {
     pub(super) hand_drawn: bool,
     /// Camera-relative world to clip space for the hand: its own field of view and the bob.
     pub(super) hand_view_proj: Mat4,
+    /// The shader pack whose post passes drew this frame owns the tone curve
+    /// (`pack_owns_tone_curve`).
+    pub(super) pack_tonemap: bool,
 }
 
 impl Renderer {
@@ -222,16 +225,13 @@ impl Renderer {
             // GameRenderer.render -> preparePostEffects(Collections.emptyList()).
             post.clear_active(frame.post_effects.root);
         }
-        // The layered frame's light eases into the peak, before the camera overlays draw on it,
-        // unless a 0.2 pack's own `[tonemap]` did.
-        let pack_tonemap = self
-            .native
-            .as_ref()
-            .and_then(|n| n.post.as_ref())
-            .is_some_and(native_post::NativePost::tonemaps);
-        if sunrise_tone_curve(layered, !frame.title, pack_tonemap)
-            && let Some(hdr) = &self.hdr
-        {
+        // The layered frame's light eases into the peak, before the camera overlays draw on it.
+        let curve = sunrise_tone_curve(layered, !frame.title, overlay.pack_tonemap);
+        #[cfg(feature = "test-support")]
+        if overlay.real {
+            self.test_hooks.tone_curve_ran = curve && self.hdr.is_some();
+        }
+        if curve && let Some(hdr) = &self.hdr {
             hdr.tonemap(encoder, timing.as_mut());
         }
         if !frame.screen.is_empty() {
@@ -250,10 +250,21 @@ impl Renderer {
                 color_attachments: &attachments,
                 ..Default::default()
             });
-            pass.set_bind_group(0, &self.entity_group, &[]);
             pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
             pass.set_vertex_buffer(0, self.screen_buffer.slice(..));
             for (i, quad) in frame.screen.iter().enumerate() {
+                let group = match quad.atlas_page {
+                    Some(page) => {
+                        let Some(group) =
+                            self.screen_page_groups.get(page).and_then(Option::as_ref)
+                        else {
+                            continue;
+                        };
+                        group
+                    }
+                    None => &self.entity_group,
+                };
+                pass.set_bind_group(0, group, &[]);
                 let blend = match quad.blend {
                     crate::screen_effects::Blend::Alpha => 0,
                     crate::screen_effects::Blend::Vignette => 4,

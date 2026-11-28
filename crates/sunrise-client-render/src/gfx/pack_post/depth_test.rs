@@ -7,7 +7,7 @@ use wgpu::{TextureFormat as T, util::DeviceExt};
 pub(super) const SIZE: [u32; 2] = [16, 16];
 
 pub(super) struct Gpu {
-    adapter: wgpu::Adapter,
+    pub(super) adapter: wgpu::Adapter,
     pub(super) device: wgpu::Device,
     pub(super) queue: wgpu::Queue,
 }
@@ -58,6 +58,18 @@ impl Gpu {
         world: World<'_>,
         inputs: sunrise_shaders::GameInputs,
     ) -> PackPost {
+        self.load_with(files, world, inputs, sunrise_shaders::Macros::standard())
+            .0
+    }
+    /// [`Self::load`] with `macros` as the game's load starts with them, and the notes
+    /// `read_properties` gives for the pack's feature flags.
+    pub(super) fn load_with(
+        &self,
+        files: Vec<(String, String)>,
+        world: World<'_>,
+        inputs: sunrise_shaders::GameInputs,
+        mut macros: sunrise_shaders::Macros,
+    ) -> (PackPost, Vec<String>) {
         use std::io::{Cursor, Write};
         let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
         for (name, contents) in files {
@@ -73,8 +85,7 @@ impl Gpu {
             zip.finish().unwrap().into_inner(),
         )
         .unwrap();
-        let mut macros = sunrise_shaders::Macros::standard();
-        let (properties, _) = sunrise_shaders::read_properties(&pack, &mut macros);
+        let (properties, feature_notes) = sunrise_shaders::read_properties(&pack, &mut macros);
         let post = sunrise_shaders::load_post(&pack, "", &properties, &macros, &inputs);
         assert!(
             post.programs.iter().any(|p| p.name == "final"),
@@ -96,7 +107,7 @@ impl Gpu {
             "{:?}",
             built.notes
         );
-        built
+        (built, feature_notes)
     }
     pub(super) fn clear(
         &self,
@@ -159,10 +170,13 @@ impl Gpu {
             &screen,
             frame,
             &Default::default(),
+            Default::default(),
             SIZE,
             SIZE,
             &[],
             terrain,
+            Default::default(),
+            |_, _| false,
             &std::sync::atomic::AtomicBool::new(false),
             super::super::in_flight::poll_live,
         )
@@ -611,15 +625,16 @@ pub(super) fn fixture_frame(hud: &HudBatch) -> Frame<'_> {
         first_person: true,
         shadow_scene_revision: (0, 0),
         shadow_cache: false,
-        water_plane: None,
         weather: &[],
         weather_time: crate::weather::Time::new(0, 0.0),
         camera: glam::DVec3::new(0.5, 100.0, 0.5),
         yaw: 0.0,
         pitch: 0.0,
+        roll: 0.0,
         fov_degrees: 90.0,
         cull_fov_degrees: 90.0,
         bob: glam::Mat4::IDENTITY,
+        view_transform: glam::Mat4::IDENTITY,
         spin: glam::Mat4::IDENTITY,
         sky: crate::environment::Sky::default(),
         distance: 12.0,
@@ -629,6 +644,7 @@ pub(super) fn fixture_frame(hud: &HudBatch) -> Frame<'_> {
         underwater: false,
         cave_culling: false,
         title: true,
+        sky_pass: false,
         sky_blocked: false,
         skybox: false,
         end_sky: false,
@@ -641,7 +657,6 @@ pub(super) fn fixture_frame(hud: &HudBatch) -> Frame<'_> {
         outline: Vec::new(),
         outline_after_terrain: false,
         outline_high_contrast: false,
-        pvp: Default::default(),
         debug_lines: &[],
         debug_lines_on_top: &[],
         debug_crosshair: &[],

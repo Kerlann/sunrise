@@ -181,9 +181,11 @@ impl Catalog {
                 .as_object()
                 .ok_or_else(|| invalid("invalid entity supplier"))?
             {
-                let id = ids
-                    .get(name)
-                    .ok_or_else(|| invalid("unknown supplier attribute"))?;
+                let id = ids.get(name).ok_or_else(|| {
+                    invalid(format!(
+                        "missing {name} definition referenced by {entity} supplier"
+                    ))
+                })?;
                 bases[id.0] = Some(number(base)?);
             }
             defaults.insert(entity.clone(), Arc::from(bases));
@@ -221,6 +223,18 @@ impl Catalog {
     /// The entity type's supplier base of an attribute, if the type has it.
     pub fn default_base(&self, entity: &str, id: AttributeId) -> Option<f64> {
         self.defaults.get(entity).and_then(|b| b[id.0])
+    }
+    /// The names supported by the entity type's supplier, in catalog order.
+    pub fn attribute_names_for(&self, entity: &str) -> impl Iterator<Item = &str> {
+        self.defaults
+            .get(entity)
+            .into_iter()
+            .flat_map(move |bases| {
+                self.attributes
+                    .iter()
+                    .zip(bases.iter())
+                    .filter_map(|(attribute, base)| base.map(|_| attribute.name.as_str()))
+            })
     }
     /// The entity type's whole supplier row, attribute name to base — the
     /// shape of an `entity-types.json` row. None if the type has no row.

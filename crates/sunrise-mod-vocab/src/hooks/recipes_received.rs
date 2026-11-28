@@ -1,10 +1,8 @@
 //! The `recipes_received` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0124
 
 pub trait Hooks {
     /// The server's recipes of `recipe_types` arrived (NeoForge's
-    /// `RecipesReceivedEvent`): from now on the recipe helpers
-    /// (`native_recipes`, `native_recipes_of_type`) give the server's recipes
+    /// `RecipesReceivedEvent`): `host.recipes_of_type` reads the server's recipes
     /// of those types in place of the window's own, so rebuild what you made
     /// of them. Vanilla serializers expose resolved candidates, not native
     /// ingredient predicates; matching on the server remains authoritative.
@@ -16,7 +14,7 @@ pub trait Hooks {
     /// recipes. A recipe's recipe book ids are not part of what arrives:
     /// `recipe_book_ids` answers them. Client-side.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_recipes_received",
+        target = "sunrise_client_gameplay::game::native_hooks::base::ClientGame<'_>::native_recipes_received",
         dispatch = "flat",
         side = "client",
         contract = "listen",

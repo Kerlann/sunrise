@@ -15,15 +15,18 @@ pub mod game_identity;
 ))]
 pub mod holder;
 pub mod icon;
-#[cfg(feature = "index")]
+#[cfg(feature = "index-read")]
 pub mod index;
 pub mod install_lock;
 pub mod internals;
+pub mod library_identity;
 #[cfg(all(
     feature = "runtime-process",
     any(target_os = "linux", target_os = "macos", windows)
 ))]
 pub mod local_control;
+#[cfg(any(feature = "prebuilt", feature = "runtime-process"))]
+pub mod lock_file;
 #[cfg(feature = "runtime-process")]
 pub mod locks;
 pub mod manifest;
@@ -39,6 +42,7 @@ pub mod page;
 pub mod runtime;
 #[cfg(feature = "runtime-process")]
 pub mod runtime_leases;
+#[cfg(feature = "sdk")]
 pub mod sdk;
 pub mod selection;
 

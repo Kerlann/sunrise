@@ -1,5 +1,4 @@
 //! The `screen_mouse_button_pressed_pre` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0093
 
 pub trait Hooks {
     /// A press about to go to `Screen.mouseClicked` (`ScreenEvent.MouseButtonPressed.Pre`).
@@ -18,15 +17,14 @@ pub trait Hooks {
     /// input (including a control-socket click sent through the window), not a
     /// gamepad's or keyboard focus's synthesized click.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_screen_mouse_button_pressed_pre",
-        receiver = "read",
+        target = "sunrise_client_gameplay::game::native_hooks::base::ClientGame<'_>::native_screen_mouse_button_pressed_pre",
         dispatch = "flat",
         side = "client",
         contract = "cancel",
         out = "canceled",
         neoforge = "ScreenEvent.MouseButtonPressed.Pre",
         cancellable = true,
-        version = 3
+        version = 4
     )]
     fn screen_mouse_button_pressed_pre(
         screen: &ScreenView<'_>,

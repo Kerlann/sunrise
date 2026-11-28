@@ -51,7 +51,9 @@ first release is reviewed and merged.
 `release` is in the [newest tool from main](../start/install-tool.md#newest-tool-from-main). A Nightly's tool that
 lacks it answers `"release" is not a cargo sunrise-mod command`.
 
-Commit your mod's source, its page, and `Cargo.lock` for a native mod. From the mod's folder on a clean branch
+Commit your mod's source, its page, and `Cargo.lock` for a native mod. The lock must match the pinned SDK:
+`cargo sunrise-mod pin` keeps it so, and after moving `[native] sunrise` by hand, `cargo sunrise-mod pin <build>`
+with the build already pinned regenerates it. From the mod's folder on a clean branch
 that is up to date with its upstream:
 
 ```sh
@@ -64,6 +66,10 @@ release checks for the proposed version without changing the checkout. Without i
 workflow, commits the version bump signed off (`Signed-off-by`, from your Git `user.name` and `user.email`), and pushes the branch, then the tag, to `origin` in two pushes: GitHub starts no workflow for a tag pushed together with the commit that first adds its workflow file. The tag is `v<version>`
 at the repository root or `<id>/v<version>` for a subfolder package. GitHub Actions builds and attests both the
 `.smod` and its page bundle, with no signing key for you to manage.
+
+`release` reads your repository's ID from GitHub's API. Set `GH_TOKEN` or `GITHUB_TOKEN` when you release
+many packages in an hour: with a token GitHub allows far more than the 60 requests an hour it allows without one.
+The token is sent to `api.github.com` alone.
 
 If your default branch accepts changes only through pull requests, add `--pull-request`:
 
@@ -89,7 +95,7 @@ updates your caller in the release commit when it has moved, so you never edit t
 2. The registry bot watches registered repositories. For a new release it opens a pull request on
    sunrise-org/sunrise-mods that adds the release and updates the project's page. A release whose package is of
    another kind than the project (a content mod that gained `[native]` code, or the reverse) changes the project's
-   kind in the same pull request and removes the project's earlier releases; `release` says so before it tags.
+   kind in the same pull request and removes the project's earlier releases.
 3. The bot's checks run on that pull request. They are static checks plus a compile, and never load the mod in the
    game:
    - the files' format, sizes and SHA-256 hashes, and both attestations against the registered repository, the
@@ -107,6 +113,9 @@ updates your caller in the release commit when it has moved, so you never edit t
 
 To check a released package and its attestation yourself, use
 [`check <file.smod>`](../reference/sdk/05-commands.md#check-a-released-package).
+
+Once several of your mods are listed, you can show them as one card in Discover: see
+[Group your mods into a collection](collections.md).
 
 ## Your mod's page
 

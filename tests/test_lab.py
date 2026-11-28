@@ -13,6 +13,7 @@ import unittest
 from unittest import mock
 import zipfile
 
+from tests.git_fixture import isolated_git_env
 from tools import agent_control_e2e, check_public_tree, lab
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -201,7 +202,7 @@ class PublicationTests(unittest.TestCase):
     def test_copied_data_fixer_tables_are_rejected_in_the_tree_only(self):
         with tempfile.TemporaryDirectory() as temp:
             directory = Path(temp)
-            env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+            env = isolated_git_env()
             def git(*args):
                 subprocess.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", *args],
                                cwd=directory, env=env, check=True, capture_output=True)
@@ -237,7 +238,8 @@ class PublicationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             directory = Path(temp)
             def git(*args):
-                return subprocess.check_output(["git", *args], cwd=directory, stderr=subprocess.DEVNULL)
+                return subprocess.check_output(["git", *args], cwd=directory, stderr=subprocess.DEVNULL,
+                                               env=isolated_git_env())
             git("init", "-b", "main")
             (directory / ".gitignore").write_text("/.local/\n")
             (directory / ".local").mkdir()
@@ -390,6 +392,60 @@ class GameEnvScreenTests(unittest.TestCase):
                 run.assert_not_called()
                 self.assertEqual(env["SUNRISE_HOME"], home)
                 self.assertNotIn("VSCREEN", env)
+
+
+class FreePortTests(unittest.TestCase):
+    def test_a_port_another_process_has_claimed_is_skipped(self):
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(lab.tempfile, "gettempdir", return_value=temp), \
+                mock.patch.object(lab, "_PORT_LOCKS", []) as held:
+            first = lab.free_port()
+            claimed = Path(temp).glob("sunrise-harness-ports-*/" + str(first))
+            self.assertEqual(len(list(claimed)), 1)
+            # The OS hands out the claimed number again, then another one: the claimed number is not returned.
+            real = lab.socket.socket
+            answers = iter([first, first])
+
+            class Sock(real):
+                def bind(self, address):
+                    return super().bind(("127.0.0.1", next(answers, 0)))
+
+            with mock.patch.object(lab.socket, "socket", Sock):
+                second = lab.free_port()
+            self.assertNotEqual(second, first)
+            self.assertEqual(len(held), 2)
+            for handle in held:
+                handle.close()
+
+
+class ExactFloatTests(unittest.TestCase):
+    def test_a_printed_float_reads_back_to_its_own_bits(self):
+        for bits in [0x00000001, 0x007FFFFF, 0x00800000, 0x3DCCCCCD, 0x3F800000, 0x3F800001, 0x7F7FFFFF,
+                     0xBF800000, 0xC2C80001, 0x80000001]:
+            value = struct.unpack(">f", struct.pack(">I", bits))[0]
+            for text in [repr(value), f"{value:.9g}"]:
+                self.assertEqual(lab.f32_bits(lab.exact_json(f"[{text}]")[0]), bits, text)
+
+    def test_a_decimal_near_a_midpoint_rounds_once(self):
+        # Parsed to a double first, this lands on 1.0; the exact value is just past the midpoint.
+        number = lab.exact_json("[1.00000005960464477539062501]")[0]
+        self.assertEqual(struct.unpack(">I", struct.pack(">f", number))[0], 0x3F800000)
+        self.assertEqual(lab.f32_bits(number), 0x3F800001)
+
+    def test_signed_zero_integers_and_overflow(self):
+        self.assertEqual(lab.f32_bits(lab.exact_json("[-0.0]")[0]), 0x80000000)
+        self.assertEqual(lab.f32_bits(lab.exact_json("[0]")[0]), 0)
+        self.assertEqual(lab.f32_bits(lab.exact_json("[1]")[0]), 0x3F800000)
+        self.assertEqual(lab.f32_bits(lab.exact_json("[3.5e38]")[0]), 0x7F800000)
+        self.assertEqual(lab.f64_bits(lab.exact_json("[-0.0]")[0]), 0x8000000000000000)
+
+    def test_ulps_count_across_zero(self):
+        self.assertEqual(lab.ulps(0x3F800000, 0x3F800002), 2)
+        self.assertEqual(lab.ulps(0x80000001, 0x00000001), 2)
+        self.assertEqual(lab.ulps(0x80000000, 0x00000000), 0)
+        self.assertIsNone(lab.float_difference(lab.exact_json("[0.1]")[0], lab.exact_json("[0.10000000149011612]")[0]))
+        self.assertEqual(lab.float_difference(lab.exact_json("[0.1]")[0], lab.exact_json("[0.1]")[0], 64), None)
+        self.assertEqual(lab.float_difference(lab.exact_json("[0.1]")[0], lab.exact_json("[0.10000000149011612]")[0], 64),
+                         "107374182 ulp")
 
 
 if __name__ == "__main__":

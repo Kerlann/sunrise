@@ -3,7 +3,7 @@ run-name: daily ${{ inputs.commit || github.sha }}${{ inputs.break_glass && ' (b
 # The daily tier (CI tiers, owner 2026-11-13; docs/release-flow.md "Daily run"): every in-game test, once a day on
 # main's head and by root's dispatch. Its legs include the ignored-tests data shards, fn-replace-check, the game's
 # Windows runtime-lease tests, cargo-sunrise-mod's platform archives, the machine sample and the prebuilt SDK. The SDK's
-# Linux and Windows client jobs run the native linkage probe before packing.
+# Linux and Windows client jobs run the native linkage probe before packing, and the Java exporters' determinism check.
 # The summary then moves the tag `daily-green` to the commit when every leg passed, or files one issue per failing
 # test (tools/ci/daily_summary.py), and on all green the nightly is published from that commit (release.yml).
 # Only a run on main with dry_run false writes anything: tags, issues, the nightly. A real run on release/26.3 files and
@@ -121,6 +121,9 @@ jobs:
             git fetch -q --no-tags origin "+refs/heads/$branch:refs/remotes/origin/$branch"
             git merge-base --is-ancestor "$sha" "refs/remotes/origin/$branch" \
               || { echo "::error::$sha is not on $branch: a writing daily run takes only its branch's commits"; exit 1; }
+            # The live branch can advance, but this run's workflow and jobs come from the dispatch SHA.
+            git merge-base --is-ancestor "$sha" "$GITHUB_SHA" \
+              || { echo "::error::$sha is not in the dispatched workflow's history ($GITHUB_SHA)"; exit 1; }
           fi
           skip=false
           if [ "$SCHEDULED" = true ] && [ "$DRY_RUN" = false ]; then
@@ -217,6 +220,15 @@ jobs:
     uses: ./.github/workflows/machine-sample.yml
     with:
       commit: ${{ needs.resolve.outputs.commit }}
+  # Our Java exporters compiled against the pinned jars, and their determinism check (exporters.yml), which every
+  # release build runs before its platform legs: an exporter that writes in an unstable order is found on main's head
+  # here, not by the next release (the Dev release of 2026-11-25 failed on one).
+  exporters:
+    needs: resolve
+    if: needs.resolve.outputs.skip == 'false' && (needs.resolve.outputs.legs == '' || contains(fromJSON(needs.resolve.outputs.legs), 'exporters'))
+    uses: ./.github/workflows/exporters.yml
+    with:
+      commit: ${{ needs.resolve.outputs.commit }}
   # The prebuilt SDK of this commit, built and smoked on every OS; its archives stay this run's artifacts until
   # sdk-publish releases them after a green summary (a red daily publishes no SDK, as it publishes no nightly).
   # Two calls, the Linux legs and the others, so fn-replace-check needs only the first; both are named `sdk`, so the
@@ -236,6 +248,7 @@ jobs:
     with:
       commit: ${{ needs.resolve.outputs.commit }}
       legs: windows-macos
+      c_source_test: true
 
   # Every automatic vanilla parity harness on this writing run's commit of main. Never on a rollup or a pull
   # request (owner, 2026-11-17). After the test shards, so its large runner is never one of three
@@ -250,13 +263,27 @@ jobs:
     uses: ./.github/workflows/parity.yml
     with:
       commit: ${{ needs.resolve.outputs.commit }}
+  # Exploratory and corpus fuzz are report-only. Run after parity even if parity found gaps; no release job needs this.
+  fuzz:
+    needs: [resolve, parity]
+    if: >-
+      !cancelled() && github.repository == 'sunrise-org/sunrise' && needs.resolve.outputs.branch == 'main' &&
+      needs.resolve.result == 'success' && needs.resolve.outputs.skip == 'false' &&
+      needs.resolve.outputs.dry_run == 'false' && needs.resolve.outputs.commit == github.sha
+    permissions:
+      contents: read
+      issues: write
+    uses: ./.github/workflows/parity-fuzz.yml
+    with:
+      commit: ${{ needs.resolve.outputs.commit }}
+      dry_run: ${{ needs.resolve.outputs.dry_run }}
   # Reads every leg's result and verdict file (never a log) and moves `daily-green` or files the issues.
   summary:
     # The resolved commit names the job: what a scheduled run's lookup (daily_summary.py --seen) matches.
     # A break-glass run's is named apart: it is no completed daily run of the commit (daily_summary.py --seen).
     name: summary ${{ needs.resolve.outputs.commit }}${{ needs.resolve.outputs.legs != '' && ' (break-glass legs)' || '' }}${{ needs.resolve.outputs.dry_run == 'true' && ' (dry run)' || '' }}
     needs: [resolve, shards, fn-replace-check, book-quickstart, windows-runtime-leases, cargo-sunrise-mod,
-            machine-sample, sdk, sdk-windows-macos, parity]
+            machine-sample, exporters, sdk, sdk-windows-macos, parity]
     # Not on a cancelled run: its legs did not fail, they were stopped, and a stopped leg says nothing about the commit.
     if: ${{ !cancelled() && needs.resolve.result == 'success' && needs.resolve.outputs.skip == 'false' }}
     runs-on: ubuntu-latest
@@ -421,10 +448,8 @@ jobs:
       needs.nightly-branch.result == 'success'
     # GitHub checks what every called job asks for at startup, skipped ones too (tests/test_ci_call_permissions.py).
     permissions:
-      # Only because release.yml holds the Dev build’s SDK publish (sdk-publish.yml), which asks for it and never
-      # runs in this call (kind nightly). release.yml's nightly path writes nothing: its jobs declare read, and the
-      # Nightly is written by `nightly build`, which this only starts.
-      contents: write
+      # release.yml writes nothing: the Nightly is written by `nightly build`, which this only starts.
+      contents: read
       issues: read
       actions: write  # release.yml starts `nightly build`
     uses: ./.github/workflows/release.yml

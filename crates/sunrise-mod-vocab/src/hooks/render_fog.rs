@@ -1,12 +1,11 @@
 //! The `render_fog` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0119
 
 pub trait Hooks {
     /// Final world fog, after the computed color hook, ordinary calculations and Sunrise's fog
     /// option, before upload. Title panoramas skip it. Invalid color or distance values retain the
     /// original whole fog.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_render_fog",
+        target = "sunrise_client_gameplay::game::native_hooks::base::ClientGame<'_>::native_render_fog",
         receiver = "read",
         dispatch = "flat",
         side = "client",

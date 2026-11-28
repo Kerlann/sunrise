@@ -1,12 +1,12 @@
 import io
 import json
-import os
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
 from unittest import mock
 
+from tests.git_fixture import isolated_git_env
 from tools import check_addresses, merge_base
 
 
@@ -76,29 +76,47 @@ class CheckTests(unittest.TestCase):
                  ("crates/sunrise-client-render/src/skins.rs", "textures.minecraft.net"),
                  ("crates/sunrise-server/src/discord.rs", "discord.com"),
                  ("crates/sunrise-telemetry/src/lib.rs", "telemetry.playsunrise.net")]
-        self.assertEqual(self.run_check(found), ([], []))
+        self.assertEqual(self.run_check(found), [])
 
     def test_a_new_address_outside_the_home_fails_and_names_the_doc(self):
-        problems, _ = self.run_check([("crates/sunrise-client/src/net.rs", "relay.playsunrise.net")])
+        problems = self.run_check([("crates/sunrise-telemetry/src/lib.rs", "telemetry.playsunrise.net"),
+                                   ("crates/sunrise-client/src/net.rs", "relay.playsunrise.net")])
         self.assertIn("relay.playsunrise.net", problems[0])
         self.assertIn("docs/layers.md#built-in-addresses", problems[0])
 
     def test_non_address_identity_can_be_scoped_to_its_file(self):
         identity = "crates/verifier/src/lib.rs"
         client = "crates/downloader/src/lib.rs"
-        config = dict(CONFIG, not_addresses={f"{identity} github.com": "certificate identity"})
-        problems, _ = check_addresses.check(config, {(identity, "github.com"), (client, "github.com")})
+        config = dict(CONFIG, not_addresses={f"{identity} github.com": "certificate identity"}, allowed=[])
+        problems = check_addresses.check(config, {(identity, "github.com"), (client, "github.com")})
         self.assertEqual(len(problems), 1)
         self.assertIn(client, problems[0])
 
-    def test_an_address_that_left_its_file_is_a_note(self):
-        problems, notes = self.run_check([])
-        self.assertEqual(problems, [])
-        self.assertIn("telemetry.playsunrise.net", notes[0])
+    def test_an_unused_allowance_fails_the_checker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "tools").mkdir()
+            (root / "tools/layers.json").write_text('{"crates": {}}')
+            config_path = root / "tools/addresses.json"
+            allowance = CONFIG["allowed"][0]
+            config = dict(CONFIG, _fork_baselines={allowance: "old baseline"})
+            config_path.write_text(json.dumps(config))
+            home = root / CONFIG["homes"][0]
+            home.parent.mkdir(parents=True)
+            home.write_text('pub const URL: &str = "https://telemetry.playsunrise.net";\n')
+            with mock.patch.object(check_addresses, "ROOT", root), \
+                    mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+                self.assertEqual(check_addresses.main([]), 1)
+                self.assertIn(f"{allowance}: unused allowance", out.getvalue())
+                self.assertEqual(check_addresses.main(["--list"]), 0)
+                config_path.write_text(json.dumps(dict(config, allowed=[])))
+                self.assertEqual(check_addresses.main([]), 0)
 
     def test_the_list_may_not_take_new_hosts_or_grow(self):
         config = dict(CONFIG, allowed=CONFIG["allowed"] + ["crates/x/src/lib.rs relay.playsunrise.net"])
-        problems, _ = check_addresses.check(config, set(), {"allowed": CONFIG["allowed"]})
+        found = {("crates/sunrise-telemetry/src/lib.rs", "telemetry.playsunrise.net"),
+                 ("crates/x/src/lib.rs", "relay.playsunrise.net")}
+        problems = check_addresses.check(config, found, {"allowed": CONFIG["allowed"]})
         self.assertTrue(any("relay.playsunrise.net: added" in p for p in problems))
         self.assertTrue(any("grew from 1 to 2" in p for p in problems))
 
@@ -106,73 +124,7 @@ class CheckTests(unittest.TestCase):
         moved = {"allowed": ["crates/sunrise-telemetry/src/upload.rs telemetry.playsunrise.net"]}
         config = dict(CONFIG, allowed=moved["allowed"])
         found = {("crates/sunrise-telemetry/src/upload.rs", "telemetry.playsunrise.net")}
-        self.assertEqual(check_addresses.check(config, found, {"allowed": CONFIG["allowed"]}), ([], []))
-
-
-class UpstreamRestorationTests(unittest.TestCase):
-    def setUp(self):
-        directory = tempfile.TemporaryDirectory()
-        self.addCleanup(directory.cleanup)
-        self.root = Path(directory.name)
-        self.git("init", "-q", "-b", "main")
-        self.git("config", "user.name", "Fixture")
-        self.git("config", "user.email", "fixture@example.invalid")
-        (self.root / "tools").mkdir()
-        (self.root / "tools/addresses.json").write_text('{"allowed": []}')
-        self.git("add", "tools")
-        self.git("commit", "-q", "-m", "base")
-        self.base = self.git("rev-parse", "HEAD").strip()
-        self.row = "crates/service/src/lib.rs telemetry.playsunrise.net"
-        self.git("checkout", "-q", "-b", "upstream")
-        (self.root / "tools/addresses.json").write_text(json.dumps({"allowed": [self.row]}))
-        self.git("commit", "-q", "-am", "upstream address")
-        remote = self.root / "remote.git"
-        self.git("init", "-q", "--bare", str(remote))
-        self.git("push", "-q", str(remote), "HEAD:refs/heads/main")
-        self.git("checkout", "-q", "-b", "work", self.base)
-        (self.root / "fork").write_text("fork")
-        self.git("add", "fork")
-        self.git("commit", "-q", "-m", "fork")
-        self.git("merge", "-q", "--no-edit", "upstream")
-        for patch in (mock.patch.object(check_addresses, "ROOT", self.root),
-                      mock.patch.object(merge_base, "ROOT", self.root),
-                      mock.patch.dict(os.environ, {"SUNRISE_UPSTREAM_URL": str(remote)})):
-            patch.start()
-            self.addCleanup(patch.stop)
-
-    def git(self, *args):
-        return subprocess.run(["git", *args], cwd=self.root, check=True,
-                              capture_output=True, text=True).stdout
-
-    def problems(self, row):
-        upstream, errors = check_addresses.restored_upstream_rows(self.base)
-        self.assertEqual(errors, [])
-        found = {tuple(row.split(" ", 1))}
-        return check_addresses.check({"allowed": [row]}, found, {"allowed": []}, upstream)[0]
-
-    def test_verbatim_upstream_row_with_verified_sync_passes(self):
-        self.assertEqual(self.problems(self.row), [])
-
-    def test_fork_only_row_fails(self):
-        self.assertTrue(self.problems("crates/fork/src/lib.rs fork.playsunrise.net"))
-
-    def test_one_character_change_to_upstream_row_fails(self):
-        self.assertTrue(self.problems(self.row.replace("service/", "service2/")))
-
-    def test_forged_sync_provenance_cannot_restore_rows(self):
-        self.git("reset", "-q", "--hard", "HEAD^")
-        self.git("checkout", "-q", "-b", "forgery", self.base)
-        (self.root / "tools/addresses.json").write_text(json.dumps({"allowed": [self.row]}))
-        self.git("commit", "-q", "-am", "forged upstream address")
-        self.git("checkout", "-q", "work")
-        self.git("merge", "-q", "--no-edit", "forgery")
-        rows, errors = check_addresses.restored_upstream_rows(self.base)
-        self.assertEqual(rows, set())
-        self.assertEqual(errors, [])
-
-    def test_verbatim_row_without_a_merge_of_upstream_fails(self):
-        self.git("reset", "-q", "--hard", "HEAD^")
-        self.assertTrue(self.problems(self.row))
+        self.assertEqual(check_addresses.check(config, found, {"allowed": CONFIG["allowed"]}), [])
 
 
 class PullRequestMergeTests(unittest.TestCase):
@@ -180,8 +132,8 @@ class PullRequestMergeTests(unittest.TestCase):
         """main allowed a new address after the branch left it: a pull request merged into that main didn't add it."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t.invalid",
-                       GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t.invalid")
+            env = isolated_git_env(GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t.invalid",
+                                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t.invalid")
 
             def run(*args):
                 return subprocess.run(["git", *args], cwd=root, check=True, capture_output=True, env=env,
@@ -210,16 +162,11 @@ class PullRequestMergeTests(unittest.TestCase):
             run("commit", "-q", "-m", "main allows an address")
             run("checkout", "-q", "--detach", "main")
             run("merge", "-q", "--no-ff", "-m", "merge work", "work")
-            fetch = mock.Mock(return_value=["no network"])
             with mock.patch.object(check_addresses, "ROOT", root), mock.patch.object(merge_base, "ROOT", root), \
-                    mock.patch.object(merge_base, "fetch_upstream_main", fetch), \
                     mock.patch("sys.stdout", new_callable=io.StringIO) as out:
                 self.assertEqual(check_addresses.main(["--base", base, "--pull-request-merge"]), 0)
-                fetch.assert_not_called()  # a merge and no violation never reaches the network
-                # Against the branch's old base, main's new entry was charged to the pull request, and only that
-                # violation looks for an upstream inventory that could excuse it.
+                # Against the branch's old base, main's new entry is charged to the pull request.
                 self.assertEqual(check_addresses.main(["--base", base]), 1)
-                fetch.assert_called_once()
             self.assertIn("relay.playsunrise.net", out.getvalue())
 
 
@@ -228,8 +175,8 @@ class BaseConfigTests(unittest.TestCase):
         """An entry main dropped after the branch left it is still on the branch's base: the branch didn't add it."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t.invalid",
-                       GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t.invalid")
+            env = isolated_git_env(GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t.invalid",
+                                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t.invalid")
 
             def run(*args):
                 subprocess.run(["git", *args], cwd=root, check=True, capture_output=True, env=env)

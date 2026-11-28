@@ -8,7 +8,8 @@ flickers, and dripstone and leaves drip, the way the client's animate tick makes
 particles for blocks near the player.
 
 When a scene block includes a mod block entity, `block_entity_submit` draws it using
-that supplied entity data and full-bright lighting. The hook's `pos` is relative to
+a read-only borrow of the supplied entity data (`event.entity.nbt()`, `item_slot`,
+`copy_item_slot`) and full-bright lighting. The hook's `pos` is relative to
 the scene; it does not identify a block in the client level.
 
 For a menu screen, use the draw context from `MenuScreen::with_draw(|host, frame, draw| ...)`.
@@ -70,7 +71,7 @@ returns a `SceneError`:
 | Error | Cause |
 |---|---|
 | `Unavailable` | Not a client's drawing |
-| `BadView` | A view or box that isn't finite, or a scene too large to stay in finite GUI coordinates |
+| `BadView` | A view or box that isn't finite, a scale that isn't positive and finite, or a scene too large to stay in finite GUI coordinates |
 | `TooManyBlocks` | More than `SCENE_MAX_BLOCKS` (4096) blocks |
 | `TooManyEntities` | More than `SCENE_MAX_ENTITIES` (16) entities |
 | `TooManyParticles` | More than `SCENE_MAX_PARTICLES` (512) particles to add at once |
@@ -83,6 +84,8 @@ returns a `SceneError`:
 | `BadParticle { index }` | Particle options, a position or a velocity that isn't finite, or options that name a stack |
 | `BadClock` | A partial tick that isn't finite |
 | `NoClock` | Entities or particles without a clock |
+
+A scale that isn't positive and finite is refused before the scene is looked at: it keeps no scene, advances no clock and spends none of the frame's four animations.
 
 ## Not yet
 

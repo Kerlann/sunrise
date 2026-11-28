@@ -23,6 +23,7 @@ struct Globals {
     // Sunrise Extras' dynamic lights: camera-relative position and level (dynamic_light.rs).
     dynamic_lights: array<vec4<f32>, 16>,
     colored_lights: array<vec4<f32>, 32>,
+    // x: coloured light count; yzw: padding.
     colored_count: vec4<u32>,
     emissive_layers: array<vec4<u32>, 128>,
     emissive_count: vec4<u32>,
@@ -94,9 +95,7 @@ fn entity_light(normal: vec3<f32>, nether: bool) -> f32 {
 // swelling). Alpha 1 changes nothing.
 fn overlay_texel(overlay: u32) -> vec4<f32> {
     if overlay == 1u || overlay == 8u {
-        // PvP & HUD's hit colour (pvp.rs `Hit::texel`) rides in colored_count.y; 0 is vanilla's.
-        let hit = globals.colored_count.y;
-        return select(HURT_OVERLAY, unpack4x8unorm(hit), hit != 0u);
+        return HURT_OVERLAY;
     }
     if overlay == 5u { return vec4(1.0, 1.0, 1.0, WHITE_OVERLAY_ALPHA[15]); }
     if overlay >= 16u && overlay < 32u { return vec4(1.0, 1.0, 1.0, WHITE_OVERLAY_ALPHA[overlay - 16u]); }
@@ -129,7 +128,9 @@ fn entity_vertex(position: vec3<f32>, uv: vec2<f32>,
     out.clip = globals.view_proj * vec4(position, 1.0);
     out.proj = vec4(out.clip.xy * 0.5 + out.clip.w * 0.5, out.clip.zw);
     out.uv = uv;
-    let l = vec2(max(f32(light.y), dynamic_block_light(position)), f32(light.x));
+    let exact_light = light.z != 0u && overlay != 6u && overlay != 11u && overlay != 12u;
+    let block_light = select(max(f32(light.y), dynamic_block_light(position)), f32(light.y), exact_light);
+    let l = vec2(block_light, f32(light.x));
     let lm = textureSampleLevel(lightmap, lightmap_sampler,
         clamp(l / 256.0 + 0.5 / 16.0, vec2(0.5 / 16.0), vec2(15.5 / 16.0)), 0.0);
     // Celestial bodies, clouds, beacon beams, End portals and breaking cracks are unlit.
@@ -247,18 +248,11 @@ fn armor_glint_uv(model: vec2<f32>) -> vec2<f32> {
     return vec2(scaled.x * c - scaled.y * s - offset0,
                 scaled.x * s + scaled.y * c + offset1);
 }
-// PvP & HUD's glint colour (pvp.rs `Tweaks::glint_texel`, 0 for vanilla's): the sample's
-// brightest channel over the chosen colour, so the shimmer keeps its pattern and strength.
-fn tinted_glint(glint: vec4<f32>, packed: u32) -> vec4<f32> {
-    if packed == 0u { return glint; }
-    let tint = unpack4x8unorm(packed).rgb;
-    return vec4(max(glint.r, max(glint.g, glint.b)) * tint, glint.a);
-}
 // RenderPipelines.GLINT: the source colour is scaled by itself, so `GlintAlpha`
 // is squared along with the sample.
 fn glint_over(color: vec4<f32>, glint: vec4<f32>) -> vec4<f32> {
     let alpha = globals.fog_ends.w;
-    let g = alpha * tinted_glint(glint, globals.colored_count.z);
+    let g = alpha * glint;
     return vec4(color.rgb + g.rgb * g.rgb, max(color.a, alpha));
 }
 // CRUMBLING_UV_BEGIN
@@ -295,9 +289,11 @@ struct ClippedEntity {
     @location(0) color: vec4<f32>,
     @builtin(frag_depth) depth: f32,
 }
-@fragment fn fs_entity_clipped(in: Out, @builtin(front_facing) front: bool) -> ClippedEntity {
-    let color = entity_written_color(in, entity_color(in, front, true));
+fn clipped_entity(in: Out, color: vec4<f32>) -> ClippedEntity {
     return ClippedEntity(color, min(in.clip.z + globals.world_view.y / in.proj.w, 1.0));
+}
+@fragment fn fs_entity_clipped(in: Out, @builtin(front_facing) front: bool) -> ClippedEntity {
+    return clipped_entity(in, entity_written_color(in, entity_color(in, front, true)));
 }
 @fragment fn fs_entity_unmarked(in: Out, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     return frame_stored(entity_color(in, front, true));
@@ -316,10 +312,7 @@ struct ClippedEntity {
 // samples the glint texture alone, fades by fog and `GlintAlpha`, and squares RGB
 // to match `BlendFunction.GLINT` (`SRC_COLOR, ONE, ZERO, ONE`) under additive colour blend.
 @fragment fn fs_glint(in: Out) -> @location(0) vec4<f32> {
-    let color = tinted_glint(
-        textureSample(glint_tex, glint_sampler, in.glint_uv),
-        globals.colored_count.z,
-    );
+    let color = textureSample(glint_tex, glint_sampler, in.glint_uv);
     if color.a < 0.1 { discard; }
     let f = max(linear_fog(in.fog_distance.x, globals.fog.x, globals.fog.y),
                 linear_fog(in.fog_distance.y, globals.fog.z, globals.fog.w));
@@ -554,6 +547,13 @@ fn sun_weight(in: Out, added: vec3<f32>) -> f32 {
 // it to the frame. The light bytes carry the sprite's origin and the colour bytes its size, both
 // as breaking::stage_light packs them.
 fn energy_swirl_base(in: Out) -> vec4<f32> {
+    if in.overlay == ARMOR_GLINT_ONLY_OVERLAY {
+        // The armor's texture still supplies its cutout, never its color. Draw only the
+        // additive contribution of the foil; a hidden material must not occlude the body.
+        if textureSample(atlas, atlas_sampler, in.uv).a * in.color.a < 0.1 { discard; }
+        let glint = textureSample(glint_armor_tex, glint_sampler, armor_glint_uv(in.glint_uv));
+        return vec4(glint_over(vec4(0.0), glint).rgb, 1.0);
+    }
     let bytes = round(in.color * 255.0);
     let size = vec2(bytes.x + bytes.y * 256.0, bytes.z + bytes.w * 256.0) / 65535.0;
     let color = textureSample(atlas, atlas_sampler, crumbling_uv(in.uv, in.wrap, size, textureDimensions(atlas)));
@@ -565,9 +565,17 @@ fn energy_swirl_fog(in: Out) -> f32 {
                 linear_fog(in.fog_distance.y, globals.fog.z, globals.fog.w));
     return f * globals.fog_color.a;
 }
-@fragment fn fs_energy_swirl(in: Out) -> @location(0) vec4<f32> {
+fn energy_swirl_color(in: Out) -> vec4<f32> {
     let color = energy_swirl_base(in);
-    return frame_stored(vec4(mix(color.rgb, globals.fog_color.rgb, energy_swirl_fog(in)), color.a));
+    let fog = energy_swirl_fog(in);
+    if in.overlay == ARMOR_GLINT_ONLY_OVERLAY { return frame_stored(vec4(color.rgb * (1.0 - fog), 0.0)); }
+    return frame_stored(vec4(mix(color.rgb, globals.fog_color.rgb, fog), color.a));
+}
+@fragment fn fs_energy_swirl(in: Out) -> @location(0) vec4<f32> {
+    return energy_swirl_color(in);
+}
+@fragment fn fs_foil_clipped(in: Out) -> ClippedEntity {
+    return clipped_entity(in, energy_swirl_color(in));
 }
 
 // RenderPipelines.WATER_MASK: depth only (the pipeline masks the colour off).

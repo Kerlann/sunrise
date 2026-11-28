@@ -68,7 +68,7 @@ impl mod_api::Hooks for Greeter {
             "sunrise-resources.json",
             r#"{"schema":7,"minecraft":"26.3"}"#,
         ),
-        ("sunrise-prepare.json", r#"{"output_version":8}"#),
+        ("sunrise-prepare.json", r#"{"output_version":9}"#),
         ("registries.json", "{}"),
     ] {
         fs::write(resources.join(name), json).unwrap();
@@ -113,7 +113,7 @@ fn run_of_a_native_mod_without_resources_says_how_to_make_them_before_building()
     .unwrap();
     let manifest = include_str!("../template/native/sunrise-mod.toml")
         .replace("{id}", "machine")
-        .replace("{name}", "Machine");
+        .replace("{name}", "\"Machine\"");
     std::fs::write(
         project.join("sunrise-mod.toml"),
         format!(

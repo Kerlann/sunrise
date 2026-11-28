@@ -3,7 +3,9 @@
 //! Language and Resource Packs, laid out like vanilla's HeaderAndFooter /
 //! OptionsList screens and drawn with the shared widgets.
 mod draw;
+mod input_resolver;
 mod pack_drop;
+pub(crate) use input_resolver::tab_step_grouped;
 
 use std::time::Instant;
 
@@ -37,8 +39,8 @@ mod wheel;
 pub(crate) use wheel::slider_unsnapped;
 
 /// `Options.renderDistance`'s upper bound in 26.3 (`IntRange(2, 32)`; 16 below 1 GiB of JVM heap).
-/// Sunrise has no JVM heap to size it by, so the classic page takes the 32; Sunrise Graphics goes
-/// to `MAX_RENDER_DISTANCE`.
+/// Sunrise has no JVM heap to size it by, so the classic page takes the 32; Sunrise Settings'
+/// General page goes to `MAX_RENDER_DISTANCE`.
 pub(crate) const VANILLA_MAX_RENDER_DISTANCE: i32 = 32;
 
 fn tr(key: &str) -> Text {
@@ -150,6 +152,19 @@ pub(crate) const ACCESSIBILITY_OPTIONS: &[Opt] = &[
     Opt::RotateWithMinecarts,
     Opt::HighContrastBlockOutlines,
 ];
+
+#[cfg(test)]
+pub(crate) use pages::TEST_PAGES;
+
+/// The pages crates registered (`sunrise_hooks::pages`), as `Page::Added` indexes them.
+pub(crate) fn registered_pages() -> &'static [&'static dyn sunrise_hooks::pages::Page] {
+    pages::registered()
+}
+
+/// What a button opening one of Sunrise's pages says (a language key), where it says something.
+pub(crate) fn page_tooltip(page: Page) -> Option<&'static str> {
+    pages::sunrise_page_tooltip(page)
+}
 
 /// `ControlsScreen.options`: the controls added by Java Edition 26.3, in
 /// their vanilla order. The macOS-only Control-click switch is omitted on
@@ -394,7 +409,7 @@ impl Opt {
                 crate::options_file::MAX_RENDER_DISTANCE as f64,
             ),
             // `IntRange(2, 32).toSliderValue`: the ends at 0 and 1, every value between them at
-            // its bin's centre. A Sunrise Graphics distance past 32 shows as 32 and stays saved.
+            // its bin's centre. A Sunrise Settings distance past 32 shows as 32 and stays saved.
             Opt::VanillaRenderDistance => {
                 Kind::Slider(match s.render_distance.min(VANILLA_MAX_RENDER_DISTANCE) {
                     d if d <= 2 => 0.0,
@@ -1461,6 +1476,15 @@ fn key_conflicts(
     conflicts
 }
 
+/// The caption of a key row: a vanilla mapping's name is its own translation key, and
+/// Sunrise's own keys ([`crate::extras::KEYS`]) have theirs.
+fn key_caption(name: &str) -> &str {
+    crate::extras::KEYS
+        .iter()
+        .find(|(key, _)| *key == name)
+        .map_or(name, |(_, caption)| caption)
+}
+
 /// A native mod's title or key category on Controls: bold and underlined, centred on the row at `y`.
 fn section_title(text: Text, y: f32, w: f32) -> Widget {
     Widget {
@@ -1497,7 +1521,7 @@ pub fn binding_text(key: &str, modifiers: u32) -> Text {
     text.append(keybinds::display_name(key))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Page {
     Main,
     Video,
@@ -1511,21 +1535,19 @@ pub enum Page {
     Font,
     Packs,
     Mods,
-    /// Browse mods: the registry's content mods, searched (`mod_browser`).
-    ModBrowser,
-    /// One registry project's page: `OptionsUi::mod_project`.
-    ModProject,
     /// A native mod's settings page: its index in `mods.installed`.
     NativeMod(usize),
     /// A page a crate registered (`sunrise_hooks::pages`): its index in `OptionsUi::pages`.
     Added(usize),
-    /// Sunrise's shader packs, either kind (`shader_pack_list`).
+    /// Sunrise Settings at its Shaders page, which lists the shader packs (`shader_pack_list`), as
+    /// `sunrise-ctl options shader-packs` opens it.
     ShaderPacks,
     /// The picked pack's options: the shader screen (`shader_ui`) at the pack's main screen.
     ShaderOptions,
     /// The selected resource packs' Polytone options (`pack_options_ui`), from the pack screen.
     PackOptions,
-    /// Sunrise's graphics settings (`graphics_ui`).
+    /// Sunrise Settings at its General, Advanced and HDR pages (`graphics_ui`'s), as
+    /// `sunrise-ctl options graphics|graphics-advanced|graphics-hdr` opens it.
     Graphics,
     GraphicsAdvanced,
     GraphicsHdr,
@@ -1539,16 +1561,13 @@ pub enum Page {
     ControllerRadialName,
     /// The list of every action for one of its slots.
     ControllerRadialPick,
+    /// Sunrise Settings at its Gameplay page (the extras, `extras_ui`).
     Extras,
-    /// PvP & HUD (`pvp`): the extras a PvP player sets, on their own page.
-    Pvp,
     /// CreditsAndAttributionScreen.
     Credits,
-    /// Sunrise Settings: every page Sunrise adds, as a mod's settings
-    /// screen hangs off vanilla's Options.
+    /// Sunrise Settings (`sunrise_ui`): one screen of every page Sunrise adds, as a mod's
+    /// settings screen hangs off vanilla's Options.
     Sunrise,
-    /// Replay Studio: saved recordings browser and 3D video editor launcher.
-    Studio,
     /// AI Agent: agent control on or off, whether an agent is connected, the connection details.
     Agent,
     /// SkinCustomizationScreen: the skin layers and Main Hand.
@@ -1569,10 +1588,6 @@ pub(crate) enum Act {
     Key(&'static str),
     ResetKey(&'static str),
     ResetKeys,
-    /// PvP & HUD's PvP preset (`pvp::apply_preset`).
-    PvpPreset,
-    /// PvP & HUD's Edit HUD button.
-    HudEditor,
     /// A native mod's key (mod, key) waits for a key; a button of its page.
     /// A key a native mod registered (mod, mapping) waits for a key, or is reset.
     ModKey(usize, usize),
@@ -1580,12 +1595,6 @@ pub(crate) enum Act {
     /// Setting `.1` of native mod `.0`'s page clicked: a toggle, choice or colour steps on.
     NativeSetting(usize, usize),
     PageRow(usize, usize),
-    /// Browse mods: the page of listing `.0` of `mod_browser`.
-    ModProject(usize),
-    /// The open project page's Install or Update.
-    InstallMod,
-    /// The open project page's page on the website.
-    OpenModPage,
     /// Accessibility's "Accessibility Help" link
     /// (`AccessibilityOptionsScreen.addFooter`'s openLinkButton).
     AccessibilityHelp,
@@ -1690,9 +1699,6 @@ pub enum Event {
     },
     /// An accepted button press or the release of a slider.
     ButtonClick,
-    /// Sunrise's own: download the Modrinth hit at this index of the pack
-    /// screen's browser. The game owns the packs folder, not this screen.
-    DownloadPack(usize),
     /// Close the options screens (back to the pause menu or title).
     Close,
     /// Settings changed: apply and save them.
@@ -1720,16 +1726,11 @@ pub enum Event {
     OpenLink(String),
     /// A click on the Mods screen's mod id or version: copy it.
     CopyText(String),
-    /// Browse mods opened: read the registry's index into `mod_browser`.
-    BrowseMods,
-    /// Install (or update) the registry's content mod with this id.
-    InstallMod(String),
-    /// Open a registry project's page on the website.
-    OpenModPage(String),
     /// Accessibility's Help link: confirm and open
     /// `CommonLinks.ACCESSIBILITY_HELP` over the options screen.
     AccessibilityHelp,
-    /// The Shader Packs page opened: list `shaderpacks/` into `shader_packs`.
+    /// Sunrise Settings opened (its Shaders page lists the packs): list `shaderpacks/` into
+    /// `shader_packs`.
     ListShaderPacks,
     /// A shader pack was picked or turned off: save and apply it.
     ShaderPack,
@@ -1738,18 +1739,16 @@ pub enum Event {
     OpenShaderOptions,
     /// The Shader Options page closed with changes: save them and load the pack again.
     ShaderOptions,
-    /// The options of `shader_packs[.0]`, a Sunrise pack, changed: save them (the pack reloads
-    /// with them).
-    NativePackOptions(usize),
     /// Native mod `.0`'s page opened: the game reads its settings' kept values again.
     NativeSettings(usize),
+    /// Config was pressed for native mod `.0`, which has its own config screen
+    /// (`IConfigScreenFactory`): the game asks the mod to open it over this screen.
+    ModConfigScreen(usize),
     /// Setting `.1` of native mod `.0`'s page changed (`settings.mods`): the game keeps it and
     /// tells the mod (`setting_changed`).
     NativeSetting(usize, usize),
     /// Roll the credits (`CreditsAndAttributionScreen.openCreditsScreen`).
     Credits,
-    /// PvP & HUD's Edit HUD: open the HUD editor over the game.
-    HudEditor,
     /// Copy how an agent connects (the AI Agent page).
     CopyAgentDetails,
     /// The AI Agent page's recording button: start or stop.
@@ -1764,10 +1763,6 @@ pub enum Event {
     ListMusicTracks,
     /// A Music page row: play this track of this event now.
     PlayMusicTrack(String, String),
-    /// Open the recordings folder in the system file browser.
-    OpenStudioFolder,
-    /// Start playback from the selected Studio recording.
-    OpenStudioReplay(std::path::PathBuf),
 }
 /// A row of the Music page: the track, and the pool it is played from.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1787,6 +1782,7 @@ pub struct MusicGroup {
 }
 pub struct OptionsUi {
     frame_draw: Option<draw::FrameDraw>,
+    active_pointer: Option<input_resolver::ActivePointerTarget>,
     pub stack: Vec<Page>,
     scroll: f32,
     pub(crate) dragging: Option<Opt>,
@@ -1804,7 +1800,8 @@ pub struct OptionsUi {
     pub selected_key: Option<&'static str>,
     /// The registered key waiting: (mod, mapping) in `mods.installed`.
     selected_mod_key: Option<(usize, usize)>,
-    selected_page_key: Option<(usize, usize)>,
+    /// The registered page's key row waiting for a key.
+    selected_page_key: Option<pages::PageKey>,
     /// The open registered page's rows its layout was made from (`refresh_added_rows`).
     added_seen: Vec<sunrise_hooks::pages::Row>,
     pending_mod_key: Option<winit::keyboard::KeyCode>,
@@ -1820,16 +1817,8 @@ pub struct OptionsUi {
     language_choice: Option<String>,
     language_search: ui::EditBox,
     pub(crate) settings_search: ui::EditBox,
-    /// Browse mods: the registry's projects, filled by the game.
-    pub mod_browser: crate::mod_browser::ModBrowser,
-    /// The project whose page is open (`Page::ModProject`).
-    pub mod_project: String,
-    /// The line about mods that wait for a restart to switch, for Browse mods' message.
-    pub mods_note: Option<String>,
     /// The Mods screen (`Page::Mods`), made when the page opens.
     pub mods_screen: Option<crate::mods_screen::ModsScreen>,
-    /// Sunrise's `packBrowser` extra: the pack screen's Add button.
-    pub pack_browser: bool,
     /// Packs: the packs found and the selection the screen opens with.
     pub pack_infos: Vec<crate::pack_screen::PackInfo>,
     pub pack_selection: Vec<String>,
@@ -1859,11 +1848,11 @@ pub struct OptionsUi {
     /// The output of the renderer the options are drawn for, as of the last draw. It lives
     /// here, not on the graphics screen, which opening resets: `shell_mut` hands it over.
     output: crate::gfx::EffectiveOutput,
-    graphics: shell::Shell<crate::graphics_ui::GraphicsScreen>,
+    /// Sunrise Settings, on the settings shell: the graphics screen's pages, the extras and
+    /// the ways to Sunrise's other pages (`sunrise_ui`).
+    sunrise: shell::Shell<crate::sunrise_ui::SunriseScreen>,
     /// Controller Settings, on the settings shell.
     controller: shell::Shell<crate::controller_ui::ControllerScreen>,
-    /// Sunrise Extras, on the settings shell.
-    extras: shell::Shell<crate::extras_ui::ExtrasScreen>,
     /// The radial menu's pages, on the settings shell.
     radial: shell::Shell<crate::radial_editor::RadialScreen>,
     /// The list of actions for one of the radial menu's slots.
@@ -1878,7 +1867,6 @@ pub struct OptionsUi {
     pub calibration: Option<crate::hdr_calibration::Calibration>,
     /// The window as calibration found it before making it fullscreen (the game keeps it).
     pub calibration_window: Option<crate::hdr_calibration::WindowState>,
-    pub studio: crate::studio_ui::StudioUi,
     /// The AI Agent page's status lines (set by the game while it shows).
     pub agent_status: Vec<String>,
     /// A repro recording is running: the AI Agent page's button says stop.
@@ -1902,9 +1890,6 @@ pub struct OptionsUi {
     /// The list's rows as last laid out: each row's top and bottom (GUI
     /// pixels), for the narration's row under the mouse.
     row_bands: Vec<[f32; 2]>,
-    /// The PvP & HUD items that take a whole row (`wide_extras`), measured
-    /// when the page is drawn.
-    wide_extras: Vec<crate::extras::Item>,
     /// The page layout's revision: every change to an input the layout reads
     /// (the page, the scroll, the search text, a setting's shown value) bumps
     /// it, so the layout is made again once and not on every draw or click.
@@ -1925,6 +1910,7 @@ impl Default for OptionsUi {
         settings_search.focused = false;
         Self {
             frame_draw: None,
+            active_pointer: None,
             stack: vec![Page::Main],
             scroll: 0.0,
             dragging: None,
@@ -1944,11 +1930,7 @@ impl Default for OptionsUi {
             language_choice: None,
             language_search: search,
             settings_search,
-            mod_browser: Default::default(),
-            mod_project: String::new(),
-            mods_note: None,
             mods_screen: None,
-            pack_browser: false,
             pack_infos: Vec::new(),
             pack_selection: Vec::new(),
             pack_screen: None,
@@ -1963,9 +1945,8 @@ impl Default for OptionsUi {
             minecart_improvements: false,
             center_language: false,
             output: crate::gfx::EffectiveOutput::NONE,
-            graphics: Default::default(),
+            sunrise: Default::default(),
             controller: Default::default(),
-            extras: Default::default(),
             radial: Default::default(),
             radial_pick: Default::default(),
             shader: Default::default(),
@@ -1973,7 +1954,6 @@ impl Default for OptionsUi {
             pack_configs: Default::default(),
             calibration: None,
             calibration_window: None,
-            studio: Default::default(),
             agent_status: Vec::new(),
             agent_recording: false,
             music_groups: Vec::new(),
@@ -1984,7 +1964,6 @@ impl Default for OptionsUi {
             size: (427.0, 240.0),
             framebuffer: [1280, 720],
             row_bands: Vec::new(),
-            wide_extras: Vec::new(),
             rev: 0,
             layout_cache: None,
             #[cfg(test)]
@@ -2021,37 +2000,6 @@ fn option_widget(s: &Settings, opt: Opt, x: f32, y: f32, w: f32) -> Widget {
 }
 /// The least GUI size a shell screen lays its keys out for, before it has been drawn at its own.
 const MIN_KEY_GUI: (f32, f32) = (480.0, 240.0);
-/// The PvP & HUD page's rows: its items under their headers.
-fn pvp_rows() -> Vec<Result<crate::extras::Item, &'static str>> {
-    crate::pvp::rows()
-        .into_iter()
-        .map(|r| r.map(crate::extras::Item::Pvp))
-        .collect()
-}
-/// The items of PvP & HUD's rows whose label, with any of their first values, is wider than a
-/// half-width button holds (`width` measures text with the screen's font): those take the
-/// whole row, so no label slides past its edges, in any language.
-fn wide_extras(s: &Settings, width: impl Fn(&str) -> f32) -> Vec<crate::extras::Item> {
-    // A button's label keeps 2 px off each edge (`AbstractButton.renderString`'s margin),
-    // past which it slides back and forth.
-    let room = 150.0 - 4.0;
-    pvp_rows()
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|&item| {
-            let mut e = s.extras.clone();
-            (0..4).any(|_| {
-                let label = Text::option_name_value(
-                    Text::literal(item.caption_text()),
-                    Text::literal(item.value(&e)),
-                )
-                .plain();
-                item.cycle(&mut e, false);
-                width(&label) > room
-            })
-        })
-        .collect()
-}
 /// Rows of an OptionsList: (big?, options) or a header.
 enum Row {
     Big(Opt),
@@ -2089,8 +2037,12 @@ fn tooltip_text(s: &Settings, wd: &Widget) -> Option<Text> {
         Act::Cycle(opt) => Some(opt.tooltip_key(s)),
         Act::Push(Page::Language) => Some("options.language.tooltip".into()),
         Act::Push(Page::Accessibility) => Some("options.accessibility.tooltip".into()),
-        Act::PvpPreset => Some("sunrise.pvp.preset.tooltip".into()),
-        Act::HudEditor => Some("sunrise.pvp.editor.tooltip".into()),
+        // A toggle, choice or colour shows its tooltip as a range's slider does.
+        Act::NativeSetting(i, j) => s
+            .mods
+            .installed
+            .get(*i)
+            .and_then(|m| m.native.as_ref()?.settings.get(*j)?.tooltip.clone()),
         _ => None,
     };
     if let Some(key) = key.filter(|key| lang::has(key)) {
@@ -2227,15 +2179,16 @@ fn narrate_widget(
                 }
             }
             Act::Key(name) => {
-                let bound = s.keys.get(name) != "key.keyboard.unknown";
+                let key = s.extras.key(name).unwrap_or_else(|| s.keys.get(name));
+                let bound = key != "key.keyboard.unknown";
                 n.what = What::Named {
-                    title: bind(tr(name), bound),
+                    title: bind(tr(key_caption(name)), bound),
                     active,
                 };
             }
             Act::ResetKey(name) => {
                 n.what = What::Named {
-                    title: t("narrator.controls.reset", &[tr(name)]),
+                    title: t("narrator.controls.reset", &[tr(key_caption(name))]),
                     active,
                 };
             }
@@ -2287,7 +2240,7 @@ impl OptionsUi {
             shell.blur_search();
         }
     }
-    /// A switch of `sunrise-extras.txt` as the Extras page draws it: "Caption: On".
+    /// A switch from `sunrise-extras.txt` on the AI Agent page: "Caption: On".
     fn extra_button(&self, s: &Settings, item: crate::extras::Item) -> Widget {
         let label = Text::option_name_value(
             Text::literal(item.caption_text()),
@@ -2297,13 +2250,22 @@ impl OptionsUi {
     }
     fn settings_search_active(&self) -> bool {
         self.settings_search.focused
-            && matches!(
-                self.page(),
-                Page::Video | Page::Controls | Page::KeyBinds | Page::ModBrowser
-            )
+            && matches!(self.page(), Page::Video | Page::Controls | Page::KeyBinds)
     }
     pub fn page(&self) -> Page {
         *self.stack.last().unwrap_or(&Page::Main)
+    }
+    /// Distinguishes sub-pages and confirm/error views that share `ScreenView.id == "options"`.
+    pub fn sub_page_key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.page().hash(&mut hasher);
+        self.pack_screen
+            .as_ref()
+            .is_some_and(crate::pack_screen::PackScreen::confirming)
+            .hash(&mut hasher);
+        self.resource_error.is_some().hash(&mut hasher);
+        hasher.finish()
     }
     /// Whether the screen's focus is a search box that takes the keys (an
     /// `EditBox` that `canConsumeInput`): the language list's, the settings
@@ -2364,10 +2326,10 @@ impl OptionsUi {
         self.data_pack_stamp = (crate::datapack::folder_stamp(&dir), Instant::now());
         self.data_pack_dir = Some(dir);
     }
-    /// `PackSelectionScreen.tick`'s watcher: once a second, the Data Packs
-    /// folder's packs are listed again if it changed, the selection kept
+    /// `PackSelectionScreen.tick`'s watcher (`PackSelectionScreen.java:175-180`): once a second,
+    /// the Data Packs folder's packs are listed again if it changed, the selection kept
     /// (the search text and scroll start over).
-    fn watch_data_packs(&mut self, atlas: &HudAtlas, size: (f32, f32)) {
+    pub fn watch_data_packs(&mut self, atlas: &HudAtlas, size: (f32, f32)) {
         let Some(dir) = &self.data_pack_dir else {
             return;
         };
@@ -2430,6 +2392,7 @@ impl OptionsUi {
         self.pending_mod_key = None;
     }
     fn push(&mut self, page: Page) {
+        self.active_pointer = None;
         self.relayout();
         self.stack.push(page);
         self.scroll = 0.0;
@@ -2437,10 +2400,7 @@ impl OptionsUi {
         self.focus = None;
         self.focus_from_keyboard = false;
         self.can_change_value = false;
-        if matches!(
-            page,
-            Page::Video | Page::Controls | Page::KeyBinds | Page::ModBrowser
-        ) {
+        if matches!(page, Page::Video | Page::Controls | Page::KeyBinds) {
             self.settings_search.set_value("");
             self.settings_search.focused = false;
         }
@@ -2461,20 +2421,32 @@ impl OptionsUi {
         if let Some(at) = Self::shader_page(page) {
             self.shader.show(at);
         }
-        if let Some(at) = Self::graphics_page(page) {
-            self.graphics.show(at);
+        if let Some(at) = Self::sunrise_tab(page) {
+            self.sunrise.show(at);
         }
         if let Some(at) = Self::controller_page(page) {
             self.controller.show(at);
-        }
-        if page == Page::Studio {
-            self.studio.refresh();
         }
     }
     /// A controller's or the keyboard's focus landed on `rect`: a row of a shell screen's list
     /// that is partly hidden scrolls all into view. How far it moved down, when it moved.
     pub fn reveal(&mut self, s: &Settings, size: (f32, f32), rect: [f32; 4]) -> Option<f32> {
         self.shell_mut()?.reveal(s, size, rect)
+    }
+    /// The name of the page a settings screen on the shell shows (`Hosted::open_page_name`).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn shell_page_name(&self) -> Option<String> {
+        self.shell()?.open_page_name()
+    }
+    /// A controller's bumper on a shell screen whose page list scrolls: the next page (or the one
+    /// before) opens, in list order and wrapping, scrolled into view. Where its tab is now; `None`
+    /// where the pages are all tabs on the screen, which the bumpers pick among.
+    pub fn step_page(&mut self, s: &Settings, size: (f32, f32), next: bool) -> Option<[f32; 4]> {
+        // A failed resource reload's message takes every input until it is dismissed.
+        if self.resource_error.is_some() {
+            return None;
+        }
+        self.shell_mut()?.step_page(s, size, next)
     }
     /// Capture `(textureFiltering, maxAnisotropyBit, mipmapLevels)` when entering video settings.
     pub fn capture_video_atlas(&mut self, s: &Settings) {
@@ -2483,22 +2455,34 @@ impl OptionsUi {
             self.video_atlas_snapshot = Some(s.texture_atlas_settings());
         }
     }
+    /// Vanilla's Video Settings or Sunrise Settings, which has the graphics settings: the
+    /// texture settings are compared when the last of them closes.
     fn is_video_page(page: Page) -> bool {
-        page == Page::Video || Self::graphics_page(page).is_some()
+        page == Page::Video || Self::sunrise_tab(page).is_some()
     }
-    /// Whether a video settings screen is open, Sunrise's or vanilla's: the fullscreen mode
-    /// waits for it to close, and Ctrl with the wheel steps the GUI scale.
+    /// Whether a video settings screen is open, vanilla's or Sunrise Settings, which holds the
+    /// graphics settings: the fullscreen mode waits for it to close, and Ctrl with the wheel
+    /// steps the GUI scale.
     pub fn video_open(&self) -> bool {
         Self::is_video_page(self.page())
     }
-    /// Where the graphics screen opens for `page`, if it is one of its pages.
-    fn graphics_page(page: Page) -> Option<crate::graphics_ui::Page> {
+    /// Where Sunrise Settings opens for `page`, if it is one of its pages: its own, or a page
+    /// `sunrise-ctl options` names (the graphics screen's and the extras' before they were one).
+    fn sunrise_tab(page: Page) -> Option<crate::sunrise_ui::Tab> {
+        use crate::{graphics_ui::Page as G, sunrise_ui::Tab};
         match page {
-            Page::Graphics => Some(crate::graphics_ui::Page::General),
-            Page::GraphicsAdvanced => Some(crate::graphics_ui::Page::Advanced),
-            Page::GraphicsHdr => Some(crate::graphics_ui::Page::Hdr),
+            Page::Sunrise | Page::Graphics => Some(Tab::Graphics(G::General)),
+            Page::GraphicsAdvanced => Some(Tab::Graphics(G::Advanced)),
+            Page::GraphicsHdr => Some(Tab::Graphics(G::Hdr)),
+            Page::Extras => Some(Tab::Gameplay),
+            Page::ShaderPacks => Some(Tab::Graphics(G::Shaders)),
             _ => None,
         }
+    }
+    /// Whether opening `page` lists the shader packs and reads the picked one's options:
+    /// Sunrise Settings', whose Shaders page lists them.
+    pub fn lists_shader_packs(page: Page) -> bool {
+        Self::sunrise_tab(page).is_some()
     }
     fn title(page: Page) -> &'static str {
         match page {
@@ -2516,25 +2500,23 @@ impl OptionsUi {
             Page::Font => "options.font.title",
             Page::Packs => "resourcePack.title",
             Page::Mods => "sunrise.pages.mods",
-            Page::ModBrowser => "sunrise.mods.browse.title",
-            Page::ModProject => "sunrise.mods.browse.project",
-            Page::NativeMod(_) => "Mod Settings",
+            Page::NativeMod(_) => "sunrise.mods.settings",
             Page::Added(i) => pages::title(i),
-            Page::ShaderPacks => "sunrise.pages.shader_packs",
             Page::ShaderOptions => "sunrise.pages.shader_options",
             Page::PackOptions => "sunrise.pack.options.title",
-            Page::Graphics | Page::GraphicsAdvanced | Page::GraphicsHdr | Page::HdrCalibration => {
-                "options.videoTitle"
-            }
+            Page::HdrCalibration => "options.videoTitle",
             Page::Controller | Page::PadBinds => "sunrise.pages.controller",
             Page::ControllerRadial => "sunrise.pages.controller_radial",
             Page::ControllerRadialName => "sunrise.radial.name_title",
             Page::ControllerRadialPick => "sunrise.radial.pick_title",
-            Page::Extras => "sunrise.pages.extras",
-            Page::Pvp => "sunrise.pages.pvp",
             Page::Credits => "credits_and_attribution.screen.title",
-            Page::Sunrise => "sunrise.pages.settings",
-            Page::Studio => "sunrise.pages.studio",
+            // `sunrise-ctl options` names some of its pages by what they were before.
+            Page::Sunrise
+            | Page::Graphics
+            | Page::GraphicsAdvanced
+            | Page::GraphicsHdr
+            | Page::Extras
+            | Page::ShaderPacks => "sunrise.pages.settings",
             Page::Agent => "sunrise.pages.agent",
             Page::Music => "sunrise.pages.music",
         }
@@ -2587,133 +2569,6 @@ impl OptionsUi {
         filtered
     }
 
-    /// Browse mods: what the registry offers this game, by the search box.
-    fn mod_browser_rows(&self) -> Vec<Row> {
-        use crate::mod_browser::Status;
-        let b = &self.mod_browser;
-        match &b.status {
-            Status::Idle | Status::Loading => {
-                return vec![Row::Note(lang::get("sunrise.mods.browse.loading"))];
-            }
-            Status::Failed(why) => {
-                return vec![Row::Note(lang::tr("sunrise.mods.browse.failed", &[why]))];
-            }
-            Status::Ready => {}
-        }
-        let found = b.found(&self.settings_search.value);
-        if found.is_empty() {
-            return vec![Row::Note(lang::get("sunrise.mods.browse.none"))];
-        }
-        let mut rows = Vec::new();
-        for i in found {
-            let l = &b.listings[i];
-            let mut label = Text::literal(format!("{} {}", l.name, l.version));
-            if l.has_update() {
-                label = label.append(tr("sunrise.mods.browse.has_update"));
-            } else if l.installed.is_some() {
-                label = label.append(tr("sunrise.mods.browse.is_installed"));
-            }
-            rows.push(Row::Buttons(
-                button(0.0, 0.0, 310.0, label, Act::ModProject(i)),
-                None,
-            ));
-            rows.extend(wrap(&l.summary, 64).into_iter().take(1).map(Row::Note));
-        }
-        rows
-    }
-    /// A registry project's page: what it is, Install or Update, its description and
-    /// changelog. An installed mod is on already: the install turned it on.
-    fn mod_project_rows(&self) -> Vec<Row> {
-        let b = &self.mod_browser;
-        let Some(l) = b.listing(&self.mod_project) else {
-            return vec![Row::Note(lang::get("sunrise.mods.browse.none"))];
-        };
-        let mut rows = vec![Row::Note(format!("{} {}", l.name, l.version))];
-        let by = [
-            lang::tr("sunrise.mods.browse.by", &[&l.authors.join(", ")]),
-            l.license.clone(),
-            l.published.clone(),
-        ];
-        let by: Vec<&str> = by
-            .iter()
-            .map(String::as_str)
-            .filter(|t| !t.is_empty())
-            .collect();
-        rows.push(Row::Note(by.join(" · ")));
-        let labels: Vec<&str> = l
-            .categories
-            .iter()
-            .chain(&l.tags)
-            .map(String::as_str)
-            .collect();
-        if !labels.is_empty() {
-            rows.push(Row::Note(labels.join(", ")));
-        }
-        let installing = b.installing.as_deref() == Some(l.id.as_str());
-        let install = match (&l.installed, installing) {
-            (_, true) => inactive(button(
-                0.0,
-                0.0,
-                150.0,
-                tr("sunrise.mods.browse.installing"),
-                Act::None,
-            )),
-            (None, false) => button(
-                0.0,
-                0.0,
-                150.0,
-                tr("sunrise.mods.browse.install"),
-                Act::InstallMod,
-            ),
-            (Some(_), false) if l.has_update() => button(
-                0.0,
-                0.0,
-                150.0,
-                tr("sunrise.mods.browse.update"),
-                Act::InstallMod,
-            ),
-            (Some(_), false) => inactive(button(
-                0.0,
-                0.0,
-                150.0,
-                tr("sunrise.mods.browse.installed"),
-                Act::None,
-            )),
-        };
-        let page = button(
-            0.0,
-            0.0,
-            150.0,
-            tr("sunrise.mods.browse.open_page"),
-            Act::OpenModPage,
-        );
-        rows.push(Row::Buttons(install, Some(page)));
-        if let Some((message, _)) = &b.message {
-            rows.extend(wrap(message, 64).into_iter().map(Row::Note));
-        }
-        let description = crate::mod_browser::plain_lines(if l.description.is_empty() {
-            &l.summary
-        } else {
-            &l.description
-        });
-        rows.extend(
-            description
-                .iter()
-                .flat_map(|line| wrap(line, 64))
-                .map(Row::Note),
-        );
-        let changelog = crate::mod_browser::plain_lines(&l.changelog);
-        if !changelog.is_empty() {
-            rows.push(Row::Heading("sunrise.mods.browse.changelog".into()));
-            rows.extend(
-                changelog
-                    .iter()
-                    .flat_map(|line| wrap(line, 64))
-                    .map(Row::Note),
-            );
-        }
-        rows
-    }
     /// A native mod's page: its name, its keys as Key Binds rows (the
     /// player's choice, else the default), then its buttons.
     fn native_rows(&self, s: &Settings, i: usize) -> Vec<Row> {
@@ -2724,7 +2579,30 @@ impl OptionsUi {
         let Some(page) = &m.native else {
             return rows;
         };
+        let mut category: Option<&str> = None;
         for (j, setting) in page.settings.iter().enumerate() {
+            if let Some(visibility) = &setting.visible_when {
+                let visible = page
+                    .settings
+                    .iter()
+                    .find(|controller| controller.key == visibility.choice_setting)
+                    .is_some_and(|controller| {
+                        matches!(
+                            &controller.value,
+                            crate::mod_list::NativeSettingValue::Choice { index, .. }
+                                if *index == visibility.choice_index
+                        )
+                    });
+                if !visible {
+                    continue;
+                }
+            }
+            if setting.category.as_deref() != category {
+                category = setting.category.as_deref();
+                if let Some(category) = category {
+                    rows.push(Row::Heading(category.to_owned()));
+                }
+            }
             let widget = match (&setting.value, u16::try_from(i), u16::try_from(j)) {
                 (crate::mod_list::NativeSettingValue::Range { .. }, Ok(i), Ok(j)) => Widget {
                     x: 0.0,
@@ -2754,70 +2632,15 @@ impl OptionsUi {
 
     fn list_rows(&self, s: &Settings) -> Vec<Row> {
         match self.page() {
-            Page::Pvp => {
-                // Each section's switches two to a row, as vanilla's
-                // OptionsList.addSmall lays out an options screen; one whose label would run
-                // past half a row in this language (`wide_extras`) gets the whole row.
-                let extra = |item: crate::extras::Item, width: f32| {
-                    let value = Text::option_name_value(
-                        Text::literal(item.caption_text()),
-                        Text::literal(item.value(&s.extras)),
-                    )
-                    .plain();
-                    let label = if item.key_name().is_some() && self.selected_key == item.key_name()
-                    {
-                        Text::literal(format!("> {value} <")).with_color(text::YELLOW)
-                    } else {
-                        Text::literal(value)
-                    };
-                    let widget = button(0.0, 0.0, width, label, Act::Extra(item));
-                    // A setting of a switch that is off does nothing: inactive,
-                    // as vanilla greys out an option that can't apply.
-                    if item
-                        .parent()
-                        .is_some_and(|parent| parent.switch(&s.extras) == Some(false))
-                    {
-                        inactive(widget)
-                    } else {
-                        widget
-                    }
-                };
-                // PvP & HUD opens with its preset (Sunrise Settings has the way there).
-                let preset = button(0.0, 0.0, 150.0, tr("sunrise.pvp.preset"), Act::PvpPreset);
-                // The editor moves what the game shows: only from a world.
-                let edit = button(0.0, 0.0, 150.0, tr("sunrise.pvp.editor"), Act::HudEditor);
-                let edit = if self.in_world { edit } else { inactive(edit) };
-                let mut rows = vec![Row::Buttons(preset, Some(edit))];
-                let mut section = Vec::new();
-                let flush = |rows: &mut Vec<Row>, section: &mut Vec<crate::extras::Item>| {
-                    let mut half = None;
-                    for item in section.drain(..) {
-                        if self.wide_extras.contains(&item) {
-                            rows.extend(half.take().map(|h| Row::Buttons(extra(h, 150.0), None)));
-                            rows.push(Row::Buttons(extra(item, 310.0), None));
-                        } else if let Some(h) = half.take() {
-                            rows.push(Row::Buttons(extra(h, 150.0), Some(extra(item, 150.0))));
-                        } else {
-                            half = Some(item);
-                        }
-                    }
-                    rows.extend(half.map(|h| Row::Buttons(extra(h, 150.0), None)));
-                };
-                for row in pvp_rows() {
-                    match row {
-                        Err(header) => {
-                            flush(&mut rows, &mut section);
-                            rows.push(Row::Header(header));
-                        }
-                        Ok(item) => section.push(item),
-                    }
-                }
-                flush(&mut rows, &mut section);
-                rows
-            }
-            Page::Sunrise => self.sunrise_rows(s),
             Page::Agent => {
-                let mut rows = vec![Row::Buttons(
+                // No AI first: it hides every AI feature, so with it on it is all the page has,
+                // and turns them back on from here.
+                let no_ai = self.extra_button(s, crate::extras::Item::NoAi);
+                let mut rows = vec![Row::Buttons(no_ai, None)];
+                if s.extras.no_ai {
+                    return rows;
+                }
+                rows.push(Row::Buttons(
                     self.extra_button(s, crate::extras::Item::AgentControl),
                     Some(button(
                         0.0,
@@ -2826,7 +2649,7 @@ impl OptionsUi {
                         tr("sunrise.agent.copy_details"),
                         Act::CopyAgentDetails,
                     )),
-                )];
+                ));
                 rows.push(Row::Buttons(
                     button(
                         0.0,
@@ -2856,7 +2679,7 @@ impl OptionsUi {
             }
             Page::Video => {
                 // Vanilla's VideoSettingsScreen as vanilla lays it out: what Video Settings...
-                // opens. Sunrise's graphics screen is `Page::Graphics`, from the Extras page.
+                // opens. Sunrise's graphics settings are Sunrise Settings' first pages.
                 let mut rows = vec![Row::Header("options.video.display.header")];
                 rows.push(Row::Big(Opt::ExclusiveMode));
                 rows.extend(pairs(&[
@@ -3037,8 +2860,6 @@ impl OptionsUi {
                 rows
             }
             Page::Font => pairs(&[Opt::ForceUnicode, Opt::JapaneseGlyphs]),
-            Page::ModBrowser => self.mod_browser_rows(),
-            Page::ModProject => self.mod_project_rows(),
             Page::NativeMod(i) => self.native_rows(s, i),
             Page::Added(i) => self.added_rows(i),
             _ => {
@@ -3175,7 +2996,35 @@ impl OptionsUi {
             let (handled, events) = self.drag(s, atlas, (x, y), size, framebuffer, right);
             return (events, handled);
         }
-        let (events, handled) = self.click_unrevised(s, atlas, x, y, size, framebuffer, right);
+        // Vanilla `AbstractWidget.isValidClickButton`: a non-primary press declined by a slider
+        // leaves focus and dragging intact so the later primary release still runs through
+        // `release_resolved`'s liveness check.
+        if !right {
+            self.active_pointer = None;
+        }
+        let (events, handled) = if crate::widgets::has_input_overrides() {
+            match self.resolve_pointer_press(s, atlas, (x, y), size, right) {
+                input_resolver::PointerPressRoute::Block => (Vec::new(), false),
+                input_resolver::PointerPressRoute::PassThrough => {
+                    self.click_unrevised(s, atlas, x, y, size, framebuffer, right)
+                }
+                input_resolver::PointerPressRoute::Select {
+                    target,
+                    mapped: (mx, my),
+                } => {
+                    let (events, handled) =
+                        crate::widgets::with_selected_engine_widget(&target.key, || {
+                            self.click_unrevised(s, atlas, mx, my, size, framebuffer, right)
+                        });
+                    if !right && handled && self.sub_page_key() == target.page_key {
+                        self.active_pointer = Some(target);
+                    }
+                    (events, handled)
+                }
+            }
+        } else {
+            self.click_unrevised(s, atlas, x, y, size, framebuffer, right)
+        };
         // A click that changed nothing the layout reads (an empty spot, a
         // focus move) keeps the built layout.
         if !events.is_empty() {
@@ -3195,12 +3044,25 @@ impl OptionsUi {
         right: bool,
     ) -> (bool, Vec<Event>) {
         self.capture_video_atlas(s);
+        if let Some(res) = self.drag_resolved(s, atlas, (x, y), size, framebuffer, right) {
+            return res;
+        }
+        self.drag_inner(s, atlas, (x, y), size, framebuffer, right)
+    }
+    pub(super) fn drag_inner(
+        &mut self,
+        s: &mut Settings,
+        atlas: &HudAtlas,
+        (x, y): (f32, f32),
+        size: (f32, f32),
+        framebuffer: [i32; 2],
+        right: bool,
+    ) -> (bool, Vec<Event>) {
         if self.resource_error.is_some() {
             return (false, Vec::new());
         }
-        match self.page() {
-            Page::Studio | Page::ControllerRadialName => return (false, Vec::new()),
-            _ => {}
+        if self.page() == Page::ControllerRadialName {
+            return (false, Vec::new());
         }
         if self.page() == Page::HdrCalibration
             && let Some(calibration) = &mut self.calibration
@@ -3223,7 +3085,12 @@ impl OptionsUi {
             }
         }
         match self.page() {
-            Page::Mods => return (self.mods_page(s, size).drag(f64::from(y)), Vec::new()),
+            Page::Mods => {
+                return (
+                    self.mods_page(s, atlas, size).drag(f64::from(y)),
+                    Vec::new(),
+                );
+            }
             Page::Packs => return (self.packs(atlas, size).drag(f64::from(y)), Vec::new()),
             _ => {}
         }
@@ -3281,27 +3148,6 @@ impl OptionsUi {
             }
             return (Vec::new(), false);
         }
-        if self.page() == Page::Studio {
-            if right {
-                return (Vec::new(), false);
-            }
-            use crate::studio_ui::StudioAction;
-            let events = match self.studio.click((x, y), size) {
-                StudioAction::None => Vec::new(),
-                StudioAction::Refresh => vec![Event::ButtonClick],
-                StudioAction::OpenReplay(path) => {
-                    vec![Event::ButtonClick, Event::OpenStudioReplay(path)]
-                }
-                StudioAction::OpenFolder => vec![Event::ButtonClick, Event::OpenStudioFolder],
-                StudioAction::Back => {
-                    let mut events = vec![Event::ButtonClick];
-                    events.extend(self.back(s));
-                    events
-                }
-            };
-            let handled = !events.is_empty();
-            return (events, handled);
-        }
         if self.page() == Page::HdrCalibration
             && let Some(c) = &mut self.calibration
         {
@@ -3323,6 +3169,7 @@ impl OptionsUi {
                 return (Vec::new(), true);
             }
             // Waiting on a key: a mouse button binds, as on Key Binds.
+            self.end_stale_page_key();
             if self.selected_key.is_some() {
                 let button = if right {
                     winit::event::MouseButton::Right
@@ -3345,7 +3192,7 @@ impl OptionsUi {
                 return (events, false);
             }
             let m = crate::screen_draw::Measure(&atlas.font);
-            let screen = self.mods_page(s, size);
+            let screen = self.mods_page(s, atlas, size);
             let before = screen.search_focused();
             let (action, sound, handled) = screen.click_with_outcome(&m, x as f64, y as f64);
             if !before && screen.search_focused() {
@@ -3359,6 +3206,15 @@ impl OptionsUi {
                 Do::None => {}
                 Do::OpenFolder => events.push(Event::OpenModFolder),
                 Do::Back => events.extend(self.back(s)),
+                Do::Config(i)
+                    if s.mods.is_on(i)
+                        && s.mods.installed[i]
+                            .native
+                            .as_ref()
+                            .is_some_and(|page| page.own_screen) =>
+                {
+                    events.push(Event::ModConfigScreen(i));
+                }
                 Do::Config(i) => {
                     self.push(Page::NativeMod(i));
                     events.push(Event::NativeSettings(i));
@@ -3390,9 +3246,6 @@ impl OptionsUi {
                     None => Event::OpenPackFolder,
                 }),
                 crate::pack_screen::Action::Done => events.extend(self.back(s)),
-                crate::pack_screen::Action::BrowsePick(i) => {
-                    events.push(Event::DownloadPack(i));
-                }
                 crate::pack_screen::Action::Options(id) => self.open_pack_options(&id),
                 crate::pack_screen::Action::None => {}
             }
@@ -3403,12 +3256,16 @@ impl OptionsUi {
         self.size = size;
         self.framebuffer = framebuffer;
         let mut events = Vec::new();
-        if matches!(
-            self.page(),
-            Page::Video | Page::Controls | Page::KeyBinds | Page::ModBrowser
-        ) {
+        if matches!(self.page(), Page::Video | Page::Controls | Page::KeyBinds) {
             let search = &mut self.settings_search;
-            search.focused = ui::hovered((x, y), search.x, search.y, search.width, search.height);
+            let msg = (!search.message.is_empty()).then(|| Text::literal(&search.message));
+            search.focused =
+                crate::widgets::matches_selected_engine_widget(
+                    crate::widgets::WidgetBucket::Field,
+                    msg.as_ref(),
+                    None,
+                    0,
+                ) && ui::hovered((x, y), search.x, search.y, search.width, search.height);
             if search.focused {
                 self.focus = Some(FocusId::Search);
                 self.focus_from_keyboard = false;
@@ -3421,7 +3278,14 @@ impl OptionsUi {
         }
         if self.page() == Page::Language {
             let search = &mut self.language_search;
-            search.focused = ui::hovered((x, y), search.x, search.y, search.width, search.height);
+            let msg = (!search.message.is_empty()).then(|| Text::literal(&search.message));
+            search.focused =
+                crate::widgets::matches_selected_engine_widget(
+                    crate::widgets::WidgetBucket::Field,
+                    msg.as_ref(),
+                    None,
+                    0,
+                ) && ui::hovered((x, y), search.x, search.y, search.width, search.height);
             if search.focused {
                 self.focus = Some(FocusId::Search);
                 self.focus_from_keyboard = false;
@@ -3451,11 +3315,57 @@ impl OptionsUi {
             self.scrollbar_drag_y = Some(y);
             return (events, true);
         }
+        let mut counts: std::collections::HashMap<(String, crate::widgets::WidgetBucket), u32> =
+            std::collections::HashMap::new();
         for (wd_idx, wd) in widgets.iter().enumerate() {
+            let visible = !wd.list || (wd.y < bottom && wd.y + wd.h > top);
+            let occ = match &wd.kind {
+                WKind::Button { label, .. } if visible => {
+                    let entry = counts
+                        .entry((
+                            crate::widgets::stable_key_from_text(label),
+                            crate::widgets::WidgetBucket::Button,
+                        ))
+                        .or_insert(0);
+                    let o = *entry;
+                    *entry += 1;
+                    o
+                }
+                WKind::Slider { label, .. } if visible => {
+                    let entry = counts
+                        .entry((
+                            crate::widgets::stable_key_from_text(label),
+                            crate::widgets::WidgetBucket::Slider,
+                        ))
+                        .or_insert(0);
+                    let o = *entry;
+                    *entry += 1;
+                    o
+                }
+                _ => 0,
+            };
             if !ui::hovered((x, y), wd.x, wd.y, wd.w, wd.h) {
                 continue;
             }
             if wd.list && (y < top || y >= bottom) {
+                continue;
+            }
+            let selected_match = match &wd.kind {
+                WKind::Button { label, .. } => crate::widgets::matches_selected_engine_widget(
+                    crate::widgets::WidgetBucket::Button,
+                    Some(label),
+                    None,
+                    occ,
+                ),
+                WKind::Slider { label, .. } => crate::widgets::matches_selected_engine_widget(
+                    crate::widgets::WidgetBucket::Slider,
+                    Some(label),
+                    None,
+                    occ,
+                ),
+                _ => true,
+            };
+            if !selected_match {
                 continue;
             }
             // AbstractWidget.mouseClicked rejects inactive buttons before the
@@ -3475,7 +3385,7 @@ impl OptionsUi {
                     events.push(Event::ButtonClick);
                     match act {
                         Act::Push(p) => {
-                            if *p == Page::ShaderPacks {
+                            if Self::lists_shader_packs(*p) {
                                 // The pack list, and the picked pack's own settings with it.
                                 events.push(Event::ListShaderPacks);
                                 s.shader_options = None;
@@ -3483,9 +3393,6 @@ impl OptionsUi {
                             }
                             if *p == Page::Music {
                                 events.push(Event::ListMusicTracks);
-                            }
-                            if *p == Page::ModBrowser {
-                                events.push(Event::BrowseMods);
                             }
                             self.push(*p);
                             self.capture_video_atlas(s);
@@ -3498,7 +3405,7 @@ impl OptionsUi {
                             if let Some(name) = item.key_name() {
                                 self.selected_key = Some(name);
                             } else {
-                                item.cycle(&mut s.extras, self.shift);
+                                item.cycle(&mut s.extras);
                                 events.push(Event::Changed);
                             }
                         }
@@ -3516,12 +3423,17 @@ impl OptionsUi {
                         }
                         Act::Key(name) => self.selected_key = Some(*name),
                         Act::ResetKey(name) => {
-                            s.keys.set(name, KeyBinds::default_of(name));
+                            if !s.extras.reset_key(name) {
+                                s.keys.set(name, KeyBinds::default_of(name));
+                            }
                             events.push(Event::Changed);
                         }
                         Act::ResetKeys => {
                             s.keys.reset_all();
                             s.mods.keys.clear();
+                            for (name, _) in crate::extras::KEYS {
+                                s.extras.reset_key(name);
+                            }
                             events.push(Event::Changed);
                         }
                         Act::ModKey(i, k) => {
@@ -3548,26 +3460,6 @@ impl OptionsUi {
                                 events.push(Event::NativeSetting(*i, *j));
                             }
                         }
-                        Act::ModProject(i) => {
-                            if let Some(listing) = self.mod_browser.listings.get(*i) {
-                                self.mod_project = listing.id.clone();
-                                self.push(Page::ModProject);
-                            }
-                        }
-                        Act::InstallMod => {
-                            self.mod_browser.message = None;
-                            events.push(Event::InstallMod(self.mod_project.clone()));
-                        }
-                        Act::OpenModPage => {
-                            if let Some(l) = self.mod_browser.listing(&self.mod_project) {
-                                events.push(Event::OpenModPage(l.page.clone()));
-                            }
-                        }
-                        Act::PvpPreset => {
-                            crate::pvp::apply_preset(s);
-                            events.push(Event::Changed);
-                        }
-                        Act::HudEditor => events.push(Event::HudEditor),
                         Act::AccessibilityHelp => events.push(Event::AccessibilityHelp),
                         Act::Credits => events.push(Event::Credits),
                         Act::CopyAgentDetails => events.push(Event::CopyAgentDetails),
@@ -3607,11 +3499,23 @@ impl OptionsUi {
         }
     }
     pub fn release(&mut self) -> Vec<Event> {
-        self.release_with_outcome().0
+        self.active_pointer = None;
+        self.release_inner().0
     }
 
     /// The release's events and whether an active slider/scrollbar accepted it.
-    pub fn release_with_outcome(&mut self) -> (Vec<Event>, bool) {
+    pub fn release_with_outcome(
+        &mut self,
+        s: &Settings,
+        atlas: &HudAtlas,
+        size: (f32, f32),
+    ) -> (Vec<Event>, bool) {
+        if let Some(res) = self.release_resolved(s, atlas, size) {
+            return res;
+        }
+        self.release_inner()
+    }
+    pub(super) fn release_inner(&mut self) -> (Vec<Event>, bool) {
         let mut handled = self.scrollbar_drag_y.take().is_some();
         if let Some(p) = &mut self.pack_screen {
             handled |= p.release();
@@ -3746,10 +3650,6 @@ impl OptionsUi {
             let (handled, outputs) = shell.wheel(s, size, cursor, amount);
             return (handled, self.shell_events(s, outputs));
         }
-        if self.page() == Page::Studio {
-            self.studio.wheel(amount);
-            return (true, Vec::new());
-        }
         let plain = self.resource_error.is_none()
             && !(self.pack_screen.is_some() && self.stack.last() == Some(&Page::Packs))
             && self.stack.last() != Some(&Page::Mods);
@@ -3823,7 +3723,7 @@ impl OptionsUi {
                 (true, self.cycle_option(s, opt, amount > 0.0, framebuffer))
             }
             Some(HoveredControl::Extra(item)) if amount != 0.0 => {
-                item.cycle(&mut s.extras, amount > 0.0);
+                item.cycle(&mut s.extras);
                 (true, vec![Event::Changed])
             }
             Some(_) => (false, Vec::new()),
@@ -3844,10 +3744,6 @@ impl OptionsUi {
         }
         if let Some(shell) = self.shell_mut() {
             shell.scroll(s, size, amount);
-            return;
-        }
-        if self.page() == Page::Studio {
-            self.studio.wheel(amount);
             return;
         }
         if self.page() == Page::Mods {
@@ -3892,14 +3788,22 @@ impl OptionsUi {
         vec![Event::Changed]
     }
     /// The Mods screen at this GUI size, made on first use from the installed mods.
-    fn mods_page(&mut self, s: &Settings, size: (f32, f32)) -> &mut crate::mods_screen::ModsScreen {
+    fn mods_page(
+        &mut self,
+        s: &Settings,
+        atlas: &HudAtlas,
+        size: (f32, f32),
+    ) -> &mut crate::mods_screen::ModsScreen {
+        let m = crate::screen_draw::Measure(&atlas.font);
         let (w, h) = (size.0 as i32, size.1 as i32);
         let in_world = self.in_world;
-        let screen = self
-            .mods_screen
-            .get_or_insert_with(|| crate::mods_screen::ModsScreen::new(w, h, in_world, &s.mods));
+        let screen = self.mods_screen.get_or_insert_with(|| {
+            let mut screen = crate::mods_screen::ModsScreen::new(w, h, in_world, &s.mods);
+            screen.update_panel_metrics(&m);
+            screen
+        });
         if screen.width != w || screen.height != h {
-            screen.resize(w, h);
+            screen.resize(&m, w, h);
         }
         screen
     }
@@ -3929,7 +3833,6 @@ impl OptionsUi {
                     self.pack_infos.clone(),
                     &self.pack_selection,
                 );
-                screen.browsing_allowed = self.pack_browser;
                 screen.changed = std::mem::take(&mut self.pack_reselected);
                 self.pack_screen = Some(screen);
             }
@@ -3980,6 +3883,7 @@ impl OptionsUi {
             .map(|c| c.picture(&atlas.font, size))
     }
     pub fn back(&mut self, s: &mut Settings) -> Vec<Event> {
+        self.active_pointer = None;
         self.relayout();
         let mut events = Vec::new();
         // A pack's screen goes back to the one that opened it.
@@ -4008,7 +3912,16 @@ impl OptionsUi {
                 let screen = std::mem::take(&mut self.pack_options.screen);
                 events.extend(screen.finished());
             }
-            Page::ShaderOptions | Page::ShaderPacks => {
+            // Sunrise Settings lists the packs as the pack list does, and closes as it does.
+            // Back on Sunrise Settings, which lists the packs, the options stay read (saved and
+            // read again when they changed): its Shaders page opens them.
+            Page::ShaderOptions if Self::lists_shader_packs(self.page()) => {
+                if s.shader_options.as_ref().is_some_and(|o| o.changed) {
+                    events.push(Event::ShaderOptions);
+                    events.push(Event::OpenShaderOptions);
+                }
+            }
+            page if page == Page::ShaderOptions || Self::lists_shader_packs(page) => {
                 if s.shader_options.as_ref().is_some_and(|o| o.changed) {
                     events.push(Event::ShaderOptions);
                 } else {
@@ -4024,8 +3937,6 @@ impl OptionsUi {
                 }
             }
             Page::Mods => self.mods_screen = None,
-            // Browse mods may have installed some: the list is made again.
-            Page::ModBrowser => self.mods_screen = None,
             Page::Packs => {
                 // PackSelectionScreen.onClose: PackSelectionModel.commit.
                 let data = self.data_pack_dir.take();
@@ -4289,11 +4200,11 @@ impl OptionsUi {
                     return (true, Vec::new());
                 }
                 K::ArrowUp => {
-                    p.step(-1);
+                    p.step(&m, -1);
                     return (true, Vec::new());
                 }
                 K::ArrowDown => {
-                    p.step(1);
+                    p.step(&m, 1);
                     return (true, Vec::new());
                 }
                 _ => {}
@@ -4306,6 +4217,7 @@ impl OptionsUi {
             }
             return (true, vec![Event::Changed]);
         }
+        self.end_stale_page_key();
         if self.selected_key.is_some() {
             // KeyBindsScreen.keyPressed: Escape unbinds.
             if self.selected_key == Some(MOD_KEY)
@@ -4400,29 +4312,119 @@ impl OptionsUi {
             }
         }
 
-        // Gather focusables on the current page
+        // Gather focusables on the current page, respecting active engine input overrides.
         let layout = self.built_layout(s, self.size.0, self.size.1);
         let (widgets, top, bottom, content) = layout.parts();
         let has_search = (self.page() == Page::Language) || self.settings_search_active();
-        let mut focusables: Vec<(FocusId, [f32; 4], bool)> = Vec::new();
+        let mut focusables: Vec<(FocusId, [f32; 4], bool, i32)> = Vec::new();
+        let mut counts: std::collections::HashMap<(String, crate::widgets::WidgetBucket), u32> =
+            std::collections::HashMap::new();
+        let next_occ = |counts: &mut std::collections::HashMap<
+            (String, crate::widgets::WidgetBucket),
+            u32,
+        >,
+                        key_str: String,
+                        bucket: crate::widgets::WidgetBucket,
+                        visible: bool| {
+            if visible {
+                let entry = counts.entry((key_str, bucket)).or_insert(0);
+                let occ = *entry;
+                *entry += 1;
+                occ
+            } else {
+                0
+            }
+        };
         if has_search {
             let search = if self.page() == Page::Language {
                 &self.language_search
             } else {
                 &self.settings_search
             };
-            focusables.push((
-                FocusId::Search,
+            let msg = (!search.message.is_empty()).then(|| Text::literal(&search.message));
+            let key_str = msg
+                .as_ref()
+                .map(crate::widgets::stable_key_from_text)
+                .unwrap_or_default();
+            let occ = next_occ(
+                &mut counts,
+                key_str,
+                crate::widgets::WidgetBucket::Field,
+                true,
+            );
+            if let Some(rect) = crate::widgets::resolve_engine_input(
+                crate::widgets::WidgetBucket::Field,
+                msg.as_ref(),
+                None,
+                occ,
                 [search.x, search.y, search.width, search.height],
-                false,
-            ));
+                true,
+            ) {
+                let group = crate::widgets::resolve_engine_tab_order_group(
+                    crate::widgets::WidgetBucket::Field,
+                    msg.as_ref(),
+                    None,
+                    occ,
+                    0,
+                );
+                focusables.push((FocusId::Search, rect, false, group));
+            }
         }
         for (i, wd) in widgets.iter().enumerate() {
+            let visible = !wd.list || (wd.y < bottom && wd.y + wd.h > top);
             match &wd.kind {
-                WKind::Button { active: true, .. }
-                | WKind::Slider { .. }
-                | WKind::LanguageRow { .. } => {
-                    focusables.push((focus_id(i, wd), [wd.x, wd.y, wd.w, wd.h], wd.list));
+                WKind::Button { label, active, .. } => {
+                    let occ = next_occ(
+                        &mut counts,
+                        crate::widgets::stable_key_from_text(label),
+                        crate::widgets::WidgetBucket::Button,
+                        visible,
+                    );
+                    if let Some(rect) = crate::widgets::resolve_engine_input(
+                        crate::widgets::WidgetBucket::Button,
+                        Some(label),
+                        None,
+                        occ,
+                        [wd.x, wd.y, wd.w, wd.h],
+                        *active,
+                    ) {
+                        let group = crate::widgets::resolve_engine_tab_order_group(
+                            crate::widgets::WidgetBucket::Button,
+                            Some(label),
+                            None,
+                            occ,
+                            0,
+                        );
+                        focusables.push((focus_id(i, wd), rect, wd.list, group));
+                    }
+                }
+                WKind::Slider { label, .. } => {
+                    let occ = next_occ(
+                        &mut counts,
+                        crate::widgets::stable_key_from_text(label),
+                        crate::widgets::WidgetBucket::Slider,
+                        visible,
+                    );
+                    if let Some(rect) = crate::widgets::resolve_engine_input(
+                        crate::widgets::WidgetBucket::Slider,
+                        Some(label),
+                        None,
+                        occ,
+                        [wd.x, wd.y, wd.w, wd.h],
+                        true,
+                    ) {
+                        let group = crate::widgets::resolve_engine_tab_order_group(
+                            crate::widgets::WidgetBucket::Slider,
+                            Some(label),
+                            None,
+                            occ,
+                            0,
+                        );
+                        focusables.push((focus_id(i, wd), rect, wd.list, group));
+                    }
+                }
+                WKind::LanguageRow { .. } => {
+                    focusables.push((focus_id(i, wd), [wd.x, wd.y, wd.w, wd.h], wd.list, 0));
                 }
                 _ => {}
             }
@@ -4431,29 +4433,17 @@ impl OptionsUi {
             return (false, Vec::new());
         }
 
-        // 1. Tab / Shift+Tab navigation
+        // 1. Tab / Shift+Tab navigation (ordered stably by resolved tab_order_group)
         if key == K::Tab {
+            let groups: Vec<i32> = focusables.iter().map(|&(_, _, _, g)| g).collect();
             let at = self
                 .focus
                 .as_ref()
                 .and_then(|fid| focusables.iter().position(|(id, ..)| id == fid));
-            let next_idx = match at {
-                None => {
-                    if shift {
-                        focusables.len() - 1
-                    } else {
-                        0
-                    }
-                }
-                Some(p) => {
-                    if shift {
-                        (p + focusables.len() - 1) % focusables.len()
-                    } else {
-                        (p + 1) % focusables.len()
-                    }
-                }
+            let Some(next_idx) = input_resolver::tab_step_grouped(&groups, at, shift) else {
+                return (false, Vec::new());
             };
-            let (next_id, rect, in_list) = &focusables[next_idx];
+            let (next_id, rect, in_list, _) = &focusables[next_idx];
             self.focus = Some(next_id.clone());
             self.focus_from_keyboard = true;
             self.can_change_value = matches!(next_id, FocusId::Slider(_));
@@ -4492,7 +4482,7 @@ impl OptionsUi {
                         gamepad::Button::DPadLeft
                     };
                     if let Some(next_idx) = gamepad::focus_step_rect(from, dir, &rects) {
-                        let (next_id, rect, in_list) = &focusables[next_idx];
+                        let (next_id, rect, in_list, _) = &focusables[next_idx];
                         self.focus = Some(next_id.clone());
                         self.focus_from_keyboard = true;
                         self.can_change_value = false;
@@ -4529,7 +4519,7 @@ impl OptionsUi {
                     let step = gamepad::focus_step_strict(from, dir, &rects)
                         .or_else(|| gamepad::focus_step_vague(from, dir, &rects));
                     if let Some(next_idx) = step {
-                        let (next_id, rect, in_list) = &focusables[next_idx];
+                        let (next_id, rect, in_list, _) = &focusables[next_idx];
                         self.focus = Some(next_id.clone());
                         self.focus_from_keyboard = true;
                         self.can_change_value = false;
@@ -4557,6 +4547,11 @@ impl OptionsUi {
 
         // 4. Enter / Space selection keys
         if matches!(key, K::Enter | K::NumpadEnter | K::Space) {
+            if let Some(fid) = &self.focus
+                && !focusables.iter().any(|(id, ..)| id == fid)
+            {
+                return (false, Vec::new());
+            }
             match &self.focus {
                 Some(FocusId::Slider(_)) => {
                     self.can_change_value = !self.can_change_value;
@@ -4575,7 +4570,7 @@ impl OptionsUi {
                             self.focus = None;
                             self.focus_from_keyboard = false;
                             self.can_change_value = false;
-                            if p == Page::ShaderPacks {
+                            if Self::lists_shader_packs(p) {
                                 // The pack list, and the picked pack's own settings with it.
                                 events.push(Event::ListShaderPacks);
                                 s.shader_options = None;
@@ -4583,9 +4578,6 @@ impl OptionsUi {
                             }
                             if p == Page::Music {
                                 events.push(Event::ListMusicTracks);
-                            }
-                            if p == Page::ModBrowser {
-                                events.push(Event::BrowseMods);
                             }
                             self.push(p);
                             self.capture_video_atlas(s);
@@ -4603,7 +4595,7 @@ impl OptionsUi {
                             if let Some(name) = item.key_name() {
                                 self.selected_key = Some(name);
                             } else {
-                                item.cycle(&mut s.extras, shift);
+                                item.cycle(&mut s.extras);
                                 events.push(Event::Changed);
                             }
                         }
@@ -4621,12 +4613,17 @@ impl OptionsUi {
                         }
                         Act::Key(name) => self.selected_key = Some(name),
                         Act::ResetKey(name) => {
-                            s.keys.set(name, KeyBinds::default_of(name));
+                            if !s.extras.reset_key(name) {
+                                s.keys.set(name, KeyBinds::default_of(name));
+                            }
                             events.push(Event::Changed);
                         }
                         Act::ResetKeys => {
                             s.keys.reset_all();
                             s.mods.keys.clear();
+                            for (name, _) in crate::extras::KEYS {
+                                s.extras.reset_key(name);
+                            }
                             events.push(Event::Changed);
                         }
                         Act::ModKey(i, k) => {
@@ -4653,26 +4650,6 @@ impl OptionsUi {
                                 events.push(Event::NativeSetting(i, j));
                             }
                         }
-                        Act::ModProject(i) => {
-                            if let Some(listing) = self.mod_browser.listings.get(i) {
-                                self.mod_project = listing.id.clone();
-                                self.push(Page::ModProject);
-                            }
-                        }
-                        Act::InstallMod => {
-                            self.mod_browser.message = None;
-                            events.push(Event::InstallMod(self.mod_project.clone()));
-                        }
-                        Act::OpenModPage => {
-                            if let Some(l) = self.mod_browser.listing(&self.mod_project) {
-                                events.push(Event::OpenModPage(l.page.clone()));
-                            }
-                        }
-                        Act::PvpPreset => {
-                            crate::pvp::apply_preset(s);
-                            events.push(Event::Changed);
-                        }
-                        Act::HudEditor => events.push(Event::HudEditor),
                         Act::AccessibilityHelp => events.push(Event::AccessibilityHelp),
                         Act::Credits => events.push(Event::Credits),
                         Act::CopyAgentDetails => events.push(Event::CopyAgentDetails),
@@ -4704,6 +4681,8 @@ mod tests {
     use super::*;
     use crate::extras_ui::ExtraRow;
     use crate::gfx::EffectiveOutput;
+    use crate::graphics_ui::GraphicsScreen;
+    use crate::sunrise_ui::{SunriseRow, Tab};
 
     /// A renderer whose destination offers nothing and whose display reports nothing.
     const NONE: EffectiveOutput = EffectiveOutput::NONE;
@@ -5243,7 +5222,7 @@ mod tests {
     #[test]
     fn video_settings_render_distance_stops_at_vanilla_range_and_keeps_saved_value() {
         let mut s = Settings::default();
-        // Sunrise Graphics' slider still reaches the extended range.
+        // Sunrise Settings' slider still reaches the extended range.
         set_slider(Opt::RenderDistance, &mut s, 1.0);
         assert_eq!(s.render_distance, crate::options_file::MAX_RENDER_DISTANCE);
         // The classic page's slider stops at 32, reached from inside its range.
@@ -5332,17 +5311,9 @@ mod tests {
     /// Picking another pack keeps the last one's changed options before the next one's are
     /// read, and leaving the shader screen applies them.
     #[test]
-    fn the_shader_screen_saves_changed_options_before_reading_the_next_packs() {
-        use crate::shader_pack_list::{Entry, Kind};
-        let entry = |file: &str| Entry {
-            file: file.into(),
-            key: file.into(),
-            title: file.into(),
-            kind: Kind::Classic,
-            options: Vec::new(),
-            values: Vec::new(),
-            pages: Vec::new(),
-        };
+    fn picking_a_pack_saves_changed_options_before_reading_the_next_packs() {
+        use crate::shader_pack_list::Entry;
+        let entry = |file: &str| Entry { file: file.into() };
         let mut s = Settings {
             shader_packs: vec![entry("A.zip"), entry("B.zip")],
             ..Settings::default()
@@ -5361,9 +5332,8 @@ mod tests {
         ui.open(false);
         ui.push(Page::ShaderPacks);
         let size = (854.0, 480.0);
-        let (x, y) = ui
-            .shader
-            .point_at(&s, size, crate::shader_ui::Item::Pack(1));
+        let pack = SunriseRow::Pack(crate::shader_ui::Item::Pack(1));
+        let (x, y) = ui.sunrise.point_at(&s, size, pack);
         let events = ui.click(&mut s, &atlas(), x, y, size, [1708, 960], false, false);
         assert!(matches!(
             events[..],
@@ -5426,9 +5396,24 @@ mod tests {
             vec![Event::ButtonClick]
         );
         assert!(ui.resource_error.is_none());
+        // A controller's bumper on Sunrise Settings, whose page list scrolls at this size, is
+        // blocked too: the page stays.
+        ui.show(Page::Sunrise);
+        ui.resource_error = Some("broken pack".into());
+        let short = (427.0, 240.0);
+        assert_eq!(ui.step_page(&settings, short, true), None);
+        assert_eq!(
+            ui.sunrise.open_page(),
+            Some(Tab::Graphics(crate::graphics_ui::Page::General))
+        );
+        ui.resource_error = None;
+        assert!(
+            ui.step_page(&settings, short, true).is_some(),
+            "it steps once dismissed"
+        );
     }
 
-    /// The Extras page joins caption and value with the language's `options.generic_value`
+    /// The AI Agent page joins caption and value with the language's `options.generic_value`
     /// (26.3's templates), not an English ": " (#6072).
     #[test]
     fn extras_captions_use_the_languages_separator() {
@@ -5475,8 +5460,15 @@ mod tests {
                 if ui.controller_open() {
                     texts.extend(ui.controller.row_names(&s));
                 }
-                if ui.page() == Page::Extras {
-                    texts.extend(ui.extras.row_labels(&s));
+                // Sunrise Settings: every page's name, then every page's rows.
+                if OptionsUi::sunrise_tab(ui.page()).is_some() {
+                    let sheets = crate::settings_shell::Screen::sheets(&ui.sunrise.screen, &s);
+                    let tabs: Vec<Tab> = sheets.iter().map(|sheet| sheet.id).collect();
+                    texts.extend(sheets.into_iter().map(|sheet| sheet.name));
+                    for tab in tabs {
+                        ui.sunrise.show(tab);
+                        texts.extend(ui.sunrise.row_labels(&s));
+                    }
                 }
             }
             texts
@@ -5499,11 +5491,33 @@ mod tests {
         // Every key these pages ask for is in the table; vanilla's own keys (`options.*`,
         // `key.*`: dotted ids without spaces) come from the prepared resources, which this
         // language does not have.
+        // Sunrise Settings holds the graphics screen too, whose values go through the table
+        // as words ("64 Chunks") and whose descriptions are English texts as keys: its own test
+        // covers those (`graphics_ui`). Its `sunrise.*` keys are checked here.
+        let s = Settings::default();
+        let graphics = || crate::settings_shell::Screen::sheets(&GraphicsScreen::default(), &s);
+        let de = || lang::Language::load(&[], "de_de");
+        let (_, graphics) = lang::scoped(de(), graphics);
         let missed: Vec<_> = missed
             .into_iter()
             .filter(|k| k.starts_with("sunrise.") || k.contains(' ') || !k.contains('.'))
+            .filter(|k| k.starts_with("sunrise.") || !graphics.contains(k))
             .collect();
         assert_eq!(missed, Vec::<String>::new());
+        // Every page's name and the rows that open Sunrise's other pages are there, in the
+        // table's words, not as their keys.
+        let (opens, _) = lang::scoped(de(), || {
+            let keys = ["sunrise.settings.tab.tools", "sunrise.pages.open.agent"];
+            keys.map(lang::get)
+        });
+        for text in &opens {
+            assert!(!text.starts_with("sunrise."), "{text}");
+            assert!(texts.contains(text), "{text:?} not in {texts:?}");
+        }
+        assert!(
+            !texts.iter().any(|t| t.starts_with("sunrise.")),
+            "{texts:?}"
+        );
         let (texts, _) = page_texts("pl_pl", &[Page::Extras, Page::PadBinds]);
         for want in [
             "Płynny czat: Wył.",
@@ -5545,6 +5559,8 @@ mod tests {
                     label: "Trails".into(),
                     tooltip: None,
                     value: crate::mod_list::NativeSettingValue::Toggle(true),
+                    category: None,
+                    visible_when: None,
                 }],
                 ..Default::default()
             }),
@@ -5571,6 +5587,17 @@ mod tests {
         let events = click(&mut ui, &mut s, 320.0, 223.0);
         assert_eq!(events.first(), Some(&Event::ButtonClick));
         assert_eq!(ui.page(), Page::Main);
+        // A mod with its own config screen (`IConfigScreenFactory`) has Config with no
+        // settings, and Config asks the game to open that screen over this one.
+        s.mods.installed[0].native = Some(crate::mod_list::NativePage {
+            own_screen: true,
+            ..Default::default()
+        });
+        ui.show(Page::Mods);
+        assert!(click(&mut ui, &mut s, 61.0, 76.0).is_empty());
+        let events = click(&mut ui, &mut s, 397.0, 192.0);
+        assert_eq!(events, vec![Event::ButtonClick, Event::ModConfigScreen(0)]);
+        assert_eq!(ui.page(), Page::Mods);
     }
 
     #[test]
@@ -5580,10 +5607,12 @@ mod tests {
         let mut s = Settings::default();
         let mut ui = OptionsUi::default();
         let size = (480.0, 240.0);
-        let setting = |key: &str, value: V| NativeSetting {
+        let setting = |key: &str, category: Option<&str>, value: V| NativeSetting {
             key: key.into(),
             label: key.into(),
             tooltip: None,
+            category: category.map(str::to_owned),
+            visible_when: None,
             value,
         };
         s.mods.installed.push(crate::mod_list::Installed {
@@ -5594,9 +5623,10 @@ mod tests {
             dev: false,
             native: Some(crate::mod_list::NativePage {
                 settings: vec![
-                    setting("trails", V::Toggle(true)),
+                    setting("trails", None, V::Toggle(true)),
                     setting(
                         "speed",
+                        Some("test.movement"),
                         V::Range {
                             min: 0.0,
                             max: 4.0,
@@ -5604,11 +5634,47 @@ mod tests {
                             value: 1.0,
                         },
                     ),
+                    setting("jump", Some("test.movement"), V::Toggle(false)),
+                    setting("sneak", Some("test.safety"), V::Toggle(false)),
                 ],
                 ..Default::default()
             }),
         });
         ui.show(Page::NativeMod(0));
+        // Headings appear in order at category changes; each setting's (i, j)
+        // is its index in the page, headings never taking one.
+        let rows = ui.native_rows(&s, 0);
+        let summary: Vec<String> = rows
+            .iter()
+            .map(|row| match row {
+                Row::Note(_) => "note".to_string(),
+                Row::Heading(key) => format!("heading:{key}"),
+                Row::Buttons(widget, _) => match &widget.kind {
+                    WKind::Button {
+                        act: Act::NativeSetting(_, j),
+                        ..
+                    } => format!("button:{j}"),
+                    WKind::Slider {
+                        opt: Opt::ModSetting(_, j),
+                        ..
+                    } => format!("slider:{j}"),
+                    _ => "other".to_string(),
+                },
+                _ => "other".to_string(),
+            })
+            .collect();
+        assert_eq!(
+            summary.iter().map(String::as_str).collect::<Vec<_>>(),
+            [
+                "note",
+                "button:0",
+                "heading:test.movement",
+                "slider:1",
+                "button:2",
+                "heading:test.safety",
+                "button:3",
+            ]
+        );
         let (widgets, ..) = ui.layout(&s, size.0, size.1);
         let toggle = widgets
             .iter()
@@ -5668,6 +5734,268 @@ mod tests {
                 value: 4.0
             }
         );
+    }
+
+    #[test]
+    fn a_mod_page_shows_only_matching_conditional_settings() {
+        use crate::mod_list::{NativeSetting, NativeSettingValue as V, SettingVisibility};
+        let mut s = Settings::default();
+        let ui = OptionsUi::default();
+        let mode = NativeSetting {
+            key: "zoom_mode".into(),
+            label: "zoom.mode".into(),
+            tooltip: None,
+            category: None,
+            visible_when: None,
+            value: V::Choice {
+                options: vec!["zoom.key".into(), "zoom.spyglass".into()],
+                index: 0,
+            },
+        };
+        let magnification = NativeSetting {
+            key: "magnification".into(),
+            label: "zoom.magnification".into(),
+            tooltip: None,
+            category: None,
+            visible_when: Some(SettingVisibility {
+                choice_setting: "zoom_mode".into(),
+                choice_index: 1,
+            }),
+            value: V::Range {
+                min: 2.0,
+                max: 10.0,
+                step: 1.0,
+                value: 5.0,
+            },
+        };
+        s.mods.installed.push(crate::mod_list::Installed {
+            id: "native".into(),
+            title: "Native 1.0".into(),
+            description: String::new(),
+            problem: None,
+            dev: false,
+            native: Some(crate::mod_list::NativePage {
+                settings: vec![mode.clone(), magnification],
+                ..Default::default()
+            }),
+        });
+
+        let has_setting = |ui: &OptionsUi, s: &Settings, index| {
+            ui.native_rows(s, 0).iter().any(|row| {
+                matches!(row, Row::Buttons(widget, _) if matches!(widget.kind, WKind::Slider { opt: Opt::ModSetting(0, j), .. } if j == index))
+            })
+        };
+        assert!(
+            !has_setting(&ui, &s, 1),
+            "reopened mode hides saved scale row"
+        );
+        assert!(matches!(
+            &s.mods.installed[0].native.as_ref().unwrap().settings[1].value,
+            V::Range { value: 5.0, .. }
+        ));
+
+        s.mods.installed[0].native.as_mut().unwrap().settings[0]
+            .value
+            .click();
+        assert!(has_setting(&ui, &s, 1));
+        assert!(matches!(
+            &s.mods.installed[0].native.as_ref().unwrap().settings[1].value,
+            V::Range { value: 5.0, .. }
+        ));
+        s.mods.installed[0].native.as_mut().unwrap().settings[0]
+            .value
+            .click();
+        assert!(!has_setting(&ui, &s, 1));
+    }
+
+    #[test]
+    fn hiding_a_mod_setting_drops_its_keyboard_focus_and_slider_drag() {
+        use crate::mod_list::{NativeSetting, NativeSettingValue as V, SettingVisibility};
+
+        let mut settings = Settings::default();
+        settings.mods.installed.push(crate::mod_list::Installed {
+            id: "native".into(),
+            title: "Native".into(),
+            description: String::new(),
+            problem: None,
+            dev: false,
+            native: Some(crate::mod_list::NativePage {
+                settings: vec![
+                    NativeSetting {
+                        key: "mode".into(),
+                        label: "mode".into(),
+                        tooltip: None,
+                        category: None,
+                        visible_when: None,
+                        value: V::Choice {
+                            options: vec!["a".into(), "b".into()],
+                            index: 0,
+                        },
+                    },
+                    NativeSetting {
+                        key: "scale".into(),
+                        label: "scale".into(),
+                        tooltip: None,
+                        category: None,
+                        visible_when: Some(SettingVisibility {
+                            choice_setting: "mode".into(),
+                            choice_index: 0,
+                        }),
+                        value: V::Range {
+                            min: 0.0,
+                            max: 2.0,
+                            step: 0.5,
+                            value: 1.0,
+                        },
+                    },
+                ],
+                ..Default::default()
+            }),
+        });
+
+        let mut ui = OptionsUi::default();
+        ui.show(Page::NativeMod(0));
+        let scale = Opt::ModSetting(0, 1);
+        ui.focus = Some(FocusId::Slider(scale));
+        ui.focus_from_keyboard = true;
+        ui.can_change_value = true;
+        ui.dragging = Some(scale);
+        ui.slider_value = Some((scale, 0.75, std::time::Instant::now()));
+
+        settings.mods.installed[0].native.as_mut().unwrap().settings[0]
+            .value
+            .click();
+        ui.layout_changed();
+        let _ = ui.built_layout(&settings, 480.0, 270.0);
+
+        assert_eq!(ui.focus, None);
+        assert!(!ui.focus_from_keyboard);
+        assert_eq!(ui.dragging, None);
+        assert_eq!(ui.slider_value, None);
+        assert!(!ui.can_change_value);
+    }
+
+    #[test]
+    fn rebuilding_video_layout_keeps_separately_drawn_search_focus() {
+        let settings = Settings::default();
+        let mut ui = OptionsUi::default();
+        ui.show(Page::Video);
+        ui.focus = Some(FocusId::Search);
+        ui.focus_from_keyboard = true;
+        ui.layout_changed();
+
+        let _ = ui.built_layout(&settings, 480.0, 270.0);
+
+        assert_eq!(ui.focus, Some(FocusId::Search));
+        assert!(ui.focus_from_keyboard);
+    }
+
+    #[test]
+    fn an_uncategorized_mod_page_has_no_headings() {
+        use crate::mod_list::{NativeSetting, NativeSettingValue as V};
+        let mut s = Settings::default();
+        let ui = OptionsUi::default();
+        let setting = |key: &str, value: V| NativeSetting {
+            key: key.into(),
+            label: key.into(),
+            tooltip: None,
+            category: None,
+            visible_when: None,
+            value,
+        };
+        s.mods.installed.push(crate::mod_list::Installed {
+            id: "native".into(),
+            title: "Native 1.0".into(),
+            description: String::new(),
+            problem: None,
+            dev: false,
+            native: Some(crate::mod_list::NativePage {
+                settings: vec![
+                    setting("trails", V::Toggle(true)),
+                    setting(
+                        "speed",
+                        V::Range {
+                            min: 0.0,
+                            max: 4.0,
+                            step: 1.0,
+                            value: 1.0,
+                        },
+                    ),
+                ],
+                ..Default::default()
+            }),
+        });
+        let rows = ui.native_rows(&s, 0);
+        assert_eq!(
+            rows.iter()
+                .filter(|row| matches!(row, Row::Heading(_)))
+                .count(),
+            0,
+            "uncategorized settings draw no headings"
+        );
+    }
+
+    /// A native mod's toggle shows the tooltip it registered, as its range slider does
+    /// (`OptionInstance.createButton` hands every kind its `Tooltip`).
+    #[test]
+    fn a_native_toggle_shows_its_tooltip_like_a_slider() {
+        use crate::mod_list::{NativeSetting, NativeSettingValue as V};
+        let key = "native.setting.tooltip";
+        let text = "Shows a mod setting's tooltip.";
+        let mut s = Settings::default();
+        let setting = |name: &str, value| NativeSetting {
+            key: name.into(),
+            label: name.into(),
+            tooltip: Some(key.into()),
+            category: None,
+            visible_when: None,
+            value,
+        };
+        s.mods.installed.push(crate::mod_list::Installed {
+            id: "native".into(),
+            title: "Native 1.0".into(),
+            description: String::new(),
+            problem: None,
+            dev: false,
+            native: Some(crate::mod_list::NativePage {
+                settings: vec![
+                    setting("trails", V::Toggle(true)),
+                    setting(
+                        "speed",
+                        V::Range {
+                            min: 0.0,
+                            max: 4.0,
+                            step: 1.0,
+                            value: 1.0,
+                        },
+                    ),
+                ],
+                ..Default::default()
+            }),
+        });
+        let mut ui = OptionsUi::default();
+        ui.show(Page::NativeMod(0));
+        let language = lang::Language::of("en_us", [(key.into(), text.into())]);
+        let (tips, _) = lang::scoped(language, || {
+            let (widgets, ..) = ui.layout(&s, 480.0, 240.0);
+            widgets
+                .iter()
+                .filter(|w| {
+                    matches!(
+                        w.kind,
+                        WKind::Button {
+                            act: Act::NativeSetting(0, 0),
+                            ..
+                        } | WKind::Slider {
+                            opt: Opt::ModSetting(0, 1),
+                            ..
+                        }
+                    )
+                })
+                .map(|w| tooltip_text(&s, w).map(|t| t.plain()))
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(tips, [Some(text.to_owned()), Some(text.to_owned())]);
     }
 
     /// Typing goes to the Mods search box once a click focuses it; the one match is selected,
@@ -5893,7 +6221,6 @@ mod tests {
             Page::PackOptions,
             Page::Mods,
             Page::Packs,
-            Page::Studio,
         ] {
             let mut ui = OptionsUi::default();
             ui.show(page);
@@ -5995,6 +6322,7 @@ mod tests {
                     ..Default::default()
                 }],
                 settings: Vec::new(),
+                own_screen: false,
             }),
         });
         ui.show(Page::KeyBinds);
@@ -6266,7 +6594,7 @@ mod tests {
         let atlas = atlas();
         let mut s = Settings::default();
         let mut ui = OptionsUi::default();
-        ui.show(Page::Pvp);
+        ui.show(Page::Agent);
         let (widgets, _, _, _) = ui.layout(&s, 480.0, 480.0);
         let extra = widgets
             .iter()
@@ -6331,12 +6659,11 @@ mod tests {
         let mut ui = OptionsUi::default();
         ui.show(Page::Extras);
         let english = || lang::Language::load(&[], "en_us");
-        // Without the mod, Extras says where it is installed (a note, not a second way into
-        // Options > Mods).
-        let labels = lang::scoped(english(), || ui.extras.row_labels(&s)).0;
+        // Without the mod, Gameplay shows nothing for it.
+        let labels = lang::scoped(english(), || ui.sunrise.row_labels(&s)).0;
         assert!(
-            labels.iter().any(|l| l == "Zoom: install from Mods"),
-            "Extras has no hint for the Zoom mod: {labels:?}"
+            !labels.iter().any(|l| l.starts_with("Zoom")),
+            "Gameplay shows Zoom without the mod: {labels:?}"
         );
         // Built in, Zoom's settings live on its page: Extras opens that page.
         s.mods.installed.push(crate::mod_list::Installed {
@@ -6352,22 +6679,29 @@ mod tests {
                     label: "Trails".into(),
                     tooltip: None,
                     value: crate::mod_list::NativeSettingValue::Toggle(true),
+                    category: None,
+                    visible_when: None,
                 }],
+                own_screen: false,
             }),
         });
-        let labels = lang::scoped(english(), || ui.extras.row_labels(&s)).0;
+        let labels = lang::scoped(english(), || ui.sunrise.row_labels(&s)).0;
         assert!(labels.iter().any(|l| l == "Settings"), "{labels:?}");
         // The mod's switch is beside it, so Extras keeps the Zoom setting it had.
         assert!(labels.iter().any(|l| l.starts_with("Zoom: ")), "{labels:?}");
         let size = (480.0, 480.0);
         let on = s.mods.is_on(0);
-        let at = ui.extras.point_at(&s, size, ExtraRow::Zoom(0));
+        let at = ui
+            .sunrise
+            .point_at(&s, size, SunriseRow::Extra(ExtraRow::Zoom(0)));
         assert_eq!(
             ui.click(&mut s, &atlas, at.0, at.1, size, [960, 960], false, false),
             vec![Event::ButtonClick, Event::Changed]
         );
         assert_ne!(s.mods.is_on(0), on);
-        let at = ui.extras.point_at(&s, size, ExtraRow::ZoomSettings(0));
+        let at = ui
+            .sunrise
+            .point_at(&s, size, SunriseRow::Extra(ExtraRow::ZoomSettings(0)));
         assert_eq!(
             ui.click(&mut s, &atlas, at.0, at.1, size, [960, 960], false, false),
             vec![
@@ -6380,11 +6714,10 @@ mod tests {
     }
 
     /// OptionsScreen's Video Settings button opens VideoSettingsScreen, not Sunrise's graphics
-    /// screen, which has its own row on the Extras page.
+    /// settings, which are Sunrise Settings' first pages.
     #[test]
-    fn extras_opens_sunrise_graphics_and_video_settings_opens_vanilla() {
-        let atlas = atlas();
-        let mut s = Settings::default();
+    fn sunrise_settings_opens_on_graphics_and_video_settings_opens_vanilla() {
+        let s = Settings::default();
         let mut ui = OptionsUi::default();
         let (widgets, _, _, _) = ui.layout(&s, 427.0, 240.0);
         let video = widgets.iter().find(|w| match &w.kind {
@@ -6409,11 +6742,16 @@ mod tests {
                 ..
             }
         )));
-        ui.show(Page::Extras);
+        // Sunrise Settings opens straight on the graphics screen's first page.
+        ui.show(Page::Sunrise);
         let size = (480.0, 480.0);
-        let at = ui.extras.point_at(&s, size, ExtraRow::Graphics);
-        ui.click(&mut s, &atlas, at.0, at.1, size, [960, 960], false, false);
-        assert_eq!(ui.page(), Page::Graphics);
+        let distance = SunriseRow::Graphics(crate::graphics_ui::Item::Vanilla(Opt::RenderDistance));
+        let general = Tab::Graphics(crate::graphics_ui::Page::General);
+        assert!(ui.sunrise.listed(&s, size).contains(&(general, distance)));
+        // All of it is the video screen, as the graphics screen was: Ctrl with the wheel steps
+        // the GUI scale on any of its pages.
+        ui.sunrise.show(Tab::Tools);
+        assert!(ui.video_open());
     }
 
     #[test]
@@ -6794,7 +7132,7 @@ mod tests {
     }
 
     #[test]
-    fn extras_from_sunrise_settings_edit_shared_settings_and_return() {
+    fn gameplay_on_sunrise_settings_edits_shared_settings_and_returns() {
         let atlas = atlas();
         let mut s = Settings::default();
         let mut ui = OptionsUi::default();
@@ -6818,20 +7156,25 @@ mod tests {
                 false,
             )
         };
-        for page in [Page::Sunrise, Page::Extras] {
-            assert_eq!(
-                click(&mut ui, &mut s, Act::Push(page)),
-                vec![Event::ButtonClick]
-            );
-            assert_eq!(ui.page(), page);
-        }
+        // Sunrise Settings lists the shader packs on its Shaders page: opening it reads them.
         assert_eq!(
-            ui.extras.row_labels(&s).len(),
-            // And the note about the Zoom mod and the Sunrise Graphics row over them.
-            2 + crate::extras::rows().iter().filter(|r| r.is_ok()).count()
+            click(&mut ui, &mut s, Act::Push(Page::Sunrise)),
+            vec![
+                Event::ButtonClick,
+                Event::ListShaderPacks,
+                Event::OpenShaderOptions
+            ]
+        );
+        assert_eq!(ui.page(), Page::Sunrise);
+        ui.sunrise.show(Tab::Gameplay);
+        assert_eq!(
+            ui.sunrise.row_labels(&s).len(),
+            crate::extras::rows().iter().filter(|r| r.is_ok()).count()
         );
         let press = |ui: &mut OptionsUi, s: &mut Settings, item: crate::extras::Item| {
-            let at = ui.extras.point_at(s, size, ExtraRow::Item(item));
+            let at = ui
+                .sunrise
+                .point_at(s, size, SunriseRow::Extra(ExtraRow::Item(item)));
             ui.click(s, &atlas, at.0, at.1, size, [960, 960], false, false)
         };
         assert_eq!(
@@ -6862,7 +7205,8 @@ mod tests {
             ui.key(&mut s, &atlas, winit::keyboard::KeyCode::Escape, None),
             vec![Event::Changed]
         );
-        assert_eq!(ui.page(), Page::Sunrise);
+        // Not waiting, Escape leaves Sunrise Settings for the Options screen.
+        assert_eq!(ui.page(), Page::Main);
     }
 
     /// A Bindings row pressed waits for a controller button: the next click or key cancels the
@@ -6901,8 +7245,7 @@ mod tests {
         assert_eq!(ui.page(), Page::PadBinds);
     }
 
-    /// Every way a pad or a wheel scrolls a page on the shell moves the same list: Replay Studio's
-    /// took the wheel and missed `scroll_at`, so a stick couldn't scroll it.
+    /// The wheel and stick scroll the same settings list.
     #[test]
     fn the_wheel_and_the_stick_scroll_a_page_on_the_shell_alike() {
         let mut s = Settings::default();
@@ -6912,12 +7255,12 @@ mod tests {
         let short = (480.0, 180.0);
         let inside = (240.0, 90.0);
         ui.wheel(&mut s, short, inside, [960, 360], -1.0);
-        let one = ui.extras.scroll_amount();
+        let one = ui.sunrise.scroll_amount();
         assert!(one > 0.0);
         ui.scroll_at(&s, short, inside, -1.0);
-        assert_eq!(ui.extras.scroll_amount(), 2.0 * one);
+        assert_eq!(ui.sunrise.scroll_amount(), 2.0 * one);
         ui.scroll_at(&s, short, inside, 2.0);
-        assert_eq!(ui.extras.scroll_amount(), 0.0);
+        assert_eq!(ui.sunrise.scroll_amount(), 0.0);
     }
 
     #[test]
@@ -7362,6 +7705,91 @@ mod tests {
         }
     }
 
+    /// Sunrise's own keys are listed on Key Binds under their own category after vanilla's
+    /// (#5866): a row's button captures the next key into the same setting the Extras page
+    /// sets, and its reset button puts the default back.
+    #[test]
+    fn sunrise_keys_are_rebound_and_reset_from_key_binds() {
+        let atlas = atlas();
+        let mut s = Settings::default();
+        let mut ui = OptionsUi::default();
+        ui.show(Page::KeyBinds);
+        let size = (480.0, 240.0);
+        let (widgets, top, _, _) = ui.layout(&s, size.0, size.1);
+        let keys: Vec<(&str, f32)> = widgets
+            .iter()
+            .filter_map(|w| match w.kind {
+                WKind::Button {
+                    act: Act::Key(name),
+                    ..
+                } => Some((name, w.y)),
+                _ => None,
+            })
+            .collect();
+        let sunrise: Vec<&str> = crate::extras::KEYS.iter().map(|(name, _)| *name).collect();
+        let first = keys
+            .iter()
+            .position(|(name, _)| sunrise.contains(name))
+            .unwrap();
+        assert_eq!(
+            keys[first..]
+                .iter()
+                .map(|(name, _)| *name)
+                .collect::<Vec<_>>(),
+            sunrise,
+            "Sunrise's keys come after every vanilla mapping, in their own order"
+        );
+        assert!(
+            keys[..first]
+                .iter()
+                .all(|(name, _)| keybinds::MAPPINGS.iter().any(|m| m.0 == *name))
+        );
+        let category = tr(crate::extras::KEY_CATEGORY).plain();
+        assert!(widgets.iter().any(|w| matches!(&w.kind,
+            WKind::Text { text, .. } if text.plain() == category)));
+        let row = |ui: &mut OptionsUi, s: &Settings, act: Act| {
+            let (widgets, _, _, _) = ui.layout(s, size.0, size.1);
+            let w = widgets
+                .into_iter()
+                .find(|w| matches!(&w.kind, WKind::Button { act: a, .. } if *a == act))
+                .unwrap();
+            (w.x, w.y + w.h / 2.0)
+        };
+        // Scroll the shader pack row into view, click its button, then press J.
+        let (_, y) = row(&mut ui, &s, Act::Key(crate::extras::SHADER_PACK_KEY));
+        ui.scroll = y - (top + 20.0);
+        let (x, at) = row(&mut ui, &s, Act::Key(crate::extras::SHADER_PACK_KEY));
+        assert_eq!(
+            ui.click(&mut s, &atlas, x + 1.0, at, size, [480, 240], false, false),
+            vec![Event::ButtonClick]
+        );
+        assert_eq!(ui.selected_key, Some(crate::extras::SHADER_PACK_KEY));
+        assert_eq!(
+            ui.key(&mut s, &atlas, winit::keyboard::KeyCode::KeyJ, None),
+            vec![Event::Changed]
+        );
+        assert_eq!(s.extras.shader_pack_key, "key.keyboard.j");
+        assert_eq!(
+            s.keys.get("key.attack"),
+            "key.mouse.left",
+            "no vanilla mapping moved"
+        );
+        // Its reset button, now active, puts K back.
+        let (x, at) = row(&mut ui, &s, Act::ResetKey(crate::extras::SHADER_PACK_KEY));
+        assert_eq!(
+            ui.click(&mut s, &atlas, x + 1.0, at, size, [480, 240], false, false),
+            vec![Event::ButtonClick, Event::Changed]
+        );
+        assert_eq!(s.extras.shader_pack_key, "key.keyboard.k");
+        // Reset All puts every Sunrise key back too.
+        s.extras.sort_key = "key.keyboard.y".into();
+        for (name, _) in crate::extras::KEYS {
+            assert!(s.extras.reset_key(name));
+        }
+        assert_eq!(s.extras.sort_key, "key.keyboard.unknown");
+        assert!(!s.extras.reset_key("key.attack"));
+    }
+
     #[test]
     fn partially_visible_keybind_rows_are_clipped_and_clickable() {
         let mut atlas = atlas();
@@ -7406,26 +7834,25 @@ mod tests {
             ui.scroll = row.y - row_y;
             let (x, width, height) = (row.x, row.w, row.h);
             ui.draw_test_frame(&s, NONE, &mut batch, &atlas, (-1.0, -1.0), &mut |_, _| {});
-            let vertices: Vec<_> = batch
-                .vertices
-                .iter()
-                .filter(|v| {
-                    (0.25..=0.5).contains(&v.uv[0])
-                        && (0.25..=0.5).contains(&v.uv[1])
-                        && v.pos[0] >= x
-                        && v.pos[0] <= x + width
-                        && v.pos[1] >= row_y
-                        && v.pos[1] <= row_y + height
+            // The button sprite's quads in the row's box, as far as their scissor lets them show.
+            let quads = batch.vertices.as_chunks::<6>().0.iter();
+            let visible: Vec<_> = quads
+                .zip(batch.quad_scissors().zip(batch.visible_quads()))
+                .filter(|(q, ((bounds, _), _))| {
+                    q.iter()
+                        .all(|v| (0.25..=0.5).contains(&v.uv[0]) && (0.25..=0.5).contains(&v.uv[1]))
+                        && bounds[0] >= x
+                        && bounds[2] <= x + width
+                        && bounds[1] >= row_y
+                        && bounds[3] <= row_y + height
                 })
+                .filter_map(|(_, (_, visible))| visible)
                 .collect();
-            assert!(!vertices.is_empty());
-            let lo = vertices
+            assert!(!visible.is_empty());
+            let lo = visible.iter().map(|q| q[1]).fold(f32::INFINITY, f32::min);
+            let hi = visible
                 .iter()
-                .map(|v| v.pos[1])
-                .fold(f32::INFINITY, f32::min);
-            let hi = vertices
-                .iter()
-                .map(|v| v.pos[1])
+                .map(|q| q[3])
                 .fold(f32::NEG_INFINITY, f32::max);
             assert_eq!(lo, row_y.max(top));
             assert_eq!(hi, (row_y + height).min(bottom));
@@ -7705,90 +8132,94 @@ mod tests {
         assert_eq!(s.language, "de_de");
     }
 
-    /// An Extras or PvP & HUD label wider than half a row takes the whole row, so every label
-    /// fits its button: "Keep channels for UI sounds: Off" did not.
-    #[test]
-    fn pvp_labels_fit_their_buttons() {
-        // Vanilla's font: 6 px a glyph, a few narrower ones.
-        let width = |t: &str| {
-            t.chars()
-                .map(|c| match c {
-                    'i' | '\'' | ':' | '.' | ',' | '!' => 2.0,
-                    'l' => 3.0,
-                    ' ' | 't' | 'I' => 4.0,
-                    'f' | 'k' => 5.0,
-                    _ => 6.0,
-                })
-                .sum::<f32>()
-        };
-        let s = Settings::default();
-        let mut ui = OptionsUi::default();
-        {
-            ui.stack = vec![Page::Main, Page::Pvp];
-            ui.wide_extras = wide_extras(&s, width);
-            let rows = ui.list_rows(&s);
-            let buttons: Vec<&Widget> = rows
-                .iter()
-                .flat_map(|r| match r {
-                    Row::Buttons(a, b) => std::iter::once(a).chain(b.as_ref()).collect(),
-                    _ => Vec::new(),
-                })
-                .collect();
-            for b in &buttons {
-                let WKind::Button { label, .. } = &b.kind else {
-                    continue;
-                };
-                let label = label.plain();
-                assert!(width(&label) <= b.w - 4.0, "{label} on {}", b.w);
-            }
-            // Short ones keep vanilla's two to a row.
-            assert!(buttons.iter().any(|b| b.w == 150.0));
-        }
-    }
-
     /// Every setting a player reaches, from the Options screen through every button that opens
     /// a page, is in one place, and every page has one way in. Vanilla's own repeats stay as
-    /// vanilla has them; Video Settings is vanilla's own screen, and Sunrise's graphics screen
-    /// (opened from Extras) repeats its options, so they are not counted twice (Menu Background
-    /// Blur is in two of vanilla's). Vanilla's Video Settings rows are all on the graphics screen.
+    /// vanilla has them; Video Settings is vanilla's own screen, and Sunrise Settings' graphics
+    /// pages repeat its options, so they are not counted twice (Menu Background Blur is in two
+    /// of vanilla's). Vanilla's Video Settings rows are all on Sunrise Settings but its preset.
     #[test]
     fn every_setting_and_page_is_reached_from_one_place() {
         use std::collections::{BTreeMap, BTreeSet};
         let mut s = Settings::default();
         // The Music page shows once its extra is on.
         s.extras.music_page = true;
+        // A shader pack picked, with its options read: the shader screen (Shader Options) has
+        // its pages.
+        s.shader_packs = vec![crate::shader_pack_list::Entry {
+            file: "A.zip".into(),
+        }];
+        s.sunrise.shader_pack = "A.zip".into();
+        s.shader_options = Some(crate::shader_options::ShaderOptions::new(
+            "A.zip".into(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        ));
         let mut ui = OptionsUi::default();
         let mut places: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut ways_in: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut put = |id: String, page: &str| {
             places.entry(id).or_default().insert(page.to_owned());
         };
-        // The graphics screen, drawn by `graphics_ui`.
+        // Sunrise Settings, on the settings shell: the graphics screen's rows, the extras', and
+        // its rows that open other pages.
         let mut graphics_rows = BTreeSet::new();
-        for (page, groups) in crate::graphics_ui::rows() {
-            for row in groups.into_iter().flat_map(|(_, rows)| rows) {
-                use crate::graphics_ui::{H, Item};
-                let id = match row.item {
-                    // Vanilla's Graphics API button sets the same setting.
-                    Item::Sunrise(H::GraphicsApi) => "graphics-api".to_owned(),
-                    Item::Sunrise(H::ShaderPacks) => {
-                        ways_in
-                            .entry(format!("{:?}", Page::ShaderPacks))
-                            .or_default()
-                            .insert(format!("Graphics/{page:?}"));
-                        continue;
+        let mut todo = vec![Page::Main];
+        {
+            use crate::graphics_ui::{H, Item};
+            use crate::settings_shell::Screen;
+            for sheet in crate::sunrise_ui::SunriseScreen::default().sheets(&s) {
+                let tab = sheet.id;
+                for row in sheet.groups.into_iter().flat_map(|g| g.rows) {
+                    let id = match row.id {
+                        // Vanilla's Graphics API button sets the same setting.
+                        SunriseRow::Graphics(Item::Sunrise(H::GraphicsApi)) => {
+                            "graphics-api".to_owned()
+                        }
+                        SunriseRow::Graphics(Item::Vanilla(o)) => format!("{o:?}"),
+                        SunriseRow::Graphics(Item::Sunrise(h)) => format!("graphics:{h:?}"),
+                        SunriseRow::Graphics(Item::Extra(e))
+                        | SunriseRow::Extra(ExtraRow::Item(e)) => format!("extra:{e:?}"),
+                        SunriseRow::Pack(item) => format!("shader:{item:?}"),
+                        SunriseRow::ShaderOptions => {
+                            let way = format!("Sunrise/{tab:?}");
+                            ways_in
+                                .entry("ShaderOptions".into())
+                                .or_default()
+                                .insert(way);
+                            continue;
+                        }
+                        SunriseRow::Open(page) => {
+                            ways_in
+                                .entry(format!("{page:?}"))
+                                .or_default()
+                                .insert("Sunrise".to_owned());
+                            todo.push(page);
+                            continue;
+                        }
+                        _ => continue,
+                    };
+                    if matches!(row.id, SunriseRow::Graphics(_)) {
+                        graphics_rows.insert(id.clone());
                     }
-                    Item::Vanilla(o) => format!("{o:?}"),
-                    Item::Sunrise(h) => format!("graphics:{h:?}"),
-                    Item::Extra(e) => format!("extra:{e:?}"),
-                };
-                graphics_rows.insert(id.clone());
-                put(id, "Graphics");
+                    put(id, "Sunrise");
+                }
+            }
+            // Shader Options, on the settings shell: the picked pack's own rows, and no pack
+            // list of its own (Sunrise Settings' Shaders page has the one).
+            let shader = crate::shader_ui::ShaderScreen::default().sheets(&s);
+            assert!(!shader.is_empty(), "the picked pack's screens");
+            for row in shader
+                .into_iter()
+                .flat_map(|sheet| sheet.groups)
+                .flat_map(|g| g.rows)
+            {
+                put(format!("shader:{:?}", row.id), "ShaderOptions");
             }
         }
         // Every page from the Options screen, through its buttons.
         let mut seen = BTreeSet::new();
-        let mut todo = vec![Page::Main];
         while let Some(page) = todo.pop() {
             if !seen.insert(format!("{page:?}")) {
                 continue;
@@ -7805,14 +8236,13 @@ mod tests {
                         Act::Cycle(Opt::GraphicsBackend) => "graphics-api".to_owned(),
                         Act::Cycle(opt) => format!("{opt:?}"),
                         Act::Extra(e) => format!("extra:{e:?}"),
-                        Act::PvpPreset => "pvp-preset".to_owned(),
                         Act::Push(to) => {
                             ways_in
                                 .entry(format!("{to:?}"))
                                 .or_default()
                                 .insert(name.clone());
-                            // The graphics screen's pages are one screen, listed above.
-                            if OptionsUi::graphics_page(*to).is_none() {
+                            // Sunrise Settings' pages are one screen, listed above.
+                            if OptionsUi::sunrise_tab(*to).is_none() {
                                 todo.push(*to);
                             }
                             continue;
@@ -7826,15 +8256,9 @@ mod tests {
                 }
             }
         }
-        // The Extras page's Sunrise Graphics row opens the graphics screen (its shell has no
-        // widgets here; `extras_opens_sunrise_graphics_and_video_settings_opens_vanilla`).
-        ways_in
-            .entry(format!("{:?}", Page::Graphics))
-            .or_default()
-            .insert("Extras".to_owned());
         // Vanilla's own: the same option on two of its screens.
         let vanilla_repeats: BTreeMap<&str, &[&str]> = [
-            ("MenuBlur", &["Accessibility", "Graphics"][..]),
+            ("MenuBlur", &["Accessibility", "Sunrise"][..]),
             ("ShowSubtitles", &["Accessibility", "Sound"][..]),
             ("Narrator", &["Accessibility", "Chat"][..]),
             ("ChatOpacity", &["Accessibility", "Chat"][..]),
@@ -7857,8 +8281,11 @@ mod tests {
                 _ => assert_eq!(from.len(), 1, "{page} opens from {from:?}"),
             }
         }
+        // The packs are listed on Sunrise Settings' Shaders page; the pick's settings open
+        // from there.
+        assert_eq!(ways_in.get("ShaderPacks"), None, "{ways_in:?}");
         assert_eq!(
-            ways_in.get("ShaderPacks").map(|f| f.len()),
+            ways_in.get("ShaderOptions").map(|f| f.len()),
             Some(1),
             "{ways_in:?}"
         );
@@ -7883,8 +8310,9 @@ mod tests {
                     Opt::VanillaRenderDistance => "RenderDistance".to_owned(),
                     o => format!("{o:?}"),
                 };
-                // macOS has one graphics API: the graphics screen leaves the row out.
-                if id == "graphics-api" && cfg!(target_os = "macos") {
+                // macOS has one graphics API: the graphics screen leaves the row out. Sunrise
+                // Settings has no preset row: vanilla's stays on its own Video Settings.
+                if (id == "graphics-api" && cfg!(target_os = "macos")) || id == "Preset" {
                     continue;
                 }
                 assert!(
@@ -7920,30 +8348,44 @@ mod tests {
             &main[main.len() - 3..],
             [Page::Sunrise, Page::Mods, Page::Credits]
         );
-        // Video Settings... is vanilla's VideoSettingsScreen; the graphics screen is Extras'.
+        // Video Settings... is vanilla's VideoSettingsScreen; the graphics settings are Sunrise
+        // Settings'.
         assert!(main.contains(&Page::Video) && !main.contains(&Page::Graphics));
-        ui.push(Page::Sunrise);
-        assert_eq!(
-            pushes(&mut ui),
-            [
-                Page::Extras,
-                Page::Pvp,
-                Page::Studio,
-                Page::Agent,
-                Page::ModBrowser,
-            ]
-        );
-        // No AI hides the AI Agent page.
+        // Without registered pages, only Tools opens another Sunrise page.
+        let opens = |s: &Settings| -> Vec<(Tab, Page)> {
+            use crate::settings_shell::Screen;
+            let sheets = crate::sunrise_ui::SunriseScreen::default().sheets(s);
+            let rows = sheets.into_iter().flat_map(|sheet| {
+                let tab = sheet.id;
+                sheet.groups.into_iter().flat_map(move |g| {
+                    g.rows.into_iter().filter_map(move |r| match r.id {
+                        SunriseRow::Open(page) => Some((tab, page)),
+                        _ => None,
+                    })
+                })
+            });
+            rows.collect()
+        };
+        assert_eq!(opens(&s), [(Tab::Tools, Page::Agent)]);
+        // No AI keeps the way to the AI Agent page, where it is turned off again.
         let mut no_ai = Settings::default();
         no_ai.extras.no_ai = true;
+        assert_eq!(opens(&no_ai), opens(&s));
+        ui.push(Page::Agent);
         let (widgets, _, _, _) = ui.layout(&no_ai, 427.0, 240.0);
-        assert!(!widgets.iter().any(|w| matches!(
-            &w.kind,
-            WKind::Button {
-                act: Act::Push(Page::Agent),
-                ..
-            }
-        )));
+        let acts: Vec<&Act> = widgets
+            .iter()
+            .filter_map(|w| match &w.kind {
+                WKind::Button { act, .. } if *act != Act::Done => Some(act),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            acts,
+            [&Act::Extra(crate::extras::Item::NoAi)],
+            "with No AI on, the page has No AI alone"
+        );
+        ui.stack.pop();
         // The AI Agent page: the switch, Copy and the status the game sets.
         ui.push(Page::Agent);
         ui.agent_status = vec!["Waiting for an agent.".into()];
@@ -8087,9 +8529,8 @@ mod tests {
         );
         ui.show(Page::Extras);
         settings.extras.wheel_cycles_settings = true;
-        let cursor = ui
-            .extras
-            .point_at(&settings, gui, ExtraRow::Item(crate::extras::Item::Sort));
+        let sort = SunriseRow::Extra(ExtraRow::Item(crate::extras::Item::Sort));
+        let cursor = ui.sunrise.point_at(&settings, gui, sort);
         assert!(!settings.extras.sort);
         assert!(
             ui.wheel_input(&mut settings, gui, cursor, [480, 600], 1.0)
@@ -8142,37 +8583,39 @@ mod tests {
         let mut s = Settings::default();
         let mut ui = OptionsUi::default();
 
-        // 1. Extras page: with the wheel extra on, the wheel on the Sort switch cycles it
+        // 1. Gameplay page: with the wheel extra on, the wheel on the Sort switch cycles it
         s.extras.wheel_cycles_settings = true;
         ui.show(Page::Extras);
         let size = (480.0, 600.0);
-        let cursor = ui
-            .extras
-            .point_at(&s, size, ExtraRow::Item(crate::extras::Item::Sort));
+        let sort = SunriseRow::Extra(ExtraRow::Item(crate::extras::Item::Sort));
+        let cursor = ui.sunrise.point_at(&s, size, sort);
         assert!(!s.extras.sort);
         ui.wheel(&mut s, size, cursor, [854, 480], 1.0);
         assert!(s.extras.sort);
         ui.wheel(&mut s, size, cursor, [854, 480], 1.0);
         assert!(!s.extras.sort);
 
-        // 2. Sunrise Graphics page through OptionsUi:
+        // 2. Sunrise Settings' Performance page through OptionsUi:
         // Tab onto ChunkUpdates slider, ArrowRight adjusts value, Space toggles can_change_value
         ui.show(Page::Graphics);
-        ui.graphics.show(crate::graphics_ui::Page::Performance);
+        ui.sunrise
+            .show(Tab::Graphics(crate::graphics_ui::Page::Performance));
         s.sunrise.chunk_updates = 10;
-        let chunk_updates = crate::graphics_ui::Item::Sunrise(crate::graphics_ui::H::ChunkUpdates);
+        let chunk_updates = SunriseRow::Graphics(crate::graphics_ui::Item::Sunrise(
+            crate::graphics_ui::H::ChunkUpdates,
+        ));
         ui.size = size;
         ui.framebuffer = [854, 480];
 
         // Tab into controls
         for _ in 0..80 {
             ui.key(&mut s, &atlas, K::Tab, None);
-            if ui.graphics.focused_row() == Some(chunk_updates) {
+            if ui.sunrise.focused_row() == Some(chunk_updates) {
                 break;
             }
         }
-        assert_eq!(ui.graphics.focused_row(), Some(chunk_updates));
-        assert!(ui.graphics.changes_value());
+        assert_eq!(ui.sunrise.focused_row(), Some(chunk_updates));
+        assert!(ui.sunrise.changes_value());
 
         // Right arrow steps ChunkUpdates to 11
         let events = ui.key(&mut s, &atlas, K::ArrowRight, None);
@@ -8181,7 +8624,7 @@ mod tests {
 
         // Space toggles can_change_value to false
         ui.key(&mut s, &atlas, K::Space, None);
-        assert!(!ui.graphics.changes_value());
+        assert!(!ui.sunrise.changes_value());
 
         // ArrowRight does not change ChunkUpdates when can_change_value is false
         ui.key(&mut s, &atlas, K::ArrowRight, None);
@@ -8375,6 +8818,7 @@ mod tests {
     fn options_keyboard_space_enter_emits_button_click_for_cycle_and_default_buttons() {
         use winit::keyboard::KeyCode;
         let mut ui = OptionsUi::default();
+        ui.show(Page::Accessibility);
         let mut s = Settings::default();
         let atlas = atlas();
 
@@ -8408,36 +8852,6 @@ mod tests {
             events.contains(&Event::ButtonClick),
             "Enter on FocusId::Act must emit Event::ButtonClick"
         );
-    }
-
-    /// Browse Mods is on the Sunrise settings page (the Mods footer has only Open Mods Folder
-    /// and Back): clicking it lists the registry's mods and opens the browser.
-    #[test]
-    fn browse_mods_opens_the_registry_browser_from_the_sunrise_page() {
-        let atlas = atlas();
-        let size = (960.0, 540.0);
-        let mut s = Settings::default();
-        let mut ui = OptionsUi::default();
-        ui.show(Page::Sunrise);
-        let (widgets, ..) = ui.layout(&s, size.0, size.1);
-        let browse = widgets
-            .into_iter()
-            .find(|w| {
-                matches!(&w.kind, WKind::Button { act, .. } if *act == Act::Push(Page::ModBrowser))
-            })
-            .expect("Browse Mods... on the Sunrise page");
-        let events = ui.click(
-            &mut s,
-            &atlas,
-            browse.x + browse.w / 2.0,
-            browse.y + browse.h / 2.0,
-            size,
-            [854, 480],
-            false,
-            false,
-        );
-        assert_eq!(events, vec![Event::ButtonClick, Event::BrowseMods]);
-        assert_eq!(ui.page(), Page::ModBrowser);
     }
 
     #[test]
@@ -8683,13 +9097,757 @@ mod tests {
         let events = ui.back(&mut s);
         assert!(events.contains(&Event::ReloadTextures));
 
-        // Changing maxAnisotropyBit on Sunrise Graphics triggers ReloadTextures.
+        // Changing maxAnisotropyBit on Sunrise Settings triggers ReloadTextures.
         ui.open_at(true, Page::Graphics);
         ui.capture_video_atlas(&s);
         s.file
             .set("maxAnisotropyBit", crate::options_file::V::Int(3));
         let events = ui.back(&mut s);
         assert!(events.contains(&Event::ReloadTextures));
+    }
+
+    #[test]
+    fn sub_page_key_distinguishes_pages_and_error_overlay() {
+        let mut ui = OptionsUi::default();
+        ui.open(true);
+        let main = ui.sub_page_key();
+        ui.show(Page::Video);
+        let video = ui.sub_page_key();
+        assert_ne!(main, video);
+        ui.show(Page::NativeMod(0));
+        let mod0 = ui.sub_page_key();
+        ui.show(Page::NativeMod(1));
+        let mod1 = ui.sub_page_key();
+        assert_ne!(mod0, mod1);
+        ui.resource_error = Some("failed".into());
+        assert_ne!(mod1, ui.sub_page_key());
+    }
+
+    #[test]
+    fn options_discovery_leaves_shell_and_pack_state_unchanged() {
+        let atlas = atlas();
+        let s = Settings::default();
+        let output = crate::gfx::EffectiveOutput::default();
+        let mut batch = HudBatch::new([854, 480], s.gui_scale_inputs());
+
+        // 1. Settings shell page: discovery must not reset frame_draw, consume reveal_page or
+        // focus_next, or write drawn.
+        let mut ui = OptionsUi::default();
+        ui.open_at(true, Page::Graphics);
+        ui.sunrise.show(crate::sunrise_ui::Tab::Graphics(
+            crate::graphics_ui::Page::General,
+        ));
+        ui.sunrise
+            .focus_soon(crate::sunrise_ui::SunriseRow::ShaderOptions);
+        let before = ui.sunrise.test_state_flags();
+        assert_eq!(before, (false, true, true, false));
+        let ((), collected) = crate::widgets::with_widget_collector(|| {
+            ui.draw_background(&s, output, &mut batch, &atlas);
+            ui.draw_contents(&s, &mut batch, &atlas, (0.0, 0.0));
+            ui.draw_overlays(&mut batch, &atlas, (0.0, 0.0));
+        });
+        assert!(
+            !collected.is_empty(),
+            "shell discovery must collect widgets"
+        );
+        assert_eq!(
+            ui.sunrise.test_state_flags(),
+            before,
+            "shell discovery must leave frame_draw, reveal_page, focus_next, and drawn untouched"
+        );
+        // Also verify an in-flight live draw survives discovery without losing frame_draw.
+        ui.draw_background(&s, output, &mut batch, &atlas);
+        let in_flight = ui.sunrise.test_state_flags();
+        assert!(in_flight.0, "live draw_background prepares frame_draw");
+        let _ = crate::widgets::with_widget_collector(|| {
+            ui.draw_contents(&s, &mut batch, &atlas, (0.0, 0.0));
+        });
+        assert_eq!(
+            ui.sunrise.test_state_flags(),
+            in_flight,
+            "discovery during an in-flight shell frame must not mutate shell state"
+        );
+        ui.draw_contents(&s, &mut batch, &atlas, (0.0, 0.0));
+        ui.draw_overlays(&mut batch, &atlas, (0.0, 0.0));
+
+        // 2. Packs and Mods pages: discovery must not lazily initialize or consume screen state.
+        let mut packs_ui = OptionsUi::default();
+        packs_ui.open_at(true, Page::Packs);
+        packs_ui.pack_reselected = true;
+        let ((), pack_collected) = crate::widgets::with_widget_collector(|| {
+            packs_ui.draw_contents(&s, &mut batch, &atlas, (0.0, 0.0));
+        });
+        assert!(
+            !pack_collected.is_empty(),
+            "packs discovery must collect widgets"
+        );
+        assert!(packs_ui.pack_screen.is_none());
+        assert!(packs_ui.pack_reselected);
+
+        let mut mods_ui = OptionsUi::default();
+        mods_ui.open_at(true, Page::Mods);
+        let ((), mods_collected) = crate::widgets::with_widget_collector(|| {
+            mods_ui.draw_contents(&s, &mut batch, &atlas, (0.0, 0.0));
+        });
+        assert!(
+            !mods_collected.is_empty(),
+            "mods discovery must collect widgets"
+        );
+        assert!(mods_ui.mods_screen.is_none());
+
+        // 3. Initialized Mods panel: discovery must leave panel metrics and scroll untouched.
+        let size = (batch.width, batch.height);
+        let m = crate::screen_draw::Measure(&atlas.font);
+        let mods_panel = mods_ui.mods_page(&s, &atlas, size);
+        mods_panel.step(&m, 1);
+        let mods_state_before = mods_panel.panel_state();
+        assert!(
+            mods_state_before.0 > 0,
+            "initialized Mods panel must compute metrics during selection update"
+        );
+        let ((), mods_init_collected) = crate::widgets::with_widget_collector(|| {
+            mods_ui.draw_contents(&s, &mut batch, &atlas, (0.0, 0.0));
+        });
+        assert!(
+            !mods_init_collected.is_empty(),
+            "initialized Mods discovery must collect widgets"
+        );
+        assert_eq!(
+            mods_ui.mods_screen.as_ref().unwrap().panel_state(),
+            mods_state_before,
+            "discovery on an initialized Mods panel must not mutate panel metrics or scroll"
+        );
+    }
+
+    #[test]
+    fn options_enter_and_space_respect_disabled_and_hidden_overrides() {
+        let atlas = atlas();
+        let mut s = Settings::default();
+
+        // 1. Disabled or hidden Done button must not activate on Enter or Space.
+        let mut ui = OptionsUi::default();
+        ui.open(false);
+        ui.size = (854.0, 480.0);
+        ui.focus = Some(FocusId::Act(Act::Done));
+        let done_key = crate::widgets::EngineWidgetKey {
+            key: crate::widgets::stable_key_from_text(&tr("gui.done")),
+            bucket: crate::widgets::WidgetBucket::Button,
+            occurrence: 0,
+        };
+        for ov in [
+            crate::widgets::EngineWidgetOverride {
+                active: Some(false),
+                ..Default::default()
+            },
+            crate::widgets::EngineWidgetOverride {
+                visible: Some(false),
+                ..Default::default()
+            },
+        ] {
+            let mut maps = crate::widgets::EngineOverrideMaps::default();
+            maps.overrides.insert(done_key.clone(), ov);
+            for key in [
+                winit::keyboard::KeyCode::Enter,
+                winit::keyboard::KeyCode::Space,
+            ] {
+                let (handled, events) = crate::widgets::with_input_overrides(&mut maps, || {
+                    ui.key_input(&mut s, &atlas, key, None, false)
+                });
+                assert!(!handled, "disabled/hidden Done must ignore {key:?}");
+                assert!(events.is_empty());
+            }
+        }
+
+        // 2. Disabled or hidden cycle button must not activate on Enter or Space.
+        let mut cycle_ui = OptionsUi::default();
+        cycle_ui.open_at(false, Page::Video);
+        cycle_ui.size = (854.0, 480.0);
+        let initial_vsync = s.vsync;
+        let vsync_label = option_widget(&s, Opt::Vsync, 0.0, 0.0, 150.0);
+        let WKind::Button { label, .. } = vsync_label.kind else {
+            panic!("Opt::Vsync must be a cycle button");
+        };
+        let vsync_key = crate::widgets::EngineWidgetKey {
+            key: crate::widgets::stable_key_from_text(&label),
+            bucket: crate::widgets::WidgetBucket::Button,
+            occurrence: 0,
+        };
+        cycle_ui.focus = Some(FocusId::Cycle(Opt::Vsync));
+        for ov in [
+            crate::widgets::EngineWidgetOverride {
+                active: Some(false),
+                ..Default::default()
+            },
+            crate::widgets::EngineWidgetOverride {
+                visible: Some(false),
+                ..Default::default()
+            },
+        ] {
+            let mut maps = crate::widgets::EngineOverrideMaps::default();
+            maps.overrides.insert(vsync_key.clone(), ov);
+            for key in [
+                winit::keyboard::KeyCode::Enter,
+                winit::keyboard::KeyCode::Space,
+            ] {
+                let (handled, events) = crate::widgets::with_input_overrides(&mut maps, || {
+                    cycle_ui.key_input(&mut s, &atlas, key, None, false)
+                });
+                assert!(!handled, "disabled/hidden cycle button must ignore {key:?}");
+                assert!(events.is_empty());
+                assert_eq!(s.vsync, initial_vsync);
+            }
+        }
+    }
+
+    #[test]
+    fn options_tab_respects_tab_order_group_overrides() {
+        let atlas = atlas();
+        let mut s = Settings::default();
+        let mut ui = OptionsUi::default();
+        ui.open(false);
+        ui.size = (854.0, 480.0);
+
+        let done_key = crate::widgets::EngineWidgetKey {
+            key: crate::widgets::stable_key_from_text(&tr("gui.done")),
+            bucket: crate::widgets::WidgetBucket::Button,
+            occurrence: 0,
+        };
+        let mut maps = crate::widgets::EngineOverrideMaps::default();
+        maps.overrides.insert(
+            done_key,
+            crate::widgets::EngineWidgetOverride {
+                tab_order_group: Some(-10),
+                ..Default::default()
+            },
+        );
+
+        crate::widgets::with_input_overrides(&mut maps, || {
+            let _ = ui.key_input(&mut s, &atlas, winit::keyboard::KeyCode::Tab, None, false);
+        });
+        assert_eq!(
+            ui.focus,
+            Some(FocusId::Act(Act::Done)),
+            "negative tab_order_group override must visit Done first on Tab"
+        );
+
+        crate::widgets::with_input_overrides(&mut maps, || {
+            let _ = ui.key_input(&mut s, &atlas, winit::keyboard::KeyCode::Tab, None, false);
+        });
+        assert_eq!(
+            ui.focus,
+            Some(FocusId::Slider(Opt::Fov)),
+            "second Tab must advance to the first default-group widget (FOV)"
+        );
+
+        crate::widgets::with_input_overrides(&mut maps, || {
+            let _ = ui.key_input(&mut s, &atlas, winit::keyboard::KeyCode::Tab, None, true);
+        });
+        assert_eq!(
+            ui.focus,
+            Some(FocusId::Act(Act::Done)),
+            "Shift+Tab from FOV must step back to the negative-group Done button"
+        );
+    }
+
+    #[test]
+    fn single_options_entry_resolver_hosted_settings_page() {
+        let atlas = atlas();
+        let mut s = Settings::default();
+        let size = (854.0, 480.0);
+        let fb = [854, 480];
+
+        // 1. First click after switching Main -> Graphics BEFORE any draw resolves against
+        // Graphics's current layout and overrides (not Main's).
+        let mut ui = OptionsUi::default();
+        ui.open(true);
+        ui.size = size;
+        ui.push(Page::Graphics);
+        let collected = ui.collect_page_widgets(&s, &atlas, size);
+        let done_rect = ui
+            .sunrise
+            .foot_at(&s, size)
+            .into_iter()
+            .find_map(|(target, rect)| (target == shell::Target::Done).then_some(rect))
+            .expect("Graphics foot exposes Done target");
+        let done = collected
+            .iter()
+            .find(|w| w.key.bucket == crate::widgets::WidgetBucket::Button && w.rect == done_rect)
+            .expect("Graphics exposes Done button");
+        let search = collected
+            .iter()
+            .find(|w| w.key.bucket == crate::widgets::WidgetBucket::Field)
+            .expect("Graphics exposes Search field");
+        let mut maps = crate::widgets::EngineOverrideMaps::default();
+        maps.overrides.insert(
+            done.key.clone(),
+            crate::widgets::EngineWidgetOverride {
+                visible: Some(false),
+                ..Default::default()
+            },
+        );
+        let (events, handled) = crate::widgets::with_input_overrides(&mut maps, || {
+            ui.click_with_outcome(
+                &mut s,
+                &atlas,
+                done.rect[0] + done.rect[2] * 0.5,
+                done.rect[1] + done.rect[3] * 0.5,
+                size,
+                fb,
+                false,
+                false,
+            )
+        });
+        assert!(
+            !handled,
+            "hidden Done on newly switched Graphics page must be blocked"
+        );
+        assert!(events.is_empty());
+        assert_eq!(ui.page(), Page::Graphics);
+
+        // 2. Overlapping moved widgets: move Done over Search; clicking overlap fires Done
+        // (pops back to Main) and does NOT focus Search.
+        let mut overlap_maps = crate::widgets::EngineOverrideMaps::default();
+        overlap_maps.overrides.insert(
+            done.key.clone(),
+            crate::widgets::EngineWidgetOverride {
+                rect: Some(search.rect),
+                ..Default::default()
+            },
+        );
+        let (events, handled) = crate::widgets::with_input_overrides(&mut overlap_maps, || {
+            ui.click_with_outcome(
+                &mut s,
+                &atlas,
+                search.rect[0] + search.rect[2] * 0.5,
+                search.rect[1] + search.rect[3] * 0.5,
+                size,
+                fb,
+                false,
+                false,
+            )
+        });
+        assert!(handled);
+        assert!(events.contains(&Event::ButtonClick));
+        assert_eq!(
+            ui.page(),
+            Page::Main,
+            "moved Done over Search must activate Done"
+        );
+        assert_ne!(ui.sunrise.focused(), Some(shell::Target::Search));
+
+        // 3. Hidden focused Done takes no Enter/Space; Tab follows tab_order_group in both
+        // directions; focused Search consumes Space without activating any button.
+        ui.push(Page::Graphics);
+        ui.sunrise.set_focus(Some(shell::Target::Done));
+        for key in [
+            winit::keyboard::KeyCode::Enter,
+            winit::keyboard::KeyCode::Space,
+        ] {
+            let (handled, events) = crate::widgets::with_input_overrides(&mut maps, || {
+                ui.key_input(&mut s, &atlas, key, None, false)
+            });
+            assert!(!handled, "hidden focused Done must ignore {key:?}");
+            assert!(events.is_empty());
+            assert_eq!(ui.page(), Page::Graphics);
+        }
+
+        ui.sunrise.set_focus(None);
+        let mut group_maps = crate::widgets::EngineOverrideMaps::default();
+        group_maps.overrides.insert(
+            done.key.clone(),
+            crate::widgets::EngineWidgetOverride {
+                tab_order_group: Some(-10),
+                ..Default::default()
+            },
+        );
+        crate::widgets::with_input_overrides(&mut group_maps, || {
+            let _ = ui.key_input(&mut s, &atlas, winit::keyboard::KeyCode::Tab, None, false);
+        });
+        assert_eq!(ui.sunrise.focused(), Some(shell::Target::Done));
+        crate::widgets::with_input_overrides(&mut group_maps, || {
+            let _ = ui.key_input(&mut s, &atlas, winit::keyboard::KeyCode::Tab, None, false);
+        });
+        assert_eq!(ui.sunrise.focused(), Some(shell::Target::Search));
+        crate::widgets::with_input_overrides(&mut group_maps, || {
+            let _ = ui.key_input(&mut s, &atlas, winit::keyboard::KeyCode::Tab, None, true);
+        });
+        assert_eq!(ui.sunrise.focused(), Some(shell::Target::Done));
+
+        // Focused Search consumes Space instead of activating a button.
+        ui.sunrise.set_focus(Some(shell::Target::Search));
+        let (handled, events) = crate::widgets::with_input_overrides(&mut group_maps, || {
+            ui.key_input(
+                &mut s,
+                &atlas,
+                winit::keyboard::KeyCode::Space,
+                Some(" "),
+                false,
+            )
+        });
+        assert!(!handled);
+        assert!(events.is_empty());
+        assert_eq!(ui.page(), Page::Graphics);
+
+        // 4. Hosted row identity: a click dispatched with a different selected widget identity
+        // must not activate or start dragging the hosted row under the pointer.
+        let graphics_widgets = ui.collect_page_widgets(&s, &atlas, size);
+        let hosted_slider = graphics_widgets
+            .iter()
+            .find(|w| w.key.bucket == crate::widgets::WidgetBucket::Slider)
+            .expect("Graphics exposes at least one hosted slider row");
+        let other_key = done.key.clone();
+        let (row_events, row_handled) =
+            crate::widgets::with_selected_engine_widget(&other_key, || {
+                ui.click_unrevised(
+                    &mut s,
+                    &atlas,
+                    hosted_slider.rect[0] + hosted_slider.rect[2] * 0.5,
+                    hosted_slider.rect[1] + hosted_slider.rect[3] * 0.5,
+                    size,
+                    fb,
+                    false,
+                )
+            });
+        assert!(
+            !row_handled,
+            "hosted row must not activate when a different widget identity is selected"
+        );
+        assert!(row_events.is_empty());
+    }
+
+    #[test]
+    fn single_options_entry_resolver_mods_and_packs_pages() {
+        let atlas = atlas();
+        let mut s = Settings::default();
+        let size = (854.0, 480.0);
+        let fb = [854, 480];
+
+        // 1. Mods: switch Main -> Mods and click before draw; move OpenFolder over Back.
+        let mut ui = OptionsUi::default();
+        ui.open(true);
+        ui.size = size;
+        ui.push(Page::Mods);
+        let mods_widgets = ui.collect_page_widgets(&s, &atlas, size);
+        let open_folder = mods_widgets
+            .iter()
+            .find(|w| w.key.key == "sunrise.mods.open_folder")
+            .expect("Mods exposes OpenFolder button");
+        let back = mods_widgets
+            .iter()
+            .find(|w| w.key.key == "gui.back")
+            .expect("Mods exposes Back button");
+        let mut mods_maps = crate::widgets::EngineOverrideMaps::default();
+        mods_maps.overrides.insert(
+            open_folder.key.clone(),
+            crate::widgets::EngineWidgetOverride {
+                rect: Some(back.rect),
+                ..Default::default()
+            },
+        );
+        let (events, handled) = crate::widgets::with_input_overrides(&mut mods_maps, || {
+            ui.click_with_outcome(
+                &mut s,
+                &atlas,
+                back.rect[0] + back.rect[2] * 0.5,
+                back.rect[1] + back.rect[3] * 0.5,
+                size,
+                fb,
+                false,
+                false,
+            )
+        });
+        assert!(handled);
+        assert!(
+            events.contains(&Event::OpenModFolder),
+            "moved OpenFolder over Back must trigger OpenModFolder"
+        );
+        assert_eq!(ui.page(), Page::Mods, "Back underneath must not run");
+
+        // 2. Packs: switch to Packs and click before draw; move OpenFolder over Done, hide Done.
+        ui.push(Page::Packs);
+        let packs_widgets = ui.collect_page_widgets(&s, &atlas, size);
+        let pack_folder = packs_widgets
+            .iter()
+            .find(|w| w.key.key == "pack.openFolder")
+            .expect("Packs exposes OpenFolder button");
+        let pack_done = packs_widgets
+            .iter()
+            .find(|w| w.key.key == "gui.done")
+            .expect("Packs exposes Done button");
+        let mut pack_maps = crate::widgets::EngineOverrideMaps::default();
+        pack_maps.overrides.insert(
+            pack_folder.key.clone(),
+            crate::widgets::EngineWidgetOverride {
+                rect: Some(pack_done.rect),
+                ..Default::default()
+            },
+        );
+        let (events, handled) = crate::widgets::with_input_overrides(&mut pack_maps, || {
+            ui.click_with_outcome(
+                &mut s,
+                &atlas,
+                pack_done.rect[0] + pack_done.rect[2] * 0.5,
+                pack_done.rect[1] + pack_done.rect[3] * 0.5,
+                size,
+                fb,
+                false,
+                false,
+            )
+        });
+        assert!(handled);
+        assert!(
+            events.contains(&Event::OpenPackFolder),
+            "moved OpenFolder over Done must trigger OpenPackFolder"
+        );
+        assert_eq!(ui.page(), Page::Packs, "Done underneath must not run");
+    }
+
+    #[test]
+    fn single_options_entry_resolver_hdr_calibration_and_radial_name() {
+        let atlas = atlas();
+        let mut s = Settings::default();
+        let size = (854.0, 480.0);
+        let fb = [854, 480];
+
+        // 1. HDR Calibration: move slider over Cancel -> press/drag updates slider without Cancel;
+        // hiding slider mid-drag cancels drag without emitting ButtonClick/Changed on release;
+        // hiding Next blocks Enter while Escape still cancels.
+        let mut ui = OptionsUi::default();
+        ui.open(true);
+        ui.size = size;
+        ui.calibration = Some(crate::hdr_calibration::Calibration::new(
+            &s,
+            &crate::gfx::EffectiveOutput::NONE,
+        ));
+        ui.push(Page::HdrCalibration);
+        let hdr_widgets = ui.collect_page_widgets(&s, &atlas, size);
+        let slider = hdr_widgets
+            .iter()
+            .find(|w| w.key.bucket == crate::widgets::WidgetBucket::Slider)
+            .expect("HDR exposes calibration slider");
+        let cancel = hdr_widgets
+            .iter()
+            .find(|w| w.key.key == lang::get_or("gui.cancel", "Cancel"))
+            .expect("HDR exposes Cancel button");
+        let next = hdr_widgets
+            .iter()
+            .find(|w| w.key.key == lang::get("Next"))
+            .expect("HDR exposes Next button");
+
+        let mut hdr_maps = crate::widgets::EngineOverrideMaps::default();
+        hdr_maps.overrides.insert(
+            slider.key.clone(),
+            crate::widgets::EngineWidgetOverride {
+                rect: Some(cancel.rect),
+                ..Default::default()
+            },
+        );
+        let (_, handled) = crate::widgets::with_input_overrides(&mut hdr_maps, || {
+            ui.click_with_outcome(
+                &mut s,
+                &atlas,
+                cancel.rect[0] + 4.0,
+                cancel.rect[1] + cancel.rect[3] * 0.5,
+                size,
+                fb,
+                false,
+                false,
+            )
+        });
+        assert!(handled);
+        assert_eq!(
+            ui.page(),
+            Page::HdrCalibration,
+            "moved slider over Cancel must not trigger Cancel"
+        );
+        let (dragged, _) = crate::widgets::with_input_overrides(&mut hdr_maps, || {
+            ui.drag(
+                &mut s,
+                &atlas,
+                (
+                    cancel.rect[0] + cancel.rect[2] - 4.0,
+                    cancel.rect[1] + cancel.rect[3] * 0.5,
+                ),
+                size,
+                fb,
+                false,
+            )
+        });
+        assert!(dragged, "moved slider must continue receiving drag");
+
+        // Hide the slider mid-drag: drag cancels and release emits no action.
+        hdr_maps.overrides.insert(
+            slider.key.clone(),
+            crate::widgets::EngineWidgetOverride {
+                visible: Some(false),
+                ..Default::default()
+            },
+        );
+        let (dragged_after_hide, drag_events) =
+            crate::widgets::with_input_overrides(&mut hdr_maps, || {
+                ui.drag(
+                    &mut s,
+                    &atlas,
+                    (cancel.rect[0] + 10.0, cancel.rect[1] + 5.0),
+                    size,
+                    fb,
+                    false,
+                )
+            });
+        assert!(
+            !dragged_after_hide,
+            "hiding slider mid-drag must cancel drag"
+        );
+        assert!(drag_events.is_empty());
+        let (rel_events, rel_handled) = crate::widgets::with_input_overrides(&mut hdr_maps, || {
+            ui.release_with_outcome(&s, &atlas, size)
+        });
+        assert!(!rel_handled);
+        assert!(rel_events.is_empty());
+
+        // Press slider, then hide it BEFORE release with NO intervening drag: fresh lookup on
+        // release must cancel the drag without firing ButtonClick or Changed.
+        hdr_maps.overrides.insert(
+            slider.key.clone(),
+            crate::widgets::EngineWidgetOverride {
+                rect: Some(cancel.rect),
+                ..Default::default()
+            },
+        );
+        let (_, pressed_again) = crate::widgets::with_input_overrides(&mut hdr_maps, || {
+            ui.click_with_outcome(
+                &mut s,
+                &atlas,
+                cancel.rect[0] + 4.0,
+                cancel.rect[1] + cancel.rect[3] * 0.5,
+                size,
+                fb,
+                false,
+                false,
+            )
+        });
+        assert!(pressed_again);
+        hdr_maps.overrides.insert(
+            slider.key.clone(),
+            crate::widgets::EngineWidgetOverride {
+                visible: Some(false),
+                ..Default::default()
+            },
+        );
+        let (stale_rel_events, stale_rel_handled) =
+            crate::widgets::with_input_overrides(&mut hdr_maps, || {
+                ui.release_with_outcome(&s, &atlas, size)
+            });
+        assert!(
+            !stale_rel_handled,
+            "release without intervening drag must cancel when widget became ineligible"
+        );
+        assert!(stale_rel_events.is_empty());
+
+        // Hidden Next blocks Enter; Escape still cancels.
+        hdr_maps.overrides.insert(
+            next.key.clone(),
+            crate::widgets::EngineWidgetOverride {
+                visible: Some(false),
+                ..Default::default()
+            },
+        );
+        let (enter_handled, enter_events) =
+            crate::widgets::with_input_overrides(&mut hdr_maps, || {
+                ui.key_input(&mut s, &atlas, winit::keyboard::KeyCode::Enter, None, false)
+            });
+        assert!(!enter_handled, "hidden HDR Next must block Enter");
+        assert!(enter_events.is_empty());
+        assert_eq!(ui.page(), Page::HdrCalibration);
+        let (esc_handled, _) = crate::widgets::with_input_overrides(&mut hdr_maps, || {
+            ui.key_input(
+                &mut s,
+                &atlas,
+                winit::keyboard::KeyCode::Escape,
+                None,
+                false,
+            )
+        });
+        assert!(esc_handled);
+        assert_eq!(
+            ui.page(),
+            Page::Main,
+            "Escape must remain a page cancel action"
+        );
+
+        // 2. RadialName: focused field consumes Space; hidden Done blocks Enter; Escape goes Back;
+        // moved Done over Cancel applies Done and does not Cancel.
+        ui.radial.screen.naming = Some(crate::radial_editor::NameEntry::new(0, "Alpha"));
+        ui.push(Page::ControllerRadialName);
+        let rn_widgets = ui.collect_page_widgets(&s, &atlas, size);
+        let rn_done = rn_widgets
+            .iter()
+            .find(|w| w.key.key == lang::get("gui.done"))
+            .expect("RadialName exposes Done button");
+        let rn_cancel = rn_widgets
+            .iter()
+            .find(|w| w.key.key == lang::get("gui.cancel"))
+            .expect("RadialName exposes Cancel button");
+
+        let mut rn_maps = crate::widgets::EngineOverrideMaps::default();
+        rn_maps.overrides.insert(
+            rn_done.key.clone(),
+            crate::widgets::EngineWidgetOverride {
+                visible: Some(false),
+                ..Default::default()
+            },
+        );
+        let (_, space_events) = crate::widgets::with_input_overrides(&mut rn_maps, || {
+            ui.key_input(
+                &mut s,
+                &atlas,
+                winit::keyboard::KeyCode::Space,
+                Some(" "),
+                false,
+            )
+        });
+        assert!(space_events.is_empty());
+        assert_eq!(
+            ui.radial.screen.naming.as_ref().unwrap().value(),
+            "Alpha ",
+            "focused RadialName field must consume Space"
+        );
+        let (enter_handled, enter_events) =
+            crate::widgets::with_input_overrides(&mut rn_maps, || {
+                ui.key_input(&mut s, &atlas, winit::keyboard::KeyCode::Enter, None, false)
+            });
+        assert!(!enter_handled, "hidden RadialName Done must block Enter");
+        assert!(enter_events.is_empty());
+        assert_eq!(ui.page(), Page::ControllerRadialName);
+
+        // Move Done over Cancel: clicking overlap fires Done (Event::Changed + pops back).
+        let mut rn_overlap = crate::widgets::EngineOverrideMaps::default();
+        rn_overlap.overrides.insert(
+            rn_done.key.clone(),
+            crate::widgets::EngineWidgetOverride {
+                rect: Some(rn_cancel.rect),
+                ..Default::default()
+            },
+        );
+        let (events, handled) = crate::widgets::with_input_overrides(&mut rn_overlap, || {
+            ui.click_with_outcome(
+                &mut s,
+                &atlas,
+                rn_cancel.rect[0] + rn_cancel.rect[2] * 0.5,
+                rn_cancel.rect[1] + rn_cancel.rect[3] * 0.5,
+                size,
+                fb,
+                false,
+                false,
+            )
+        });
+        assert!(handled);
+        assert!(
+            ui.radial.screen.naming.is_none(),
+            "moved Done over Cancel must apply Done (taking naming), not Cancel"
+        );
+        assert!(events.contains(&Event::Changed));
+        assert_eq!(ui.page(), Page::Main);
     }
 }
 

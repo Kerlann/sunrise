@@ -12,10 +12,11 @@
 use std::collections::BTreeSet;
 use std::fmt::Write;
 
-use super::scan::{QUALIFIERS, STORAGE, significant};
+use super::scan::{declaration_prefix, significant};
 use super::{Error, GbuffersInputs, Program, Target};
 use crate::Preprocessed;
 use crate::macros::lex;
+use crate::preprocess::check_line_count;
 
 /// How a geometry program's vertex invocations reach their triangle's vertices.
 #[derive(Clone, Debug, Default)]
@@ -30,7 +31,8 @@ pub struct GeometryInputs {
 }
 
 /// Translates `vertex`, `geometry` and `fragment` (a shadow program): the program, and how many
-/// triangles the geometry stage can emit (the instances to draw).
+/// triangles the geometry stage can emit (the instances to draw). A fold that cannot keep a
+/// stage's line origins is refused at that stage's file.
 pub fn translate_geometry(
     vertex: &Preprocessed,
     geometry: &Preprocessed,
@@ -73,6 +75,8 @@ struct Statement {
 enum Kind {
     /// `in`, `out`, `attribute`, `varying`: storage, names and types (with array suffixes).
     Interface(&'static str, Vec<(String, String)>),
+    /// An unflattened `in`/`out` interface block, left in place so its authored lines stay intact.
+    InterfaceBlock,
     /// `layout(...) in;` or `out;` without a variable.
     Layout(&'static str),
     Buffer(String),
@@ -112,8 +116,9 @@ fn statements(tokens: &[&str]) -> Vec<Statement> {
                     .copied()
                     .filter(|t| significant(t))
                     .collect();
-                // `struct S { } ;`, `buffer B { } name;`: to the `;`.
-                if !head.contains(&"(") || head.contains(&"buffer") {
+                // `struct S { } ;`, `buffer B { } name;`, `layout(...) out B { } name;`: to `;`.
+                // Only a function body's `{` immediately follows its parameter list's `)`.
+                if head.last() != Some(&")") {
                     while end < tokens.len() && tokens[end] != ";" {
                         end += 1;
                     }
@@ -164,49 +169,23 @@ fn classify(tokens: &[&str], range: std::ops::Range<usize>) -> Statement {
         .copied()
         .filter(|t| significant(t))
         .collect();
-    // A storage word before any `(` but a leading `layout(...)`'s: in a function's parameters
-    // `in` and `out` are qualifiers.
-    let skip = if words.first() == Some(&"layout") {
-        words.iter().position(|w| *w == ")").map_or(0, |p| p + 1)
-    } else {
-        0
-    };
-    let head = match words[skip..].iter().position(|w| *w == "(") {
-        Some(p) => &words[skip..skip + p],
-        None => &words[skip..],
-    };
-    let storage = ["in", "out", "attribute", "varying"]
-        .into_iter()
-        .find(|s| head.contains(s));
-    let kind = if let Some(p) = words.iter().position(|w| *w == "buffer") {
-        Kind::Buffer(words.get(p + 1).map_or(String::new(), |s| s.to_string()))
-    } else if words.contains(&"uniform") {
-        Kind::Uniform
-    } else if let Some(storage) = storage {
-        // Skip `layout(...)`, then qualifiers, then the type and the declarators.
-        let mut k = 0;
-        if words.first() == Some(&"layout") {
-            while k < words.len() && words[k] != ")" {
-                k += 1;
-            }
-            k += 1;
-        }
-        // Every qualifier the translator knows (`sample`, `precise`...), in any order (GLSL
-        // 4.60, 4.12): one it missed would be taken for the type, and the type for a name.
-        while k < words.len() && (STORAGE.contains(&words[k]) || QUALIFIERS.contains(&words[k])) {
-            k += 1;
-        }
-        match words.get(k) {
+    let (storage, k) = declaration_prefix(&words);
+    let rest = &words[k..];
+    let kind = match storage {
+        Some("buffer") => Kind::Buffer(rest.first().map_or(String::new(), |s| (*s).to_owned())),
+        Some("uniform") => Kind::Uniform,
+        Some(storage) => match rest.first() {
             None | Some(&";") => Kind::Layout(storage),
+            Some(_) if rest.contains(&"{") => Kind::InterfaceBlock,
             Some(ty) => {
                 let mut vars = Vec::new();
-                let mut j = k + 1;
-                while j < words.len() && words[j] != ";" {
-                    let name = words[j].to_owned();
+                let mut j = 1;
+                while j < rest.len() && rest[j] != ";" {
+                    let name = rest[j].to_owned();
                     let mut array = String::new();
                     j += 1;
-                    while j < words.len() && !matches!(words[j], "," | ";") {
-                        array.push_str(words[j]);
+                    while j < rest.len() && !matches!(rest[j], "," | ";") {
+                        array.push_str(rest[j]);
                         j += 1;
                     }
                     j += 1;
@@ -214,71 +193,67 @@ fn classify(tokens: &[&str], range: std::ops::Range<usize>) -> Statement {
                 }
                 Kind::Interface(storage, vars)
             }
-        }
-    } else {
-        let mut names = Vec::new();
-        let first = words.iter().position(|w| matches!(*w, "(" | "="));
-        // A struct's `struct` comes before its body; a function's body may define structs.
-        let head = words.iter().position(|w| matches!(*w, "(" | "{"));
-        if let Some(p) = words[..head.unwrap_or(words.len())]
-            .iter()
-            .position(|w| *w == "struct")
-        {
-            names.extend(words.get(p + 1).map(|s| s.to_string()));
-        } else if let Some(p) = first.filter(|&p| words[p] == "(") {
-            // A function.
-            names.extend(p.checked_sub(1).map(|n| words[n].to_owned()));
-        } else {
-            // Variables: the last identifier before each declarator's `=` or end.
-            let (mut depth, mut last, mut init) = (0, None, false);
-            for w in &words {
-                match *w {
-                    "(" | "[" | "{" => depth += 1,
-                    ")" | "]" | "}" => depth -= 1,
-                    "=" if depth == 0 => {
-                        names.extend(last.take());
-                        init = true;
-                    }
-                    "," | ";" if depth == 0 => {
-                        if !init {
+        },
+        None => {
+            let mut names = Vec::new();
+            let first = rest.iter().position(|w| matches!(*w, "(" | "="));
+            // A struct's `struct` comes before its body; a function's body may define structs.
+            let head = rest.iter().position(|w| matches!(*w, "(" | "{"));
+            if let Some(p) = rest[..head.unwrap_or(rest.len())]
+                .iter()
+                .position(|w| *w == "struct")
+            {
+                names.extend(rest.get(p + 1).map(|s| (*s).to_owned()));
+            } else if let Some(p) = first.filter(|&p| rest[p] == "(") {
+                // A function.
+                names.extend(p.checked_sub(1).map(|n| rest[n].to_owned()));
+            } else {
+                // Variables: the last identifier before each declarator's `=` or end.
+                let (mut depth, mut last, mut init) = (0, None, false);
+                for w in rest {
+                    match *w {
+                        "(" | "[" | "{" => depth += 1,
+                        ")" | "]" | "}" => depth -= 1,
+                        "=" if depth == 0 => {
                             names.extend(last.take());
+                            init = true;
                         }
-                        (last, init) = (None, false);
+                        "," | ";" if depth == 0 => {
+                            if !init {
+                                names.extend(last.take());
+                            }
+                            (last, init) = (None, false);
+                        }
+                        w if depth == 0 && !init && super::scan::is_ident(w) => {
+                            last = Some((*w).to_owned())
+                        }
+                        _ => {}
                     }
-                    w if depth == 0 && !init && super::scan::is_ident(w) => {
-                        last = Some(w.to_owned())
-                    }
-                    _ => {}
                 }
             }
+            names.dedup();
+            Kind::Defines(names)
         }
-        names.dedup();
-        Kind::Defines(names)
     };
     Statement { range, kind }
 }
 
 /// The combined vertex stage's source, and the triangles the geometry stage can emit.
+/// Each rewritten stage must still match its own source map before it can join the fold.
 fn combine(
     vertex: &Preprocessed,
     geometry: &Preprocessed,
     inputs: &GeometryInputs,
 ) -> Result<(Preprocessed, u32), Vec<Error>> {
-    let error = |message: String| {
-        vec![Error {
-            file: geometry.files.first().cloned().unwrap_or_default(),
-            line: 0,
-            message,
-        }]
-    };
+    let error = |message: String| vec![Error::new(geometry.file(), 0, message)];
     // Interface blocks first become plain varyings (`interface_blocks`), the vertex stage's
     // `out` block and the geometry stage's `in` array alike: what follows reads declarations
     // of one type each. The geometry stage's input blocks read as `hz_in_<block>_<member>`,
     // apart from its output blocks, which may have the same names.
-    let gs_code = super::interface_blocks::flatten_as(&geometry.code, "in_");
-    let vs_code = super::interface_blocks::flatten(&vertex.code);
-    let gs_tokens = lex(gs_code.as_deref().unwrap_or(&geometry.code));
-    let vs_tokens = lex(vs_code.as_deref().unwrap_or(&vertex.code));
+    let gs_code = super::interface_blocks::flatten_as(geometry.code(), "in_");
+    let vs_code = super::interface_blocks::flatten(vertex.code());
+    let gs_tokens = lex(gs_code.as_deref().unwrap_or(geometry.code()));
+    let vs_tokens = lex(vs_code.as_deref().unwrap_or(vertex.code()));
     let gs = statements(&gs_tokens);
     let vs = statements(&vs_tokens);
 
@@ -488,15 +463,29 @@ fn combine(
     main.push_str(&result);
     main.push_str("}\n");
 
-    // The source, lines mapped: ours (no file), the geometry stage, ours, the vertex stage, ours.
-    let mut out = Preprocessed {
-        version: geometry.version.clone().or(vertex.version.clone()),
-        files: geometry.files.clone(),
-        ..Default::default()
-    };
-    let offset = out.files.len() as u16;
-    out.files.extend(vertex.files.iter().cloned());
-    let mut code = String::new();
+    let gs_text = gs_text.concat();
+    let vs_text = vs_text.concat();
+    let out = join_stages(vertex, &vs_text, geometry, &gs_text, &head, &emit, &main)?;
+    // A strip of n vertices is n - 2 triangles: at most `max_vertices - 2`, whichever of the
+    // stage's paths runs.
+    let triangles = max_vertices.saturating_sub(2).max(1);
+    Ok((out, triangles))
+}
+
+/// Joins the rewritten geometry and vertex stages with our generated glue, checking each stage's
+/// line count against its own source map so a dropped line in one cannot cancel an added line in
+/// the other.
+fn join_stages(
+    vertex: &Preprocessed,
+    vs_text: &str,
+    geometry: &Preprocessed,
+    gs_text: &str,
+    head: &str,
+    emit: &str,
+    main: &str,
+) -> Result<Preprocessed, Vec<Error>> {
+    let error = |message: String| vec![Error::new(geometry.file(), 0, message)];
+    let (mut code, mut lines, mut files) = (String::new(), Vec::new(), Vec::new());
     let ours = |code: &mut String, lines: &mut Vec<crate::Origin>, text: &str| {
         for l in text.lines() {
             code.push_str(l);
@@ -504,24 +493,33 @@ fn combine(
             lines.push(crate::Origin::default());
         }
     };
-    ours(&mut code, &mut out.lines, &head);
-    code.push_str(&gs_text.concat());
-    code.push('\n');
-    out.lines.extend(geometry.lines.iter().copied());
-    ours(&mut code, &mut out.lines, &emit);
-    code.push_str(&vs_text.concat());
-    code.push('\n');
-    out.lines.extend(vertex.lines.iter().map(|o| crate::Origin {
-        file: o.file + offset,
-        line: o.line,
-    }));
-    ours(&mut code, &mut out.lines, &main);
-    out.code = code.trim_end_matches('\n').to_owned();
-    out.lines.truncate(out.code.split('\n').count());
-    // A strip of n vertices is n - 2 triangles: at most `max_vertices - 2`, whichever of the
-    // stage's paths runs.
-    let triangles = max_vertices.saturating_sub(2).max(1);
-    Ok((out, triangles))
+    for (kind, stage, text, before) in [
+        ("geometry", geometry, gs_text, head),
+        ("vertex", vertex, vs_text, emit),
+    ] {
+        check_line_count(text, stage.lines().len()).map_err(|message| {
+            vec![Error::new(
+                stage.file(),
+                0,
+                format!("{kind} stage: {message}"),
+            )]
+        })?;
+        let offset = files.len();
+        files.extend_from_slice(stage.files());
+        ours(&mut code, &mut lines, before);
+        code.push_str(text);
+        code.push('\n');
+        lines.extend(stage.lines().iter().map(|o| crate::Origin {
+            file: o.file + offset,
+            line: o.line,
+        }));
+    }
+    ours(&mut code, &mut lines, main);
+    // The final `}` line needs no separator after it.
+    code.pop();
+    let mut out = Preprocessed::new(code, lines, files).map_err(error)?;
+    out.version = geometry.version.clone().or(vertex.version.clone());
+    Ok(out)
 }
 
 /// Functions whose calls write memory other invocations see.
@@ -532,6 +530,7 @@ fn writes(name: &str) -> bool {
 /// Calls that write images or buffers run for one invocation of a triangle only: as statements,
 /// `if (!hz_primary) {} else imageStore(...)`; in an expression the others read the value instead,
 /// `(hz_primary ? imageAtomicOr(i, p, v) : imageLoad(i, p).x)`, `(hz_primary ? atomicAdd(m, v) : m)`.
+/// Any line breaks in copied arguments stay only in the original call.
 fn once(text: &mut [String], tokens: &[&str]) {
     for (i, &t) in tokens.iter().enumerate() {
         let open = (i + 1..tokens.len()).find(|&j| significant(tokens[j]));
@@ -574,7 +573,7 @@ fn once(text: &mut [String], tokens: &[&str]) {
             continue;
         };
         text[i] = format!("(hz_primary ? {t}");
-        text[close] = format!(") : {read})");
+        text[close] = format!(") : {})", read.replace('\n', " "));
     }
 }
 
@@ -593,7 +592,8 @@ fn blank(text: &mut [String], range: std::ops::Range<usize>) {
     }
 }
 
-/// Removes a declaration's `layout(...)`, storage and interpolation words: a plain global.
+/// Removes a declaration's `layout(...)`, storage and interpolation words to make a plain
+/// global without moving later lines.
 fn strip_storage(text: &mut [String], tokens: &[&str], range: std::ops::Range<usize>) {
     let mut in_layout = false;
     for i in range {
@@ -619,10 +619,11 @@ fn strip_storage(text: &mut [String], tokens: &[&str], range: std::ops::Range<us
                     | "invariant"
             )
         {
-            text[i] = if tokens[i].contains('\n') {
-                "\n".into()
-            } else {
+            let breaks = tokens[i].matches('\n').count();
+            text[i] = if breaks == 0 {
                 " ".into()
+            } else {
+                "\n".repeat(breaks)
             };
         }
     }
@@ -888,6 +889,153 @@ mod tests {
         let fsh = "#version 430\nuniform float far;\nin float gDepth;\n\
                    void main() {\n    gl_FragData[0] = vec4(gDepth / far);\n}\n";
         fold(vsh, gsh, fsh).unwrap_or_else(|e| panic!("{e:?}"));
+    }
+
+    /// An unflattened `out` or `in` interface block (such as one with a malformed empty member,
+    /// a qualifier-and-layout prefix, or a body token named `buffer`) stays in place rather than
+    /// being blanked or renamed, so its refusal points at the authored stage file and line.
+    #[test]
+    fn malformed_unflattened_interface_blocks_keep_their_authored_lines() {
+        let bad_vsh = "#version 430\nout VertexData {\n    vec2 uv;\n    ;\n} vOut;\n\
+                       void main() {\n    gl_Position = ftransform();\n}\n";
+        let Err(errors) = fold(bad_vsh, PASS_GSH, PASS_FSH) else {
+            panic!("a malformed vertex out block must be refused");
+        };
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.file == "shadow.vsh" && error.line == 4),
+            "{errors:?}"
+        );
+
+        let qualified_vsh = "#version 430\nflat layout(location = 0) out VertexData {\n    \
+                             vec2 uv;\n    ;\n} vOut;\n\
+                             void main() {\n    gl_Position = ftransform();\n}\n";
+        let Err(errors) = fold(qualified_vsh, PASS_GSH, PASS_FSH) else {
+            panic!("a qualified malformed vertex out block must be refused");
+        };
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.file == "shadow.vsh" && error.line == 4),
+            "{errors:?}"
+        );
+
+        let body_buffer_vsh = "#version 430\nout VertexData {\n    buffer Params;\n    ;\n} vOut;\n\
+                               void main() {\n    gl_Position = ftransform();\n}\n";
+        let buffer_gsh = format!(
+            "#version 430\nlayout(std430, binding = 2) buffer Params {{ float w; }} params;\n{}",
+            PASS_GSH.trim_start_matches("#version 430\n")
+        );
+        let Err(errors) = fold(body_buffer_vsh, &buffer_gsh, PASS_FSH) else {
+            panic!("a vertex out block with a malformed buffer member must be refused");
+        };
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.file == "shadow.vsh" && error.line == 3),
+            "{errors:?}"
+        );
+
+        let good_vsh = "#version 430\nout vec3 vNormal;\nvoid main() {\n    \
+                        vNormal = vec3(0.0);\n    gl_Position = ftransform();\n}\n";
+        let bad_gsh = "#version 430\nlayout(triangles) in;\n\
+                       layout(triangle_strip, max_vertices = 3) out;\n\
+                       in VertexData {\n    vec2 uv;\n    ;\n} vIn[];\n\
+                       out vec3 gNormal;\nvoid main() {\n    \
+                       for (int i = 0; i < 3; i++) {\n        gNormal = vec3(0.0);\n        \
+                       gl_Position = gl_in[i].gl_Position;\n        EmitVertex();\n    }\n    \
+                       EndPrimitive();\n}\n";
+        let Err(errors) = fold(good_vsh, bad_gsh, PASS_FSH) else {
+            panic!("a malformed geometry in block must be refused");
+        };
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.file == "shadow.gsh" && error.line == 6),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn multiline_atomic_arguments_keep_the_folded_error_origins() {
+        let pack = Pack::from_zip_bytes(
+            "P.zip",
+            zip(&[
+                (
+                    "shaders/shadow.gsh",
+                    "layout(triangles) in;\nlayout(triangle_strip, max_vertices = 3) out;\n\
+                     #include \"lib/emit.glsl\"\nvoid main() { emit(); }",
+                ),
+                (
+                    "shaders/lib/emit.glsl",
+                    "layout(std430, binding = 2) buffer Counters { int counter; };\n\
+                     void emit() {\n    int old = atomicAdd(\n        counter, 1);\n    bad_geometry;\n}",
+                ),
+            ]),
+        )
+        .unwrap();
+        let geometry = preprocess(&pack, "shadow.gsh", &Macros::standard());
+        let vertex = Preprocessed::from_source("shadow.vsh", "void main() { bad_vertex; }");
+        let (folded, _) = combine(&vertex, &geometry, &GeometryInputs::default()).unwrap();
+        let tokens = lex(folded.code());
+        for (name, expected) in [
+            ("bad_geometry", ("lib/emit.glsl", 5)),
+            ("bad_vertex", ("shadow.vsh", 1)),
+        ] {
+            let at = tokens.iter().position(|&token| token == name).unwrap();
+            let error = crate::translate::scan::error_at_token(&folded, &tokens, at, name);
+            assert_eq!((error.file.as_str(), error.line), expected);
+        }
+    }
+
+    #[test]
+    fn multiline_vertex_layout_keeps_the_next_error_origin() {
+        let vertex = Preprocessed::from_source(
+            "shadow.vsh",
+            "layout(\n\n    location = 0) in vec3 position;\nvoid main() { bad_vertex; }",
+        );
+        let geometry = Preprocessed::from_source("shadow.gsh", PASS_GSH);
+        let (folded, _) = combine(&vertex, &geometry, &GeometryInputs::default()).unwrap();
+        let tokens = lex(folded.code());
+        let at = tokens
+            .iter()
+            .position(|&token| token == "bad_vertex")
+            .unwrap();
+        let error = crate::translate::scan::error_at_token(&folded, &tokens, at, "bad_vertex");
+        assert_eq!((error.file.as_str(), error.line), ("shadow.vsh", 4));
+    }
+
+    #[test]
+    fn cancelling_stage_line_count_deltas_are_still_refused() {
+        let vertex = Preprocessed::from_source("shadow.vsh", "float a;\nfloat b;");
+        let geometry = Preprocessed::from_source("shadow.gsh", "float c;\nfloat d;");
+        // Vertex loses one line and geometry gains one (total unchanged: 4 == 4).
+        let err = join_stages(
+            &vertex,
+            "float a;",
+            &geometry,
+            "float c;\nfloat d;\nfloat extra;",
+            "void head();",
+            "void emit();",
+            "void main() {}",
+        )
+        .unwrap_err();
+        assert_eq!(err.len(), 1);
+        assert_eq!((err[0].file.as_str(), err[0].line), ("shadow.gsh", 0));
+        // Geometry matches while vertex loses one line: refused at the vertex stage file.
+        let err = join_stages(
+            &vertex,
+            "float a;",
+            &geometry,
+            "float c;\nfloat d;",
+            "void head();",
+            "void emit();",
+            "void main() {}",
+        )
+        .unwrap_err();
+        assert_eq!(err.len(), 1);
+        assert_eq!((err[0].file.as_str(), err[0].line), ("shadow.vsh", 0));
     }
 
     #[test]

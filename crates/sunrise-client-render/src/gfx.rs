@@ -52,9 +52,7 @@ mod section_gpu;
 mod static_entity;
 
 pub(crate) use section_gpu::collect_animated_layers;
-use section_gpu::{
-    Part, SectionGpu, begin_shrink, decide_fade, forget_records, hold_fading, mark_fades,
-};
+use section_gpu::{Part, SectionGpu, begin_shrink, decide_fade, forget_records, mark_fades};
 use static_entity::{GpuStaticEntitySection, StaticEntityUniform};
 pub mod outline;
 mod overlay;
@@ -64,6 +62,7 @@ use gpu_checks::GpuChecks;
 use outline::{debug_line_opaque, debug_lines_opaque_first, outline_vertices_into};
 pub use outline::{outline_params, outline_vertices, outline_width};
 use overlay::Overlay;
+mod dynamic_entity;
 mod entity_batch;
 mod entity_outline;
 #[cfg(any(test, feature = "test-support"))]
@@ -75,7 +74,7 @@ mod prepared_model;
 pub use prepared_model::fail_next_prepared_upload;
 pub use prepared_model::{
     PreparedInstanceBuilder, PreparedModelDraw, PreparedModelInstance, PreparedModelVertex,
-    PreparedModels, camera_matrix,
+    PreparedModels, camera_matrix, prepared_instance_room_for,
 };
 #[cfg(feature = "test-support")]
 pub use prepared_model::{
@@ -93,6 +92,7 @@ mod renderer_construction;
 mod section_fade;
 mod section_upload;
 mod shader_pack;
+pub use shader_pack::PackPoll;
 mod surface_lifecycle;
 use entity_draw::*;
 #[cfg(test)]
@@ -100,28 +100,28 @@ mod sprite_arrays_tests;
 mod terrain_model;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_gpu;
+#[cfg(feature = "test-support")]
+pub use test_gpu::lock as lock_test_gpu;
 mod weather;
 mod world_text;
 use cull::occlusion_culling_requested;
 use entity_batch::EntityBatch;
 pub use entity_batch::{
-    ADDITIVE_PARTICLE_OVERLAY, BANNER_PATTERN_OVERLAY, DISSOLVE_OVERLAY, DRAGON_RAYS_OVERLAY,
-    ENERGY_SWIRL_OVERLAY, GLINT_ONLY_OVERLAY, SHADOW_OVERLAY, TRANSLUCENT_GLINT_ITEM_OVERLAY,
-    TRANSLUCENT_ITEM_OVERLAY, TRANSLUCENT_PARTICLE_OVERLAY,
+    ADDITIVE_PARTICLE_OVERLAY, ARMOR_GLINT_ONLY_OVERLAY, BANNER_PATTERN_OVERLAY, DISSOLVE_OVERLAY,
+    DRAGON_RAYS_OVERLAY, DYNAMIC_TEXTURE_CUTOUT_OVERLAY, DYNAMIC_TEXTURE_SOLID_OVERLAY,
+    DYNAMIC_TEXTURE_TRANSLUCENT_OVERLAY, ENERGY_SWIRL_OVERLAY, EntityQuadCapacity, EntityQuadScope,
+    FLUID_OVERLAY, GLINT_ONLY_OVERLAY, OIT_ENTITY, SHADOW_OVERLAY,
+    TERRAIN_MODEL_CUTOUT_MIPPED_OVERLAY, TERRAIN_MODEL_CUTOUT_OVERLAY, TERRAIN_MODEL_SOLID_OVERLAY,
+    TERRAIN_MODEL_TRANSLUCENT_OVERLAY, TEXT_NORMAL_SOLID_OVERLAY, TEXT_POLYGON_OFFSET_OVERLAY,
+    TEXT_POLYGON_OFFSET_SOLID_OVERLAY, TRANSLUCENT_DRAW_FLIP, TRANSLUCENT_GLINT_ITEM_OVERLAY,
+    TRANSLUCENT_ITEM_OVERLAY, TRANSLUCENT_PARTICLE_OVERLAY, WATER_MASK_OVERLAY, WORLD_TEXT_OVERLAY,
+    WORLD_TEXT_POLYGON_OFFSET_OVERLAY, dynamic_texture_bits, is_native_terrain, mark_oit,
 };
-pub use entity_batch::{
-    FLUID_OVERLAY, TERRAIN_MODEL_CUTOUT_MIPPED_OVERLAY, TERRAIN_MODEL_CUTOUT_OVERLAY,
-    TERRAIN_MODEL_SOLID_OVERLAY, TERRAIN_MODEL_TRANSLUCENT_OVERLAY, WATER_MASK_OVERLAY,
-    is_native_terrain,
-};
-pub use entity_batch::{
-    OIT_ENTITY, TEXT_NORMAL_SOLID_OVERLAY, TEXT_POLYGON_OFFSET_OVERLAY,
-    TEXT_POLYGON_OFFSET_SOLID_OVERLAY, TRANSLUCENT_DRAW_FLIP, WORLD_TEXT_OVERLAY,
-    WORLD_TEXT_POLYGON_OFFSET_OVERLAY, mark_oit,
-};
+pub use entity_batch::{NAME_TAG_OVERLAY, NAME_TAG_SOLID_OVERLAY};
 use external::{shadow_box, shadow_runs};
-pub use frustum::{Cull, Frusta, JoinedFrusta, ShadowCull};
+pub use frustum::{Cull, JoinedFrusta, ShadowCull};
 use frustum::{block_entities_within_reach, frustum, shadow_casters, taa_frustum};
+pub use mod_gpu::ModGpuResources;
 pub use section_fade::{CHUNK_VISIBILITY_THRESHOLD, chunk_visibility, fade_millis};
 use section_fade::{FadeInputs, compiled_and_visible, section_instance, section_visibility};
 #[doc(hidden)]
@@ -227,30 +227,33 @@ mod hdr_start;
 mod hdr_stats;
 pub(crate) mod hud_coverage;
 mod in_flight;
-mod sourced_geometry;
+mod material_animation;
+#[cfg(test)]
+mod material_animation_renderer_tests;
+mod terrain_normals;
 use display_watch::DisplayWatch;
 #[cfg(test)]
 use display_watch::{macos_hdr, os_reported};
 pub use hdr::{Calibration as HdrCalibration, Output as HdrOutput};
 pub use output::{DisplayReading, EffectiveOutput, FrameConfiguration, FrameRequest};
 
-pub mod block_light;
 mod custom_sky;
-mod displace;
 mod frame_policy;
 pub mod lightning;
 mod linear_blend;
 #[cfg(test)]
 use frame_policy::frame_format;
-use frame_policy::{frame_configuration, overlay_format, sunrise_tone_curve};
-mod lod;
+use frame_policy::{frame_configuration, overlay_format, pack_owns_tone_curve, sunrise_tone_curve};
+pub mod mod_compute;
+pub mod mod_frame_graph;
+pub mod mod_gpu;
+pub mod mod_meshes;
 pub mod mod_pipelines;
-mod native_material;
-mod native_pack;
-mod native_post;
+pub mod mod_readback;
+pub mod mod_render_targets;
+pub mod mod_storage;
+pub mod mod_uniforms;
 use crate::render_slots as native_render;
-mod native_shadow;
-mod native_sky;
 mod occlusion;
 mod oit;
 mod oit_features;
@@ -289,13 +292,14 @@ mod off_page;
 use off_page::move_off_page;
 pub mod submit;
 mod sunrise_fan;
+#[cfg(feature = "test-support")]
+pub mod test_hooks;
 mod timing;
 pub mod translucency;
 pub(crate) mod upload;
 mod view;
 mod view_sections;
 mod visbuffer;
-mod wgsl_prefix;
 mod world_handover;
 mod world_post;
 pub mod world_primitives;
@@ -643,6 +647,25 @@ impl Renderer {
     pub fn custom_sky_draws(&mut self) -> &mut Vec<crate::custom_sky::Draw> {
         &mut self.custom_sky_draws
     }
+    /// The pack's custom lightmaps (`crate::custom_lightmap::load`): a world with one takes its
+    /// light texture from them in place of the default one. A pack without any costs a frame
+    /// nothing.
+    pub fn set_custom_lightmap(
+        &mut self,
+        pack: std::sync::Arc<dyn crate::custom_lightmap::Lightmaps>,
+    ) {
+        self.custom_lightmap = (!pack.is_empty()).then_some(pack);
+        self.lightmap_uploaded = false;
+    }
+    /// Whether the pack has custom lightmaps: only then does the game hand over the weather.
+    pub fn has_custom_lightmap(&self) -> bool {
+        self.custom_lightmap.is_some()
+    }
+    /// The world and weather of the next frame's light texture (custom lightmaps read them). Only
+    /// that frame reads them: a frame the game sets none for has no custom lightmap.
+    pub fn set_lightmap_weather(&mut self, weather: crate::custom_lightmap::Weather) {
+        self.lightmap_weather = Some(weather);
+    }
     fn quad_indices(device: &wgpu::Device, quads: u32) -> wgpu::Buffer {
         surface_setup::ray_query::quad_indices(device, quads)
     }
@@ -681,7 +704,6 @@ impl Renderer {
                 self.frame_gen.on,
                 (self.pack_post.as_ref())
                     .map(|(_, p)| p.as_ref().is_some_and(|p| p.skins_entities())),
-                self.native.is_some(),
                 || native_render::needs().entity_spans,
             )
     }
@@ -814,50 +836,21 @@ impl Renderer {
             self.own_timing.as_mut(),
         );
         if let Some(arrays) = &self.pbr_maps {
-            for animation in &self.material_animations {
-                if !self.animations.changed().contains(&animation.layer) {
-                    continue;
-                }
-                let Some(pair) = arrays.get((animation.layer / self.sprite_split) as usize) else {
-                    continue;
-                };
-                for kind in 0..2 {
-                    let Some(pixels) = animation.material_pixels(kind, tick) else {
-                        continue;
-                    };
-                    let texture = &pair[kind];
-                    let from = (pixels.len() / 4).isqrt() as u32;
-                    for level in 0..texture.mip_level_count() {
-                        let size = texture.width() >> level;
-                        let pixels = crate::sprites::resample(pixels, from, size);
-                        self.uploads.texture(
-                            encoder,
-                            wgpu::TexelCopyTextureInfo {
-                                texture,
-                                mip_level: level,
-                                origin: wgpu::Origin3d {
-                                    x: 0,
-                                    y: 0,
-                                    z: animation.layer % self.sprite_split,
-                                },
-                                aspect: wgpu::TextureAspect::All,
-                            },
-                            size,
-                            size,
-                            &pixels,
-                        );
-                    }
-                }
-            }
+            let written = self.material_animations.upload(
+                encoder,
+                &mut self.uploads,
+                arrays,
+                self.sprite_split,
+                tick,
+                self.animations.changed(),
+            );
             if let Some(atlases) = &self.pack_material_atlases {
-                for kind in 0..2 {
+                for (kind, layers) in written.into_iter().enumerate() {
+                    if layers.is_empty() {
+                        continue;
+                    }
                     let arrays: Vec<_> = arrays.iter().map(|pair| pair[kind].clone()).collect();
-                    atlases[kind].copy(
-                        &self.device,
-                        encoder,
-                        &arrays,
-                        self.animations.changed().iter().copied(),
-                    );
+                    atlases[kind].copy(&self.device, encoder, &arrays, layers);
                 }
             }
         }
@@ -870,8 +863,22 @@ impl Renderer {
             );
         }
     }
+    /// Device `max_buffer_size`, for instance-room checks while `Renderer` is borrowed by `render`.
+    pub fn max_buffer_size(&self) -> u64 {
+        self.mod_gpu.max_buffer_size()
+    }
+    /// See [`ModGpuResources::mod_binding_limits`].
+    pub fn mod_binding_limits(&self) -> (u64, u64) {
+        self.mod_gpu.mod_binding_limits()
+    }
+    /// Render `frame`, optionally driving mod world-render hooks (`FrameHooks`) at the renderer's
+    /// real visibility, sky, prepare, pass-stage, and post-world boundaries.
     #[sunrise_mod_api_macros::replaceable]
-    pub fn render(&mut self, frame: &Frame) -> Result<bool> {
+    pub fn render(
+        &mut self,
+        frame: &Frame,
+        hooks: Option<&mut dyn world_primitives::FrameHooks>,
+    ) -> Result<bool> {
         // A lost device cannot accept uploads either. Leave recovery to the
         // owner instead of submitting atlas patches to the invalid device.
         if self.device_lost() {
@@ -883,8 +890,8 @@ impl Renderer {
         }
         let scaled = self.screenshot_size();
         let rendered = match scaled {
-            Some(size) => self.draw_scaled_frame(frame, size),
-            None => self.draw_frame(frame, None, self.output),
+            Some(size) => self.draw_scaled_frame(frame, size, hooks),
+            None => self.draw_frame(frame, None, self.output, hooks),
         };
         self.finish_prepared_frame();
         // A frame that was not drawn still submits the section copies and
@@ -893,7 +900,7 @@ impl Renderer {
         if self.device_lost() {
             return Err("the graphics device was lost".into());
         }
-        let patched = !frame.hud.patches.is_empty() || !frame.hud.image_patches.is_empty();
+        let patched = !frame.hud.patches.is_empty() || !frame.hud.dynamic_commands.is_empty();
         if !matches!(rendered, Ok(true)) && patched {
             let section_copies = self.section_copies.take();
             let has_section_copies = section_copies.is_some();
@@ -904,7 +911,7 @@ impl Renderer {
                     })
             });
             self.hud
-                .upload_patches(&mut self.uploads, &mut encoder, frame.hud);
+                .upload_patches(&self.device, &mut self.uploads, &mut encoder, frame.hud);
             self.uploads.finish(&encoder);
             if has_section_copies {
                 self.section_copy_bytes = 0;
@@ -917,10 +924,22 @@ impl Renderer {
         // A scaled screenshot's frame never reached the window.
         rendered.map(|drawn| drawn && scaled.is_none())
     }
+    /// The device's largest 2D texture side (`max_texture_dimension_2d`), the limit of a dynamic
+    /// texture.
+    pub fn max_texture_side(&self) -> u32 {
+        self.device.limits().max_texture_dimension_2d
+    }
     /// Whether the device's loss callback has fired. A surface reconfigure
     /// alone cannot restore resources belonging to a lost device.
     pub fn device_lost(&self) -> bool {
         self.device_lost.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The device this renderer draws on: equal for two renderers exactly when the later one was
+    /// made on the earlier one's device (`RendererDevice::Reuse`). A recovery after a device loss
+    /// or any other newly opened device gets a new one.
+    pub fn device_id(&self) -> u64 {
+        self.device_id
     }
 }
 /// Encodes the copy of `texture`'s `size` pixels into a mappable buffer.
@@ -1015,14 +1034,12 @@ pub(crate) fn world_projection(fov_degrees: f32, aspect: f32, far: f32) -> Mat4 
 /// face `eye` (`view::projection_center`), the mesh at the camera-relative
 /// `origin`; all of them when there is no eye.
 fn facing_runs(sides: &Sides, eye: Option<Vec3>, origin: [f32; 3], draw: impl FnMut(u32, u32)) {
-    facing_runs_from(sides, eye, None, origin, Quads::All, draw)
+    facing_runs_from(sides, eye, origin, Quads::All, draw)
 }
-/// `facing_runs` for the eye and, with `low`, every eye straight below it down to that
-/// camera-relative height (the water mirror's eye).
+/// `facing_runs` for one `part` of a mesh's solid quads.
 fn facing_runs_from(
     sides: &Sides,
     eye: Option<Vec3>,
-    low: Option<f32>,
     origin: [f32; 3],
     part: Quads,
     draw: impl FnMut(u32, u32),
@@ -1030,8 +1047,7 @@ fn facing_runs_from(
     match eye {
         Some(eye) => {
             let eye = eye - Vec3::from(origin);
-            let low = low.map_or(eye.y, |y| (y - origin[1]).min(eye.y));
-            sides.visible_from(eye.to_array(), low, part, draw)
+            sides.visible_from(eye.to_array(), eye.y, part, draw)
         }
         None => sides.every(part, draw),
     }
@@ -1049,27 +1065,94 @@ mod sprite_upload_tests;
 #[cfg(test)]
 mod shadow_tests;
 
+#[cfg(test)]
+mod pack_build_retire_tests;
+
+mod pack_builds;
+#[cfg(feature = "test-support")]
+pub use pack_builds::PackBuildWatch;
+pub use pack_builds::PackBuilds;
+pub(crate) use pack_builds::{BuildOrigin, PackBuild, Retired, RetiredPackBuilds};
+
+/// What a pack's thread builds (`Renderer::load_shader_pack`): the pack or why it is refused,
+/// its block ids, and the mod pipelines' state for its targets.
+type PackBuilt = (
+    std::result::Result<pack_post::PackPost, pack_post::Refused>,
+    Vec<i32>,
+    Option<mod_pipelines::BuiltPackState>,
+);
+
 /// A `shaders/` pack building on its own thread (`Renderer::load_shader_pack`): the dimension it
 /// is for, the thread (a panic in it contained), and what the game named it with and when.
 /// Dropping it (another pack, none, or another dimension) cancels the build: the thread stops at
-/// the next program instead of compiling the rest for nothing.
+/// the next program instead of compiling the rest for nothing, and goes to the renderer's
+/// [`RetiredPackBuilds`], which joins it once it ends, and before the renderer drops.
 pub(crate) struct PackLoading {
     dimension: i32,
-    /// Held to be dropped with it: that cancels the build.
-    _cancel: CancelOnDrop,
-    #[allow(clippy::type_complexity)]
-    thread: std::thread::JoinHandle<
-        std::result::Result<std::result::Result<pack_post::PackPost, pack_post::Refused>, String>,
-    >,
+    /// Set when it drops: `PackPost::new` checks it per program.
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// `None` once `poll_shader_pack` joined it.
+    thread: Option<PackBuild>,
+    /// Where the thread goes when this drops before it was joined, and where it runs.
+    retired: RetiredPackBuilds,
+    origin: BuildOrigin,
     label: String,
     started: std::time::Instant,
+    /// What its terrain and shadow programs will draw from the game's sections, as the built
+    /// pack's `has_terrain` and `has_shadow` will say (`PackLoading::draws_of`), for the layouts
+    /// the frames drawn meanwhile keep (`Renderer::pack_pending`).
+    draws: PackDraws,
+    /// Sunrise's HDR as served to it (`Post::hdr`).
+    served: Option<sunrise_shaders::Tonemap>,
+    /// Block ids given while it builds (`Renderer::set_pack_block_ids`), which it runs with in
+    /// place of those it was built with.
+    block_ids: Option<Vec<i32>>,
 }
 
-/// Sets its flag when dropped: `PackLoading`'s cancel, which `PackPost::new` checks per program.
-struct CancelOnDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
-
-impl Drop for CancelOnDrop {
+impl Drop for PackLoading {
     fn drop(&mut self) {
-        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            self.retired.retire(Retired {
+                thread,
+                origin: self.origin.clone(),
+            });
+        }
+    }
+}
+
+/// A running `shaders/` pack's block ids (`Renderer::pack_block_ids`).
+#[derive(Debug)]
+pub(crate) struct PackBlockIds(pub(crate) Vec<i32>);
+
+/// What a pack's programs will draw, as the built pack's `has_terrain`, `has_shadow` and
+/// `draws_sections` will say.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PackDraws {
+    pub(crate) terrain: bool,
+    pub(crate) shadow: bool,
+    pub(crate) sections: bool,
+}
+
+impl PackLoading {
+    /// What `post`'s programs draw once built, with terrain geometry (`atlas`, the pack's block
+    /// atlas) or without: `PackPost::has_terrain` (a solid or cutout terrain program, built with
+    /// that geometry, or terrain the pack leaves undrawn), `has_shadow` (the shadow pass, with a
+    /// terrain or translucent shadow program built with it) and `draws_sections` (a solid,
+    /// cutout or translucent terrain program, or that shadow pass). A program the device then
+    /// refuses to build is not foreseen: the layouts follow the built pack once it runs.
+    pub(crate) fn draws_of(post: &sunrise_shaders::Post, atlas: bool) -> PackDraws {
+        let shadow = atlas
+            && post.shadow_pass
+            && (post.shadow.is_some()
+                || post.shadow_water.is_some()
+                || post.shadow_water_plain.is_some());
+        let programs = post.terrain.is_some() || post.terrain_cutout.is_some();
+        PackDraws {
+            terrain: atlas && programs || post.terrain_undrawn,
+            shadow,
+            sections: atlas && (programs || post.water.is_some()) || shadow,
+        }
     }
 }

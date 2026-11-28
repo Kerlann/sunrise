@@ -11,7 +11,6 @@ use sunrise_client::{
     assets::Assets,
     collisions,
     motion::{LAVA, MotionEvent, MotionResources, MotionWorld, PlayerMotion, WATER},
-    world::World,
 };
 use sunrise_core::geometry::Aabb;
 use sunrise_core::geometry::Vec3;
@@ -247,10 +246,11 @@ pub fn main() -> Result<()> {
     let root = PathBuf::from(&args[0]);
     let dir = PathBuf::from(&args[1]);
     let assets = Assets::load(&root)?;
-    let render = assets.reload(&sunrise_assets::resource_source::ResourceRoot::directory(
-        root.to_path_buf(),
-    ))?;
-    let mut scene = World::test_scene(&assets, &render, 1)?;
+    let render = sunrise_client::assets::RenderAssets::load(
+        &sunrise_assets::resource_source::ResourceRoot::directory(root.to_path_buf()),
+        &assets,
+    )?;
+    let mut scene = sunrise_client::assets::test_scene_world(&assets, &render, 1)?;
     let binding = collisions::load(&root, assets.registry)?;
     let resources = MotionResources::load(&root, &assets)?;
     fs::write(
@@ -270,7 +270,7 @@ pub fn main() -> Result<()> {
         let f: Value = serde_json::from_str(&line?)?;
         scene.health_rules = sunrise_client::health::HealthRules::default();
         let hashes: Vec<_> = resources
-            .attributes
+            .attributes()
             .attributes()
             .map(|(_, a)| {
                 f["holder_hashes"][&a.name]
@@ -405,9 +405,11 @@ pub fn main() -> Result<()> {
                     &resources.health,
                     world.scene.health_rules,
                 )?,
-                "peaceful" => world
-                    .player
-                    .peaceful_regeneration(world.loop_context, world.scene.health_rules)?,
+                "peaceful" => world.player.peaceful_regeneration(
+                    world.loop_context,
+                    &|| None,
+                    world.scene.health_rules,
+                )?,
                 "simulation_tick" => {
                     let v = vector(&op["value"]);
                     world.simulation_tick(
@@ -521,7 +523,13 @@ pub fn main() -> Result<()> {
                         other => return Err(format!("unknown fixture effect {other}").into()),
                     }
                 }
-                "travel" => world.travel_in_air(&mut MoveGate::new(), vector(&op["value"]))?,
+                "travel" => {
+                    sunrise_world::living_air::travel_in_air(
+                        &mut world,
+                        &mut MoveGate::new(),
+                        vector(&op["value"]).into(),
+                    )?;
+                }
                 "tick" => {
                     let v = vector(&op["value"]);
                     world.movement_tick([v.x as f32, v.y as f32, v.z as f32])?;

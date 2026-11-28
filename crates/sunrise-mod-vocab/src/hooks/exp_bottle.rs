@@ -1,10 +1,9 @@
 //! The `exp_bottle` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0211
 
 pub trait Hooks {
     /// An experience bottle broke and its experience was awarded.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_exp_bottle",
+        target = "sunrise_gameplay::game::native_hooks::base::ServerGame<'_>::native_exp_bottle",
         dispatch = "flat",
         side = "server",
         contract = "listen",

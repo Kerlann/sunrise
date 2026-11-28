@@ -9,40 +9,40 @@ pub(crate) mod client_executor;
 pub mod camera;
 pub(crate) mod client_reload;
 pub(crate) mod client_session;
+pub(crate) mod compute_pipeline;
 pub(crate) mod debug_entries;
 pub(crate) mod dynamic_texture;
 pub(crate) mod entity_layers;
 pub(crate) mod entity_render_attachments;
 pub(crate) mod entity_renderers;
-pub(crate) mod item_extensions;
-// hidden: a module of game-side types; mods use their re-exports
-#[doc(hidden)]
-pub mod extras;
-// hidden: a module of game-side types; mods use their re-exports
-#[doc(hidden)]
-pub mod extras_hud;
-// hidden: a module of game-side types; mods use their re-exports
-#[doc(hidden)]
-pub mod first_person;
+pub(crate) mod first_person;
 pub(crate) mod fluid_draw;
+pub(crate) mod item_extensions;
+pub(crate) mod stock_layers;
+pub(crate) mod storage_buffer;
 // hidden: a module of game-side types; mods use their re-exports
 #[doc(hidden)]
 pub mod fog;
+pub(crate) mod frame_graph;
+pub(crate) mod gui_canvas;
 pub(crate) mod gui_clip;
 pub(crate) mod gui_entity;
 pub(crate) mod gui_layers;
 pub(crate) mod gui_model;
-pub(crate) mod gui_paint;
 // hidden: a module of game-side types; mods use their re-exports
 #[doc(hidden)]
 pub mod hud_layout;
 // hidden: module of API-owned HUD values; mods use the re-export
 #[doc(hidden)]
 pub mod hud_mode;
+pub(crate) mod indirect_draw;
 pub(crate) mod key_mapping;
 pub(crate) mod keyframe_animation;
 pub(crate) mod menu_screen;
 pub(crate) mod mod_key_refusal;
+// hidden: module of an API-owned render value; mods use the re-export
+#[doc(hidden)]
+pub mod name_tag_line;
 // hidden: a module of game-side types; mods use their re-exports
 #[doc(hidden)]
 pub mod mesher;
@@ -58,13 +58,9 @@ pub(crate) mod baked_models;
 pub mod music;
 pub(crate) mod narration;
 pub(crate) mod pack_finders;
-pub(crate) mod particle_keys;
 pub(crate) mod particle_providers;
-mod particle_stacks;
-pub(crate) mod particle_types;
-// hidden: a module of game-side types; mods use their re-exports
-#[doc(hidden)]
-pub mod particles;
+pub(crate) mod particles;
+pub(crate) mod phase;
 // hidden: a module of game-side types; mods use their re-exports
 #[doc(hidden)]
 pub mod player_chat;

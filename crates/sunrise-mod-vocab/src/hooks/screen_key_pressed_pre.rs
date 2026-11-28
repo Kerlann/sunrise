@@ -1,5 +1,4 @@
 //! The `screen_key_pressed_pre` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0108
 
 pub trait Hooks {
     /// A key went down over the open screen (`ScreenEvent.KeyPressed.Pre`,
@@ -22,11 +21,10 @@ pub trait Hooks {
     /// release or its separate characters: see `screen_key_released_pre` and
     /// `screen_char_typed_pre`.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_screen_key_pressed_pre",
-        receiver = "read",
+        target = "sunrise_client_gameplay::game::native_hooks::base::ClientGame<'_>::native_screen_key_pressed_pre",
         dispatch = "flat",
         side = "client",
-        version = 2,
+        version = 3,
         contract = "cancel",
         out = "canceled",
         neoforge = "ScreenEvent.KeyPressed.Pre",

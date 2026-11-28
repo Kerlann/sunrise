@@ -94,6 +94,8 @@ pub enum Socket {
 #[derive(Debug, Default)]
 pub struct Counters {
     pub received: AtomicI64,
+    #[cfg(feature = "test-receive-progress")]
+    pub play_ingress_received: AtomicI64,
     pub sent: AtomicI64,
     pub bytes_in: AtomicI64,
     pub bytes_out: AtomicI64,
@@ -153,7 +155,7 @@ fn configure_stream(stream: &TcpStream) -> Result<()> {
     let _ = sock.set_tcp_keepalive(&keepalive);
     #[cfg(target_os = "linux")]
     {
-        let _ = sock.set_quickack(true);
+        let _ = sock.set_tcp_quickack(true);
     }
     Ok(())
 }
@@ -331,6 +333,10 @@ enum Next {
     Partial(usize),
 }
 impl ConnReader {
+    /// Whether this reader sits on an in-process memory pipe rather than a network socket.
+    pub fn is_memory(&self) -> bool {
+        self.memory
+    }
     fn header(&self) -> Result<Option<(usize, usize)>> {
         let bytes = &self.buffer[self.start..self.end];
         if !self.memory {

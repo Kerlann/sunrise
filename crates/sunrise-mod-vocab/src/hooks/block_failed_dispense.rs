@@ -1,10 +1,9 @@
 //! The `block_failed_dispense` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0176
 
 pub trait Hooks {
     /// A dispenser at `pos` failed to dispense `item`. Server-side.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_block_failed_dispense",
+        target = "sunrise_gameplay::game::native_hooks::base::ServerGame<'_>::native_block_failed_dispense",
         dispatch = "flat",
         side = "server",
         contract = "listen",

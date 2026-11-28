@@ -1,5 +1,4 @@
 //! The `item_consumption_teleport` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0187
 
 pub trait Hooks {
     /// On an authoritative server, a cauldron at `pos` is about to change
@@ -16,7 +15,7 @@ pub trait Hooks {
         out = "cancel",
         neoforge = "none (NeoForge has no such event; Bukkit's CauldronLevelChangeEvent)",
         cancellable = true,
-        target = "sunrise_client::game::native_hooks::base::GameLevel<'_>::native_cauldron_level_changed"
+        target = "sunrise_gameplay_common::game::native_hooks::base::GameLevel<'_>::native_cauldron_level_changed"
     )]
     fn cauldron_level_changed(
         dimension: LevelDimension,
@@ -47,7 +46,7 @@ pub trait Hooks {
     /// heard: the listeners aren't called for that consumption and the teleport goes on as
     /// vanilla's.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_item_consumption_teleport",
+        target = "sunrise_gameplay::game::native_hooks::base::ServerGame<'_>::native_item_consumption_teleport",
         dispatch = "flat",
         side = "server",
         contract = "cancel",

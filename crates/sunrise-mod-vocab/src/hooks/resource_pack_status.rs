@@ -1,5 +1,4 @@
 //! The `resource_pack_status` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0266
 
 pub trait Hooks {
     /// A server player's client answered a resource pack in play (vanilla's
@@ -13,7 +12,7 @@ pub trait Hooks {
     /// player has joined, and those answers are not heard. Once for each
     /// answer, on a server.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_resource_pack_status",
+        target = "sunrise_gameplay::game::native_hooks::base::ServerGame<'_>::native_resource_pack_status",
         dispatch = "flat",
         side = "server",
         contract = "listen",

@@ -1,5 +1,4 @@
 //! The `is_bonemeal_success` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0083
 
 pub trait Hooks {
     /// `BonemealableBlock.isBonemealSuccess` for a block that answered
@@ -16,7 +15,7 @@ pub trait Hooks {
         out = "success",
         scope = "block",
         key = "state",
-        target = "sunrise_client::game::native_hooks::base::GameLevel<'_>::native_is_bonemeal_success",
+        target = "sunrise_gameplay_common::game::native_hooks::base::GameLevel<'_>::native_is_bonemeal_success",
         neoforge = "none (vanilla BonemealableBlock.isBonemealSuccess; NeoForge adds no event or extension for it)"
     )]
     fn is_bonemeal_success(

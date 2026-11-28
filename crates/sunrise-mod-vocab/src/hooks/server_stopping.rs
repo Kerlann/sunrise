@@ -1,22 +1,25 @@
 //! The `server_stopping` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0007
 
 pub trait Hooks {
-    /// The server begins teardown (NeoForge's `ServerStoppingEvent`), including
-    /// after startup or the tick loop failed:
-    /// the start of vanilla's `MinecraftServer.stopServer`, with the worlds
-    /// still loaded and the players still connected and not yet saved, so a
-    /// mod can save its own data or tell them. `world_lifecycle`'s
-    /// `WorldCloseFinal` follows once the worlds are saved. A server whose loop
-    /// fails still fires this before the final save attempt and `server_stopped`.
+    /// Fired once at the start of an orderly server shutdown (NeoForge's
+    /// `ServerStoppingEvent` in `MinecraftServer.runServer`, after the tick
+    /// loop exits normally and before `stopServer`), before network shutdown,
+    /// player disconnect and save, final world save, level unloads, and
+    /// `server_stopped`. Worlds are still loaded and players are still
+    /// connected so a mod can save its own data or notify them. The shutdown waits
+    /// for each listener, so one that blocks here delays the world save and the player
+    /// disconnects: keep it short, and put joins and flushes of the mod's own threads in
+    /// `server_stopped`. Not fired on a
+    /// failed startup or when the tick loop exits with an error or panic: those
+    /// paths jump directly to `stopServer` teardown and `server_stopped`.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_server_stopping",
+        target = "sunrise_gameplay::game::native_hooks::base::ServerGame<'_>::native_server_stopping",
         dispatch = "flat",
         side = "server",
         contract = "listen",
         neoforge = "ServerStoppingEvent",
-        fabric = "ServerLifecycleEvents.SERVER_STOPPING",
-        cancellable = false
+        cancellable = false,
+        version = 2
     )]
     fn server_stopping(dedicated: bool);
 }

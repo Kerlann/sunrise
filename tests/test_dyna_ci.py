@@ -1,30 +1,46 @@
 """Dyna's switch routes only supported, same-repository events to its pool."""
-import ast
+import copy
 import hashlib
 import json
 import os
 import re
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
-import sys
 import tempfile
-import textwrap
 import time
 import unittest
 
+from tests.git_fixture import isolated_git_env
+from tests.os_support import BASH, POSIX_BASH, needs_command, needs_gnu_timeout, needs_runner_shell, needs_symlinks
+from tests.test_ci_concurrency import expression_value
+from tests.test_launcher_mirrors_check import MirrorCheckout
+from tools.ci import vendored_yaml
+
 ROOT = Path(__file__).resolve().parents[1]
-PARITY = ROOT / ".github/workflows/parity.yml"
-BASH = shutil.which("bash")
-POSIX_BASH = BASH is not None and not (
-    os.name == "nt" and os.path.dirname(os.path.normcase(BASH)).endswith(os.path.normcase(r"\system32")))
+yaml = vendored_yaml.load()
+
+WORKFLOWS = ROOT / ".github/workflows"
+
+
+def workflow(name):
+    return yaml.load((WORKFLOWS / name).read_text(), Loader=yaml.BaseLoader)
+
+
+def step_named(job, name):
+    return next(step for step in job["steps"] if step.get("name") == name)
+
+
+def commands(job):
+    return "\n".join(step.get("run", "") for step in job["steps"])
 
 
 class DynaRoutingTests(unittest.TestCase):
     def route(self, event, same_repo="true", enabled="true", lease=None):
         env = dict(os.environ, EVENT=event, SAME_REPO=same_repo, ENABLED=enabled,
                    LEASE=str(int(time.time()) + 3600) if lease is None else lease)
-        return subprocess.check_output(["bash", ROOT / "tools/ci/dyna_ci_runner.sh"], env=env, text=True).strip()
+        return subprocess.check_output([BASH, ROOT / "tools/ci/dyna_ci_runner.sh"], env=env, text=True).strip()
 
     @unittest.skipUnless(POSIX_BASH, "needs a bash that is not WSL's")
     def test_only_allowed_events_and_same_repository(self):
@@ -39,6 +55,74 @@ class DynaRoutingTests(unittest.TestCase):
         self.assertEqual(self.route("push", enabled="false"), "self_hosted=false")
         for lease in ("", "bad", "0"):
             self.assertEqual(self.route("push", lease=lease), "self_hosted=false")
+
+    def snapshot_route(self, directory, *, now, snapshot, created_at, started_at, attempt, live="", path=None):
+        """The route script's stdout, with a `gh` in `directory` that answers its reads from these values.
+
+        `path` replaces PATH entirely (to run where python3 is absent); by default `directory` precedes it."""
+        gh = Path(directory) / "gh"
+        gh.write_text('#!/usr/bin/env bash\ncase "$*" in *SELF_HOSTED*) echo "$LIVE_ENABLED";; '
+                      '*POOL_UNTIL*) echo "$LIVE";; *runs/7*.run_started_at) echo "$STARTED_AT";; '
+                      '*runs/7*.created_at) echo "$CREATED_AT";; *) exit 1;; esac\n',
+                      encoding="utf-8", newline="\n")
+        gh.chmod(0o755)
+        env = dict(os.environ, PATH=path or f"{directory}{os.pathsep}{os.environ['PATH']}", EVENT="workflow_dispatch",
+                   SAME_REPO="true", VARS_ENABLED="true", VARS_LEASE=snapshot, LIVE=live,
+                   LIVE_ENABLED="true" if live else "", CREATED_AT=created_at, STARTED_AT=started_at,
+                   GITHUB_REPOSITORY="sunrise-org/sunrise", GITHUB_RUN_ID="7",
+                   GITHUB_RUN_ATTEMPT=str(attempt), NOW=str(now))
+        env.pop("GITHUB_OUTPUT", None)
+        return subprocess.run([BASH, ROOT / "tools/ci/dyna_ci_route.sh"], env=env,
+                              capture_output=True, text=True, check=True).stdout
+
+    def assert_bsd_date_fails_closed(self, now, stamp):
+        """With a BSD-like `date` (macOS) first on PATH, the route script never asks it `-d`: python3 reads the stamp,
+        and where python3 is absent the script fails closed rather than trust a `date -d` that sets DST and succeeds."""
+        # BSD date: no --version (exit 1), -d <integer> means "set DST" and succeeds printing the current time, and any
+        # other -d is rejected. Every -d is logged; every other use of date is the real one.
+        bsd_date = ('#!/usr/bin/env bash\nif [ "$1" = --version ]; then exit 1; fi\n'
+                    'if [ "$1" = -d ]; then echo "$*" >> "$DATE_LOG"\n'
+                    '  case "$2" in *[!0-9]* | "") echo "date: illegal option -- d" >&2; exit 1;; esac\n'
+                    '  date +%%s; exit 0; fi\nexec %s "$@"\n')
+        # snapshot lease, created_at, started_at, attempt, expected with python3: to the second, from the field the
+        # attempt names. Without python3 every one is refused.
+        cases = ((str(now - 55 * 60 + 12 * 60), stamp(55 * 60), stamp(60), 1, "true"),
+                 (str(now - 55 * 60 - 1), stamp(55 * 60), stamp(60), 1, "false"),
+                 (str(now - 30), stamp(2 * 3600), stamp(60), 2, "true"),
+                 (str(now - 61), stamp(2 * 3600), stamp(60), 2, "false"),
+                 # A stamp it cannot read, or one with no zone, judges nothing: the snapshot is refused.
+                 ("9999999999", "not a timestamp", stamp(60), 1, "false"),
+                 ("9999999999", "0", stamp(60), 1, "false"),
+                 ("9999999999", stamp(60).removesuffix("Z"), stamp(60), 1, "false"),
+                 ("9999999999", stamp(60), "", 2, "false"),
+                 ("9999999999", stamp(60), stamp(60), 1, "true"))
+        # Git Bash's usr/bin is often off the Windows PATH, so ask the POSIX shell where each program is.
+        which = lambda name: subprocess.check_output([BASH, "-c", f"command -v {name}"], text=True).strip()
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as bare:
+            Path(directory, "date").write_text(bsd_date % shlex.quote(which("date")),
+                                               encoding="utf-8", newline="\n")
+            Path(directory, "date").chmod(0o755)
+            # A PATH with no python3: the stubs, and wrappers for the only other programs the script runs.
+            for name in ("bash", "dirname"):
+                Path(bare, name).write_text(f'#!/bin/sh\nexec {shlex.quote(which(name))} "$@"\n',
+                                            encoding="utf-8", newline="\n")
+                Path(bare, name).chmod(0o755)
+            Path(bare, "date").write_text(Path(directory, "date").read_text(encoding="utf-8"),
+                                          encoding="utf-8", newline="\n")
+            Path(bare, "date").chmod(0o755)
+            log = Path(directory, "date.log")
+            os.environ["DATE_LOG"] = str(log)
+            self.addCleanup(os.environ.pop, "DATE_LOG")
+            for snapshot, created_at, started_at, attempt, expected in cases:
+                with self.subTest(snapshot=snapshot, created_at=created_at, started_at=started_at, attempt=attempt):
+                    result = self.snapshot_route(directory, now=now, snapshot=snapshot, created_at=created_at,
+                                                 started_at=started_at, attempt=attempt)
+                    self.assertEqual(result, f"self_hosted={expected}\n")
+                with self.subTest(python3="absent", snapshot=snapshot, created_at=created_at):
+                    result = self.snapshot_route(bare, now=now, snapshot=snapshot, created_at=created_at,
+                                                 started_at=started_at, attempt=attempt, path=bare)
+                    self.assertEqual(result, "self_hosted=false\n")
+            self.assertFalse(log.exists(), "BSD date -d is never invoked, with or without python3")
 
     @unittest.skipUnless(POSIX_BASH, "needs a bash that is not WSL's")
     def test_route_reads_the_lease_live_else_judges_the_snapshot_at_the_attempts_creation(self):
@@ -57,47 +141,42 @@ class DynaRoutingTests(unittest.TestCase):
                  ("", str(now - 61), 2 * 3600, 2, 60, "false"),
                  ("", "9999999999", 2 * 3600, 2, 3601, "false"))
         with tempfile.TemporaryDirectory() as directory:
-            gh = Path(directory) / "gh"
-            gh.write_text('#!/usr/bin/env bash\ncase "$*" in *SELF_HOSTED*) echo "$LIVE_ENABLED";; '
-                          '*POOL_UNTIL*) echo "$LIVE";; *runs/7*.run_started_at) echo "$STARTED_AT";; '
-                          '*runs/7*.created_at) echo "$CREATED_AT";; *) exit 1;; esac\n')
-            gh.chmod(0o755)
             for live, snapshot, age, attempt, started, expected in cases:
                 with self.subTest(live=live, snapshot=snapshot, age=age, attempt=attempt):
-                    env = dict(os.environ, PATH=f"{directory}:{os.environ['PATH']}", EVENT="workflow_dispatch",
-                               SAME_REPO="true", VARS_ENABLED="true", VARS_LEASE=snapshot, LIVE=live,
-                               LIVE_ENABLED="true" if live else "", CREATED_AT=stamp(age), STARTED_AT=stamp(started),
-                               GITHUB_REPOSITORY="sunrise-org/sunrise", GITHUB_RUN_ID="7",
-                               GITHUB_RUN_ATTEMPT=str(attempt), NOW=str(now))
-                    env.pop("GITHUB_OUTPUT", None)
-                    result = subprocess.run(["bash", ROOT / "tools/ci/dyna_ci_route.sh"], env=env,
-                                            capture_output=True, text=True, check=True)
-                    self.assertEqual(result.stdout, f"self_hosted={expected}\n")
+                    result = self.snapshot_route(directory, now=now, snapshot=snapshot, created_at=stamp(age),
+                                                 started_at=stamp(started), attempt=attempt, live=live)
+                    self.assertEqual(result, f"self_hosted={expected}\n")
+        self.assert_bsd_date_fails_closed(now, stamp)
 
     def test_every_workflow_routes_through_the_route_script(self):
         # A job that handed the run's lease snapshot straight to dyna_ci_runner.sh judged it against the time the job
         # started: a daily run that waited for GitHub's runners sent its data shards off the pool (2026-11-16).
-        for workflow in sorted((ROOT / ".github/workflows").glob("*.yml")):
-            text = workflow.read_text()
-            if "vars.DYNA_CI_POOL_UNTIL" not in text:
-                continue
-            with self.subTest(workflow=workflow.name):
-                self.assertNotIn("dyna_ci_runner.sh", text)
-                self.assertIn('bash tools/ci/dyna_ci_route.sh >> "$GITHUB_OUTPUT"', text)
-                self.assertIn("VARS_LEASE: ${{ vars.DYNA_CI_POOL_UNTIL }}", text)
-                self.assertIn("actions: read", text)
+        routed = 0
+        for path in sorted(WORKFLOWS.glob("*.yml")):
+            for name, job in workflow(path.name)["jobs"].items():
+                leases = [step for step in job.get("steps", [])
+                          if "vars.DYNA_CI_POOL_UNTIL" in "".join(step.get("env", {}).values())]
+                if not leases:
+                    continue
+                routed += 1
+                with self.subTest(workflow=path.name, job=name):
+                    self.assertNotIn("dyna_ci_runner.sh", commands(job))
+                    self.assertIn('bash tools/ci/dyna_ci_route.sh >> "$GITHUB_OUTPUT"', commands(job))
+                    for step in leases:
+                        self.assertEqual(step["env"]["VARS_LEASE"], "${{ vars.DYNA_CI_POOL_UNTIL }}")
+                    self.assertEqual(job["permissions"]["actions"], "read")
+        self.assertGreaterEqual(routed, 7)
 
     @unittest.skipUnless(POSIX_BASH, "needs a bash that is not WSL's")
     def test_the_daily_routes_fn_replace_check_at_its_start(self):
         # fn-replace-check starts after the SDK's Linux legs, an hour or more into the run: routing there judged the
         # lease snapshot too late and sent every daily's check to GitHub's runners (runs 44065326913, 44145360054).
-        from test_ci_concurrency import yaml
-        daily = yaml.load((ROOT / ".github/workflows/daily.yml").read_text(), Loader=yaml.BaseLoader)["jobs"]
+        daily = workflow("daily.yml")["jobs"]
         route = next(step for step in daily["resolve"]["steps"] if step.get("id") == "route")
         self.assertIn("dyna_ci_route.sh", route["run"])
         self.assertEqual(daily["resolve"]["outputs"]["self_hosted"], "${{ steps.route.outputs.self_hosted }}")
         self.assertEqual(daily["fn-replace-check"]["with"]["self_hosted"], "${{ needs.resolve.outputs.self_hosted }}")
-        check = yaml.load((ROOT / ".github/workflows/fn-replace-check.yml").read_text(), Loader=yaml.BaseLoader)
+        check = workflow("fn-replace-check.yml")
         script = next(step for step in check["jobs"]["route"]["steps"] if step.get("id") == "runner")["run"]
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "output"
@@ -105,7 +184,7 @@ class DynaRoutingTests(unittest.TestCase):
                                             ("yes", 1, "")):
                 with self.subTest(given=given):
                     output.write_text("")
-                    result = subprocess.run(["bash", "-e", "-c", script], cwd=ROOT, capture_output=True, text=True,
+                    result = subprocess.run([BASH, "-e", "-c", script], cwd=ROOT, capture_output=True, text=True,
                                             env=dict(os.environ, GIVEN=given, GITHUB_OUTPUT=str(output)))
                     self.assertEqual(result.returncode, status, result.stdout)
                     self.assertEqual(output.read_text(), expected)
@@ -128,11 +207,12 @@ class DynaRoutingTests(unittest.TestCase):
             with self.subTest(source=source, lease=lease, created=created, now=now):
                 env = dict(os.environ, EVENT="push", SAME_REPO="true", ENABLED="true",
                            LEASE=lease, LEASE_SOURCE=source, CREATED=created, NOW=now)
-                result = subprocess.check_output(["bash", ROOT / "tools/ci/dyna_ci_runner.sh"],
+                result = subprocess.check_output([BASH, ROOT / "tools/ci/dyna_ci_runner.sh"],
                                                  env=env, text=True)
                 self.assertEqual(result.strip(), f"self_hosted={str(expected).lower()}")
 
     @unittest.skipIf(os.name == "nt", "the script installs dependencies on Dyna's Ubuntu runner")
+    @needs_command("sha256sum")
     def test_cached_dependencies_export_persistent_paths(self):
         script = ROOT / "tools/ci/dyna_ci_deps.sh"
         with tempfile.TemporaryDirectory() as directory:
@@ -146,7 +226,7 @@ class DynaRoutingTests(unittest.TestCase):
             cargo_home = cache / "dyna-cargo"
             env = dict(os.environ, DYNA_CI_BUILD=directory, GITHUB_ENV=str(envfile), GITHUB_PATH=str(pathfile),
                        CARGO_HOME=str(cargo_home))
-            subprocess.run(["bash", script], env=env, check=True)
+            subprocess.run([BASH, script], env=env, check=True)
             exports = envfile.read_text()
             self.assertIn(f"RUSTUP_HOME={cache / 'rustup'}\n", exports)
             for key in ("CARGO_TARGET_DIR", "CARGO_HOME", "CARGO_INCREMENTAL"):
@@ -154,6 +234,8 @@ class DynaRoutingTests(unittest.TestCase):
             self.assertIn(str(cargo_home / "bin"), pathfile.read_text())
 
     @unittest.skipUnless(POSIX_BASH and os.name != "nt", "needs the runner's bash")
+    @needs_gnu_timeout
+    @needs_command("sha256sum")
     def test_baked_packages_skip_the_download_and_a_partial_image_falls_back(self):
         script = ROOT / "tools/ci/dyna_ci_deps.sh"
         for missing, extraction_error in ((False, False), (True, False), (True, True)):
@@ -184,7 +266,7 @@ class DynaRoutingTests(unittest.TestCase):
                            GITHUB_ENV=str(root / "env"), GITHUB_PATH=str(root / "path"),
                            MISSING=str(int(missing)), APT_CALLS=str(root / "apt-calls"), DYNA_CI_APT_TRIES="1",
                            EXTRACTION_ERROR=str(int(extraction_error)), EXTRACTION_RECEIPT=str(root / "extracted"))
-                result = subprocess.run(["bash", script], env=env, capture_output=True, text=True)
+                result = subprocess.run([BASH, script], env=env, capture_output=True, text=True)
                 calls = (root / "apt-calls").read_text() if (root / "apt-calls").exists() else ""
                 if missing:
                     self.assertTrue(calls, "a missing package must run the download fallback")
@@ -212,11 +294,12 @@ class DynaRoutingTests(unittest.TestCase):
             stubs.mkdir()
             (stubs / "apt-get").write_text(
                 '#!/usr/bin/env bash\n'
-                f'n=$(cat "{root}/count" 2>/dev/null || echo 0); echo $((n + 1)) > "{root}/count"\n'
-                f'if [ "$n" -lt {failures} ]; then echo "E: File has unexpected size (mirror sync)" >&2; exit 100; fi\n')
-            (stubs / "dpkg-deb").write_text("#!/usr/bin/env bash\n")
+                f'n=$(cat "{root.as_posix()}/count" 2>/dev/null || echo 0); echo $((n + 1)) > "{root.as_posix()}/count"\n'
+                f'if [ "$n" -lt {failures} ]; then echo "E: File has unexpected size (mirror sync)" >&2; exit 100; fi\n',
+                encoding="utf-8", newline="\n")
+            (stubs / "dpkg-deb").write_text("#!/usr/bin/env bash\n", encoding="utf-8", newline="\n")
             # No baked packages: the rootless download fallback is what these cases exercise.
-            (stubs / "dpkg-query").write_text("#!/usr/bin/env bash\nexit 1\n")
+            (stubs / "dpkg-query").write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8", newline="\n")
             for stub in stubs.iterdir():
                 stub.chmod(0o755)
             home = root / "home"
@@ -226,11 +309,13 @@ class DynaRoutingTests(unittest.TestCase):
                        GITHUB_ENV=str(root / "env"), GITHUB_PATH=str(root / "path"),
                        DYNA_CI_APT_PAUSE="0", DYNA_CI_APT_TRIES="3")
             (root / "build").mkdir()
-            result = subprocess.run(["bash", script], env=env, capture_output=True, text=True)
+            result = subprocess.run([BASH, script], env=env, capture_output=True, text=True)
             count = int((root / "count").read_text()) if (root / "count").exists() else 0
             return result, count
 
-    @unittest.skipUnless(POSIX_BASH and os.name != "nt", "needs the runner's bash")
+    @needs_runner_shell
+    @needs_gnu_timeout
+    @needs_command("sha256sum")
     def test_apt_is_retried_a_bounded_number_of_times_and_then_succeeds(self):
         # The first command (update) fails twice, then both commands pass: 2 failures + 2 successes.
         result, count = self.run_deps_with_stub_apt(failures=2)
@@ -238,7 +323,9 @@ class DynaRoutingTests(unittest.TestCase):
         self.assertEqual(count, 4)
         self.assertEqual(result.stderr.count("retrying in"), 2)
 
-    @unittest.skipUnless(POSIX_BASH and os.name != "nt", "needs the runner's bash")
+    @needs_runner_shell
+    @needs_gnu_timeout
+    @needs_command("sha256sum")
     def test_apt_that_keeps_failing_fails_with_the_real_error_after_the_last_try(self):
         result, count = self.run_deps_with_stub_apt(failures=99)
         self.assertEqual(result.returncode, 100)
@@ -247,37 +334,40 @@ class DynaRoutingTests(unittest.TestCase):
         self.assertIn("timeout failed after 3 tries (exit 100)", result.stderr)
 
     def test_lint_enforces_api_boundary_under_central_selection(self):
-        from test_ci_runners import jobs
-        lint = dict(jobs((ROOT / ".github/workflows/dyna-ci.yml").read_text()))["lint"]
-        self.assertIn("if: ${{ always() && !cancelled()", lint)
+        lint = workflow("dyna-ci.yml")["jobs"]["lint"]
+        self.assertTrue(lint["if"].startswith("${{ always() && !cancelled()"))
         # Pin the executable contract, including the selection and source-only mode:
         # deleting the step or making it unconditional must fail this test.
-        step = lint.split("- name: Check mod API boundary\n", 1)[1].split("\n      - ", 1)[0]
-        self.assertIn("needs.changes.outputs.rust_required != 'false'", step)
-        self.assertIn("python3 tools/ci/check_api_boundary.py --source-only", step)
+        step = step_named(lint, "Check mod API boundary")
+        self.assertIn("needs.changes.outputs.rust_required != 'false'", step["if"])
+        self.assertEqual(step["run"], "python3 tools/ci/check_api_boundary.py --source-only")
 
     def test_workflow_wires_route_and_keeps_privileges_off_pool(self):
-        from test_ci_runners import jobs
-        workflow = (ROOT / ".github/workflows/dyna-ci.yml").read_text()
-        blocks = dict(jobs(workflow))
-        route = blocks["changes"]
-        for item in ("vars.DYNA_CI_SELF_HOSTED", "vars.DYNA_CI_POOL_UNTIL", "github.event_name",
-                     "github.event.pull_request.head.repo.full_name == github.repository", "dyna_ci_route.sh"):
-            self.assertIn(item, route)
-        for name, label in (("verify", "dyna-large"), ("verify-static", "dyna-medium")):
+        gate = workflow("dyna-ci.yml")
+        blocks = gate["jobs"]
+        route = next(step for step in blocks["changes"]["steps"] if step.get("id") == "runner")
+        self.assertEqual(route["env"]["VARS_ENABLED"], "${{ vars.DYNA_CI_SELF_HOSTED }}")
+        self.assertEqual(route["env"]["VARS_LEASE"], "${{ vars.DYNA_CI_POOL_UNTIL }}")
+        self.assertEqual(route["env"]["EVENT"], "${{ github.event_name }}")
+        self.assertIn("github.event.pull_request.head.repo.full_name == github.repository", route["env"]["SAME_REPO"])
+        self.assertIn("dyna_ci_route.sh", route["run"])
+        # verify is on dyna-xlarge only until sunrise#5839 brings sunrise-client's lib-test compile back under 12 GiB.
+        for name, label in (("verify", "dyna-xlarge"), ("verify-static", "dyna-medium")):
             block = blocks[name]
-            self.assertIn("needs: changes", block)
-            self.assertIn(f"needs.changes.outputs.self_hosted == 'true' && '{label}'", block)
-            self.assertNotIn("secrets.", block)
-            self.assertNotIn("permissions:", block)
+            self.assertEqual(block["needs"], "changes")
+            self.assertIn(f"needs.changes.outputs.self_hosted == 'true' && '{label}'", block["runs-on"])
+            self.assertNotIn("secrets.", json.dumps(block))
+        self.assertNotIn("permissions", blocks["verify"])
+        # verify-static only reads the pull request body: strictly read-only, no write privileges.
+        self.assertEqual(blocks["verify-static"]["permissions"], {"contents": "read", "pull-requests": "read"})
         # The watch for a dead pool runs off the pool, as one scheduled sweep, never as a job of each run.
         self.assertNotIn("pool-watch", blocks)
-        self.assertIn("runs-on: ubuntu-latest", (ROOT / ".github/workflows/dyna-pool-watch.yml").read_text())
-        self.assertIn("permissions:\n  contents: read", workflow)
+        self.assertEqual([job["runs-on"] for job in workflow("dyna-pool-watch.yml")["jobs"].values()],
+                         ["ubuntu-latest"])
+        self.assertEqual(gate["permissions"], {"contents": "read"})
 
     def test_split_jobs_are_independent_fail_closed_and_share_routing(self):
-        from test_ci_runners import jobs
-        blocks = dict(jobs((ROOT / ".github/workflows/dyna-ci.yml").read_text()))
+        blocks = workflow("dyna-ci.yml")["jobs"]
         runtime = blocks["verify"]
         static = blocks["verify-static"]
         # verify waits for the heavy gate (tools/ci/pr_gate.py); verify-static runs on every pull request.
@@ -287,57 +377,52 @@ class DynaRoutingTests(unittest.TestCase):
             id(static): "${{ always() && !cancelled() && needs.changes.result != 'skipped' }}",
         }
         for block in (runtime, static):
-            header, steps = block.split("    steps:\n", 1)
-            fields = dict(line.strip().split(":", 1) for line in header.splitlines()
-                          if line.startswith("    ") and ":" in line and not line.lstrip().startswith("#"))
-            self.assertEqual(fields["needs"].strip(), "changes")
-            self.assertIn("timeout-minutes", fields)
-            self.assertEqual(fields["if"].strip(), conditions[id(block)])
-            first = steps.split("\n      - ", 1)[0]
-            guard = dict(line.strip().split(":", 1) for line in first.splitlines()
-                         if line.startswith("        ") and ":" in line)
-            self.assertEqual(guard["if"].strip(), "needs.changes.result != 'success'")
-            self.assertEqual(guard["run"].strip(), "exit 1")
+            self.assertEqual(block["needs"], "changes")
+            self.assertIn("timeout-minutes", block)
+            self.assertEqual(block["if"], conditions[id(block)])
+        for block in (blocks["lint"], runtime, static):
+            guard = block["steps"][0]
+            self.assertEqual(guard["if"], "needs.changes.result != 'success' || (github.event_name == 'workflow_dispatch' "
+                             "&& inputs.pr != '' && needs.changes.outputs.pr_merge == '')")
+            self.assertEqual(guard["run"], "exit 1")
         # verify-static routes as verify does, except that a pull request outside the gate and a contributor's
         # pull request stay on GitHub's runners, and our pool gives it a medium runner (it compiles nothing heavy).
-        for field, outside, fork in (
-                ("runs-on", "needs.changes.outputs.heavy == 'false' && 'ubuntu-latest' || ",
-                 "needs.changes.outputs.trusted != 'true' && 'ubuntu-latest' || "),
-                ("RUNNER_KIND", "needs.changes.outputs.heavy == 'false' && 'github' || ",
-                 "needs.changes.outputs.trusted != 'true' && 'github' || ")):
-            shared = runtime.split(f"{field}:", 1)[1].split("\n", 1)[0]
-            if field == "runs-on":
-                shared = shared.replace("'ubuntu-latest') || ", "'ubuntu-latest') || " + fork, 1)
-                shared = shared.replace("needs.changes.outputs.self_hosted == 'true' && 'dyna-large'",
-                                        "needs.changes.outputs.self_hosted == 'true' && 'dyna-medium'", 1)
-            else:
-                shared = shared.replace("${{ ", "${{ " + fork, 1)
-            shared = shared.replace("${{ ", "${{ " + outside, 1)
-            self.assertEqual(static.split(f"{field}:", 1)[1].split("\n", 1)[0], shared)
-        self.assertIn("- name: No Rust work selected", runtime)
-        self.assertNotIn("history_fetch.sh", runtime)
-        self.assertIn("run: bash tools/ci/history_fetch.sh", static)
-        self.assertNotIn("cargo test", static)
-        self.assertNotIn("Swatinem/rust-cache", static)
-        self.assertNotIn("runner-packages.txt", static)
-        self.assertIn("cc -shared -fPIC -O2 -Wall -Wextra -Werror tools/ci/network_guard.c -o target/network_guard.so", runtime)
-        self.assertIn("python3 tools/ci/run_test_binaries.py --jobs 3 --time-limits 2,5 --network-guard target/network_guard.so --no-data-skips -- cargo test $JOBS --profile test --workspace --lib --bins --tests", runtime)
-        self.assertIn("cargo test $JOBS --no-fail-fast --profile test --workspace --doc", runtime)
-        tools = static.split("- name: Install Rust tools for isolated tooling fixtures\n", 1)[1].split("\n      - ", 1)[0]
+        shared_runs_on = runtime["runs-on"]
+        shared_runs_on = shared_runs_on.replace(
+            "'ubuntu-latest') || ", "'ubuntu-latest') || needs.changes.outputs.trusted != 'true' && 'ubuntu-latest' || ", 1)
+        shared_runs_on = shared_runs_on.replace("needs.changes.outputs.self_hosted == 'true' && 'dyna-xlarge'",
+                                                "needs.changes.outputs.self_hosted == 'true' && 'dyna-medium'", 1)
+        shared_runs_on = shared_runs_on.replace(
+            "${{ ", "${{ needs.changes.outputs.heavy == 'false' && 'ubuntu-latest' || ", 1)
+        self.assertEqual(static["runs-on"], shared_runs_on)
+        shared_kind = runtime["env"]["RUNNER_KIND"].replace(
+            "${{ ", "${{ needs.changes.outputs.trusted != 'true' && 'github' || ", 1)
+        shared_kind = shared_kind.replace("${{ ", "${{ needs.changes.outputs.heavy == 'false' && 'github' || ", 1)
+        self.assertEqual(static["env"]["RUNNER_KIND"], shared_kind)
+        runtime_names = [step.get("name") for step in runtime["steps"]]
+        self.assertIn("No Rust work selected", runtime_names)
+        self.assertNotIn("history_fetch.sh", commands(runtime))
+        self.assertIn("bash tools/ci/history_fetch.sh", [step.get("run") for step in static["steps"]])
+        self.assertNotIn("cargo test", commands(static))
+        self.assertNotIn("Swatinem/rust-cache", json.dumps(static))
+        self.assertNotIn("runner-packages.txt", json.dumps(static))
+        self.assertIn("cc -shared -fPIC -O2 -Wall -Wextra -Werror tools/ci/network_guard.c -o target/network_guard.so", commands(runtime))
+        self.assertIn("python3 tools/ci/run_test_binaries.py --jobs 3 --time-limits 2,5 --network-guard target/network_guard.so --no-data-skips -- cargo test $JOBS --profile test --workspace --lib --bins --tests", commands(runtime))
+        self.assertIn("cargo test $JOBS --no-fail-fast --profile test --workspace --doc", commands(runtime))
+        tools = step_named(static, "Install Rust tools for isolated tooling fixtures")
         # Dyna's image has no Cargo: a reused main push (nothing selected) still runs the Cargo-using checks there.
-        self.assertIn("if: needs.changes.outputs.rust_required != 'false' || needs.changes.outputs.tooling_required != 'false'"
-                      " || env.RUNNER_KIND == 'dyna'\n", tools)
-        self.assertIn("--component rustfmt --component clippy", tools)
+        self.assertEqual(tools["if"], "needs.changes.outputs.rust_required != 'false' || needs.changes.outputs.tooling_required != 'false'"
+                         " || env.RUNNER_KIND == 'dyna'")
+        self.assertIn("--component rustfmt --component clippy", tools["run"])
         # GITHUB_PATH, not a shell-local export, carries Cargo into later steps.
-        self.assertIn('echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"', tools)
-        self.assertLess(static.index("- name: Install Rust tools for isolated tooling fixtures"),
-                        static.index("- name: Python tests of the repository's tools"))
+        self.assertIn('echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"', tools["run"])
+        static_names = [step.get("name") for step in static["steps"]]
+        self.assertLess(static_names.index("Install Rust tools for isolated tooling fixtures"),
+                        static_names.index("Python tests of the repository's tools"))
 
     @unittest.skipUnless(POSIX_BASH and os.name != "nt", "needs the runner's bash and POSIX paths")
     def test_pull_requests_select_from_the_api_list_and_fetch_less_history(self):
-        sys.path.insert(0, str(ROOT / "tools/ci/vendor/pyyaml-6.0.3.zip"))
-        import yaml
-        jobs = yaml.load((ROOT / ".github/workflows/dyna-ci.yml").read_text(), Loader=yaml.BaseLoader)["jobs"]
+        jobs = workflow("dyna-ci.yml")["jobs"]
         changes = {step.get("name"): step for step in jobs["changes"]["steps"]}
         listing = changes["List this pull request's files"]
         fetch = changes["Fetch this commit's history for selection"]
@@ -382,7 +467,7 @@ class DynaRoutingTests(unittest.TestCase):
                     output = Path(directory, "output")
                     output.write_text("")
                     env = dict(os.environ, BASE_SHA=base, HEAD_SHA=head, FILES=files, ENTRIES=entries, GITHUB_OUTPUT=str(output))
-                    subprocess.run(["bash", "-e", "-c", select["run"].replace("tools/ci/", f"{ROOT}/tools/ci/")],
+                    subprocess.run([BASH, "-e", "-c", select["run"].replace("tools/ci/", f"{ROOT}/tools/ci/")],
                                    cwd=directory, env=env, check=True)
                     self.assertIn(f"rust_required={rust}\n", output.read_text())
         # format skips rustfmt when no Rust changed; the repository checks still run.
@@ -397,19 +482,18 @@ class DynaRoutingTests(unittest.TestCase):
 
     @unittest.skipUnless(POSIX_BASH and os.name != "nt", "needs the runner's bash and POSIX paths")
     def test_verify_reuses_persistent_target_without_replacing_existing_paths(self):
-        import textwrap
-        from test_ci_runners import jobs
-        runtime = dict(jobs((ROOT / ".github/workflows/dyna-ci.yml").read_text()))["verify"]
-        setup = runtime.split("- name: Use persistent verify build artifacts\n", 1)[1].split("\n      - ", 1)[0]
-        self.assertIn("needs.changes.outputs.rust_required != 'false' && needs.changes.outputs.self_hosted == 'true'", setup)
-        script = textwrap.dedent(setup.split("        run: |\n", 1)[1])
-        restore = runtime.split("- name: Restore unchanged source timestamps\n", 1)[1].split("\n      - ", 1)[0]
-        self.assertIn("needs.changes.outputs.rust_required != 'false'", restore)
-        self.assertIn("python3 tools/ci/source_mtimes.py target/ci-source-mtimes-v2.json", restore)
-        self.assertLess(runtime.index("- name: Use persistent verify build artifacts"),
-                        runtime.index("- name: Restore unchanged source timestamps"))
-        self.assertLess(runtime.index("- name: Restore unchanged source timestamps"),
-                        runtime.index("- name: Build Rust core test binaries"))
+        runtime = workflow("dyna-ci.yml")["jobs"]["verify"]
+        setup = step_named(runtime, "Use persistent verify build artifacts")
+        self.assertIn("needs.changes.outputs.rust_required != 'false' && needs.changes.outputs.self_hosted == 'true'", setup["if"])
+        script = setup["run"]
+        restore = step_named(runtime, "Restore unchanged source timestamps")
+        self.assertIn("needs.changes.outputs.rust_required != 'false'", restore["if"])
+        self.assertIn("python3 tools/ci/source_mtimes.py target/ci-source-mtimes-v2.json", restore["run"])
+        names = [step.get("name") for step in runtime["steps"]]
+        self.assertLess(names.index("Use persistent verify build artifacts"),
+                        names.index("Restore unchanged source timestamps"))
+        self.assertLess(names.index("Restore unchanged source timestamps"),
+                        names.index("Build Rust core test binaries"))
         for case in ("absent", "correct-link", "directory", "file", "wrong-link", "dangling-link"):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
@@ -430,11 +514,11 @@ class DynaRoutingTests(unittest.TestCase):
                 before = target.lstat() if case != "absent" else None
                 before_link = os.readlink(target) if case in ("wrong-link", "dangling-link") else None
                 env = dict(os.environ, CARGO_TARGET_DIR=str(persistent))
-                result = subprocess.run(["bash", "-e", "-c", script], cwd=root, env=env,
+                result = subprocess.run([BASH, "-e", "-c", script], cwd=root, env=env,
                                         capture_output=True, text=True)
                 if case in ("absent", "correct-link"):
                     self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertEqual(target.resolve(), persistent)
+                    self.assertEqual(target.resolve(), persistent.resolve())
                 else:
                     self.assertNotEqual(result.returncode, 0)
                     after = target.lstat()
@@ -452,11 +536,9 @@ class DynaRoutingTests(unittest.TestCase):
     @unittest.skipUnless(POSIX_BASH and os.name != "nt", "needs the runner's bash and POSIX paths")
     def test_stage_artifact_handoff_selects_normal_binary_and_rejects_unsafe_paths(self):
         import json
-        import textwrap
-        from test_ci_runners import jobs
-        runtime = dict(jobs((ROOT / ".github/workflows/dyna-ci.yml").read_text()))["verify"]
-        build = runtime.split("- name: Build the source stage generator (test profile)\n", 1)[1].split("\n      - ", 1)[0]
-        script = textwrap.dedent(build.split("        run: |\n", 1)[1])
+        runtime = workflow("dyna-ci.yml")["jobs"]["verify"]
+        script = step_named(runtime, "Build the source stage generator (test profile)")["run"]
+        self.assertEqual(script, "python3 tools/ci/surface_report.py --build-tool")
         for case in ("normal-and-harness", "harness-only", "newline-path"):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
@@ -478,7 +560,7 @@ class DynaRoutingTests(unittest.TestCase):
                 env = dict(os.environ, PATH=f"{stubs}{os.pathsep}{os.environ['PATH']}",
                            RUNNER_TEMP=str(root), GITHUB_ENV=str(environment), JOBS="",
                            STAGE_ARTIFACTS="".join(json.dumps(message) + "\n" for message in messages))
-                result = subprocess.run(["bash", "-e", "-c", script], cwd=ROOT, env=env,
+                result = subprocess.run([BASH, "-e", "-c", script], cwd=ROOT, env=env,
                                         capture_output=True, text=True)
                 if case == "normal-and-harness":
                     self.assertEqual(result.returncode, 0, result.stderr)
@@ -489,154 +571,239 @@ class DynaRoutingTests(unittest.TestCase):
 
     def assert_positive_stage_export(self, build):
         command = "python tools/ci/test_stage_catalog.py -v"
-        name = "- name: The source stages with this commit's build data\n"
-        step = build.split(name, 1)[1].split("\n      - ", 1)[0]
-        # Inspect active scalar values in this named step, not command text in
-        # comments or another step. Require the exact executable invocation.
-        fields = dict(line.strip().split(":", 1) for line in step.splitlines()
-                      if line.startswith("        ") and ":" in line and not line.lstrip().startswith("#"))
-        self.assertEqual(fields.get("run", "").strip(), command)
-        self.assertEqual(fields.get("if", "").strip(), "matrix.name == 'linux'")
-        self.assertEqual(fields.get("SUNRISE_STAGE_TOOL", "").strip(), "target/prebuilt/tools/release/sunrise-stage")
-        self.assertEqual(fields.get("continue-on-error", "false").strip(), "false")
-        self.assertEqual(build.count(command), 1)
+        name = "The source stages with this commit's build data"
+        step = step_named(build, name)
+        self.assertEqual(step.get("run", "").strip(), command)
+        self.assertEqual(step.get("if", "").strip(), "matrix.name == 'linux'")
+        self.assertEqual(step["env"]["SUNRISE_STAGE_TOOL"].strip(), "target/prebuilt/tools/release/sunrise-stage")
+        self.assertEqual(step.get("continue-on-error", "false").strip(), "false")
+        self.assertEqual(commands(build).count(command), 1)
         # After the build that compiles the tool, and before the leg's assets upload: a tree that does not stage
         # publishes no SDK.
-        self.assertLess(build.index("- name: Build and collect\n"), build.index(name))
-        self.assertLess(build.index(name), build.index("uses: actions/upload-artifact@v4"))
+        names = [step.get("name") for step in build["steps"]]
+        upload = next(index for index, step in enumerate(build["steps"])
+                      if step.get("uses") == "actions/upload-artifact@v4")
+        self.assertLess(names.index("Build and collect"), names.index(name))
+        self.assertLess(names.index(name), upload)
 
     def test_positive_stage_export_runs_in_the_sdk_linux_leg_and_not_in_verify(self):
-        from test_ci_runners import jobs
-        build = dict(jobs((ROOT / ".github/workflows/prebuilt-game-build.yml").read_text()))["build"]
+        build = workflow("prebuilt-game-build.yml")["jobs"]["build"]
         self.assert_positive_stage_export(build)
-        self.assertNotIn("run: python3 tools/ci/test_stage_catalog.py", (ROOT / ".github/workflows/dyna-ci.yml").read_text())
+        self.assertNotIn("run: python3 tools/ci/test_stage_catalog.py", commands(workflow("dyna-ci.yml")["jobs"]["verify"]))
 
     def test_the_surface_report_runs_after_the_stage_build_on_pull_requests_and_dispatches(self):
-        from test_ci_runners import jobs
-        verify = dict(jobs((ROOT / ".github/workflows/dyna-ci.yml").read_text()))["verify"]
-        name = "- name: Report the mod API surface change\n"
-        self.assertEqual(verify.count(name), 1)
-        step = verify.split(name, 1)[1].split("\n      - ", 1)[0]
-        fields = {}
-        for line in step.splitlines():
-            if ":" in line and not line.lstrip().startswith("#"):
-                key, value = line.strip().split(":", 1)
-                fields[key] = value.strip()
-        self.assertEqual(fields.get("run"), "python3 tools/ci/surface_report.py")
-        self.assertIn("steps.stage.outcome == 'success'", fields.get("if", ""))
-        self.assertIn("github.event_name == 'pull_request' || inputs.pr != ''", fields.get("if", ""))
-        self.assertEqual(fields.get("EVENT"), "${{ github.event_name }}")
-        self.assertEqual(fields.get("PR"), "${{ inputs.pr }}")
+        verify = workflow("dyna-ci.yml")["jobs"]["verify"]
+        name = "Report the mod API surface change"
+        names = [step.get("name") for step in verify["steps"]]
+        self.assertEqual(names.count(name), 1)
+        step = step_named(verify, name)
+        self.assertEqual(step["run"], "python3 tools/ci/surface_report.py")
+        self.assertIn("steps.stage.outcome == 'success'", step["if"])
+        self.assertIn("github.event_name == 'pull_request' || inputs.pr != ''", step["if"])
+        self.assertEqual(step["env"]["EVENT"], "${{ github.event_name }}")
+        self.assertEqual(step["env"]["PR"], "${{ inputs.pr }}")
         # The base is the checkout's own merge parent: the step reads no API.
-        self.assertNotIn("GH_TOKEN", fields)
-        self.assertNotIn("continue-on-error", fields)
+        self.assertNotIn("GH_TOKEN", step["env"])
+        self.assertNotIn("continue-on-error", step)
         # It needs the tool the stage build puts in SUNRISE_STAGE_TOOL.
-        self.assertLess(verify.index("- name: Build the source stage generator (test profile)"), verify.index(name))
+        self.assertLess(names.index("Build the source stage generator (test profile)"), names.index(name))
 
-    def test_positive_stage_guard_rejects_commented_command_noop_and_ignored_failure(self):
-        from test_ci_runners import jobs
-        build = dict(jobs((ROOT / ".github/workflows/prebuilt-game-build.yml").read_text()))["build"]
-        command = "        run: python tools/ci/test_stage_catalog.py -v"
-        for replacement in (
-            "        # run: python tools/ci/test_stage_catalog.py -v\n        run: true",
-            "        run: '# python tools/ci/test_stage_catalog.py -v'",
-            command + "\n        continue-on-error: true",
-        ):
-            with self.subTest(replacement=replacement), self.assertRaises(AssertionError):
-                self.assert_positive_stage_export(build.replace(command, replacement, 1))
+    def test_positive_stage_guard_rejects_a_noop_a_comment_and_ignored_failure(self):
+        build = workflow("prebuilt-game-build.yml")["jobs"]["build"]
+        for change in ({"run": "true"}, {"run": "# python tools/ci/test_stage_catalog.py -v"},
+                       {"continue-on-error": "true"}):
+            mutated = copy.deepcopy(build)
+            step_named(mutated, "The source stages with this commit's build data").update(change)
+            with self.subTest(change=change), self.assertRaises(AssertionError):
+                self.assert_positive_stage_export(mutated)
+
+    @needs_runner_shell
+    def test_the_c_source_test_signs_with_homebrews_openssl_on_macos(self):
+        # macOS's LibreSSL has no `pkeyutl -rawin`, which sign_release.sh uses (daily run 45879175792).
+        steps = workflow("prebuilt-game-build.yml")["jobs"]["build"]["steps"]
+        names = [step.get("name") for step in steps]
+        signing = "A native mod with a C source builds through the mod tool"
+        step = step_named({"steps": steps}, "OpenSSL 3 for tools/ci/sign_release.sh")
+        self.assertEqual(names.count(step["name"]), 1)
+        self.assertLess(names.index(step["name"]), names.index(signing))
+        self.assertEqual(step["if"], "inputs.c_source_test && matrix.name == 'macos'")
+        self.assertEqual(step["env"], {"HOMEBREW_NO_AUTO_UPDATE": "1"})
+        self.assertIn("EPHEMERAL=yes bash tools/ci/sign_release.sh", step_named({"steps": steps}, signing)["run"])
+
+        for installed in (True, False):
+            with self.subTest(installed=installed), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                prefix = root / "cellar" / "openssl@3"
+                (prefix / "bin").mkdir(parents=True)
+                stubs = root / "stubs"
+                stubs.mkdir()
+                calls = root / "calls"
+                # Scripts are written with LF endings whatever the platform.
+                (stubs / "brew").write_bytes((
+                    '#!/bin/sh\n'
+                    'echo "brew $*" >> "$CALLS"\n'
+                    'case "$1" in\n'
+                    '  list) [ "$INSTALLED" = 1 ] ;;\n'
+                    '  --prefix) echo "$PREFIX" ;;\n'
+                    '  install) ;;\n'
+                    '  *) exit 2 ;;\n'
+                    'esac\n').encode())
+                (prefix / "bin" / "openssl").write_bytes(
+                    b'#!/bin/sh\necho "openssl $*" >> "$CALLS"\necho "OpenSSL 3.stub"\n')
+                for stub in (stubs / "brew", prefix / "bin" / "openssl"):
+                    stub.chmod(0o755)
+                github_env = root / "github-env"
+                env = dict(os.environ, PATH=f"{stubs}{os.pathsep}{os.environ['PATH']}", CALLS=calls.as_posix(),
+                           INSTALLED=str(int(installed)), PREFIX=prefix.as_posix(), GITHUB_ENV=github_env.as_posix(),
+                           **step["env"])
+                result = subprocess.run([BASH, "-e", "-c", step["run"]], cwd=root, env=env,
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("OpenSSL 3.stub", result.stdout)
+                expected = ["brew list openssl@3"]
+                if not installed:
+                    expected.append("brew install openssl@3")
+                expected += ["brew --prefix openssl@3", "openssl version"]
+                self.assertEqual(calls.read_text().splitlines(), expected)
+                self.assertEqual(github_env.read_text(), f"OPENSSL={prefix.as_posix()}/bin/openssl\n")
 
     def test_optional_map_upload_is_nonblocking_and_reports_its_failure(self):
-        from test_ci_runners import jobs
-        verify = dict(jobs((ROOT / ".github/workflows/dyna-ci.yml").read_text()))["verify-static"]
-        upload = verify.split("        id: mod_host_map_upload\n", 1)[1].split("\n      - ", 1)[0]
-        fields = dict(line.strip().split(":", 1) for line in upload.splitlines()
-                      if line.startswith("        ") and ":" in line and not line.lstrip().startswith("#"))
-        self.assertEqual(fields["continue-on-error"].strip(), "true")
-        self.assertIn("uses: actions/upload-artifact@", upload)
-        report = verify.split("- name: Report optional mod-host map upload failure\n", 1)[1].split("\n      - ", 1)[0]
-        condition = report.split("if:", 1)[1].split("\n", 1)[0]
-        self.assertIn("!cancelled()", condition)
-        self.assertIn("steps.mod_host_map_upload.outcome == 'failure'", condition)
-        self.assertIn("::warning::", report)
-        self.assertIn('>> "$GITHUB_STEP_SUMMARY"', report)
+        verify = workflow("dyna-ci.yml")["jobs"]["verify-static"]
+        upload = next(step for step in verify["steps"] if step.get("id") == "mod_host_map_upload")
+        self.assertEqual(upload["continue-on-error"], "true")
+        self.assertTrue(upload["uses"].startswith("actions/upload-artifact@"))
+        report = step_named(verify, "Report optional mod-host map upload failure")
+        self.assertIn("!cancelled()", report["if"])
+        self.assertIn("steps.mod_host_map_upload.outcome == 'failure'", report["if"])
+        self.assertIn("::warning::", report["run"])
+        self.assertIn('>> "$GITHUB_STEP_SUMMARY"', report["run"])
 
     def test_tooling_tests_run_only_after_static_setup_succeeded(self):
         # Failed setup must not produce secondary failures from compiler fixtures (#2920).
-        from test_ci_runners import jobs
-        verify = dict(jobs((ROOT / ".github/workflows/dyna-ci.yml").read_text()))["verify-static"]
-        step = verify.split("- name: Python tests of the repository's tools\n", 1)[1].split("\n      - ", 1)[0]
-        condition = step.split("if:", 1)[1].split("\n", 1)[0]
+        verify = workflow("dyna-ci.yml")["jobs"]["verify-static"]
+        condition = step_named(verify, "Python tests of the repository's tools")["if"]
         self.assertNotIn("success()", condition)
         self.assertIn("!cancelled()", condition)
         self.assertIn("steps.setup.outcome == 'success'", condition)
         self.assertNotIn("always()", condition)
 
-    @unittest.skipUnless(POSIX_BASH, "needs a bash that is not WSL's")
-    def test_missing_prepared_data_fails_the_leg(self):
-        from test_ci_runners import jobs
-        import textwrap
-        workflow = (ROOT / ".github/workflows/ignored-tests.yml").read_text()
-        shard = dict(jobs(workflow))["ignored-tests-shards"]
-        script = textwrap.dedent(shard.split("        run: |\n          for dir", 1)[1]
-                                .split("      - name: Generate", 1)[0])
-        script = "for dir " + script
-        with tempfile.TemporaryDirectory() as directory:
-            script = script.replace("/cache/sunrise-local", directory + "/missing")
-            summary = Path(directory) / "summary"
-            for event in ("push", "workflow_dispatch"):
-                env = dict(os.environ, EVENT=event, GITHUB_STEP_SUMMARY=str(summary))
-                run = subprocess.run(["bash", "-e", "-c", script], env=env,
-                                     capture_output=True, text=True)
-                self.assertEqual(run.returncode, 1)
-                self.assertIn(f"Prepared data unavailable: minecraft ({event})", summary.read_text())
-                summary.unlink()
+    @needs_runner_shell
+    @needs_symlinks
+    def test_prepared_data_is_checked_before_checkout_or_setup(self):
+        names = ("minecraft", "datagen", "sunrise-client", "tools")
+        event = "workflow_dispatch"
+        for filename, job_name in (("hot-paths.yml", "measure"), ("ignored-tests.yml", "ignored-tests-shards")):
+            with self.subTest(job=job_name), tempfile.TemporaryDirectory() as directory:
+                job = workflow(filename)["jobs"][job_name]
+                step = job["steps"][0]
+                self.assertEqual(step["name"], "Check runner prepared data")
+                self.assertNotIn("if", step)
+                self.assertNotEqual(step.get("continue-on-error"), "true")
+                is_shard = job_name == "ignored-tests-shards"
+                if is_shard:
+                    self.assertEqual(step["env"]["EVENT"], "${{ github.event_name }}")
+
+                root = Path(directory)
+                seed = root / "sunrise-local"
+                for name in names:
+                    (seed / name).mkdir(parents=True)
+                script = step["run"].replace("/cache/sunrise-local", seed.as_posix())
+                summary = root / "summary"
+                env = dict(os.environ, EVENT=event, GITHUB_STEP_SUMMARY=summary.as_posix())
+
+                def check(unavailable=None):
+                    summary.write_text("", encoding="utf-8", newline="\n")
+                    run = subprocess.run([BASH, "-e", "-c", script], cwd=root, env=env,
+                                         capture_output=True, text=True)
+                    self.assertEqual(run.stderr, "")
+                    self.assertEqual(run.returncode, 1 if unavailable else 0, run.stdout)
+                    self.assertEqual(run.stdout, f"::error::prepared data unavailable on this runner: {unavailable}\n"
+                                     if unavailable else "")
+                    self.assertEqual(summary.read_text(encoding="utf-8"), f"Prepared data unavailable: {unavailable} ({event})\n"
+                                     if unavailable and is_shard else "")
+
+                check()
+                for name in names:
+                    with self.subTest(missing=name):
+                        (seed / name).rmdir()
+                        try:
+                            check(name)
+                        finally:
+                            (seed / name).mkdir()
+
+                tools = seed / "tools"
+                tools.rmdir()
+                tools.touch(mode=0o755)
+                check("tools")
+                tools.unlink()
+                tools.mkdir()
+
+                client = seed / "sunrise-client"
+                legacy = client.rename(seed / "horizon-client")
+                client.symlink_to(legacy.name, target_is_directory=True)
+                check()
+                for mode, denied in ((0o100, os.R_OK), (0o400, os.X_OK)):
+                    with self.subTest(alias_target_mode=oct(mode)):
+                        legacy.chmod(mode)
+                        try:
+                            # A privileged user or a filesystem without Unix modes may still have access.
+                            if not os.access(client, denied):
+                                check("sunrise-client")
+                        finally:
+                            legacy.chmod(0o700)
+                legacy.rmdir()
+                check("sunrise-client")
+
+    def test_ignored_shard_finalizers_run_only_after_seed_readiness(self):
+        job = workflow("ignored-tests.yml")["jobs"]["ignored-tests-shards"]
+        seed_id = job["steps"][0]["id"]
+        finalizers = ("Keep a failed run's full output beyond this slot", "Upload the leg report",
+                      "Record data-leg end and compiler cache")
+        diagnostic = step_named(job, "Retain typed preparation diagnostics only")["if"]
+        for case, seed, data, job_status, finalize, diagnose in (
+            ("preflight refusal", "failure", "skipped", "failure", False, False),
+            ("preparation failure", "success", "failure", "failure", True, True),
+            ("test failure", "success", "success", "failure", True, False),
+            ("clean run", "success", "success", "success", True, False),
+        ):
+            steps = {seed_id: {"outcome": seed}, "data": {"outcome": data}}
+            with self.subTest(case=case, step="preparation diagnostic"):
+                # This step is evaluated before the tests, even if they later fail.
+                prep_status = "success" if data == "success" else "failure"
+                self.assertIs(expression_value(diagnostic, {}, steps=steps, job_status=prep_status), diagnose)
+            for name in finalizers:
+                with self.subTest(case=case, step=name):
+                    condition = step_named(job, name)["if"]
+                    self.assertIs(expression_value(condition, {}, steps=steps, job_status=job_status), finalize)
 
     def test_telemetry_ingest_checks_require_manual_dispatch(self):
-        from test_ci_runners import triggers
-        workflow = (ROOT / ".github/workflows/telemetry-server.yml").read_text()
-        self.assertEqual(triggers(workflow), {"workflow_dispatch"})
+        self.assertEqual(set(workflow("telemetry-server.yml")["on"]), {"workflow_dispatch"})
 
     def test_schedule_only_dispatches_and_parity_has_no_gate_entry_point(self):
-        from test_ci_runners import jobs, triggers
-        workflow = (ROOT / ".github/workflows/dyna-ci.yml").read_text()
-        self.assertEqual(triggers(workflow), {"pull_request", "push", "workflow_dispatch", "schedule"})
-        blocks = dict(jobs(workflow))
+        gate = workflow("dyna-ci.yml")
+        self.assertEqual(set(gate["on"]), {"pull_request", "push", "workflow_dispatch", "schedule"})
+        blocks = gate["jobs"]
         dispatcher = blocks["nightly-dispatch"]
-        self.assertIn("github.event_name == 'schedule'", dispatcher)
-        self.assertIn("runs-on: ubuntu-latest", dispatcher)
-        self.assertIn('gh workflow run dyna-ci.yml --repo "$GITHUB_REPOSITORY" --ref main', dispatcher)
-        self.assertIn("if: github.event_name != 'schedule'", blocks["changes"])
+        self.assertIn("github.event_name == 'schedule'", dispatcher["if"])
+        self.assertEqual(dispatcher["runs-on"], "ubuntu-latest")
+        self.assertIn('gh workflow run dyna-ci.yml --repo "$GITHUB_REPOSITORY" --ref main', commands(dispatcher))
+        self.assertIn("github.event_name != 'schedule'", blocks["changes"]["if"])
         self.assertNotIn("vanilla-parity", blocks)
-        workflows = ROOT / ".github/workflows"
-        gate = (workflows / "dyna-ci.yml").read_text()
-        self.assertNotIn("inputs.parity", gate)
-        self.assertNotIn("inputs.harnesses", gate)
-        callers = [path.name for path in workflows.glob("*.yml") if "uses: ./.github/workflows/parity.yml" in path.read_text()]
+        self.assertNotIn("inputs.parity", json.dumps(gate))
+        self.assertNotIn("inputs.harnesses", json.dumps(gate))
+        callers = [path.name for path in sorted(WORKFLOWS.glob("*.yml"))
+                   if any(job.get("uses") == "./.github/workflows/parity.yml"
+                          for job in workflow(path.name)["jobs"].values())]
         self.assertEqual(callers, ["daily.yml"])
-        self.assertNotIn("vanilla-parity", dict(jobs((workflows / "ci.yml").read_text())))
-        parity = dict(jobs(PARITY.read_text()))["vanilla-parity"]
-        self.assertIn("runs-on: dyna-large", parity)
-        self.assertIn("persist-credentials: false", parity)
-        self.assertIn("ref: ${{ inputs.commit }}", parity)
+        self.assertNotIn("vanilla-parity", workflow("ci.yml")["jobs"])
+        parity = workflow("parity.yml")["jobs"]["vanilla-parity"]
+        self.assertEqual(parity["runs-on"], "dyna-large")
+        self.assertIn("false", [step.get("with", {}).get("persist-credentials") for step in parity["steps"]])
+        self.assertIn("${{ inputs.commit }}", [step.get("with", {}).get("ref") for step in parity["steps"]])
 
-    def test_no_parity_harness_builds_the_client_lib_test(self):
-        # Its one rustc outgrew the 16 GiB parity runner (#4896): a harness runs a sunrise-client fixture from
-        # lab.parity_fixtures() instead.
-        def builds_client_lib_test(path):
-            # Any command list holding cargo, test and sunrise-client, whatever its flags and their order.
-            return any(isinstance(node, ast.List)
-                       and {"cargo", "test", "sunrise-client"} <= {item.value for item in node.elts
-                                                                   if isinstance(item, ast.Constant)}
-                       for node in ast.walk(ast.parse(path.read_text())))
-
-        self.assertEqual([path.name for path in sorted((ROOT / "tools").glob("test_*_parity.py"))
-                          if builds_client_lib_test(path)], [])
-
+    @needs_runner_shell
     def test_daily_harnesses_client_lib_tests_are_built_before_the_harnesses(self):
-        from test_ci_runners import jobs
-        parity = dict(jobs(PARITY.read_text()))["vanilla-parity"]
-        step = parity.split("- name: Build the daily harnesses' game probes\n", 1)[1]
-        script = textwrap.dedent(step.split("        run: |\n", 1)[1].split("\n      - ", 1)[0])
+        script = step_named(workflow("parity.yml")["jobs"]["vanilla-parity"], "Build the daily harnesses' game probes")["run"]
         with tempfile.TemporaryDirectory() as temporary:
             tree, bin_dir = Path(temporary, "tree"), Path(temporary, "bin")
             (tree / "tools").mkdir(parents=True)
@@ -661,7 +828,7 @@ class DynaRoutingTests(unittest.TestCase):
                 "run(['cargo', 'test', '--locked', '-p', 'sunrise-gameplay', '--lib', 'w'])\n")
             env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
                    "PARITY_LOG_DIR": temporary, "RUNNER_TEMP": temporary, "BUCKET": "1"}
-            subprocess.run(["bash", "-e", "-c", script], cwd=tree, env=env, check=True)
+            subprocess.run([BASH, "-e", "-c", script], cwd=tree, env=env, check=True)
             fixtures = "build --locked --profile test -p sunrise-parity-fixtures"
             self.assertEqual(calls.read_text().splitlines(), [
                 "test --locked --no-run -p sunrise-client --lib",
@@ -673,18 +840,173 @@ class DynaRoutingTests(unittest.TestCase):
             calls.unlink()
             (Path(temporary, "plan")).mkdir()
             Path(temporary, "plan", "bucket-1.json").write_text('["gameplay#2", "fast"]\n')
-            subprocess.run(["bash", "-e", "-c", script], cwd=tree, env=env, check=True)
+            subprocess.run([BASH, "-e", "-c", script], cwd=tree, env=env, check=True)
             self.assertEqual(calls.read_text().splitlines(), ["test --locked --no-run -p sunrise-gameplay --lib"])
             calls.unlink()
             Path(temporary, "plan", "bucket-1.json").write_text("[]\n")
-            subprocess.run(["bash", "-e", "-c", script], cwd=tree, env=env, check=True)
+            subprocess.run([BASH, "-e", "-c", script], cwd=tree, env=env, check=True)
             self.assertFalse(calls.exists())
             # A plan it cannot read fails the step with a fixed annotation, not a silent empty build.
             Path(temporary, "plan", "bucket-1.json").write_text("not json\n")
-            failed = subprocess.run(["bash", "-e", "-c", script], cwd=tree, env=env, capture_output=True, text=True)
+            failed = subprocess.run([BASH, "-e", "-c", script], cwd=tree, env=env, capture_output=True, text=True)
             self.assertNotEqual(failed.returncode, 0)
             self.assertEqual(failed.stdout, "::error::Could not read the game-probe plan for this parity share.\n")
             self.assertFalse(calls.exists())
+
+
+@needs_runner_shell
+@unittest.skipUnless(shutil.which("python3"), "needs python3 on PATH")
+class LauncherMirrorsStepTests(unittest.TestCase):
+    """verify-static's `Launcher mirrors` step as written, with a stub `gh` for the API and no network."""
+
+    def setUp(self):
+        job = workflow("dyna-ci.yml")["jobs"]["verify-static"]
+        self.step = step_named(job, "Launcher mirrors")
+        names = [step.get("name") for step in job["steps"]]
+        self.assertLess(names.index("GitHub CLI for the launcher mirror check"), names.index("Launcher mirrors"))
+        self.prepare(MirrorCheckout(self))
+        # A pull request run checks out the test merge: two parents, the first main as it is now.
+        self.checkout.merge_pull_request(pr_change=lambda: self.checkout.write("crates/unrelated/note.txt", "x\n"))
+
+    def prepare(self, checkout):
+        """Stubs and environment for the step in `checkout`, whose event base is its first commit."""
+        self.checkout = checkout
+        self.temp = self.checkout.root / "runner-temp"
+        stubs = self.checkout.root / "stubs"
+        stubs.mkdir()
+        self.calls = self.checkout.root / "gh-calls"
+        (stubs / "gh").write_text('#!/usr/bin/env bash\nprintf "%s|%s\\n" "$GH_TOKEN" "$*" >> "$GH_CALLS"\n'
+                                  '[ "${GH_EXIT:-0}" = 0 ] || { echo "gh: HTTP 502" >&2; exit "$GH_EXIT"; }\n'
+                                  'printf "%s" "$GH_RESPONSE"\n',
+                                  encoding="utf-8", newline="\n")
+        (stubs / "gh").chmod(0o755)
+        self.temp.mkdir()
+        self.env = isolated_git_env(PATH=f"{stubs}{os.pathsep}{os.environ['PATH']}", GH_CALLS=str(self.calls),
+                                       GH_TOKEN="token-value", RUNNER_TEMP=str(self.temp),
+                                       GITHUB_REPOSITORY="sunrise-org/sunrise", BASE_SHA=self.checkout.base,
+                                       PR_NUMBER="42")
+
+    def run_step(self, live=None, event=None, gh_exit=0, **env):
+        """The step's script on a pull request. `live` is gh's answer, `event` the body the event file kept."""
+        event_file = self.checkout.root / "event.json"
+        event_file.write_text(json.dumps({"pull_request": {"number": 42, "body": event}}))
+        environment = dict(self.env, GITHUB_EVENT_PATH=str(event_file), GH_EXIT=str(gh_exit),
+                           GH_RESPONSE=live if isinstance(live, str) else json.dumps(live), **env)
+        return subprocess.run([BASH, "-e", "-o", "pipefail", "-c", self.step["run"]], cwd=self.checkout.root,
+                              env=environment, capture_output=True, text=True, encoding="utf-8")
+
+    def test_the_live_body_decides_not_the_one_the_event_kept(self):
+        self.checkout.change_surface(record=True)
+        # Announced after the push: the event still holds the old body, and the same head passes.
+        result = self.run_step(live={"body": "Fix\nlauncher-mirror: the copy follows\n"}, event="Fix")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.calls.read_text(), "token-value|api repos/sunrise-org/sunrise/pulls/42\n")
+        # Taken out after the push: the event still announces it, and the rerun fails.
+        result = self.run_step(live={"body": "Fix"}, event="launcher-mirror: the copy follows")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("without a line starting launcher-mirror:", result.stdout)
+
+    def test_a_stale_event_base_is_not_the_baseline_of_a_merge_main_has_moved_past(self):
+        # #6245: main changed `mirror` (manifest recorded) after the event's base; the pull request does not touch it.
+        checkout = MirrorCheckout(self)
+        self.prepare(checkout)
+        checkout.merge_pull_request(main_change=lambda: checkout.change_surface(record=True),
+                                    pr_change=lambda: checkout.write("crates/unrelated/note.txt", "x\n"))
+        result = self.run_step(live={"body": ""})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Launcher mirror check passed", result.stdout)
+
+    def test_a_pull_request_that_changes_a_mirror_main_did_not_still_needs_its_line(self):
+        checkout = MirrorCheckout(self)
+        self.prepare(checkout)
+        checkout.merge_pull_request(main_change=lambda: checkout.change_surface(record=True),
+                                    pr_change=lambda: checkout.change_second_surface(record=True))
+        result = self.run_step(live={"body": ""})
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("launcher mirrors changed (mirror2)", result.stdout)
+        result = self.run_step(live={"body": "launcher-mirror: the copy follows"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_an_api_that_cannot_be_read_fails_the_step_whatever_the_event_says(self):
+        self.checkout.change_surface(record=True)
+        announced = "launcher-mirror: the copy follows"
+        result = self.run_step(live={"body": announced}, event=announced, gh_exit=1)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("::error::Could not read pull request #42 from the GitHub API", result.stdout)
+        self.assertNotIn("Launcher mirror check passed", result.stdout)
+        # An answer without a text body is as unreadable as no answer.
+        for live in ('{"message": "Not Found"}', "not json", "", '{"body": 7}', "[]"):
+            with self.subTest(live=live):
+                result = self.run_step(live=live, event=announced)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("has no readable body", result.stdout)
+                self.assertNotIn("Launcher mirror check passed", result.stdout)
+        result = self.run_step(live={"body": announced}, event=announced, PR_NUMBER="")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+
+    def test_an_empty_live_body_is_text_not_a_failure(self):
+        for live in ({"body": None}, {"body": ""}):
+            with self.subTest(live=live, surface="unchanged"):
+                self.checkout.change_privately()
+                result = self.run_step(live=live, event="launcher-mirror: stale")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.checkout.change_surface(record=True)
+        for live in ({"body": None}, {"body": ""}):
+            with self.subTest(live=live, surface="changed"):
+                result = self.run_step(live=live, event="launcher-mirror: stale")
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("without a line starting launcher-mirror:", result.stdout)
+                self.assertNotIn("could not", result.stdout.lower())
+
+    def test_a_push_reads_no_pull_request(self):
+        self.checkout.change_surface(record=True)
+        result = self.run_step(live={"body": ""}, gh_exit=1, BASE_SHA="", PR_NUMBER="")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(self.calls.exists())
+        # Its manifest still has to match the surface.
+        self.checkout.write("crates/mirror/src/lib.rs", "pub fn c() {}\n")
+        self.assertEqual(self.run_step(live={"body": ""}, BASE_SHA="", PR_NUMBER="").returncode, 1)
+        self.assertFalse(self.calls.exists())
+
+    def test_the_step_holds_the_token_and_the_pull_request_only_as_environment_data(self):
+        self.assertEqual(self.step["env"]["GH_TOKEN"], "${{ github.token }}")
+        self.assertEqual(self.step["env"]["PR_NUMBER"], "${{ github.event.pull_request.number }}")
+        self.assertEqual(self.step["env"]["BASE_SHA"], "${{ github.event.pull_request.base.sha }}")
+        self.assertNotIn("${{", self.step["run"])
+        self.assertEqual(workflow("dyna-ci.yml")["jobs"]["verify-static"]["permissions"],
+                         {"contents": "read", "pull-requests": "read"})
+
+
+class BookQuickstartWorkflowTests(unittest.TestCase):
+    PREPARE = "Prepare dedicated server resources for the own-sdk tests"
+    SERVER_TESTS = ("m2m_mod_events", "convention_tags", "m2m_load_conditions")
+
+    def test_the_server_is_prepared_once_with_java_25_before_every_test_that_starts_one(self):
+        steps = workflow("book-quickstart.yml")["jobs"]["quickstart"]["steps"]
+        names = [step["name"] for step in steps if "name" in step]
+        self.assertEqual(len(names), len(set(names)))
+        prepare = steps.index(step_named({"steps": steps}, self.PREPARE))
+        for test in self.SERVER_TESTS:
+            first = next(index for index, step in enumerate(steps) if f"--test {test} " in step.get("run", ""))
+            self.assertLess(prepare, first, test)
+        java = [index for index, step in enumerate(steps) if step.get("uses") == "actions/setup-java@v4"]
+        self.assertEqual(len(java), 1)
+        self.assertLess(java[0], prepare)
+        self.assertEqual(steps[java[0]]["if"], "inputs.own_sdk")
+        self.assertEqual(steps[java[0]]["with"], {"distribution": "temurin", "java-version": "25"})
+
+
+class PullRequestMergeFlagTests(unittest.TestCase):
+    def test_every_verify_static_step_that_takes_a_base_reads_the_pull_request_merge(self):
+        # A step that compares with the event's base alone blames a pull request for what main changed after it
+        # (#6245's Launcher mirrors): each --base is the merge's first parent, through --pull-request-merge.
+        steps = workflow("dyna-ci.yml")["jobs"]["verify-static"]["steps"]
+        based = [step for step in steps if "--base" in step.get("run", "")]
+        self.assertEqual(len(based), 6)
+        for step in based:
+            with self.subTest(step=step["name"]):
+                self.assertIn("--pull-request-merge", step["run"])
+
 
 class PersistentTargetTests(unittest.TestCase):
     def test_every_job_that_can_build_on_a_self_hosted_runner_keeps_the_source_snapshot_first(self):
@@ -692,13 +1014,11 @@ class PersistentTargetTests(unittest.TestCase):
         # its tree under a snapshot of another, which a later job then judges fresh: R55's verify linked a
         # sunrise-mod-surface from a tree before 09339ddb31 (2026-11-19). The first step that can compile (cargo, or a
         # repository tool that runs it) must come after the snapshot.
-        import re
-        from test_ci_concurrency import yaml
         builds = re.compile(r"\bcargo (build|test|run|clippy|check|doc|fetch)\b|tools/ci/check_ignored_test_rows\.py|"
                             r"tools/ci/check_machine_sample\.py|tools/parity\.py|tools/prebuilt_game\.py|xtask")
         checked = 0
-        for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
-            for name, job in yaml.load(path.read_text(), Loader=yaml.BaseLoader)["jobs"].items():
+        for path in sorted(WORKFLOWS.glob("*.yml")):
+            for name, job in workflow(path.name)["jobs"].items():
                 if not re.search(r"dyna|DYNA", str(job.get("runs-on", ""))):
                     continue
                 steps = [str(step.get("run", "")) for step in job.get("steps", [])]
@@ -715,9 +1035,7 @@ class IgnoredTestsKeepTests(unittest.TestCase):
     STEP = "Keep a failed run's full output beyond this slot"
 
     def setUp(self):
-        from test_ci_concurrency import yaml
-        steps = yaml.load((ROOT / ".github/workflows/ignored-tests.yml").read_text(),
-                          Loader=yaml.BaseLoader)["jobs"]["ignored-tests-shards"]["steps"]
+        steps = workflow("ignored-tests.yml")["jobs"]["ignored-tests-shards"]["steps"]
         self.steps = {step.get("name"): step for step in steps}
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -728,17 +1046,18 @@ class IgnoredTestsKeepTests(unittest.TestCase):
                     "NAME": "77-2-3"}
 
     def keep_step(self):
-        return subprocess.run(["bash", "-e", "-c", self.steps[self.STEP]["run"]], cwd=self.root, env=self.env,
+        return subprocess.run([BASH, "-e", "-c", self.steps[self.STEP]["run"]], cwd=self.root, env=self.env,
                               capture_output=True, text=True)
 
     def test_the_run_step_writes_where_the_keep_step_reads(self):
         run = self.steps["Run the ignored tests that need prepared data"]["env"]
         step = self.steps[self.STEP]
-        self.assertEqual(step["if"], "always()")
+        self.assertEqual(step["if"], "always() && steps.seed.outcome == 'success'")
         self.assertEqual(run["IGNORED_TESTS_PRIVATE_LOGS"], step["env"]["PRIVATE_LOGS"])
         self.assertEqual(step["env"]["NAME"],
                          "${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}")
 
+    @needs_runner_shell
     def test_a_failed_runs_output_is_kept_under_its_run_attempt_and_job(self):
         self.private.mkdir()
         (self.private / "sunrise-client#1of2.test.log").write_text("synthetic private payload")
@@ -750,6 +1069,7 @@ class IgnoredTestsKeepTests(unittest.TestCase):
         self.assertIn("ignored-tests-failed-logs/77-2-3", result.stdout)
         self.assertNotIn("synthetic private payload", result.stdout + result.stderr)
 
+    @needs_runner_shell
     def test_expired_entries_are_pruned_and_a_clean_run_adds_none(self):
         root = self.keep / "ignored-tests-failed-logs"
         stale, fresh = root / "70-1-0", root / "76-1-0"
@@ -765,17 +1085,16 @@ class IgnoredTestsKeepTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual([path.name for path in root.iterdir()], ["76-1-0"])
         # A host with no keep variable is left alone.
-        result = subprocess.run(["bash", "-e", "-c", self.steps[self.STEP]["run"]], cwd=self.root,
+        result = subprocess.run([BASH, "-e", "-c", self.steps[self.STEP]["run"]], cwd=self.root,
                                 env={key: value for key, value in self.env.items() if key != "DYNA_CI_KEEP"},
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
 
+@needs_runner_shell
 class ParityWorkflowTests(unittest.TestCase):
     def setUp(self):
-        from test_ci_concurrency import yaml
-        self.steps = {step.get("name"): step for step in
-                      yaml.load(PARITY.read_text(), Loader=yaml.BaseLoader)["jobs"]["vanilla-parity"]["steps"]}
+        self.steps = {step.get("name"): step for step in workflow("parity.yml")["jobs"]["vanilla-parity"]["steps"]}
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
@@ -788,7 +1107,7 @@ class ParityWorkflowTests(unittest.TestCase):
         self.slot = self.root / "parity-keep/77-2-bucket-0"
 
     def step(self, name):
-        return subprocess.run(["bash", "-e", "-c", self.steps[name]["run"]], cwd=self.root, env=self.env,
+        return subprocess.run([BASH, "-e", "-c", self.steps[name]["run"]], cwd=self.root, env=self.env,
                               capture_output=True, text=True)
 
     def initialise(self):
@@ -800,7 +1119,6 @@ class ParityWorkflowTests(unittest.TestCase):
     def test_a_failed_probe_build_shows_its_error_headings_not_its_text(self):
         step = self.steps["Show a failed probe build's compiler errors"]
         self.assertEqual(self.steps["Build the daily harnesses' game probes"]["id"], "game-probes")
-        self.assertEqual(self.steps["Build parity probes"]["id"], "probes")
         self.assertIn("steps.game-probes.outcome == 'failure'", step["if"])
         self.initialise()
         (self.slot / "game-probes.log").write_text(
@@ -808,8 +1126,8 @@ class ParityWorkflowTests(unittest.TestCase):
             "  --> crates/sunrise-client/src/lib.rs:1:1\nprivate source excerpt\n"
             "error[E0609]: no field `PRIVATE`\n  --> crates/sunrise-client/src/untracked_generated_probe.rs:3:9\n"
             "error: could not compile\n")
-        result = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=ROOT, capture_output=True, text=True,
-                                env=dict(self.env, FAILED="game-probes"))
+        result = subprocess.run([BASH, "-e", "-c", step["run"]], cwd=ROOT, capture_output=True, text=True,
+                                env=self.env)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("game-probes failed:", result.stdout)
         self.assertIn("compiler: error[E0425]: custom diagnostic payload withheld", result.stdout)
@@ -840,13 +1158,13 @@ class ParityWorkflowTests(unittest.TestCase):
             path.mkdir(parents=True)
         os.utime(stale, (0, 0))
         # A green share: nothing captured, the expired copy still goes.
-        result = subprocess.run(["bash", "-e", "-c", cleanup["run"]], cwd=self.root, capture_output=True, text=True,
+        result = subprocess.run([BASH, "-e", "-c", cleanup["run"]], cwd=self.root, capture_output=True, text=True,
                                 env=dict(self.env, DYNA_CI_KEEP=str(keep)))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(stale.exists())
         self.assertTrue(fresh.exists())
         # A host whose keep holds no captured logs is left as it is.
-        result = subprocess.run(["bash", "-e", "-c", cleanup["run"]], cwd=self.root, capture_output=True, text=True,
+        result = subprocess.run([BASH, "-e", "-c", cleanup["run"]], cwd=self.root, capture_output=True, text=True,
                                 env=dict(self.env, DYNA_CI_KEEP=str(self.root / "empty-keep")))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((self.root / "empty-keep").exists())
@@ -902,8 +1220,7 @@ class ParityWorkflowTests(unittest.TestCase):
         self.assertEqual((self.root / "parity-private-summary").read_text(), "private retry reason")
 
     def test_merging_verdicts_keeps_current_failures_beside_bad_evidence(self):
-        from test_ci_concurrency import expression_value, yaml
-        verdict = yaml.load(PARITY.read_text(), Loader=yaml.BaseLoader)["jobs"]["verdict"]
+        verdict = workflow("parity.yml")["jobs"]["verdict"]
         step = next(step for step in verdict["steps"] if step.get("name") == "Merge the shares' verdicts")
         scope = {"run_id": "77", "run_attempt": "2", "commit": "selected-main-commit"}
         expected_commit = expression_value(step["env"]["COMMIT"].strip("${} "), {}, inputs={"commit": scope["commit"]})
@@ -917,7 +1234,7 @@ class ParityWorkflowTests(unittest.TestCase):
             run = scope | {"run_attempt": "1"} if bucket == 1 else scope
             report.write_text(json.dumps({"bucket": bucket, "of": 3, "selected": [name], "passed": [],
                                           "failed": [name], "complete": True, "scope": run}) if bucket != 2 else "{")
-        result = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=self.root, env=env,
+        result = subprocess.run([BASH, "-e", "-c", step["run"]], cwd=self.root, env=env,
                                 capture_output=True, text=True, check=True)
         self.assertEqual(result.stdout.splitlines(), ["FAIL loot_a"])
         merged = json.loads((self.root / "parity.json").read_text())
@@ -925,6 +1242,7 @@ class ParityWorkflowTests(unittest.TestCase):
                          ([], ["loot_a"], False, scope))
         self.assertEqual(merged["shares"], {"reported": 1, "expected": 3})
 
+    @needs_symlinks
     def test_vanilla_derived_scratch_is_deleted_when_the_job_ends(self):
         self.initialise()
         build = self.root
@@ -994,17 +1312,22 @@ class ScheduledDynaJobTests(unittest.TestCase):
         # Dyna's runners refuse a scheduled event at "Set up runner" (hot-paths' scheduled runs, 2026-11-16 to 18):
         # the schedule starts only a GitHub-hosted job that dispatches the workflow on main, and the chain that
         # reaches the Dyna runner (route, measure, record) runs from that dispatch alone.
-        from test_ci_concurrency import yaml
-        workflow = yaml.load((ROOT / ".github/workflows/hot-paths.yml").read_text(), Loader=yaml.BaseLoader)
-        self.assertEqual(set(workflow["on"]), {"schedule", "workflow_dispatch"})
-        jobs = workflow["jobs"]
+        hot_paths = workflow("hot-paths.yml")
+        self.assertEqual(set(hot_paths["on"]), {"schedule", "workflow_dispatch"})
+        jobs = hot_paths["jobs"]
         self.assertEqual(set(jobs), {"schedule-dispatch", "route", "measure", "record"})
         dispatcher = jobs["schedule-dispatch"]
-        self.assertEqual(dispatcher["if"], "github.repository == 'sunrise-org/sunrise' && github.event_name == 'schedule'")
+        self.assertEqual(hot_paths["on"]["schedule"], [{"cron": "43 8 * * *"}])
+        self.assertEqual(dispatcher["if"], "github.repository == 'sunrise-org/sunrise' && "
+                         "github.event_name == 'schedule' && github.ref == 'refs/heads/main'")
         self.assertEqual(dispatcher["runs-on"], "ubuntu-latest")
-        self.assertEqual(dispatcher["permissions"], {"actions": "write"})
-        self.assertEqual([step["run"] for step in dispatcher["steps"]],
-                         ['gh workflow run hot-paths.yml --repo "$GITHUB_REPOSITORY" --ref main'])
+        self.assertEqual(dispatcher["permissions"], {"actions": "write", "contents": "read"})
+        checkout, dispatch = dispatcher["steps"]
+        self.assertTrue(checkout["uses"].startswith("actions/checkout@"))
+        self.assertEqual(checkout["with"]["ref"], "${{ github.sha }}")
+        self.assertEqual(checkout["with"]["persist-credentials"], "false")
+        self.assertEqual(dispatch["env"], {"GH_TOKEN": "${{ github.token }}"})
+        self.assertEqual(dispatch["run"], "python3 tools/ci/hot_paths_schedule.py")
         self.assertEqual(jobs["route"]["if"], "github.event_name == 'workflow_dispatch'")
         self.assertNotIn("needs", jobs["route"])
         self.assertEqual(jobs["measure"]["needs"], "route")

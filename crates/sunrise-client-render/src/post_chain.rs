@@ -424,8 +424,12 @@ pub(crate) enum PassRefusal {
         count: usize,
         limit: usize,
     },
-    /// A `PolyGlobals` declaration the one rule refuses (`expression_blocks::check_poly_globals`).
-    Globals(crate::gfx::expression_blocks::GlobalsRefusal),
+    /// A `PolyGlobals` declaration the one rule refuses (`expression_blocks::check_poly_globals`),
+    /// at that declaration.
+    Globals(
+        sunrise_glsl::Location,
+        crate::gfx::expression_blocks::GlobalsRefusal,
+    ),
     /// Its `uniforms` give `PolyGlobals`, the game's block.
     GlobalsGiven,
     /// The shader translator's refusal or fault.
@@ -475,7 +479,7 @@ impl std::fmt::Display for PassRefusal {
                 f,
                 "its {stage:?} stage reads {count} {what}, past the device's {limit}"
             ),
-            Self::Globals(refusal) => refusal.fmt(f),
+            Self::Globals(at, refusal) => at.error(refusal).fmt(f),
             Self::GlobalsGiven => write!(
                 f,
                 "its uniforms give {}, which the game fills",
@@ -1319,11 +1323,11 @@ impl PostEffects {
         for (name, binding) in &program.blocks {
             if name == globals {
                 crate::gfx::expression_blocks::check_poly_globals(modules, *binding)
-                    .map_err(PassRefusal::Globals)?;
+                    .map_err(|e| PassRefusal::Globals(program.declared_at(*binding), e))?;
             }
             // Bound only to the stages that read it: one only declared (an imported block the
             // shader doesn't use) binds nothing.
-            let stages = crate::core_shader::stages_reading(read, *binding);
+            let stages = sunrise_glsl::stages_reading(read, *binding);
             if stages.is_empty() {
                 continue;
             }
@@ -1350,8 +1354,10 @@ impl PostEffects {
                     Block::Dynamic(other.to_owned(), buffer)
                 }
                 other => {
-                    let values = (p.uniforms.get(other))
-                        .ok_or_else(|| config(format!("the uniform block {other} is missing")))?;
+                    let values = (p.uniforms.get(other)).ok_or_else(|| {
+                        let missing = format!("the uniform block {other} is missing");
+                        config(program.declared_at(*binding).error(missing).to_string())
+                    })?;
                     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some("Post effect uniforms"),
                         size: UNIFORM_BYTES,
@@ -1379,8 +1385,11 @@ impl PostEffects {
             let input = name.strip_suffix("Sampler").unwrap_or(name);
             let slot = (p.inputs.iter())
                 .position(|i| i.sampler == input)
-                .ok_or_else(|| config(format!("no input for the sampler {name}")))?;
-            let stages = crate::core_shader::stages_reading(read, *texture);
+                .ok_or_else(|| {
+                    let missing = format!("no input for the sampler {name}");
+                    config(program.declared_at(*texture).error(missing).to_string())
+                })?;
+            let stages = sunrise_glsl::stages_reading(read, *texture);
             if stages.is_empty() {
                 continue;
             }
@@ -3009,11 +3018,14 @@ mod tests {
             load("short"),
             Err(LoadError::Pass(
                 0,
-                PassRefusal::Globals(crate::gfx::expression_blocks::GlobalsRefusal::Member {
+                PassRefusal::Globals(at, crate::gfx::expression_blocks::GlobalsRefusal::Member {
                     index: 0,
                     ..
                 })
-            ))
+            )) if at == sunrise_glsl::Location {
+                file: "minecraft:shaders/post/short.fsh".into(),
+                line: 2,
+            }
         ));
         assert!(matches!(
             load("unmatched"),

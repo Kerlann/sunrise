@@ -390,21 +390,10 @@ pub struct HurtSource<'a> {
     /// dealt during a projectile's impact (an ownerless wither skull, a tipped arrow's
     /// instant harm).
     pub direct: i32,
+    /// The direct entity's type (`minecraft:splash_potion`, `minecraft:area_effect_cloud`),
+    /// when the source names one, independently of its class family.
+    pub direct_type: Option<&'a str>,
     pub position: Option<[f64; 3]>,
-}
-/// Which entry of vanilla's `LivingEntity.knockback` a push came through, as
-/// `living_knockback` tells its listener. The short entry (power, direction) only delegates to
-/// the full one (which also takes whether the push comes from an effect), so one push through
-/// the short entry reaches the hook once, as `Short`; a call of the full entry itself is `Full`.
-/// A listener that changes the strength where a mixin on both entries would change it twice
-/// for a short-entry call and once for a full-entry call applies its change twice on `Short`.
-// exhaustive: vanilla has exactly these two entries, `knockback(power, x, z)` and the full one
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, sunrise_mod_api_macros::Wire)]
-pub enum KnockbackEntry {
-    /// The push entered through `knockback(power, x, z)`, which then calls the full entry.
-    Short,
-    /// The push entered the full entry directly.
-    Full,
 }
 /// Where the entity a hit lands on stands and looks (`getViewVector`), for
 /// `HURT_SERVER`.
@@ -443,10 +432,14 @@ pub enum LivingParty {
     Victim,
     /// The hit's causing entity (`DamageSource.getEntity`).
     Causing,
+    /// The one entity a heal or movement hook is about: the healed entity of `living_heal`,
+    /// the moving entity of `living_jump_power`, `living_speed` and `living_flying_speed`.
+    Subject,
 }
 
-/// Engine backing for a [`LivingView`]: the hit's live borrows of its victim and causing
-/// entity, read with the same engine functions as the [`LivingRef`](crate::LivingRef) reads.
+/// Engine backing for a [`LivingView`]: the live borrows of a hit's victim and causing entity,
+/// or of the entity a heal or movement hook is about, read with the same engine functions as
+/// the [`LivingRef`](crate::LivingRef) reads.
 // hidden: the engine owns the borrowed bodies; listeners read through LivingView.
 // no wire: engine-implemented hit-scoped reads.
 #[doc(hidden)]
@@ -486,12 +479,15 @@ pub trait LivingReads {
     fn living_no_ai(&self, party: LivingParty) -> Option<bool>;
 }
 
-/// A living entity a hit lends its listener for reading: its victim
-/// ([`HitHost::victim`](crate::HitHost::victim)) or its causing entity
-/// ([`HitHost::causing`](crate::HitHost::causing)). Each read answers from the entity's
-/// live state at the call, through the engine function the matching
-/// [`LivingRef`](crate::LivingRef) read uses, so the two agree at the same moment. It
-/// borrows the host, and no method writes; it is valid only during the listener's call.
+/// A living entity a hook lends its listener for reading: a hit's victim
+/// ([`HitHost::victim`](crate::HitHost::victim)) or causing entity
+/// ([`HitHost::causing`](crate::HitHost::causing)), the entity `living_heal` heals
+/// (NeoForge `LivingHealEvent.getEntity`), or the entity whose jump power, speed or flying
+/// speed `living_jump_power`, `living_speed` and `living_flying_speed` compute. Each read
+/// answers from the entity's live state at the call, through the engine function the
+/// matching [`LivingRef`](crate::LivingRef) read uses, so the two agree at the same moment.
+/// It borrows what the game lends, and no method writes; it is valid only during the
+/// listener's call.
 // no wire: a call-scoped borrow of the hit's live entity state.
 #[derive(Clone, Copy)]
 #[non_exhaustive]
@@ -513,8 +509,8 @@ impl<'h> LivingView<'h> {
             entity,
         })
     }
-    /// The entity's handle (NeoForge `LivingEvent.getEntity` for the victim, vanilla
-    /// `DamageSource.getEntity` for the causing entity), as
+    /// The entity's handle (NeoForge `LivingEvent.getEntity` for the victim and the healed
+    /// entity, vanilla `DamageSource.getEntity` for the causing entity), as
     /// [`LivingRef::entity`](crate::LivingRef::entity). It outlives the view.
     pub fn entity(&self) -> crate::EntityRef {
         self.entity
@@ -532,7 +528,8 @@ impl<'h> LivingView<'h> {
     /// `IAttachmentHolder.hasData` and `getExistingData`) through the hit's host: a player's [`Holder::Player`](crate::Holder::Player) by UUID, any other
     /// entity's [`Holder::Entity`](crate::Holder::Entity) by id. The hit's host only reads
     /// them: a write, or a `get` that would store its default, refuses with
-    /// [`AttachmentError::ReadOnlyHolder`](crate::AttachmentError::ReadOnlyHolder).
+    /// [`AttachmentError::ReadOnlyHolder`](crate::AttachmentError::ReadOnlyHolder). A heal or
+    /// movement hook gets no host, so there the holder only names the entity.
     pub fn holder(&self) -> Option<crate::Holder> {
         self.reads.living_holder(self.party)
     }

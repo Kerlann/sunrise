@@ -1,5 +1,4 @@
 //! The `player_changed_dimension` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0247
 
 pub trait Hooks {
     /// `player` (`name`) changed dimension (NeoForge's
@@ -14,7 +13,7 @@ pub trait Hooks {
     /// arrival, or a replacement created by respawn, even in another level.
     /// Use `player_respawned` for respawns after death or after the End credits.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_player_changed_dimension",
+        target = "sunrise_gameplay::game::native_hooks::base::ServerGame<'_>::native_player_changed_dimension",
         dispatch = "flat",
         side = "server",
         contract = "listen",

@@ -1,5 +1,4 @@
 //! The `panel_event` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0021
 
 pub trait Hooks {
     /// `event` happened on mod `mod_id`'s panel (`native_panel_items`): the
@@ -10,7 +9,7 @@ pub trait Hooks {
     /// without a drag, and a drag off the list ends as `Dropped`. Act on it
     /// when it is yours.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_panel_event",
+        target = "sunrise_client_gameplay::game::native_hooks::base::ClientGame<'_>::native_panel_event",
         dispatch = "flat",
         side = "client",
         version = 3,

@@ -19,14 +19,15 @@ use std::{collections::BTreeMap, io::Read, path::Path};
 /// The index format this build reads and writes. A reader refuses a newer
 /// one rather than misread it.
 pub const SCHEMA: u32 = 1;
-/// Byte budget for the in-game browser's HTTPS index download.
+/// Byte budget for an HTTPS index download.
 pub const MAX_INDEX: u64 = 16 << 20;
 /// The biggest file the registry takes (a `.smod` with content, a `.spack`).
 pub const MAX_FILE: u64 = 64 << 20;
 /// The biggest native binary build ID, in bytes.
 pub const MAX_NATIVE_BUILD: usize = 128;
-/// Where files may be downloaded from: the registry's release assets.
-pub const FILE_HOST: &str = "https://github.com/horizon-rust/horizon-mods/releases/download/";
+
+/// The default base URL for mirrored packages and native binaries.
+pub const FILE_HOST: &str = "https://github.com/sunrise-org/sunrise-mods/releases/download/";
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Index {
@@ -138,9 +139,6 @@ pub enum Kind {
     Modpack,
     /// A resource pack (`.zip` with `pack.mcmeta`) made or tested for Sunrise.
     ResourcePack,
-    /// A Sunrise shader pack (`.sshader`, the native WGSL format of
-    /// docs/shaders.md).
-    Shader,
     /// A `shaders/`-folder shader pack (`.zip`, the format `sunrise-shaders` loads), listed by
     /// its author under a licence that allows it.
     ShaderPack,
@@ -156,7 +154,6 @@ impl Kind {
             Kind::NativeMod => "native-mod",
             Kind::Modpack => "modpack",
             Kind::ResourcePack => "resourcepack",
-            Kind::Shader => "shader",
             Kind::ShaderPack => "shaderpack",
             Kind::DataPack => "datapack",
             Kind::Other(name) => name,
@@ -170,7 +167,6 @@ impl Kind {
             Kind::NativeMod => Some("smod"),
             Kind::Modpack => Some("spack"),
             Kind::ResourcePack => Some("zip"),
-            Kind::Shader => Some(sunrise_shader_api::EXTENSION),
             Kind::ShaderPack | Kind::DataPack => Some("zip"),
             Kind::Other(_) => None,
         }
@@ -184,7 +180,6 @@ impl From<String> for Kind {
             "native-mod" => Kind::NativeMod,
             "modpack" => Kind::Modpack,
             "resourcepack" => Kind::ResourcePack,
-            "shader" => Kind::Shader,
             "shaderpack" => Kind::ShaderPack,
             "datapack" => Kind::DataPack,
             _ => Kind::Other(name),
@@ -833,15 +828,20 @@ impl Revoked {
     }
 }
 
-/// A project's own fields: a valid id, a name and a licence, `https` addresses and a key that
-/// decodes.
+/// A project's own fields: a valid id, a kind that is not the retired `shader`, a name and a
+/// licence, `https` addresses and a key that decodes.
 fn check_project(p: &Project) -> Result<(), String> {
     let at = |e: String| format!("{}: {e}", p.id);
     if !valid_id(&p.id) {
         return Err(format!("project id {:?} is not [a-z0-9_]{{1,64}}", p.id));
     }
+    if matches!(&p.kind, Kind::Other(name) if name == "shader") {
+        return Err(at(
+            "kind shader (the native `.sshader` format) is no longer supported".into(),
+        ));
+    }
     if let Some(nightly) = &p.nightly {
-        registry::check_nightly_source(&nightly.repo, nightly.path.as_deref()).map_err(at)?;
+        check_nightly_source(&nightly.repo, nightly.path.as_deref()).map_err(at)?;
     }
     if p.nightly.is_some() && p.versions.is_empty() {
         if let Some(problem) = page::check_title(&p.name, &p.summary).into_iter().next() {
@@ -1086,6 +1086,7 @@ pub fn verify_signature(key: &str, signature: &str, path: &Path) -> Result<(), S
         .map_err(|_| "the signature doesn't match the project's key".to_string())
 }
 
+#[cfg(feature = "index")]
 fn verify_signature_bytes(key: &str, signature: &str, bytes: &[u8]) -> Result<(), String> {
     let key =
         minisign_verify::PublicKey::from_base64(key.trim()).map_err(|e| format!("key: {e}"))?;
@@ -1234,13 +1235,6 @@ impl Facts {
                 names(&self.capabilities)
             ),
             Kind::Modpack => format!("its {} isn't what the index lists", modpack::MANIFEST),
-            Kind::Shader => format!(
-                "its {} ({} {}, shader API {}) isn't what the index lists",
-                sunrise_shader_api::MANIFEST,
-                self.id.as_deref().unwrap_or("?"),
-                self.version.as_deref().unwrap_or("?"),
-                self.api
-            ),
             _ => format!("its pack format {} isn't what the index lists", self.api),
         })
     }
@@ -1248,7 +1242,7 @@ impl Facts {
 
 /// Reads and checks a file as its kind: a mod's manifest and content, a
 /// modpack's manifest and overrides, a resource pack's `pack.mcmeta` and
-/// paths, a shader pack's `sunrise_shader_api::check` (the game's own). Kinds
+/// paths, a shader pack's `shaders/` folder. Kinds
 /// this build doesn't know are refused: their checks come with their formats.
 pub fn inspect(kind: &Kind, path: &Path) -> Result<Facts, String> {
     match kind {
@@ -1289,32 +1283,6 @@ pub fn inspect(kind: &Kind, path: &Path) -> Result<Facts, String> {
             api: check_resource_pack(path)?,
             ..Facts::default()
         }),
-        Kind::Shader => {
-            let pack = sunrise_shader_api::Pack::read(path)?;
-            if let Err(problems) = sunrise_shader_api::check(&pack) {
-                let lines: Vec<String> = problems.iter().map(ToString::to_string).collect();
-                return Err(format!(
-                    "the shader pack fails its check:\n{}",
-                    lines.join("\n")
-                ));
-            }
-            let m = pack.manifest;
-            // Players get only what the game draws without a switch, and a line that may
-            // still change in any release would break the packs listed for it.
-            if m.api != sunrise_shader_api::Api::V0_1 {
-                return Err(format!(
-                    "it is written for shader API {}, which is experimental: the registry takes \
-                     such packs once the game draws them without a switch",
-                    m.api
-                ));
-            }
-            Ok(Facts {
-                id: Some(m.id),
-                version: Some(m.version),
-                api: m.api.to_string(),
-                ..Facts::default()
-            })
-        }
         Kind::ShaderPack => Ok(Facts {
             api: check_shader_folder_pack(path)?,
             ..Facts::default()
@@ -1437,15 +1405,13 @@ fn pack_format(zip: &mut zip::ZipArchive<std::fs::File>) -> Result<String, Strin
     Ok(format)
 }
 
-/// The kinds the registry takes submissions for; other kinds wait for their
-/// formats.
+/// The kinds the registry accepts; other kinds wait for their formats.
 pub fn open(kind: &Kind) -> Result<(), String> {
     match kind {
         Kind::Mod
         | Kind::NativeMod
         | Kind::Modpack
         | Kind::ResourcePack
-        | Kind::Shader
         | Kind::ShaderPack
         | Kind::DataPack => Ok(()),
         Kind::Other(name) => Err(format!("the registry doesn't take {name} yet")),
@@ -1457,6 +1423,38 @@ fn names(caps: &[Capability]) -> String {
     format!("[{}]", names.join(", "))
 }
 
+/// `owner/name` of a GitHub repository.
+pub fn valid_repo(repo: &str) -> bool {
+    let part = |p: &str, max: usize| {
+        !p.is_empty()
+            && p.len() <= max
+            && p != "."
+            && p != ".."
+            && p.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    };
+    repo.split_once('/')
+        .is_some_and(|(owner, name)| part(owner, 39) && part(name, 100))
+}
+
+pub(crate) fn check_nightly_source(repo: &str, path: Option<&str>) -> Result<(), String> {
+    if !valid_repo(repo) {
+        return Err(format!(
+            "nightly.repo {repo:?} must be owner/name on GitHub"
+        ));
+    }
+    if let Some(path) = path
+        && (path.contains(['\\', ':'])
+            || path.chars().any(char::is_control)
+            || path.split('/').any(|part| matches!(part, "" | "." | "..")))
+    {
+        return Err(format!(
+            "nightly.path {path:?} must be a relative directory in the repository"
+        ));
+    }
+    Ok(())
+}
+
 pub mod browser_state;
 mod collections;
 pub use collections::{Collection, MAX_COLLECTION_MEMBERS, Member};
@@ -1464,8 +1462,11 @@ mod dependencies;
 pub mod native;
 pub mod page;
 mod read;
+#[cfg(feature = "index")]
 pub mod registry;
+#[cfg(feature = "index")]
 pub mod resolve;
-#[cfg(test)]
+#[cfg(all(test, feature = "index"))]
 mod tests;
+#[cfg(feature = "index")]
 pub mod v2;

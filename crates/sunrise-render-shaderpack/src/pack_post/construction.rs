@@ -3,12 +3,17 @@
 //! compute dispatches (`compile` makes them), its samplers and its blits. It ends where the
 //! frame's own work starts (`execution.rs`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use sunrise_shaders::{BUFFERS, Format, Group, Kind, Post, SHADOW_COLORS};
 
+use super::mod_pack::{
+    ModDepthTargetDecl, ModDrawChunk, ModPackPass, ModPackRuntime, ModPassSlot, ModProgramMode,
+    ModUniformDecl, ModUniformMatch, ModUniformTable, ModVertexStage, match_mod_uniform,
+    mod_depth_source,
+};
 use super::packed;
-use super::{image_binding, image_format, storage_formats_of};
+use super::{image_binding, image_format, sampled_image, storage_formats_of};
 use crate::pack_draw::DrawUniforms;
 use crate::pack_entities::PackEntities;
 use crate::pack_images;
@@ -118,9 +123,6 @@ pub fn snorm_format(
     (features.contains(needs) && renders).then_some(format)
 }
 
-/// The texture behind sampler `name` in a program of the shadow buffers (`shadow_space`: buffer
-/// n is shadowcolor n) or of the others, when the shadow pass runs (`shadow_pass`). `shadow` is
-/// `shadowtex1` when the program also declares `watershadow` (6.3).
 /// Whether a `ty` sampler can read a custom texture of `sample_type`: custom textures hold
 /// colours, never depth to compare against.
 pub fn fits(ty: &str, sample_type: wgpu::TextureSampleType) -> bool {
@@ -141,6 +143,9 @@ pub fn depth_linear(interface: &sunrise_shaders::Interface, linear: u8) -> [f32;
     [0, 1, usize::from(watershadow), 0].map(|n| f32::from(linear >> n & 1))
 }
 
+/// The texture behind sampler `name` in a program of the shadow buffers (`shadow_space`: buffer
+/// n is shadowcolor n) or of the others, when the shadow pass runs (`shadow_pass`). `shadow` is
+/// `shadowtex1` when the program also declares `watershadow` (6.3).
 pub fn source(name: &str, shadow_space: bool, shadow_pass: bool, watershadow: bool) -> Source {
     let shadow_color = sunrise_shaders::shadow_color(name);
     let shadow_depth = match name {
@@ -602,6 +607,24 @@ pub struct Resources<'a> {
     /// While the pack is laid out for `compile`: the pipelines its programs need. `None`
     /// compiles each as its program is built.
     pub jobs: Option<std::cell::RefCell<Vec<Job>>>,
+    /// Mod-declared auxiliary depth targets for sampler resolution.
+    pub mod_depth_targets: &'a [ModDepthTargetDecl],
+    /// Mod-declared per-frame uniforms for uniform resolution and type validation.
+    pub mod_uniforms: &'a [ModUniformDecl],
+    /// The pack is served Sunrise's HDR extension (`Post::hdr`): its programs read the display
+    /// uniforms (`pack_uniforms::DISPLAY`).
+    pub display_uniforms: bool,
+    /// Deduplicates mod frame-uniform mismatch warnings by program and uniform name.
+    pub mod_uniform_mismatches: &'a std::cell::RefCell<HashSet<(String, String)>>,
+    /// Auxiliary depth target index written by the mod geometry pass currently being built, if any.
+    pub mod_depth_target: std::cell::Cell<Option<usize>>,
+    /// Depth comparison function for the pass currently being built.
+    pub depth_compare: std::cell::Cell<wgpu::CompareFunction>,
+    /// The linked mod pass's declared depth bias; `None` leaves the pack program's own bias.
+    pub mod_depth_bias: std::cell::Cell<Option<wgpu::DepthBiasState>>,
+    /// The mod's own vertex stage for the pass about to be built, which `build_pass` takes and
+    /// links to that pass's fragment stage ([`ModProgramMode::ModVertexPackFragment`]).
+    pub mod_vertex: std::cell::RefCell<Option<ModVertexStage>>,
 }
 
 impl Resources<'_> {
@@ -866,7 +889,16 @@ pub fn bindings(
         let (src, sample_type, dimension) = match custom {
             _ if let Some(k) = image => {
                 let i = &pack.images[k];
-                (Source::Image(k), i.sample_type(features), i.dimension)
+                let sample_type = i.sample_type(features);
+                // A sampler of another class than its image's texture (`usampler2D` over an
+                // `R32F` image) refuses the program (decision D-6, #5223).
+                if let Err(note) =
+                    sampled_image(name, &i.def.name, &s.ty, &s.name, i.format, sample_type)
+                {
+                    notes.push(note);
+                    return None;
+                }
+                (Source::Image(k), sample_type, i.dimension)
             }
             Some(i) if !fits(&s.ty, textures[i].sample_type) => {
                 notes.push(format!(
@@ -889,7 +921,10 @@ pub fn bindings(
                 (src, t.sample_type, t.dimension)
             }
             None => {
-                let mut src = source(&s.name, group.shadow(), shadow.is_some(), watershadow);
+                let mut src =
+                    mod_depth_source(pack.mod_depth_targets, &s.name).unwrap_or_else(|| {
+                        source(&s.name, group.shadow(), shadow.is_some(), watershadow)
+                    });
                 // A sampler the game gives no texture reads texture unit 0, as do the atlas's
                 // names: the atlas in gbuffers programs, `colortex0` in deferred, composite and
                 // final (OptiFine's shaders.txt). Iris 1.11.7 read the atlas through a name of
@@ -920,13 +955,22 @@ pub fn bindings(
                 {
                     src = unit_0;
                 }
+                let active_mod_depth = pack.mod_depth_target.get();
                 let blank = match src {
                     // The shadow pass writes the shadow map.
                     Source::ShadowDepth(..) => group == Group::Shadow,
                     Source::Atlas => geometry.is_none(),
-                    Source::Depth => geometry.is_some(),
+                    // A mod pass writing to its own auxiliary depth target can legally sample
+                    // the pack's main `depthtex0`; passes writing to `depthtex0` cannot.
+                    Source::Depth => geometry.is_some() && active_mod_depth.is_none(),
                     // Translucent terrain reads the copy; opaque terrain would read itself.
-                    Source::Depth1 | Source::Depth2 => group == Group::Gbuffers,
+                    Source::Depth1 | Source::Depth2 => {
+                        group == Group::Gbuffers && active_mod_depth.is_none()
+                    }
+                    Source::ModDepth(idx) => active_mod_depth == Some(idx),
+                    Source::ModOpaqueDepth(idx) => {
+                        group == Group::Gbuffers && active_mod_depth == Some(idx)
+                    }
                     Source::Color(n) => {
                         (group != Group::Translucent || n < 4) && in_place & 1 << n != 0
                     }
@@ -943,7 +987,11 @@ pub fn bindings(
                     | Source::Depth1
                     | Source::Depth2
                     | Source::ShadowDepth(..)
-                    | Source::WaterMask => wgpu::TextureSampleType::Float { filterable: false },
+                    | Source::WaterMask
+                    | Source::ModDepth(_)
+                    | Source::ModOpaqueDepth(_) => {
+                        wgpu::TextureSampleType::Float { filterable: false }
+                    }
                     // Unfilterable on WebGPU-level devices; the lightmap is sampled at texel centres.
                     Source::Lightmap => float,
                     _ => float,
@@ -1157,6 +1205,53 @@ const POLYGON_OFFSET: wgpu::DepthBiasState = wgpu::DepthBiasState {
     clamp: 0.0,
 };
 
+struct ResolvedModUniforms<'a> {
+    bound: Vec<(usize, bool, u32)>,
+    handled: HashSet<&'a str>,
+}
+
+/// Resolve mod frame uniforms before the ordinary pack uploads are assigned. Both bound and
+/// type-mismatched mod uniforms are recorded in `handled` so they are excluded from
+/// `Pass::uniforms`; a mismatch keeps its shader slot at zero without refusing the program. In a
+/// pack served Sunrise's HDR extension the display uniforms (`pack_uniforms::DISPLAY`) are the
+/// display's, never a mod's: a mod uniform of such a name binds only where the pack isn't served.
+fn resolve_mod_uniforms<'a>(
+    uniforms: &'a [sunrise_shaders::Uniform],
+    initial_block: &mut [u8],
+    pass_name: &str,
+    pack: &Resources<'_>,
+    notes: &mut Vec<String>,
+) -> ResolvedModUniforms<'a> {
+    let mut bound = Vec::new();
+    let mut handled = HashSet::new();
+    let display = |name: &str| pack.display_uniforms && pack_uniforms::DISPLAY.contains(&name);
+    for u in uniforms.iter().filter(|u| !display(&u.name)) {
+        match match_mod_uniform(pack.mod_uniforms, &u.name, &u.ty) {
+            ModUniformMatch::None => {}
+            ModUniformMatch::Bound { index, previous } => {
+                bound.push((index, previous, u.offset));
+                handled.insert(u.name.as_str());
+            }
+            ModUniformMatch::TypeMismatch { expected } => {
+                handled.insert(u.name.as_str());
+                // The member's range is guaranteed by `sunrise_shaders::Interface::uniforms`.
+                initial_block[u.offset as usize..(u.offset + u.size) as usize].fill(0);
+                let key = (pass_name.to_owned(), u.name.clone());
+                if pack.mod_uniform_mismatches.borrow_mut().insert(key) {
+                    let msg = format!(
+                        "{pass_name}: mod uniform `{}` declared as `{}` (mod provides `{}`); left unbound, reads zero",
+                        u.name,
+                        u.ty,
+                        expected.glsl_name()
+                    );
+                    notes.push(msg);
+                }
+            }
+        }
+    }
+    ResolvedModUniforms { bound, handled }
+}
+
 /// The pass of program `p`: a quad, or `geometry` drawn by the game. `None` (with a note) when
 /// wgpu refuses it or it writes nothing. `formats` are its buffers' (for a program of the shadow
 /// buffers, buffer n is shadowcolor n); `shadow` the shadowcolor formats when the shadow pass
@@ -1179,11 +1274,45 @@ pub fn build_pass(
     let features = device.features();
     // The frame's uniforms, then the pack's custom ones.
     let index = |name: &str, ty: &str| {
-        pack_uniforms::index_in(name, geometry.is_some()).or_else(|| custom_index(custom, name, ty))
+        pack_uniforms::index_in(name, geometry.is_some(), pack.display_uniforms)
+            .or_else(|| custom_index(custom, name, ty))
     };
     let mask = |flips: &[(u32, bool)]| flips.iter().filter(|f| f.1).fold(0u16, |m, f| m | 1 << f.0);
     let mut p = p;
-    let program = p.program.take()?;
+    let mut program = p.program.take()?;
+    // A mod's own vertex stage replaces the pack's, when it fits the pack's fragment stage.
+    let mod_vertex = match pack.mod_vertex.borrow_mut().take() {
+        Some(stage) => {
+            // The pack's vertex stage carries a geometry stage's inputs: the mod's can't replace it.
+            if p.geometry_triangles > 0 {
+                notes.push(format!(
+                    "{}: the mod's own vertex stage is not used: the pack's program has a geometry stage",
+                    p.name
+                ));
+                return None;
+            }
+            match super::mod_link::link_vertex_stage(
+                &stage.module,
+                &program.fragment,
+                &program.varyings,
+                stage.set1_layout.is_some(),
+                device.limits().max_bind_groups,
+            ) {
+                Ok(linked) => {
+                    program.vertex = linked;
+                    Some(stage)
+                }
+                Err(reason) => {
+                    notes.push(format!(
+                        "{}: the mod's own vertex stage is not used: {reason}",
+                        p.name
+                    ));
+                    return None;
+                }
+            }
+        }
+        None => None,
+    };
     let interface = &program.interface;
     let draw = interface.draw;
     let storage = !interface.images.is_empty() || !interface.buffers.is_empty();
@@ -1294,6 +1423,18 @@ pub fn build_pass(
             write_mask: wgpu::ColorWrites::empty(),
         })];
     } else if !final_pass && writes.is_empty() && !sink {
+        // It draws nothing a later program could see: its compute stages and forced flips are
+        // all it does, and the caller drops it when it has neither.
+        if geometry.is_none() {
+            let flip = mask(&p.flips);
+            return Some(no_draw(
+                device,
+                p.name,
+                p.group,
+                flip,
+                !interface.buffers.is_empty(),
+            ));
+        }
         notes.push(format!("{}: writes no buffer; skipped", p.name));
         return None;
     }
@@ -1315,16 +1456,22 @@ pub fn build_pass(
             label: Some(&p.name),
             entries: &entries,
         });
+        let mut sets = vec![
+            Some(&layout),
+            geometry.and_then(|g| g.table),
+            draw.then_some(draws),
+            geometry.and_then(|g| g.ids),
+            (!interface.buffers.is_empty()).then_some(&pack.buffers.layout),
+            pack.indices.filter(|_| reads_indices),
+        ];
+        // The mod's own sets go after the pack's (`MOD_SET_BASE`).
+        if let Some(stage) = &mod_vertex {
+            sets.push(Some(&stage.globals_layout));
+            sets.extend(stage.set1_layout.as_ref().map(Some));
+        }
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some(&p.name),
-            bind_group_layouts: &[
-                Some(&layout),
-                geometry.and_then(|g| g.table),
-                draw.then_some(draws),
-                geometry.and_then(|g| g.ids),
-                (!interface.buffers.is_empty()).then_some(&pack.buffers.layout),
-                pack.indices.filter(|_| reads_indices),
-            ],
+            bind_group_layouts: &sets,
             ..Default::default()
         });
         let module = |mut m: naga::Module| {
@@ -1350,7 +1497,12 @@ pub fn build_pass(
                 .map_or_else(Vec::new, |g| owned_buffers(g.buffers)),
             // Rows flipped to GL's turn front faces clockwise.
             primitive: wgpu::PrimitiveState {
-                front_face: wgpu::FrontFace::Cw,
+                // The mod's own vertex stage winds as its pipeline does.
+                front_face: if mod_vertex.is_some() {
+                    wgpu::FrontFace::Ccw
+                } else {
+                    wgpu::FrontFace::Cw
+                },
                 cull_mode: geometry
                     .filter(|g| g.cull && p.geometry_triangles == 0)
                     .map(|_| wgpu::Face::Back),
@@ -1359,13 +1511,15 @@ pub fn build_pass(
             depth_stencil: geometry.map(|g| wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: Some(g.depth_write),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                depth_compare: Some(pack.depth_compare.get()),
                 stencil: Default::default(),
-                bias: if p.name == "gbuffers_damagedblock" {
-                    POLYGON_OFFSET
-                } else {
-                    Default::default()
-                },
+                bias: pack.mod_depth_bias.get().unwrap_or_else(|| {
+                    if p.name == "gbuffers_damagedblock" {
+                        POLYGON_OFFSET
+                    } else {
+                        Default::default()
+                    }
+                }),
             }),
             targets: targets.to_vec(),
         };
@@ -1440,11 +1594,25 @@ pub fn build_pass(
             return None;
         }
     };
-    let interface = &program.interface;
+    let interface = &mut program.interface;
+    let ResolvedModUniforms {
+        bound: mod_uniforms,
+        handled,
+    } = resolve_mod_uniforms(
+        &interface.uniforms,
+        &mut interface.initial_values,
+        &p.name,
+        pack,
+        notes,
+    );
     let missing: Vec<&str> = interface
         .uniforms
         .iter()
-        .filter(|u| !u.name.starts_with("hz_") && index(&u.name, &u.ty).is_none())
+        .filter(|u| {
+            !u.name.starts_with("hz_")
+                && !handled.contains(u.name.as_str())
+                && index(&u.name, &u.ty).is_none()
+        })
         .map(|u| u.name.as_str())
         .collect();
     if !missing.is_empty() {
@@ -1468,8 +1636,10 @@ pub fn build_pass(
         uniforms: interface
             .uniforms
             .iter()
+            .filter(|u| !handled.contains(u.name.as_str()))
             .map(|u| (index(&u.name, &u.ty), u.ty.clone(), u.offset))
             .collect(),
+        mod_uniforms,
         name: p.name,
         group: p.group,
         pipeline: Pipeline::Render(pipeline),
@@ -1492,6 +1662,8 @@ pub fn build_pass(
         ids: geometry.is_some_and(|g| g.ids.is_some()),
         groups: HashMap::new(),
         portal_groups: HashMap::new(),
+        dynamic_groups: HashMap::new(),
+        block_atlas_groups: HashMap::new(),
         copies: (image_buffers(&images)
             | if p.group == Group::Translucent {
                 written
@@ -1511,6 +1683,60 @@ pub fn build_pass(
     })
 }
 
+/// A pass that draws nothing (`Pipeline::NoDraw`): it runs the compute stages its caller adds,
+/// then flips `flip`. `storage`: its fragment stage binds storage buffers.
+fn no_draw(device: &wgpu::Device, name: String, group: Group, flip: u16, storage: bool) -> Pass {
+    Pass {
+        ubo: device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(&name),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }),
+        layout: device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some(&name),
+            entries: &[],
+        }),
+        block: Vec::new(),
+        initial_block: Vec::new(),
+        uniforms: Vec::new(),
+        mod_uniforms: Vec::new(),
+        name,
+        group,
+        pipeline: Pipeline::NoDraw { storage },
+        sky_parts: None,
+        water_mask: None,
+        polygon_offset: None,
+        samplers: Vec::new(),
+        writes: Vec::new(),
+        flip,
+        depth_linear: [0.0; 4],
+        shadow_reads: 0,
+        shadow_copies: 0,
+        written: 0,
+        mipmaps: 0,
+        draw: false,
+        atlas: None,
+        material_maps: false,
+        paged: false,
+        ids: false,
+        groups: HashMap::new(),
+        portal_groups: HashMap::new(),
+        dynamic_groups: HashMap::new(),
+        block_atlas_groups: HashMap::new(),
+        copies: 0,
+        reads: 0,
+        buffers: false,
+        images: Vec::new(),
+        compute: Vec::new(),
+        sink: false,
+        geometry: 0,
+        viewport: None,
+        image_copies: 0,
+        snapshots: 0,
+    }
+}
+
 /// The pack's images a pass both samples and stores.
 pub fn image_copies(samplers: &[Binding], images: &[(u32, Image)]) -> u64 {
     samplers
@@ -1528,7 +1754,7 @@ pub fn build_compute(
     device: &wgpu::Device,
     name: String,
     group: Group,
-    c: sunrise_shaders::ComputeProgram,
+    mut c: sunrise_shaders::ComputeProgram,
     formats: &[wgpu::TextureFormat; BUFFERS],
     shadow: Option<&[wgpu::TextureFormat; SHADOW_COLORS]>,
     notes: &mut Vec<String>,
@@ -1536,7 +1762,8 @@ pub fn build_compute(
     pack: &Resources<'_>,
 ) -> Option<Pass> {
     let index = |name: &str, ty: &str| {
-        pack_uniforms::index_in(name, false).or_else(|| custom_index(custom, name, ty))
+        pack_uniforms::index_in(name, false, pack.display_uniforms)
+            .or_else(|| custom_index(custom, name, ty))
     };
     let interface = &c.interface;
     let (entries, samplers, slots, reads, shadow_reads, images) = bindings(
@@ -1552,6 +1779,7 @@ pub fn build_compute(
         pack,
     )?;
     let local = c.module.entry_points[0].workgroup_size;
+    let indirect = c.indirect;
     let created = checked(device, || {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some(&name),
@@ -1589,10 +1817,37 @@ pub fn build_compute(
             return None;
         }
     };
+    let dispatch = match indirect {
+        None => Dispatch::Direct {
+            groups: c.work_groups,
+            render: c.work_groups_render,
+            local,
+        },
+        Some(i) => match checked(device, || {
+            crate::pack_post::indirect::IndirectDispatch::new(device, &name, i)
+        }) {
+            Ok(dispatch) => Dispatch::Indirect(Box::new(dispatch)),
+            Err(e) => {
+                notes.push(format!("{name}: skipped: {e}"));
+                return None;
+            }
+        },
+    };
     let written = image_buffers(&images);
     let image_copies = image_copies(&samplers, &images);
     let (before_colors, snapshots) = befores(&images);
     let (shadow_own, shadow_before) = shadow_images(&images);
+    let interface = &mut c.interface;
+    let ResolvedModUniforms {
+        bound: mod_uniforms,
+        handled,
+    } = resolve_mod_uniforms(
+        &interface.uniforms,
+        &mut interface.initial_values,
+        &format!("{name}.csh"),
+        pack,
+        notes,
+    );
     Some(Pass {
         ubo: device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(&name),
@@ -1605,16 +1860,13 @@ pub fn build_compute(
         uniforms: interface
             .uniforms
             .iter()
+            .filter(|u| !handled.contains(u.name.as_str()))
             .map(|u| (index(&u.name, &u.ty), u.ty.clone(), u.offset))
             .collect(),
+        mod_uniforms,
         name,
         group,
-        pipeline: Pipeline::Compute {
-            pipeline,
-            groups: c.work_groups,
-            render: c.work_groups_render,
-            local,
-        },
+        pipeline: Pipeline::Compute { pipeline, dispatch },
         sky_parts: None,
         water_mask: None,
         polygon_offset: None,
@@ -1636,6 +1888,8 @@ pub fn build_compute(
         ids: false,
         groups: HashMap::new(),
         portal_groups: HashMap::new(),
+        dynamic_groups: HashMap::new(),
+        block_atlas_groups: HashMap::new(),
         buffers: !interface.buffers.is_empty(),
         images,
         compute: Vec::new(),
@@ -1752,7 +2006,8 @@ pub struct PackPost {
     pub down: HashMap<wgpu::TextureFormat, (wgpu::RenderPipeline, wgpu::BindGroupLayout)>,
     /// The per-draw uniforms of gbuffers programs.
     pub draws: DrawUniforms,
-    /// Set 3 of flat terrain: an unknown-source fallback and immutable state/sprite tables.
+    /// Set 3 of flat terrain: an unknown-source fallback and the state/sprite tables
+    /// (`PackPost::write_block_ids` rewrites the states' ids).
     /// Each page's bind group tracks both its vertex buffer and optional source sidecar.
     pub block_ids: Option<(wgpu::BindGroupLayout, wgpu::Buffer, wgpu::Buffer)>,
     pub page_groups: HashMap<u32, (wgpu::Buffer, Option<wgpu::Buffer>, wgpu::BindGroup)>,
@@ -1807,7 +2062,8 @@ pub struct PackPost {
     /// are cleared every frame.
     pub shadow_writes: u16,
     /// A shadow program, or a compute stage attached to one, binds the pack's storage buffers
-    /// (`bufferObject.*`, set 4): they are zeroed once and then kept between frames, and the
+    /// (`bufferObject.*`, set 4) or reads its work-group counts from one (`indirect.<pass>`,
+    /// `Pass::reads_buffers`): they are zeroed once and then kept between frames, and the
     /// cache key doesn't hold them, so the Shadow Cache never keeps such a pass.
     pub shadow_buffers: bool,
     /// Set 5 of programs with a geometry stage.
@@ -1835,21 +2091,53 @@ pub struct PackPost {
     /// nor buffer to clear.
     pub blit: Option<(wgpu::RenderPipeline, wgpu::BindGroupLayout)>,
     /// The blit also writes depthtex0 (some program reads it) and clears these buffers.
+    /// Whether any gbuffer pass in this pack writes `targets.depth` (and therefore
+    /// `fs_export_depth` should write the pack's final depth back to Sunrise's `world_depth`).
+    pub draws_depth: bool,
+    /// Whether `targets.depth` receives the world's depth (`blit_depth` includes post-only
+    /// depth readers in addition to `draws_depth`).
     pub blit_depth: bool,
     pub blit_clears: Vec<usize>,
     /// Buffers cleared in passes of their own (more than the blit's eight attachments).
     pub other_clears: Vec<usize>,
     /// Source views identify the world target, including replacements at the same size.
     pub blit_group: Option<([wgpu::TextureView; 2], wgpu::BindGroup)>,
-    /// Shows colortex0 when the pack has no `final` (OQ-5).
+    /// Shows colortex0 when the pack has no `final` (OQ-5); served Sunrise's HDR (`hdr`), it
+    /// encodes the linear light colortex0 holds as a served `final` does (`fs_copy_linear`),
+    /// loading texels only: its layout has no sampler and takes an unfilterable colortex0.
     pub copy: (wgpu::RenderPipeline, wgpu::BindGroupLayout),
+    /// Served Sunrise's HDR (`hdr`), the copy of colortex0 when it is the window's size: each
+    /// pixel its own texel (`fs_copy_linear_texel`), filtered by nothing.
+    pub copy_texel: Option<(wgpu::RenderPipeline, wgpu::BindGroupLayout)>,
+    /// Sunrise's HDR extension as the pack was served it (`Post::hdr`): what its picture on
+    /// the frame was encoded from, and who owns the tone curve.
+    pub hdr: Option<sunrise_shaders::Tonemap>,
     /// Copies the picture `final` drew at the world's size onto the window: no flip, it is
-    /// already in the screen's rows.
+    /// already in the screen's rows. Served Sunrise's HDR, alpha isn't filtered
+    /// (`fs_upscale_linear`).
     pub upscale: (wgpu::RenderPipeline, wgpu::BindGroupLayout),
+    /// Copies the pack's GL-rows, GL-depth `targets.depth` back into Sunrise's screen-rows,
+    /// reversed-Z `world_depth` so post-pack stages (`AfterLevel`, `world_drawn`) see valid
+    /// terrain, water, entity, and hand depth.
+    pub export_depth: (wgpu::RenderPipeline, wgpu::BindGroupLayout),
+    /// Cached bind group for `export_depth`, keyed by the pack's `targets.depth` view.
+    pub export_depth_group: Option<(wgpu::TextureView, wgpu::BindGroup)>,
     /// The picture `final` draws while the world's size is not the window's.
     pub final_target: Option<FinalTarget>,
     pub screen: wgpu::TextureFormat,
     pub uniforms: FrameUniforms,
+    /// Mod-declared render pipelines bound to translated pack programs.
+    pub mod_passes: Vec<ModPackPass>,
+    /// Pipeline slots bound to `mod_passes`, cached once at build time for zero-alloc queries.
+    pub bound_mod_slots: Vec<usize>,
+    /// Uploaded quad draw chunks for bound mod pipelines on the current frame.
+    pub mod_draws: Vec<ModDrawChunk>,
+    /// Mod-declared auxiliary depth targets and lazy usage flags (allocated only when sampled).
+    pub mod_depth_decls: Vec<ModDepthTargetDecl>,
+    pub mod_depth_used: Vec<bool>,
+    pub mod_opaque_depth_used: Vec<bool>,
+    /// Mod-declared per-frame uniforms with automatic previous-frame tracking.
+    pub mod_uniforms: ModUniformTable,
 }
 
 impl PackPost {
@@ -1871,11 +2159,30 @@ impl PackPost {
         world: World<'_>,
         cancel: &std::sync::atomic::AtomicBool,
     ) -> Result<PackPost, Refused> {
+        Self::new_with_mods(
+            (device, queue, adapter),
+            post,
+            screen,
+            world,
+            ModPackRuntime::default(),
+            cancel,
+        )
+    }
+
+    /// As [`Self::new`], with mod-declared auxiliary depth targets, frame uniforms, and
+    /// pipeline pack bindings.
+    pub fn new_with_mods(
+        gpu: (&wgpu::Device, &wgpu::Queue, &wgpu::Adapter),
+        post: Post,
+        screen: wgpu::TextureFormat,
+        world: World<'_>,
+        mods: ModPackRuntime<'_>,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<PackPost, Refused> {
         use std::sync::atomic::Ordering;
-        let spare = (post.clone(), world.clone());
-        let (built, jobs) =
-            PackPost::build(device, queue, adapter, post, screen, world, true, cancel)?;
-        let refused = compile(device, &jobs, cancel);
+        let spare = (post.clone(), world.clone(), mods.clone());
+        let (built, jobs) = PackPost::build(gpu, post, screen, world, mods, true, cancel)?;
+        let refused = compile(gpu.0, &jobs, cancel);
         // Some pipelines may be left unmade: the pack can't draw.
         if cancel.load(Ordering::Relaxed) {
             return Err(Refused::cancelled(built.notes));
@@ -1887,24 +2194,43 @@ impl PackPost {
             "shader pack: {program} was refused ({refused}): building it again a program at a time"
         );
         drop((built, jobs));
-        let (post, world) = spare;
-        PackPost::build(device, queue, adapter, post, screen, world, false, cancel)
-            .map(|(built, _)| built)
+        let (post, world, mods) = spare;
+        PackPost::build(gpu, post, screen, world, mods, false, cancel).map(|(built, _)| built)
     }
 
     /// `new`'s work: with `defer`, the pipelines are left to make (the jobs returned).
     fn build(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        adapter: &wgpu::Adapter,
+        (device, queue, adapter): (&wgpu::Device, &wgpu::Queue, &wgpu::Adapter),
         mut post: Post,
         screen: wgpu::TextureFormat,
         world: World<'_>,
+        mods: ModPackRuntime<'_>,
         defer: bool,
         cancel: &std::sync::atomic::AtomicBool,
     ) -> Result<(PackPost, Vec<Job>), Refused> {
         // What the pack's shaders need of its storage buffers, before its parts move out.
         let minimums = post.buffer_minimums();
+        // Pre-scan every loaded program before `post`'s parts move out so mod geometry passes
+        // targeting an actively sampled auxiliary depth buffer can legally sample `depthtex0`.
+        let mut pre_mod_depth_sampled = vec![false; mods.depth_targets.len()];
+        if !mods.depth_targets.is_empty() {
+            let samplers = post
+                .every_program()
+                .flat_map(|p| {
+                    p.program
+                        .iter()
+                        .map(|q| &q.interface)
+                        .chain(p.compute.iter().map(|(_, c)| &c.interface))
+                })
+                .flat_map(|i| &i.samplers);
+            for s in samplers {
+                if let Some(Source::ModDepth(idx) | Source::ModOpaqueDepth(idx)) =
+                    mod_depth_source(mods.depth_targets, &s.name)
+                {
+                    pre_mod_depth_sampled[idx] = true;
+                }
+            }
+        }
         let features = device.features();
         let formats: [wgpu::TextureFormat; BUFFERS] = std::array::from_fn(|i| {
             let f = post.config.buffers[i].format;
@@ -1933,6 +2259,7 @@ impl PackPost {
                 packed[i].map_or(c, |bits| packed::quantise(c, bits))
             })
         });
+        let hdr = post.hdr;
         let mut notes = post.notes;
         notes.extend(post.config.notes);
         let mut sizes = post.sizes;
@@ -2055,6 +2382,7 @@ impl PackPost {
             })
         });
         let stand_ins = std::cell::RefCell::new(Vec::new());
+        let mod_uniform_mismatches = std::cell::RefCell::new(HashSet::new());
         let pack = Resources {
             textures: &textures,
             images: &images,
@@ -2071,6 +2399,14 @@ impl PackPost {
                 .filter(|&n| !shadow_config.nearest[n])
                 .fold(0, |m, n| m | 1 << n),
             jobs: defer.then(Default::default),
+            mod_depth_targets: mods.depth_targets,
+            mod_uniforms: mods.uniforms,
+            display_uniforms: hdr.is_some(),
+            mod_uniform_mismatches: &mod_uniform_mismatches,
+            mod_depth_target: std::cell::Cell::new(None),
+            depth_compare: std::cell::Cell::new(wgpu::CompareFunction::LessEqual),
+            mod_depth_bias: Default::default(),
+            mod_vertex: Default::default(),
         };
         // Flat terrain resolves each quad's source state against the current pack; terrain that
         // reads its pages per section binds them by the same layout.
@@ -2145,6 +2481,21 @@ impl PackPost {
                     polygon_offset_next.get(),
                 )?
             };
+            // A program whose fragment stage writes nothing keeps its compute stages and its
+            // forced flips; with neither, nothing of it is left.
+            if let Pipeline::NoDraw { storage } = pass.pipeline {
+                if pass.flip == 0 && computes.is_empty() {
+                    notes.push(format!("{}: writes no buffer; skipped", pass.name));
+                    return None;
+                }
+                if storage {
+                    notes.push(format!(
+                        "{}: writes no buffer; its fragment stage, which binds storage buffers, \
+                         is left out",
+                        pass.name
+                    ));
+                }
+            }
             pass.compute.append(&mut computes);
             // A shadow program with geometry draws into its buffers' "main" side in place, the
             // side `shadowcolorimgN` binds, and wgpu binds a texture one way per pass.
@@ -2214,7 +2565,7 @@ impl PackPost {
                 if in_shadow {
                     shadow_pass_images |= own | before;
                     shadow_writes |= p.written | p.flip | own;
-                    shadow_buffers |= p.buffers;
+                    shadow_buffers |= p.reads_buffers();
                 } else {
                     shadow_images_outside |= own | before;
                 }
@@ -2337,7 +2688,15 @@ impl PackPost {
         let shadow_programs = [post.shadow_entities, post.shadow_block];
         let entity_vertices = (programs.iter().chain(&shadow_programs))
             .any(Option::is_some)
-            .then(|| PackEntities::new(device, &draws.layout));
+            .then(|| {
+                let mut entities = PackEntities::new(device, &draws.layout);
+                // Native terrain quads of block entities and entities are placed in the block
+                // atlas, the one the pack's terrain samples (`pack_entities::BlockAtlas`).
+                entities.set_block_atlas(world.atlas.as_ref().and_then(|(_, size)| {
+                    crate::pack_entities::BlockAtlas::new(world.sprite_rects, *size)
+                }));
+                entities
+            });
         let entity_buffers = crate::pack_entities::buffers();
         let entity_geometry = entity_vertices.as_ref().map(|e| Geometry {
             buffers: &entity_buffers,
@@ -2428,9 +2787,15 @@ impl PackPost {
             cull: false,
             pages: false,
         });
-        let hand_geometry = world
-            .hand
-            .then(|| crate::pack_hand::PackHand::new(device, &draws.layout));
+        let hand_geometry = world.hand.then(|| {
+            let mut hand = crate::pack_hand::PackHand::new(device, &draws.layout);
+            // A `render_hand` mod's native terrain quads are placed in the block atlas, as an
+            // entity's are (`pack_entities::BlockAtlas`).
+            hand.set_block_atlas(world.atlas.as_ref().and_then(|(_, size)| {
+                crate::pack_entities::BlockAtlas::new(world.sprite_rects, *size)
+            }));
+            hand
+        });
         let hand = post.hand.zip(hand_geometry).and_then(|(p, geometry)| {
             let g = Geometry {
                 buffers: &entity_buffers,
@@ -2487,6 +2852,88 @@ impl PackPost {
             pages: false,
         };
         let lines = post.lines.and_then(|p| build(p, Some(&line_geometry)));
+        // Build mod-declared pipeline passes that resolved to a pack program.
+        let mut mod_passes = Vec::new();
+        if !mods.vertex_buffers.is_empty() {
+            for resolved in post.mod_programs {
+                let Some(program) = resolved.program else {
+                    continue;
+                };
+                let Some(spec) = mods.pipelines.iter().find(|s| s.slot == resolved.slot) else {
+                    continue;
+                };
+                if spec.pass_slot == ModPassSlot::Shadow && shadow_formats.is_none() {
+                    continue;
+                }
+                let active_depth = spec.depth_target.filter(|&idx| {
+                    spec.pass_slot != ModPassSlot::Shadow
+                        && pre_mod_depth_sampled.get(idx).copied().unwrap_or(false)
+                });
+                let mod_set1_layout = mods.bind_group_layouts.get(spec.slot).copied().flatten();
+                // The mod's own vertex stage, its layouts and its vertices, or the pack's
+                // program over the engine's mod vertex format.
+                let own_stage = match spec.program_mode {
+                    ModProgramMode::PackVertexAndFragment => None,
+                    ModProgramMode::ModVertexPackFragment => {
+                        let stage = mods.vertex_stages.get(spec.slot).and_then(Option::as_ref);
+                        // A pipeline the GPU refused has no stage: its slot stays unbound.
+                        if stage.is_none() {
+                            continue;
+                        }
+                        stage
+                    }
+                };
+                let mut own_buffers: Vec<Option<wgpu::VertexBufferLayout<'_>>> = Vec::new();
+                for buffer in own_stage.iter().flat_map(|s| &s.buffers) {
+                    let slot = buffer.binding as usize;
+                    if own_buffers.len() <= slot {
+                        own_buffers.resize(slot + 1, None);
+                    }
+                    own_buffers[slot] = Some(wgpu::VertexBufferLayout {
+                        array_stride: buffer.stride,
+                        step_mode: buffer.step_mode,
+                        attributes: &buffer.attributes,
+                    });
+                }
+                let mod_geometry = Geometry {
+                    buffers: if own_stage.is_some() {
+                        &own_buffers[..]
+                    } else {
+                        mods.vertex_buffers
+                    },
+                    // The mod's own sets go after the pack's, not into set 1.
+                    table: mod_set1_layout.filter(|_| own_stage.is_none()),
+                    depth_write: spec.depth_write,
+                    atlas: None,
+                    material_maps: true,
+                    ids: None,
+                    cull: spec.cull,
+                    pages: false,
+                };
+                pack.mod_depth_target.set(active_depth);
+                pack.depth_compare.set(spec.depth_compare);
+                pack.mod_depth_bias.set(spec.depth_bias);
+                *pack.mod_vertex.borrow_mut() = own_stage.cloned();
+                let built_pass = build(program, Some(&mod_geometry));
+                pack.mod_vertex.borrow_mut().take();
+                pack.mod_depth_target.set(None);
+                pack.mod_depth_bias.set(None);
+                pack.depth_compare.set(wgpu::CompareFunction::LessEqual);
+                if let Some(pass) = built_pass {
+                    mod_passes.push(ModPackPass {
+                        slot: spec.slot,
+                        pass_slot: spec.pass_slot,
+                        depth_target: active_depth,
+                        has_mod_bind_group: own_stage.map_or_else(
+                            || mod_set1_layout.is_some(),
+                            |stage| stage.set1_layout.is_some(),
+                        ),
+                        mod_vertex: own_stage.is_some(),
+                        pass,
+                    });
+                }
+            }
+        }
         // Developers' aid: `SUNRISE_SHADER_PACK_SKIP=composite,final` leaves programs out.
         let skip = std::env::var("SUNRISE_SHADER_PACK_SKIP").unwrap_or_default();
         let passes: Vec<Pass> = post
@@ -2615,18 +3062,35 @@ impl PackPost {
                 .filter(|p| matches!(p.group, Group::Deferred | Group::Composite | Group::Final))
                 .chain(&water)
                 .chain(weather.iter().take(1).flatten())
+                .chain(
+                    mod_passes
+                        .iter()
+                        .filter(|m| {
+                            matches!(
+                                m.pass_slot,
+                                ModPassSlot::AfterTranslucentGbuffers | ModPassSlot::AfterWeather
+                            ) || m.depth_target.is_some()
+                        })
+                        .map(|m| &m.pass),
+                )
                 .flat_map(|p| std::iter::once(p).chain(&p.compute))
                 .any(|p| p.samplers.iter().any(|s| s.source == source))
         };
         let reads_depth2 = reads_depth(Source::Depth2);
+        let mod_writes_post_opaque_depth0 = mod_passes.iter().any(|m| {
+            matches!(
+                m.pass_slot,
+                ModPassSlot::AfterTranslucentGbuffers | ModPassSlot::AfterWeather
+            ) && m.depth_target.is_none()
+        });
         // Without a shader hand, depth1 also serves depth2: both exclude only translucency.
-        let depth1 = (water.is_some() || hand.is_some())
+        let depth1 = (water.is_some() || hand.is_some() || mod_writes_post_opaque_depth0)
             && (reads_depth(Source::Depth1) || (hand.is_none() && reads_depth2));
         let depth2 = hand.is_some() && reads_depth2;
         let water_mask = (water.iter())
             .flat_map(|p| &p.samplers)
             .any(|s| s.source == Source::WaterMask);
-        let every_pass = || {
+        let every_base_pass = || {
             (passes
                 .iter()
                 .chain(&shadow_comp)
@@ -2643,6 +3107,56 @@ impl PackPost {
             .chain(hand.iter().map(|h| &h.0))
             .chain(&hand_water)
         };
+        // Lazy allocation for mod-declared auxiliary depth targets: allocate a depth target
+        // (and its opaque-depth snapshot) only when at least one built pass actually samples it.
+        let mut mod_depth_used = vec![false; mods.depth_targets.len()];
+        let mut mod_opaque_depth_used = vec![false; mods.depth_targets.len()];
+        let mut record_mod_depth_samplers = |p: &Pass| {
+            for s in &p.samplers {
+                match s.source {
+                    Source::ModDepth(idx) => {
+                        if let Some(flag) = mod_depth_used.get_mut(idx) {
+                            *flag = true;
+                        }
+                    }
+                    Source::ModOpaqueDepth(idx) => {
+                        if let Some(flag) = mod_depth_used.get_mut(idx) {
+                            *flag = true;
+                        }
+                        if let Some(flag) = mod_opaque_depth_used.get_mut(idx) {
+                            *flag = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        };
+        for p in every_base_pass().flat_map(|p| std::iter::once(p).chain(&p.compute)) {
+            record_mod_depth_samplers(p);
+        }
+        for p in mod_passes
+            .iter()
+            .map(|m| &m.pass)
+            .flat_map(|p| std::iter::once(p).chain(&p.compute))
+        {
+            record_mod_depth_samplers(p);
+        }
+        for m in &mut mod_passes {
+            if let Some(idx) = m.depth_target
+                && !mod_depth_used.get(idx).copied().unwrap_or(false)
+            {
+                if m.pass
+                    .samplers
+                    .iter()
+                    .any(|s| matches!(s.source, Source::Depth | Source::Depth1 | Source::Depth2))
+                {
+                    mod_depth_used[idx] = true;
+                } else {
+                    m.depth_target = None;
+                }
+            }
+        }
+        let every_pass = || every_base_pass().chain(mod_passes.iter().map(|m| &m.pass));
         let shadow_targets = shadow_formats.map(|f| {
             // `shadow_storage` covers compute stages attached to a pass, which `every_pass`
             // leaves out: one may be the only program binding shadowcolorimgN.
@@ -2704,6 +3218,12 @@ impl PackPost {
                 .chain(weather.iter().take(1).flatten())
                 .chain(hand.iter().map(|h| &h.0))
                 .chain(&hand_water)
+                .chain(
+                    mod_passes
+                        .iter()
+                        .filter(|m| m.pass_slot != ModPassSlot::Shadow)
+                        .map(|m| &m.pass),
+                )
                 .find(touched)
                 .map(|_| true)
                 .or_else(|| passes.iter().find(touched).map(|_| true));
@@ -2712,7 +3232,7 @@ impl PackPost {
             }
         }
         // Terrain tests against the world's depth (entities...), so the blit copies it then.
-        let blit_depth = terrain.is_some()
+        let draws_depth = terrain.is_some()
             || terrain_cutout.is_some()
             || water.is_some()
             || sky.is_some()
@@ -2721,8 +3241,11 @@ impl PackPost {
             || lines.is_some()
             || weather.is_some()
             || hand.is_some()
-            || passes
+            || mod_passes
                 .iter()
+                .any(|m| m.pass_slot != ModPassSlot::Shadow && m.depth_target.is_none());
+        let blit_depth = draws_depth
+            || every_pass()
                 .flat_map(|p| std::iter::once(p).chain(&p.compute))
                 .any(|p| {
                     p.samplers.iter().any(|s| {
@@ -2796,10 +3319,59 @@ impl PackPost {
                 }),
             )
         });
-        let copy = helper(
+        // The colortex0 copy's bindings: served Sunrise's HDR it only loads texels, so colortex0
+        // needs no filtering (an `RGBA32F` one isn't filterable without `FLOAT32_FILTERABLE`);
+        // otherwise `fs_copy` samples it.
+        let unfiltered = [texture_entry(
+            0,
+            wgpu::TextureSampleType::Float { filterable: false },
+        )];
+        let sampled = [
+            texture_entry(0, float),
+            entry(
+                2,
+                wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            ),
+        ];
+        let copy = match hdr {
+            // Served Sunrise's HDR, colortex0 holds the linear light `final` would write.
+            Some(_) => helper(
+                device,
+                "vs_uv",
+                "fs_copy_linear",
+                &unfiltered,
+                &[target(screen)],
+                None,
+            ),
+            None => helper(
+                device,
+                "vs_uv",
+                "fs_copy",
+                &sampled,
+                &[target(screen)],
+                None,
+            ),
+        };
+        // Served, a colortex0 copy without a render scale reads each pixel's own texel.
+        let copy_texel = hdr.is_some().then(|| {
+            helper(
+                device,
+                "vs_uv",
+                "fs_copy_linear_texel",
+                &unfiltered,
+                &[target(screen)],
+                None,
+            )
+        });
+        let upscale = helper(
             device,
-            "vs_uv",
-            "fs_copy",
+            "vs_screen",
+            // Served, the picture's alpha is the centre texel's, as for the copy.
+            if hdr.is_some() {
+                "fs_upscale_linear"
+            } else {
+                "fs_copy"
+            },
             &[
                 texture_entry(0, float),
                 entry(
@@ -2810,19 +3382,22 @@ impl PackPost {
             &[target(screen)],
             None,
         );
-        let upscale = helper(
+        let export_depth = helper(
             device,
-            "vs_screen",
-            "fs_copy",
-            &[
-                texture_entry(0, float),
-                entry(
-                    2,
-                    wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                ),
-            ],
-            &[target(screen)],
-            None,
+            "vs_full",
+            "fs_export_depth",
+            &[texture_entry(
+                1,
+                wgpu::TextureSampleType::Float { filterable: false },
+            )],
+            &[],
+            Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
         );
         let filterable = |b: usize| {
             formats[b].sample_type(None, Some(device.features()))
@@ -2874,6 +3449,7 @@ impl PackPost {
         let jobs = (pack.jobs.as_ref())
             .map(std::cell::RefCell::take)
             .unwrap_or_default();
+        let bound_mod_slots = mod_passes.iter().map(|m| m.slot).collect();
         let built = PackPost {
             notes,
             setup_pending: true,
@@ -2934,6 +3510,7 @@ impl PackPost {
             storage,
             copied,
             sizes,
+            draws_depth,
             blit_depth,
             blit_clears: cleared,
             other_clears,
@@ -3037,7 +3614,11 @@ impl PackPost {
             }),
             blit,
             copy,
+            copy_texel,
+            hdr,
             upscale,
+            export_depth,
+            export_depth_group: None,
             final_target: None,
             screen,
             uniforms: {
@@ -3052,6 +3633,13 @@ impl PackPost {
             shadow_pass_images,
             shadow_writes,
             shadow_buffers,
+            mod_passes,
+            bound_mod_slots,
+            mod_draws: Vec::new(),
+            mod_depth_decls: mods.depth_targets.to_vec(),
+            mod_depth_used,
+            mod_opaque_depth_used,
+            mod_uniforms: ModUniformTable::new(mods.uniforms),
         };
         Ok((built, jobs))
     }
@@ -3063,5 +3651,23 @@ impl PackPost {
     /// bind groups are kept once made). A missing one reads as the dummy (flat, no specular).
     pub fn set_paged_maps(&mut self, maps: [Option<wgpu::TextureView>; 2]) {
         self.paged_maps = maps;
+    }
+
+    /// Rewrites flat terrain's state table (set 3, [`block_ids`]) with `table`, the states' ids
+    /// as `World::block_ids` gives them, beside the sprite `rects`: the draws from the next
+    /// submission on read them. `false`, with the table left as it was, when the two make a
+    /// table of another size than the one built (another registry or atlas). Nothing to do for
+    /// a pack whose terrain reads no table.
+    pub fn write_block_ids(&self, queue: &wgpu::Queue, table: &[i32], rects: &[u32]) -> bool {
+        let Some((_, _, buffer)) = &self.block_ids else {
+            return true;
+        };
+        let contents = terrain_tables(table, rects);
+        let bytes: &[u8] = bytemuck::cast_slice(&contents);
+        if bytes.len() as u64 != buffer.size() {
+            return false;
+        }
+        queue.write_buffer(buffer, 0, bytes);
+        true
     }
 }

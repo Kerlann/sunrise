@@ -184,6 +184,7 @@ pub(crate) fn shaped_mesh(compact: bool) -> SectionMesh {
         cutout_leaves: true,
         opaque_ice: false,
         translucent_layers: &[],
+        layer_overrides: &[],
         leaf_culling: LeafCullingMode::Off,
     };
     let mut mesh = mesher.mesh(&region, 0);
@@ -242,9 +243,10 @@ fn assemble(
         sprite_layers: BTreeMap::new(),
         sprite_names: vec![None],
         file_layers: BTreeMap::new(),
-        emissive: vec![],
+        emissive_layers: vec![],
         translucent_layers: vec![false],
         sprite_mips: vec![],
+        oversized_sprites: Default::default(),
         pbr_normals: vec![],
         pbr_specular: vec![],
         pbr_size: 1,
@@ -389,6 +391,7 @@ fn terrain_source_cpu_multipart_and_waterlogged_faces_keep_their_owner() {
         cutout_leaves: true,
         opaque_ice: false,
         translucent_layers: &[],
+        layer_overrides: &[],
         leaf_culling: LeafCullingMode::Off,
     };
     let mut mesh = mesher.mesh(&region, 0);
@@ -479,6 +482,7 @@ fn a_folder_without_connected_texture_rules_meshes_exactly_as_before() {
             cutout_leaves: true,
             opaque_ice: false,
             translucent_layers: &[],
+            layer_overrides: &[],
             leaf_culling: LeafCullingMode::Off,
         };
         let mesh = mesher.mesh(&region, 0);

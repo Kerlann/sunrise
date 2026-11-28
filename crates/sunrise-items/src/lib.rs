@@ -21,6 +21,7 @@ pub mod item_data;
 pub mod item_nbt;
 pub mod items;
 pub mod kinetic_weapon;
+mod loot_candidate;
 #[cfg(test)]
 mod loot_predicate_tests;
 mod loot_tags;
@@ -33,4 +34,4 @@ pub mod random_sequences;
 pub mod recipe_filters;
 pub mod recipe_sources;
 pub mod use_animation;
-pub use sunrise_client_core::Result;
+pub use sunrise_game_data::Result;

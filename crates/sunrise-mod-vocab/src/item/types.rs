@@ -28,6 +28,12 @@ pub enum ModelError {
     StaleModel,
 }
 
+impl crate::NoBackend for ModelError {
+    fn no_backend() -> Self {
+        Self::UnknownModel
+    }
+}
+
 /// An item requested at registration; its load-owned slot identifies the canonical name.
 // no wire: decoding validates the u32 slot with ItemKey::from_slot on the host.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -42,6 +48,20 @@ impl ItemKey {
     /// not require a connection. Save and send identifiers, never these session-local numbers.
     pub fn registry_id(self, host: &dyn Host) -> Option<u32> {
         crate::backend_of(host)?.item_registry_id(self)
+    }
+    /// Whether this item is in `tag` (`ItemStack.is(TagKey)`), over `tags`'s current
+    /// authoritative snapshot. An unknown tag is `Some(false)`; unavailable tags or mappings
+    /// return `None`.
+    pub fn is_in_tag(self, tags: &dyn Tags, tag: TagKey<ItemKey>) -> Option<bool> {
+        tags.is_in_tag(self, tag)
+    }
+    /// The fluid a filled bucket the game registers holds (`BucketItem.content`), the inverse of
+    /// [`FluidKey::bucket`] for those buckets: `minecraft:water` for `minecraft:water_bucket`,
+    /// `minecraft:lava` for `minecraft:lava_bucket`, a mod world fluid's source for its generated
+    /// bucket. `None` for any other item (including the empty bucket and a mod-declared item) or
+    /// when tables are unavailable.
+    pub fn bucket_fluid(self, states: &BlockStates<'_>) -> Option<FluidKey> {
+        states.backend().bucket_fluid(self).ok().flatten()
     }
 }
 
@@ -62,8 +82,8 @@ pub struct MenuKey(pub(crate) u32);
 // exhaustive: only the load-owned table creates keys
 pub struct EnchantmentKey(pub(crate) u32);
 
-/// The registry facts a client mod reads for an enchantment.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The registry facts a mod reads for an enchantment.
+#[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 #[derive(sunrise_mod_api_macros::Wire)]
 pub struct EnchantmentInfo {
@@ -77,17 +97,30 @@ pub struct EnchantmentInfo {
     pub anvil_cost: u32,
     /// Whether the enchantment is in the curse tag (`#minecraft:curse`).
     pub curse: bool,
+    /// The enchantment's name as its definition writes it (`Enchantment.description`, which
+    /// `Enchantment.getFullname` renders): a translatable key with its fallback and arguments
+    /// (`enchantment.minecraft.sharpness` for vanilla's), or a data pack's literal, with its
+    /// style. Render it in the player's language with the host's text reads.
+    pub description: Text,
 }
 
 impl EnchantmentInfo {
     /// Construct registry facts for an enchantment.
-    pub fn new(id: String, max_level: u32, weight: u32, anvil_cost: u32, curse: bool) -> Self {
+    pub fn new(
+        id: String,
+        max_level: u32,
+        weight: u32,
+        anvil_cost: u32,
+        curse: bool,
+        description: Text,
+    ) -> Self {
         Self {
             id,
             max_level,
             weight,
             anvil_cost,
             curse,
+            description,
         }
     }
 }
@@ -224,8 +257,9 @@ pub struct ItemDrop {
     pub position: [f64; 3],
     /// Its motion in blocks per tick, as vanilla's constructor drew it.
     pub velocity: [f64; 3],
-    /// Ticks before a player may pick it up.
-    pub pickup_delay: u32,
+    /// Signed ticks before a player may pick it up (`ItemEntity.pickupDelay`;
+    /// 32767 is vanilla's infinite-delay sentinel).
+    pub pickup_delay: i32,
     /// `ItemEntity.setThrower`: the UUID of the entity that threw it, none by default.
     pub thrower: Option<u128>,
     /// `ItemEntity.setTarget`: the UUID of the only player who may pick it up, none (anyone)
@@ -239,12 +273,12 @@ pub struct ItemDrop {
 }
 
 impl ItemDrop {
-    /// A drop of `stack` at `position` with a `velocity` and `pickup_delay`.
+    /// A drop of `stack` at `position` with a `velocity` and signed `pickup_delay`.
     pub fn new(
         stack: ItemStack,
         position: [f64; 3],
         velocity: [f64; 3],
-        pickup_delay: u32,
+        pickup_delay: i32,
     ) -> Self {
         Self {
             stack,
@@ -665,7 +699,7 @@ pub struct ToolUse {
     /// The acting entity ID, if present.
     pub player: Option<u32>,
     /// The hand holding the tool.
-    pub hand: crate::client::first_person::Hand,
+    pub hand: crate::Hand,
     /// The clicked block position.
     pub pos: [i32; 3],
     /// The clicked face's direction.
@@ -816,4 +850,28 @@ impl InteractionResult {
     pub fn consumes_action(self) -> bool {
         matches!(self, Self::Success | Self::SuccessServer | Self::Consume)
     }
+}
+
+/// One player's open menu, invalidated on close, replacement or reconnect.
+/// Client menu handles are also invalidated on respawn.
+///
+/// Clicks require a mutable client host, not a server or a read-only hook:
+/// ```compile_fail
+/// use mod_api::{MenuRef, ServerHost};
+/// fn wrong(menu: MenuRef, host: &mut dyn ServerHost) {
+///     menu.click(host, &[]);
+/// }
+/// ```
+/// ```compile_fail
+/// use mod_api::{MenuRef, ClientHost};
+/// fn wrong(menu: MenuRef, host: &dyn ClientHost) {
+///     menu.click(host, &[]);
+/// }
+/// ```
+#[derive(sunrise_mod_api_macros::Wire, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+// exhaustive: its fields are private, so mods cannot build or destructure it
+pub struct MenuRef {
+    pub(crate) player: PlayerRef,
+    pub(crate) window: i32,
+    pub(crate) generation: u64,
 }

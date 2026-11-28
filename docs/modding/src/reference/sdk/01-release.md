@@ -92,5 +92,5 @@ is in the release flow's
 [retention design](https://github.com/sunrise-org/sunrise/blob/main/docs/release-flow.md#prebuilt-sdk-retention-design-3011).
 Releases of the older `prebuilt-<sha>` form are outside it and removed by hand.
 
-The launcher keeps its own copies under its own rules ([Cache and disk](../../how-to/native-mods/10-cache-and-disk.md)):
+The launcher keeps its own copies under its own rules ([Cache and disk](../../how-to/native-mods/04-what-the-launcher-does.md#cache-and-disk)):
 a build's small files are kept, so a mod's fit is told offline, and its compiled slices are evicted with the build.

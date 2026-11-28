@@ -1,5 +1,4 @@
 //! The `screen_mouse_dragged_pre` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0127
 
 pub trait Hooks {
     /// Before a real held-button movement reaches screen drag handlers.
@@ -8,11 +7,10 @@ pub trait Hooks {
     /// Same receiving screens as `screen_mouse_button_pressed_pre`, including
     /// dialogs, confirmation prompts, books, lecterns and sign editors.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_screen_mouse_dragged_pre",
-        receiver = "read",
+        target = "sunrise_client_gameplay::game::native_hooks::base::ClientGame<'_>::native_screen_mouse_dragged_pre",
         dispatch = "flat",
         side = "client",
-        version = 2,
+        version = 3,
         contract = "cancel",
         out = "canceled",
         neoforge = "ScreenEvent.MouseDragged.Pre",

@@ -400,6 +400,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bstr"
+version = "1.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a680398c10c7bc0488067c4612226ea905a85f607134b69f3068d505d58c4214"
+dependencies = [
+ "memchr",
+ "serde_core",
+]
+
+[[package]]
 name = "btoi"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -531,26 +541,30 @@ name = "cargo-sunrise-mod"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "cap-std",
  "dunce",
+ "getrandom 0.4.3",
  "libc",
  "lzma-rust2",
+ "object",
+ "png",
  "ring",
- "rustc-demangle",
  "semver",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "sunrise-addresses",
  "sunrise-attestation",
+ "sunrise-jar-fetch",
  "sunrise-mod-api-gen",
  "sunrise-mod-package",
+ "sunrise-mod-pipeline",
  "sunrise-mod-source",
  "sunrise-mod-surface",
  "sunrise-native-build",
  "sunrise-port-pack",
  "sunrise-proxy",
  "sunrise-release-sign",
- "sunrise-shader-api",
  "tar",
  "tempfile",
  "toml",
@@ -1524,6 +1538,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19fc433e8437a212d1b6f1e68c7824af3aed907da60afa994e7f542d18d12aa9"
 
 [[package]]
+name = "globset"
+version = "0.4.22"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71217a07f20b48b4938c14203b77b610f8a7fa6762c3f75394a10c5f31e5aee0"
+dependencies = [
+ "aho-corasick",
+ "bstr",
+ "log",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
 name = "glow"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1805,6 +1832,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ignore"
+version = "0.4.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df0a7d5f105e76bda602bed0a44af048542d3c9af12ec35aaf16f106c6f34270"
+dependencies = [
+ "crossbeam-deque",
+ "globset",
+ "log",
+ "memchr",
+ "regex-automata",
+ "same-file",
+ "walkdir",
+ "winapi-util",
+]
+
+[[package]]
 name = "image-webp"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1885,7 +1928,7 @@ version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4d40460c0ce33d6ce4b0630ad68ff63d6661961c48b6dba35e5a4d81cfb48222"
 dependencies = [
- "socket2 0.6.5",
+ "socket2",
  "widestring",
  "windows-registry",
  "windows-result 0.4.1",
@@ -2445,7 +2488,7 @@ dependencies = [
  "percent-encoding",
  "rustls",
  "rustls-pemfile",
- "socket2 0.6.5",
+ "socket2",
  "twox-hash",
  "url",
  "webpki",
@@ -3559,7 +3602,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.1.3",
  "rustls",
- "socket2 0.6.5",
+ "socket2",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -3597,7 +3640,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.5",
+ "socket2",
  "tracing",
  "windows-sys 0.61.2",
 ]
@@ -3756,7 +3799,7 @@ dependencies = [
  "itoa",
  "percent-encoding",
  "ryu",
- "socket2 0.6.5",
+ "socket2",
  "url",
  "xxhash-rust",
 ]
@@ -4405,16 +4448,6 @@ checksum = "199905e6153d6405f9728fe44daace35f8f837bbf830bb6e85fbd5828709a886"
 
 [[package]]
 name = "socket2"
-version = "0.5.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e22376abed350d73dd1cd119b57ffccad95b4e585a7cda43e286245ce23c0678"
-dependencies = [
- "libc",
- "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "socket2"
 version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
@@ -4581,7 +4614,6 @@ dependencies = [
 name = "sunrise-client"
 version = "0.1.0"
 dependencies = [
- "ab_glyph",
  "bytemuck",
  "cap-fs-ext",
  "cap-std",
@@ -4592,24 +4624,75 @@ dependencies = [
  "flate2",
  "fnv",
  "fs4",
- "gilrs",
  "glam",
  "indexmap",
  "libc",
  "log",
- "naga",
  "png",
- "pollster",
  "rustix 1.1.5",
  "serde",
  "serde_json",
  "sha1",
  "sha2 0.10.9",
- "socket2 0.6.5",
+ "socket2",
  "sunrise-assets",
  "sunrise-bench",
- "sunrise-client-core",
+ "sunrise-client",
  "sunrise-client-gameplay",
+ "sunrise-client-input",
+ "sunrise-client-lib",
+ "sunrise-client-render",
+ "sunrise-command",
+ "sunrise-core",
+ "sunrise-game-data",
+ "sunrise-gameplay",
+ "sunrise-gameplay-common",
+ "sunrise-hooks",
+ "sunrise-items",
+ "sunrise-java-properties",
+ "sunrise-level",
+ "sunrise-mod-api",
+ "sunrise-mod-api-macros",
+ "sunrise-mod-package",
+ "sunrise-mod-runtime",
+ "sunrise-mod-vocab",
+ "sunrise-narrator",
+ "sunrise-perf",
+ "sunrise-perf-format",
+ "sunrise-protocol",
+ "sunrise-server-files",
+ "sunrise-server-profiles-http",
+ "sunrise-shaders",
+ "sunrise-sim",
+ "sunrise-system",
+ "sunrise-telemetry",
+ "sunrise-threads",
+ "sunrise-world",
+ "tempfile",
+ "toml",
+ "ureq",
+ "winit",
+ "zip",
+]
+
+[[package]]
+name = "sunrise-client-gameplay"
+version = "0.1.0"
+dependencies = [
+ "ab_glyph",
+ "bytemuck",
+ "chrono",
+ "gilrs",
+ "glam",
+ "indexmap",
+ "log",
+ "naga",
+ "png",
+ "pollster",
+ "serde",
+ "serde_json",
+ "sunrise-assets",
+ "sunrise-bench",
  "sunrise-client-input",
  "sunrise-client-lib",
  "sunrise-client-render",
@@ -4617,10 +4700,12 @@ dependencies = [
  "sunrise-core",
  "sunrise-dualsense",
  "sunrise-friends",
- "sunrise-gameplay",
+ "sunrise-game-data",
+ "sunrise-gameplay-common",
  "sunrise-hooks",
  "sunrise-items",
  "sunrise-java-properties",
+ "sunrise-level",
  "sunrise-mod-api",
  "sunrise-mod-api-gen",
  "sunrise-mod-api-macros",
@@ -4629,51 +4714,21 @@ dependencies = [
  "sunrise-mod-vocab",
  "sunrise-narrator",
  "sunrise-optifine",
- "sunrise-perf",
  "sunrise-perf-format",
  "sunrise-protocol",
  "sunrise-server-files",
- "sunrise-shader-api",
+ "sunrise-server-profiles-http",
  "sunrise-shaders",
+ "sunrise-sim",
  "sunrise-system",
  "sunrise-telemetry",
  "sunrise-theme",
  "sunrise-threads",
  "sunrise-world",
  "tempfile",
- "toml",
- "ureq",
  "wgpu",
  "winit",
  "zip",
-]
-
-[[package]]
-name = "sunrise-client-core"
-version = "0.1.0"
-dependencies = [
- "log",
- "serde_json",
- "sunrise-assets",
- "sunrise-core",
- "sunrise-mod-vocab",
- "sunrise-world",
-]
-
-[[package]]
-name = "sunrise-client-gameplay"
-version = "0.1.0"
-dependencies = [
- "glam",
- "log",
- "serde",
- "serde_json",
- "sunrise-client-lib",
- "sunrise-core",
- "sunrise-protocol",
- "sunrise-threads",
- "sunrise-world",
- "winit",
 ]
 
 [[package]]
@@ -4683,8 +4738,8 @@ dependencies = [
  "arboard",
  "log",
  "png",
- "sunrise-client-core",
  "sunrise-core",
+ "sunrise-game-data",
  "sunrise-mod-api-macros",
  "sunrise-theme",
  "winit",
@@ -4701,7 +4756,6 @@ dependencies = [
  "flate2",
  "fs4",
  "getrandom 0.3.4",
- "gilrs",
  "glam",
  "log",
  "mio",
@@ -4718,16 +4772,16 @@ dependencies = [
  "stacker",
  "sunrise-assets",
  "sunrise-bench",
- "sunrise-client-core",
  "sunrise-client-input",
  "sunrise-client-lib",
  "sunrise-client-render",
  "sunrise-command",
  "sunrise-core",
- "sunrise-dualsense",
+ "sunrise-game-data",
  "sunrise-hooks",
  "sunrise-items",
  "sunrise-java-properties",
+ "sunrise-level",
  "sunrise-mcp",
  "sunrise-mod-api",
  "sunrise-mod-api-macros",
@@ -4740,8 +4794,8 @@ dependencies = [
  "sunrise-perf-format",
  "sunrise-protocol",
  "sunrise-server-files",
- "sunrise-shader-api",
  "sunrise-shaders",
+ "sunrise-sim",
  "sunrise-telemetry",
  "sunrise-theme",
  "sunrise-threads",
@@ -4775,28 +4829,29 @@ dependencies = [
  "naga",
  "png",
  "pollster",
- "pp-rs",
  "rustix 1.1.5",
  "serde",
  "serde_json",
- "sha1",
  "sha2 0.10.9",
  "smallvec",
  "sunrise-assets",
  "sunrise-audio-input",
  "sunrise-border",
- "sunrise-client-core",
  "sunrise-client-input",
  "sunrise-command",
  "sunrise-connected",
  "sunrise-core",
+ "sunrise-game-data",
+ "sunrise-glsl",
  "sunrise-hdr",
  "sunrise-hooks",
  "sunrise-items",
  "sunrise-java-properties",
+ "sunrise-level",
  "sunrise-mod-api",
  "sunrise-mod-api-macros",
  "sunrise-mod-package",
+ "sunrise-mod-pipeline",
  "sunrise-mod-runtime",
  "sunrise-mod-vocab",
  "sunrise-narrator",
@@ -4807,7 +4862,7 @@ dependencies = [
  "sunrise-protocol",
  "sunrise-render-core",
  "sunrise-render-shaderpack",
- "sunrise-shader-api",
+ "sunrise-server-profiles-http",
  "sunrise-shaders",
  "sunrise-system",
  "sunrise-theme",
@@ -4827,8 +4882,8 @@ dependencies = [
 name = "sunrise-command"
 version = "0.1.0"
 dependencies = [
- "sunrise-client-core",
  "sunrise-core",
+ "sunrise-game-data",
  "sunrise-items",
  "sunrise-mod-vocab",
  "sunrise-protocol",
@@ -4864,6 +4919,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sunrise-dependency-rule"
+version = "0.1.0"
+dependencies = [
+ "semver",
+]
+
+[[package]]
 name = "sunrise-discord"
 version = "0.1.0"
 dependencies = [
@@ -4882,6 +4944,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sunrise-entity-data"
+version = "0.1.0"
+dependencies = [
+ "sunrise-core",
+ "sunrise-game-data",
+ "sunrise-mod-vocab",
+ "sunrise-world",
+]
+
+[[package]]
 name = "sunrise-friends"
 version = "0.1.0"
 dependencies = [
@@ -4892,7 +4964,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "socket2 0.6.5",
+ "socket2",
  "spake2",
  "sunrise-addresses",
  "sunrise-platform",
@@ -4914,6 +4986,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "sunrise-game-data"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "serde_json",
+ "sunrise-assets",
+ "sunrise-core",
+ "sunrise-mod-api-macros",
+ "sunrise-mod-vocab",
+ "sunrise-world",
+]
+
+[[package]]
 name = "sunrise-game-discovery"
 version = "0.1.0"
 dependencies = [
@@ -4928,19 +5013,78 @@ dependencies = [
 name = "sunrise-gameplay"
 version = "0.1.0"
 dependencies = [
+ "chrono",
+ "glam",
+ "indexmap",
  "log",
+ "serde",
  "serde_json",
  "sunrise-assets",
- "sunrise-client-core",
- "sunrise-client-lib",
+ "sunrise-bench",
+ "sunrise-command",
  "sunrise-core",
+ "sunrise-game-data",
+ "sunrise-gameplay-common",
  "sunrise-items",
+ "sunrise-java-properties",
+ "sunrise-level",
  "sunrise-mod-api",
+ "sunrise-mod-api-gen",
+ "sunrise-mod-api-macros",
+ "sunrise-mod-package",
  "sunrise-mod-runtime",
  "sunrise-mod-vocab",
+ "sunrise-perf-format",
  "sunrise-protocol",
+ "sunrise-server-files",
+ "sunrise-sim",
  "sunrise-threads",
  "sunrise-world",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
+name = "sunrise-gameplay-common"
+version = "0.1.0"
+dependencies = [
+ "cap-fs-ext",
+ "cap-std",
+ "chrono",
+ "glam",
+ "indexmap",
+ "log",
+ "png",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sunrise-assets",
+ "sunrise-command",
+ "sunrise-core",
+ "sunrise-game-data",
+ "sunrise-hooks",
+ "sunrise-items",
+ "sunrise-level",
+ "sunrise-mod-api",
+ "sunrise-mod-api-gen",
+ "sunrise-mod-package",
+ "sunrise-mod-runtime",
+ "sunrise-mod-vocab",
+ "sunrise-perf-format",
+ "sunrise-protocol",
+ "sunrise-sim",
+ "sunrise-threads",
+ "sunrise-world",
+ "tempfile",
+]
+
+[[package]]
+name = "sunrise-glsl"
+version = "0.1.0"
+dependencies = [
+ "naga",
+ "pp-rs",
+ "wgpu-types",
 ]
 
 [[package]]
@@ -4988,16 +5132,64 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
- "sunrise-client-core",
  "sunrise-core",
+ "sunrise-game-data",
  "sunrise-mod-package",
  "sunrise-mod-vocab",
  "sunrise-world",
 ]
 
 [[package]]
+name = "sunrise-jar-fetch"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "sunrise-java-properties"
 version = "0.1.0"
+
+[[package]]
+name = "sunrise-level"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "bytemuck",
+ "chrono",
+ "flate2",
+ "glam",
+ "log",
+ "png",
+ "rustix 1.1.5",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2 0.10.9",
+ "smallvec",
+ "sunrise-assets",
+ "sunrise-border",
+ "sunrise-command",
+ "sunrise-core",
+ "sunrise-game-data",
+ "sunrise-items",
+ "sunrise-mod-api",
+ "sunrise-mod-api-macros",
+ "sunrise-mod-package",
+ "sunrise-mod-runtime",
+ "sunrise-mod-vocab",
+ "sunrise-perf",
+ "sunrise-perf-format",
+ "sunrise-protocol",
+ "sunrise-system",
+ "sunrise-threads",
+ "sunrise-world",
+ "tempfile",
+ "unicode-bidi",
+ "zip",
+]
 
 [[package]]
 name = "sunrise-mcp"
@@ -5094,11 +5286,13 @@ version = "0.1.0"
 dependencies = [
  "libloading",
  "log",
+ "memchr",
  "object",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "sunrise-client",
+ "sunrise-core",
  "sunrise-hooks",
  "sunrise-mod-api",
  "sunrise-mod-package",
@@ -5125,7 +5319,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "socket2 0.6.5",
+ "socket2",
  "subtle",
  "sunrise-assets",
  "sunrise-core",
@@ -5133,7 +5327,6 @@ dependencies = [
  "sunrise-mod-source",
  "sunrise-mod-surface",
  "sunrise-mod-vocab",
- "sunrise-shader-api",
  "syn 2.0.119",
  "tar",
  "tempfile",
@@ -5143,6 +5336,16 @@ dependencies = [
  "xz4rust",
  "zip",
  "zune-jpeg",
+]
+
+[[package]]
+name = "sunrise-mod-pipeline"
+version = "0.1.0"
+dependencies = [
+ "naga",
+ "sunrise-glsl",
+ "sunrise-mod-vocab",
+ "wgpu-types",
 ]
 
 [[package]]
@@ -5168,6 +5371,7 @@ dependencies = [
 name = "sunrise-mod-source"
 version = "0.1.0"
 dependencies = [
+ "ignore",
  "proc-macro2",
  "quote",
  "sunrise-mod-surface",
@@ -5202,7 +5406,7 @@ dependencies = [
  "sunrise-mod-api-gen",
  "sunrise-mod-api-macros",
  "sunrise-mod-runtime",
- "sunrise-protocol",
+ "sunrise-threads",
 ]
 
 [[package]]
@@ -5229,6 +5433,7 @@ dependencies = [
 name = "sunrise-native-build"
 version = "0.1.0"
 dependencies = [
+ "filetime",
  "flate2",
  "libc",
  "object",
@@ -5280,73 +5485,10 @@ dependencies = [
 name = "sunrise-parity-fixtures"
 version = "0.1.0"
 dependencies = [
- "ab_glyph",
- "bytemuck",
- "cap-fs-ext",
- "cap-std",
- "chrono",
- "cipher",
- "crypto-common 0.1.7",
- "digest 0.10.7",
- "flate2",
- "fnv",
- "fs4",
- "gilrs",
- "glam",
- "indexmap",
- "libc",
- "log",
- "naga",
- "png",
- "pollster",
- "rustix 1.1.5",
- "serde",
- "serde_json",
- "sha1",
- "sha2 0.10.9",
- "socket2 0.6.5",
- "sunrise-assets",
- "sunrise-bench",
- "sunrise-client-core",
+ "sunrise-client",
  "sunrise-client-gameplay",
- "sunrise-client-input",
- "sunrise-client-lib",
- "sunrise-client-render",
- "sunrise-command",
- "sunrise-core",
- "sunrise-dualsense",
- "sunrise-friends",
  "sunrise-gameplay",
- "sunrise-hooks",
- "sunrise-items",
- "sunrise-java-properties",
- "sunrise-mod-api",
- "sunrise-mod-api-gen",
- "sunrise-mod-api-macros",
- "sunrise-mod-package",
- "sunrise-mod-runtime",
- "sunrise-mod-source",
- "sunrise-mod-vocab",
- "sunrise-narrator",
- "sunrise-optifine",
- "sunrise-perf",
- "sunrise-perf-format",
- "sunrise-protocol",
- "sunrise-server-files",
- "sunrise-shader-api",
- "sunrise-shaders",
- "sunrise-system",
- "sunrise-telemetry",
- "sunrise-theme",
- "sunrise-threads",
- "sunrise-world",
- "syn 2.0.119",
- "tempfile",
- "toml",
- "ureq",
- "wgpu",
- "winit",
- "zip",
+ "sunrise-gameplay-common",
 ]
 
 [[package]]
@@ -5408,6 +5550,7 @@ dependencies = [
  "sunrise-perf-format",
  "sunrise-proxy",
  "sunrise-server-files",
+ "sunrise-server-profiles-http",
  "sunrise-system",
  "sunrise-world",
 ]
@@ -5429,6 +5572,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2 0.10.9",
+ "sunrise-jar-fetch",
  "sunrise-mod-api",
  "sunrise-mod-api-gen",
  "sunrise-mod-package",
@@ -5458,18 +5602,21 @@ name = "sunrise-protocol"
 version = "0.1.0"
 dependencies = [
  "aes",
+ "base64 0.22.1",
  "flate2",
  "getrandom 0.3.4",
  "ipconfig",
  "log",
+ "serde",
  "serde_json",
  "sha1",
  "sha2 0.10.9",
- "socket2 0.5.10",
+ "socket2",
  "sunrise-core",
  "sunrise-mod-runtime",
  "sunrise-threads",
  "sunrise-world",
+ "zlib-rs",
 ]
 
 [[package]]
@@ -5523,6 +5670,7 @@ dependencies = [
  "naga",
  "pollster",
  "serde_json",
+ "sha2 0.10.9",
  "smallvec",
  "sunrise-core",
  "sunrise-render-core",
@@ -5570,7 +5718,6 @@ dependencies = [
  "sunrise-core",
  "sunrise-java-properties",
  "sunrise-protocol",
- "ureq",
 ]
 
 [[package]]
@@ -5589,17 +5736,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "sunrise-shader-api"
+name = "sunrise-server-profiles-http"
 version = "0.1.0"
 dependencies = [
- "bytemuck",
- "naga",
- "png",
- "serde",
+ "log",
  "serde_json",
- "sha2 0.10.9",
- "toml",
- "zip",
+ "sunrise-core",
+ "sunrise-level",
+ "sunrise-server-files",
+ "ureq",
 ]
 
 [[package]]
@@ -5610,6 +5755,53 @@ dependencies = [
  "naga",
  "png",
  "sunrise-core",
+ "sunrise-glsl",
+ "zip",
+]
+
+[[package]]
+name = "sunrise-sim"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "flate2",
+ "fs4",
+ "getrandom 0.3.4",
+ "glam",
+ "indexmap",
+ "log",
+ "mio",
+ "png",
+ "rayon",
+ "rustix 1.1.5",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2 0.10.9",
+ "sunrise-assets",
+ "sunrise-bench",
+ "sunrise-border",
+ "sunrise-command",
+ "sunrise-core",
+ "sunrise-entity-data",
+ "sunrise-game-data",
+ "sunrise-items",
+ "sunrise-java-properties",
+ "sunrise-level",
+ "sunrise-mod-api",
+ "sunrise-mod-api-macros",
+ "sunrise-mod-package",
+ "sunrise-mod-runtime",
+ "sunrise-mod-vocab",
+ "sunrise-perf",
+ "sunrise-perf-format",
+ "sunrise-protocol",
+ "sunrise-server-files",
+ "sunrise-system",
+ "sunrise-threads",
+ "sunrise-world",
+ "tempfile",
+ "xxhash-rust",
  "zip",
 ]
 
@@ -5683,6 +5875,9 @@ dependencies = [
  "sunrise-mod-api-macros",
  "sunrise-mod-vocab",
  "sunrise-threads",
+ "tar",
+ "tempfile",
+ "ureq",
  "xxhash-rust",
 ]
 
@@ -5974,7 +6169,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
- "socket2 0.6.5",
+ "socket2",
  "windows-sys 0.61.2",
 ]
 
@@ -7382,7 +7577,6 @@ dependencies = [
  "nix",
  "typed-path",
  "windows-sys 0.61.2",
- "zopfli",
 ]
 
 [[package]]
@@ -7396,18 +7590,6 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
-
-[[package]]
-name = "zopfli"
-version = "0.8.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aaf7fc5d30c28483d93805c4a5e12b05bbb52407fa67c5f8bd552374cd01fb11"
-dependencies = [
- "bumpalo",
- "crc32fast",
- "log",
- "simd-adler32",
-]
 
 [[package]]
 name = "zune-core"

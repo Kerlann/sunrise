@@ -20,6 +20,12 @@ impl ItemTagNames {
         )
     }
 
+    /// Whether `other` is this same generation (one `bind`, and its clones), not only equal
+    /// names: what a reader holding one knows the tags were not bound again by.
+    pub fn same_generation(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
     /// Clone the matching names, or refuse the query if a matching name is invalid.
     pub fn matching(&self, mut matches: impl FnMut(&str) -> bool) -> Option<Vec<Identifier>> {
         self.0
@@ -47,6 +53,13 @@ pub trait LootTags {
     /// type registry, answer None.
     fn damage_type_in_tag(&self, _damage_type: &str, _tag: &str) -> Option<bool> {
         None
+    }
+}
+
+impl super::LootData {
+    /// One registry's bound tags in their resolved order (`TagLoader.build`), if it was bound.
+    pub fn registry_tags(&self, registry: &str) -> Option<&super::RegistryTags> {
+        self.tags.get(registry)
     }
 }
 

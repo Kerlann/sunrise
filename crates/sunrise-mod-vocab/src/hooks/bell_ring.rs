@@ -1,5 +1,4 @@
 //! The `bell_ring` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0169
 
 pub trait Hooks {
     /// On an authoritative server, a bell at `pos` is about to ring. Set
@@ -12,7 +11,7 @@ pub trait Hooks {
         out = "cancel",
         neoforge = "none (NeoForge has no such event; Bukkit's BellRingEvent)",
         cancellable = true,
-        target = "sunrise_client::game::native_hooks::base::GameLevel<'_>::native_bell_ring"
+        target = "sunrise_gameplay_common::game::native_hooks::base::GameLevel<'_>::native_bell_ring"
     )]
     fn bell_ring(dimension: LevelDimension, player: Option<u128>, pos: BlockPos, cancel: &mut bool);
 }

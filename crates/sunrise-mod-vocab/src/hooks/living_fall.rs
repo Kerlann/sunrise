@@ -1,5 +1,4 @@
 //! The `living_fall` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0346
 
 pub trait Hooks {
     /// A living entity is about to handle a fall (`LivingFallEvent`). Mods may
@@ -11,7 +10,7 @@ pub trait Hooks {
         context = "loop",
         neoforge = "LivingFallEvent",
         version = 2,
-        target = "sunrise_client_lib::landing::native_living_fall"
+        target = "sunrise_sim::landing::native_living_fall"
     )]
     fn living_fall(
         entity: u32,

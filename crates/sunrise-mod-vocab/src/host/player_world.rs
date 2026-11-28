@@ -79,7 +79,8 @@ pub trait PlayerWorldBackendMut {
     /// Side: server.
     /// `Player.setLastDeathLocation`: stores where the player died, or
     /// forgets it for None. The client hears of it with the player's next
-    /// respawn, as in vanilla. False in the cases a read gives None.
+    /// respawn, as in vanilla. A resident dead player can still be edited.
+    /// False if the server player's state is unavailable.
     fn player_set_last_death_location(
         &mut self,
         player: PlayerRef,
@@ -90,7 +91,10 @@ pub trait PlayerWorldBackendMut {
     /// empty slice withdraws them, and other mods' areas stay. The engine keeps each area's
     /// chunks loaded with a ticket of its own (`Loaded`, or `Ticking` as a player's simulation
     /// ticket), generates what is missing, and sends a level besides the player's own to a client
-    /// that can view it. A chunk no area covers any more is forgotten 52 ticks later. An area
+    /// that can view it. In the player's own level, a Sunrise client of this build is sent an
+    /// area's chunks past its view too, and they count as tracked (their block changes, entities
+    /// and passages go with them, and a passage may lead into them); to vanilla's, nothing past
+    /// its view is sent. A chunk no area covers any more is forgotten 52 ticks later. An area
     /// counts as no player for spawning, sleeping, raids or any other rule. Areas are never saved
     /// and end when the player leaves. A call that breaks a limit changes nothing and names it.
     fn player_set_chunk_areas(
@@ -100,9 +104,7 @@ pub trait PlayerWorldBackendMut {
     ) -> Result<(), ChunkAreaRefusal>;
     /// Side: both.
     /// Simulate one client movement tick for this server player without changing the player.
-    /// The usual closest-space velocity nudge accounts for solid collider boxes when a
-    /// collision scene is in scope. Refuses stale, absent, dead, spectator or riding players
-    /// and invalid input.
+    /// Refuses stale, absent, dead, spectator or riding players and invalid input.
     fn player_simulate_move(
         &mut self,
         player: PlayerRef,
@@ -142,4 +144,18 @@ pub trait PlayerWorldBackendMut {
         &mut self,
         player: PlayerRef,
     ) -> Result<RespawnTarget, RespawnTargetUnavailable>;
+}
+
+/// The handles' client writes of the `player_world` area, reached through [`ClientBackendMut`].
+// hidden: a handle's backend, reached through `ClientBackendMut`; mods call the handle
+#[doc(hidden)]
+#[sunrise_mod_api_macros::host_area]
+pub trait PlayerWorldClientBackendMut {
+    /// Side: client.
+    /// Sets the local player's current body yaw in degrees (`LivingEntity.setYBodyRot`).
+    /// The view, head, previous body angle and packets are unchanged. `Ok(false)` for a stale,
+    /// nonlocal, or unavailable player. Returns `Err(LevelWriteError::Unavailable)` when the
+    /// host cannot write living state. Does not change frame extraction order.
+    fn player_set_body_yaw(&mut self, player: PlayerRef, yaw: f32)
+    -> Result<bool, LevelWriteError>;
 }

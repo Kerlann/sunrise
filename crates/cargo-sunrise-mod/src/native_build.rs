@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::OnceLock;
 use sunrise_mod_package::{internals::ListedInternal, manifest::Native, sdk::Mixins};
-use sunrise_native_build::{check as checks, contract, discover, host, rust::Unpacked};
+use sunrise_native_build::{
+    BuildDiagnostics, check as checks, contract, discover, host, rust::Unpacked,
+};
 
 /// The plan's build folder, the host's root.
 static WORK: OnceLock<PathBuf> = OnceLock::new();
@@ -29,7 +31,12 @@ pub fn run(args: &[String]) -> ExitCode {
         }
     };
     install_host(&plan.work);
-    match contract::run(&plan, &mut input, &mut std::io::stdout().lock()) {
+    match contract::run(
+        &plan,
+        &mut input,
+        &mut std::io::stdout().lock(),
+        BuildDiagnostics::default().with_env(),
+    ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(_) => ExitCode::FAILURE,
     }
@@ -241,9 +248,10 @@ pub fn layout(args: &[String]) -> ExitCode {
 fn laid_out(plan: &contract::LayoutPlan) -> Result<serde_json::Value, (&'static str, String)> {
     use sunrise_native_build::prebuilt;
     let layout = || -> Result<prebuilt::Package, String> {
-        prebuilt::check_identity(&plan.prebuilt, &plan.build, &plan.host, plan.target.into())?;
+        let sdk =
+            prebuilt::check_identity(&plan.prebuilt, &plan.build, &plan.host, plan.target.into())?;
         let _ = std::fs::remove_dir_all(&plan.out);
-        prebuilt::lay_out(&plan.prebuilt, &plan.out, true)
+        prebuilt::lay_out(&plan.prebuilt, &plan.out, true, &sdk)
     };
     layout()
         .and_then(|package| serde_json::to_value(package).map_err(|e| e.to_string()))

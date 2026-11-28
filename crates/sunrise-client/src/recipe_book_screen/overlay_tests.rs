@@ -30,13 +30,12 @@ fn poses(cells: &[(i32, i32)]) -> Vec<[f32; 6]> {
         translate: &str::to_owned,
         text_width: &|text| text.len() as i32,
     };
-    let mut poses = Vec::new();
-    overlay(&screen, &overlay_view, &mut |call, pose| {
-        if matches!(call, Call::Item { .. }) {
-            poses.push(pose);
-        }
-    });
-    poses
+    let mut out = Vec::new();
+    let mut widgets = Vec::new();
+    overlay(&screen, &overlay_view, &mut out, &mut widgets);
+    out.into_iter()
+        .filter_map(|drawn| matches!(drawn.call, Call::Item { .. }).then_some(drawn.pose))
+        .collect()
 }
 
 fn assert_inner_bounds(poses: &[[f32; 6]]) {

@@ -1,5 +1,4 @@
 //! The `datapack_sync` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0123
 
 pub trait Hooks {
     /// Collect recipe types once the joining player exists, after admission
@@ -15,7 +14,7 @@ pub trait Hooks {
     /// An empty answer retains the client's own recipes, or restores
     /// them after an earlier nonempty answer.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_datapack_sync",
+        target = "sunrise_gameplay::game::native_hooks::base::ServerGame<'_>::native_datapack_sync",
         dispatch = "api_carrier",
         side = "server",
         contract = "collect",

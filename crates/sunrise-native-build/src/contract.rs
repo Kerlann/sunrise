@@ -1,7 +1,7 @@
 //! The JSON contract of `cargo sunrise-mod native-build`: one plan line in, one event per line out.
 use crate::prebuilt::{self, Package, Route};
 use crate::rust::Unpacked;
-use crate::{Target, api, dependencies, library_record, scan_bundles};
+use crate::{BuildDiagnostics, Target, api, dependencies, library_record, scan_bundles};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
@@ -9,7 +9,23 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 /// The contract this tool speaks: a plan naming another is refused, so a caller never misreads a reply.
+///
+/// Bump it for any tool change that alters what a caller may send the tool or rely on from it:
+/// plan fields, events, exit codes and outputs. A change that also alters the package layout
+/// bumps `PACKAGE_FORMAT` in `sunrise-mod-package` too.
 pub const CONTRACT: u32 = 2;
+
+/// The commit this tool was built from: release and SDK builds compile with `SUNRISE_TOOL_COMMIT`
+/// set, any other build is `local`. `--version`, `self-update` and the kept builds' key all read it.
+pub const TOOL_COMMIT: &str = tool_build_id(option_env!("SUNRISE_TOOL_COMMIT"));
+
+/// A build that names no commit, or an empty one, is `local`: never a git call whose answer goes stale.
+const fn tool_build_id(named: Option<&'static str>) -> &'static str {
+    match named {
+        Some(commit) if !commit.is_empty() => commit,
+        _ => "local",
+    }
+}
 
 /// What to build, the first line of standard input.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
@@ -161,8 +177,6 @@ pub struct Blame {
 pub enum BlameKind {
     /// Its own library didn't compile.
     Compile,
-    /// It has a build script, which a prebuilt build refuses.
-    BuildScript,
     /// It asks for Cargo features, which a prebuilt build refuses.
     Features,
 }
@@ -194,9 +208,6 @@ fn blame(error: &str, ids: &[String]) -> Option<Blame> {
     ids.iter().find_map(|id| {
         let kind = if error.contains(&format!("{} failed (", prebuilt::compiling(id))) {
             BlameKind::Compile
-        } else if error.contains(&prebuilt::Refusal::BuildScript { mod_id: id.clone() }.to_string())
-        {
-            BlameKind::BuildScript
         } else if error.contains(&prebuilt::Refusal::Features { mod_id: id.clone() }.to_string()) {
             BlameKind::Features
         } else {
@@ -264,7 +275,12 @@ pub fn emit(out: &mut dyn Write, event: &Event) -> Result<(), String> {
 }
 
 /// Builds `plan`, saying each step on `out` and reading consent answers from `input`; ends with [`Event::Built`] or [`Event::Failed`].
-pub fn run(plan: &Plan, input: &mut dyn BufRead, out: &mut dyn Write) -> Result<(), String> {
+pub fn run(
+    plan: &Plan,
+    input: &mut dyn BufRead,
+    out: &mut dyn Write,
+    diagnostics: BuildDiagnostics,
+) -> Result<(), String> {
     crate::mixins_from_source(plan.mixins_from_source);
     let events = std::cell::RefCell::new(out);
     let ids = std::cell::RefCell::new(Vec::new());
@@ -273,6 +289,7 @@ pub fn run(plan: &Plan, input: &mut dyn BufRead, out: &mut dyn Write) -> Result<
         &|event| emit(&mut **events.borrow_mut(), &event),
         input,
         &ids,
+        diagnostics,
     );
     let out = events.into_inner();
     match built {
@@ -324,7 +341,6 @@ fn code_links(
         .map(|(bundle, deps)| dependencies::Mod {
             id: &bundle.manifest.id,
             version: &bundle.manifest.version,
-            has_api: true,
             code: true,
             dependencies: deps,
         })
@@ -336,7 +352,7 @@ fn code_links(
 
 /// Type-check a developer's staged native projects through the build's own route and SDK
 /// bindings, without producing or installing native libraries.
-pub fn check_rust(plan: &Plan) -> Result<(), String> {
+pub fn check_rust(plan: &Plan, diagnostics: BuildDiagnostics) -> Result<(), String> {
     let work = crate::root();
     let mods = native_projects(plan)?;
     let (declared, resolution) = code_links(&mods, plan.target.into())?;
@@ -360,6 +376,7 @@ pub fn check_rust(plan: &Plan) -> Result<(), String> {
         Some(&|_| plan.registry == Some(true)),
         &|_, _, _| {},
         true,
+        diagnostics,
     )
     .map(drop)
 }
@@ -369,6 +386,7 @@ fn compile(
     say: &dyn Fn(Event) -> Result<(), String>,
     input: &mut dyn BufRead,
     ids: &std::cell::RefCell<Vec<String>>,
+    diagnostics: BuildDiagnostics,
 ) -> Result<Event, String> {
     let work = crate::root();
     std::fs::create_dir_all(&work).map_err(|e| format!("{}: {e}", work.display()))?;
@@ -398,7 +416,11 @@ fn compile(
             say(question).is_ok() && answer(&mut **asked.borrow_mut())
         })
     };
-    let (binary, libraries) = prebuilt::compile(
+    let prebuilt::Built {
+        binary,
+        libraries,
+        catalog,
+    } = prebuilt::compile(
         &plan.toolchain,
         &plan.package,
         &crate::root().join("prebuilt-build"),
@@ -416,9 +438,9 @@ fn compile(
             });
         },
         false,
+        diagnostics,
     )?
     .expect("build mode returns artifacts");
-    let catalog = crate::internals::Catalog::read(&plan.package.api)?;
     let mut internals = BTreeMap::new();
     for &index in &resolution.order {
         let manifest = &mods[index].manifest;
@@ -452,6 +474,13 @@ fn answer(input: &mut dyn BufRead) -> bool {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn a_build_that_names_no_commit_is_local() {
+        assert_eq!(tool_build_id(None), "local");
+        assert_eq!(tool_build_id(Some("")), "local");
+        assert_eq!(tool_build_id(Some("abc123")), "abc123");
+    }
 
     fn plan(mods: &Path) -> Plan {
         Plan {
@@ -536,20 +565,22 @@ mod tests {
     #[test]
     fn a_refused_mod_ends_in_a_failed_event_before_anything_compiles() {
         let dir = crate::tests::dir("contract-refused");
-        let project = dir.join("scripted");
-        crate::tests::write_bundle(&project, "scripted", "");
+        let project = dir.join("optioned");
+        crate::tests::write_bundle(&project, "optioned", "");
         std::fs::write(
             project.join("Cargo.toml"),
-            "[package]\nname='scripted'\nversion='1.0.0'\nedition='2024'\n[dependencies]\nsunrise-mod-api={path='.sunrise/sdk/api/crates/sunrise-mod-api'}\n",
+            "[package]\nname='optioned'\nversion='1.0.0'\nedition='2024'\n[dependencies]\nsunrise-mod-api={path='.sunrise/sdk/api/crates/sunrise-mod-api'}\n[features]\nextra=[]\n",
         )
         .unwrap();
-        std::fs::write(project.join("build.rs"), "fn main() {}").unwrap();
         let mut out = Vec::new();
-        let error = run(&plan(&dir), &mut "".as_bytes(), &mut out).unwrap_err();
-        assert!(
-            error.starts_with("E_NATIVE_BUILD_SCRIPT: scripted"),
-            "{error}"
-        );
+        let error = run(
+            &plan(&dir),
+            &mut "".as_bytes(),
+            &mut out,
+            BuildDiagnostics::default(),
+        )
+        .unwrap_err();
+        assert!(error.starts_with("E_NATIVE_FEATURES: optioned"), "{error}");
         let lines: Vec<Event> = String::from_utf8(out)
             .unwrap()
             .lines()
@@ -560,8 +591,8 @@ mod tests {
             [Event::Failed {
                 error,
                 blame: Some(Blame {
-                    mod_id: "scripted".into(),
-                    kind: BlameKind::BuildScript,
+                    mod_id: "optioned".into(),
+                    kind: BlameKind::Features,
                 }),
                 used: Vec::new(),
             }]

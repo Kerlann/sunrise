@@ -1,5 +1,4 @@
 //! The `piston_post` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0041
 
 pub trait Hooks {
     /// On an authoritative server, the piston at `piston` is about to push
@@ -18,7 +17,7 @@ pub trait Hooks {
         contract = "cancel",
         out = "canceled",
         neoforge = "PistonEvent.Pre",
-        target = "sunrise_client::game::native_hooks::base::GameLevel<'_>::native_piston_pre"
+        target = "sunrise_gameplay_common::game::native_hooks::base::GameLevel<'_>::native_piston_pre"
     )]
     fn piston_pre(
         dimension: LevelDimension,
@@ -42,7 +41,7 @@ pub trait Hooks {
         side = "server",
         contract = "listen",
         neoforge = "PistonEvent.Post",
-        target = "sunrise_client::game::native_hooks::base::GameLevel<'_>::native_piston_post"
+        target = "sunrise_gameplay_common::game::native_hooks::base::GameLevel<'_>::native_piston_post"
     )]
     fn piston_post(
         dimension: LevelDimension,

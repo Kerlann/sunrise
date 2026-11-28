@@ -1,13 +1,11 @@
 use crate::source;
 use mod_source::{
     index::Index,
-    modules::{ModuleVariant, cfg_conditions, evaluate_cfg, walk_module_variants},
+    modules::{ModuleVariant, cfg_atom, cfg_conditions, evaluate_cfg, walk_module_variants},
 };
-use quote::ToTokens;
 use std::{
     cell::RefCell,
     collections::{BTreeMap, HashMap, HashSet},
-    fs,
     path::Path,
     rc::Rc,
 };
@@ -34,8 +32,7 @@ impl Build {
                     .lines()
                     .filter(|line| !line.is_empty())
                     .map(|line| {
-                        syn::parse_str::<syn::Meta>(line)
-                            .map(|meta| meta.to_token_stream().to_string())
+                        cfg_atom(line)
                             .map_err(|error| format!("invalid target cfg {line:?}: {error}"))
                     })
                     .collect::<Result<HashSet<_>, _>>()
@@ -98,29 +95,39 @@ impl Build {
     pub(super) fn enabled(&self, attrs: &[syn::Attribute]) -> bool {
         self.permits(&cfg_conditions(attrs))
     }
+
+    pub(super) fn is_disabled(&self, atom: &str) -> bool {
+        self.values.get(atom) == Some(&false)
+    }
 }
 
 fn is_target_atom(atom: &str) -> bool {
     matches!(atom, "unix" | "windows") || atom.starts_with("target_")
 }
 
-type ModuleItems = Vec<(Vec<String>, Vec<Item>)>;
+struct PackageVariants {
+    variants: Vec<ModuleVariant>,
+    by_module: HashMap<String, Vec<usize>>,
+}
 
 const CRATES: &[(&str, &str)] = &[
     ("sunrise_client", ""),
+    ("sunrise_client_gameplay", ""),
+    ("sunrise_gameplay", ""),
+    ("sunrise_gameplay_common", ""),
     ("sunrise_client_lib", ""),
     ("sunrise_client_render", ""),
     ("sunrise_mod_render", ""),
     ("sunrise_mod_vocab", ""),
+    ("sunrise_sim", ""),
     ("sunrise_world", ""),
 ];
 
 /// Index packages by Cargo's library roots (including client-lib's out-of-package root).
-/// Cache parsed bodies only for modules the check inspects.
+/// Keep the parsed module snapshot produced by discovery so lookups and semantic scans reuse it.
 pub(super) struct Sources<'a> {
     root: &'a Path,
-    files: HashMap<String, Result<Vec<ModuleVariant>, String>>,
-    modules: HashMap<(String, String), ModuleItems>,
+    files: HashMap<String, Result<PackageVariants, String>>,
 }
 
 impl<'a> Sources<'a> {
@@ -128,11 +135,14 @@ impl<'a> Sources<'a> {
         Self {
             root,
             files: HashMap::new(),
-            modules: HashMap::new(),
         }
     }
 
     pub(super) fn index<'s>(&'s mut self, build: &'s Build) -> Index<'s> {
+        self.binding_index(build, false)
+    }
+
+    pub(super) fn binding_index<'s>(&'s mut self, build: &'s Build, types: bool) -> Index<'s> {
         Index::new(self.root, &[], CRATES)
             .loading_functions(move |krate, path| {
                 let path = path.join("::");
@@ -143,6 +153,11 @@ impl<'a> Sources<'a> {
                     .filter_map(|item| match item {
                         Item::Fn(item) => Some(Item::Fn(item.clone())),
                         Item::Struct(item) => Some(Item::Struct(item.clone())),
+                        Item::Enum(_) | Item::Union(_) | Item::Type(_) | Item::Trait(_)
+                            if types =>
+                        {
+                            Some(item.clone())
+                        }
                         Item::Use(item) => Some(Item::Use(item.clone())),
                         Item::Mod(item) => Some(Item::Mod(syn::ItemMod {
                             vis: item.vis.clone(),
@@ -160,10 +175,54 @@ impl<'a> Sources<'a> {
             .filtering_items(move |item| match item {
                 Item::Fn(item) => build.enabled(&item.attrs),
                 Item::Struct(item) => build.enabled(&item.attrs),
+                Item::Enum(item) => build.enabled(&item.attrs),
+                Item::Union(item) => build.enabled(&item.attrs),
+                Item::Type(item) => build.enabled(&item.attrs),
+                Item::Trait(item) => build.enabled(&item.attrs),
                 Item::Use(item) => build.enabled(&item.attrs),
                 Item::Mod(item) => build.enabled(&item.attrs),
                 _ => true,
             })
+    }
+
+    fn package_variants(&mut self, package: &str) -> Result<&PackageVariants, String> {
+        let root = self.root;
+        let parse = |path: &Path, text: &str| {
+            let parsed = if package == "sunrise_mod_vocab" {
+                syn::parse_file(&crate::exports::expand(root, text)?)
+            } else {
+                syn::parse_file(text)
+            };
+            parsed.map_err(|error| format!("{}: {error}", path.display()))
+        };
+        self.files
+            .entry(package.to_owned())
+            .or_insert_with(|| {
+                let (_, lib) = source::crate_root(root, package)?;
+                let dir = lib
+                    .parent()
+                    .expect("a library file has a folder")
+                    .to_owned();
+                let variants =
+                    walk_module_variants(package.to_owned(), lib, dir, false, false, parse)?;
+                let mut by_module: HashMap<String, Vec<usize>> = HashMap::new();
+                for (index, variant) in variants.iter().enumerate() {
+                    by_module
+                        .entry(variant.file.module.clone())
+                        .or_default()
+                        .push(index);
+                }
+                Ok(PackageVariants {
+                    variants,
+                    by_module,
+                })
+            })
+            .as_ref()
+            .map_err(Clone::clone)
+    }
+
+    pub(super) fn variants(&mut self, package: &str) -> Result<&[ModuleVariant], String> {
+        Ok(&self.package_variants(package)?.variants)
     }
 
     pub(super) fn items<'s>(
@@ -172,62 +231,26 @@ impl<'a> Sources<'a> {
         package: &str,
         module: &str,
     ) -> Result<Option<impl Iterator<Item = &'s Item>>, String> {
-        let key = (package.to_owned(), module.to_owned());
-        if !self.modules.contains_key(&key) {
-            let root = self.root;
-            let parse = |path: &Path, text: &str| {
-                let parsed = if package == "sunrise_mod_vocab" {
-                    syn::parse_file(&crate::exports::expand(root, text)?)
-                } else {
-                    syn::parse_file(text)
-                };
-                parsed.map_err(|error| format!("{}: {error}", path.display()))
-            };
-            let files = self.files.entry(package.to_owned()).or_insert_with(|| {
-                let (_, lib) = source::crate_root(root, package)?;
-                let dir = lib
-                    .parent()
-                    .expect("a library file has a folder")
-                    .to_owned();
-                walk_module_variants(package.to_owned(), lib, dir, false, false, parse)
-            });
-            let path = if module.is_empty() {
-                package.to_owned()
-            } else {
-                format!("{package}::{module}")
-            };
-            let mut variants = Vec::new();
-            for variant in files
-                .as_ref()
-                .map_err(Clone::clone)?
-                .iter()
-                .filter(|v| v.file.module == path)
-            {
-                let path = &variant.file.path;
-                let text = fs::read_to_string(path)
-                    .map_err(|error| format!("{}: {error}", path.display()))?;
-                let mut items = parse(path, &text)?.items;
-                for &index in &variant.inline {
-                    // The walker recorded these indices in the same parsed file.
-                    let Item::Mod(declaration) = items.swap_remove(index) else {
-                        unreachable!()
-                    };
-                    items = declaration.content.expect("recorded inline module").1;
-                }
-                variants.push((variant.file.cfg.clone(), items));
-            }
-            self.modules.insert(key.clone(), variants);
-        }
-        let variants = &self.modules[&key];
+        let files = self.package_variants(package)?;
+        let path = if module.is_empty() {
+            package.to_owned()
+        } else {
+            format!("{package}::{module}")
+        };
+        let indices = files.by_module.get(&path).map(Vec::as_slice).unwrap_or(&[]);
         // Resolve aliases and globs only if there isn't a declared module at this path.
-        if !variants.iter().any(|(cfg, _)| build.permits(cfg)) {
+        if !indices
+            .iter()
+            .any(|&index| build.permits(&files.variants[index].file.cfg))
+        {
             return Ok(None);
         }
         Ok(Some(
-            variants
+            indices
                 .iter()
-                .filter(|(cfg, _)| build.permits(cfg))
-                .flat_map(|(_, items)| items),
+                .map(move |&index| &files.variants[index])
+                .filter(move |variant| build.permits(&variant.file.cfg))
+                .flat_map(|variant| &variant.items),
         ))
     }
 }

@@ -10,7 +10,12 @@ creates the one it names.
 import json
 import re
 import struct
-from command_exec_corpus import cmd
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools.command_exec_corpus import cmd
 
 COMMON = 'NoAI:1b,NoGravity:1b,PersistenceRequired:1b,Silent:1b'
 # Instances the mob's own load makes (vanilla 26.3, before any tick): an enderman's movement_speed
@@ -212,4 +217,3 @@ def record_oxygen_bonus_witness(reference, version, destination):
     }
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(witness, indent=2) + '\n', encoding='utf-8')
-

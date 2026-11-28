@@ -1,11 +1,10 @@
 //! The `player_stonecutter_recipe_select` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0311
 
 pub trait Hooks {
     /// A server player selected a stonecutter recipe, after the menu accepted
     /// its button. `recipe` is the zero-based button index. Server-side.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_player_stonecutter_recipe_select",
+        target = "sunrise_gameplay::game::native_hooks::base::ServerGame<'_>::native_player_stonecutter_recipe_select",
         dispatch = "flat",
         side = "server",
         contract = "listen",

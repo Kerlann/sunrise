@@ -11,6 +11,8 @@ pub(super) struct FlatLayers {
     /// `layers.get(i) == null`: `getBaseHeight` skips it, `getBaseColumn` reads it as air, and
     /// `buildTerrain` leaves it for the `FillLayerFeature` that runs after the structures.
     pub(super) null: Vec<bool>,
+    /// The fixed biome every column is, resolved once: the surface sample reads it per column.
+    pub(super) biome: Option<BiomeId>,
 }
 /// A superflat world's generator settings (`FlatLevelGeneratorSettings`).
 #[derive(Clone, Debug)]
@@ -32,7 +34,7 @@ impl OverworldGenerator {
         self.pipeline.flat_spawn_height()
     }
 
-    /// A superflat overworld (`FlatLevelSource`): the layers where the terrain would be, a
+    /// A superflat level (`FlatLevelSource`): the layers where the terrain would be, a
     /// fixed biome, and the structure sets `structure_overrides` allows (every one when it
     /// names none) generating on the flat ground, with or without structures.
     pub fn flat(
@@ -40,13 +42,16 @@ impl OverworldGenerator {
         seed: i64,
         flat: &FlatSettings,
         structures: bool,
+        level: Option<(i32, i32)>,
     ) -> Result<Self, GeneratorError> {
         let registry = data.registry;
-        let (level_min_y, level_height) = overrides::LevelHeight::of_type(
-            &Value::from("minecraft:overworld"),
-            &data.dimension_types,
-        )
-        .map_or((-64, 384), |h| (h.min_y, h.height));
+        let (level_min_y, level_height) = level.unwrap_or_else(|| {
+            overrides::LevelHeight::of_type(
+                &Value::from("minecraft:overworld"),
+                &data.dimension_types,
+            )
+            .map_or((-64, 384), |h| (h.min_y, h.height))
+        });
         // The overworld's own noise settings give the level its sea level and the rest of
         // the generator its data; no noise is ever sampled.
         let settings_json: Value = serde_json::from_str(
@@ -73,9 +78,13 @@ impl OverworldGenerator {
             &generator,
             &settings_json,
             structures,
-            Some((level_min_y, level_height)),
+            None,
             None,
         )?;
+        // `FlatLevelSource` has no noise settings: its level's build height bounds it, not the
+        // overworld noise range the data above comes with.
+        pipeline.settings.level_min_y = level_min_y;
+        pipeline.settings.level_height = level_height;
         let mut states = Vec::new();
         let mut null = Vec::new();
         for (block, height) in &flat.layers {
@@ -104,10 +113,16 @@ impl OverworldGenerator {
             .filter(|(_, (hole, _))| **hole)
             .map(|(i, (_, &state))| (level_min_y + i as i32, state))
             .collect();
+        let biome_id = pipeline
+            .source
+            .possible_biomes()
+            .into_iter()
+            .find_map(|name| pipeline.data.biome_id(name));
         pipeline.flat = Some(FlatLayers {
             min_y: level_min_y,
             states,
             null,
+            biome: biome_id,
         });
         // `FlatLevelSource` decorates with `adjustGenerationSettings` of the biome.
         let adjust = super::super::generator_decoration::FlatDecoration::new(

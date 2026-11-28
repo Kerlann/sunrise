@@ -1,5 +1,4 @@
 //! The `block_dispense_armor` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0174
 
 pub trait Hooks {
     /// A dispenser equipped `item` on the first eligible `target` in front
@@ -7,7 +6,7 @@ pub trait Hooks {
     /// The equip, item consumption, sound and game event have completed.
     /// Server-side.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_block_dispense_armor",
+        target = "sunrise_gameplay::game::native_hooks::base::ServerGame<'_>::native_block_dispense_armor",
         dispatch = "flat",
         side = "server",
         contract = "listen",

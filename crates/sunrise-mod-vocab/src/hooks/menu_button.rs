@@ -1,5 +1,4 @@
 //! The `menu_button` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0031
 
 pub trait Hooks {
     /// A player pressed a mod menu's button (`clickMenuButton`), on the
@@ -25,10 +24,10 @@ edit must span the subject and other world storage atomically. A panicking liste
 edit is discarded and any open transaction rolls back) and disabled for `menu_button` for the rest of the session.
 A panic in a different hook does not discard the cursor edit of a button callback that returns normally."#]
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_menu_button",
+        target = "sunrise_gameplay_common::game::native_hooks::base::native_menu_button",
         receiver = "associated",
         dispatch = "flat",
-        version = 4,
+        version = 5,
         side = "server",
         contract = "listen",
         scope = "menu",

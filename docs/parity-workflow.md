@@ -1,6 +1,6 @@
 # Parity workflow
 
-How parity work is run, checked and merged. What is ported and where it is checked: [Rust rewrite status](rust-parity.md).
+How parity work is run, checked and merged. What is ported and where it is checked: [Sunrise status](status.md) and [port ledger](port-ledger.md).
 
 ## Datafix downloads and author self-checks
 
@@ -192,7 +192,7 @@ and shrieker. They supplement the deterministic component comparisons.
 
 ### Randoms that repeat
 
-Vanilla seeds every unseeded random (`RandomSource.create()`: each entity's own, the level's, a raid's...) from `RandomSupport.generateUniqueSeed`, a shared uniquifier XORed with `System.nanoTime()`, and numbers entities from `ServerLevel.ENTITY_COUNTER`; Sunrise ports both (`random_source::unique_seed`, `Game.next_entity`). A command script can make what they decide comparable exactly: a dropped item's position, primed TNT's kick, a dispensed item's motion, which tick of four a resting item moves on.
+Vanilla seeds every unseeded random (`RandomSource.create()`: each entity's own, the level's, a raid's...) from `RandomSupport.generateUniqueSeed`, a shared uniquifier XORed with `System.nanoTime()`, and numbers entities from `ServerLevel.ENTITY_COUNTER`; Sunrise ports both (`random_source::unique_seed`, `Game.server.next_entity`). A command script can make what they decide comparable exactly: a dropped item's position, primed TNT's kick, a dispensed item's motion, which tick of four a resting item moves on.
 
 - `{"op": "sync_randoms", "uniquifier": U, "entity_id": E, "level_seed": S}`, run on the server thread of both engines, sets that thread's uniquifier to `U`, the entity-id counter to `E` (the next entity is `E + 1`) and the random of the player's level to seed `S`. Startup creates a different number of randoms in each engine, so sync right before what you compare, and give each case its own values (Sunrise keeps an entity's UUID by id).
 - A script with this step runs vanilla under `tools/seed_agent.py`'s agent (`SeedAgent.java`, built with the JDK's class-file API): `generateUniqueSeed` steps a uniquifier of the calling thread's own, from vanilla's start and by vanilla's factor, without the clock. Sunrise runs with `SUNRISE_TEST_SEEDS=1`, which does the same in `unique_seed`; the step fails without it. Per thread, so worker threads and Sunrise's client don't shift the server thread's seeds. The agent jar is an oracle input (`tools/parity_shim.py`).
@@ -202,14 +202,75 @@ One draw too many or too few shifts every later value, so read the first field t
 
 ### State digest
 
-A build with `--features state-digest` and `SUNRISE_STATE_DIGEST=<file>` appends one line per level tick: hashes of the entities (join order), their own randoms, the block entities (ticker order) and the scheduled ticks, plus the level random, `Level.randValue`, the entity-id counter and the join counter. Off by default and compiled out. `digest-sync U E S` on a dedicated server's console is `sync_randoms` (needs `SUNRISE_TEST_SEEDS=1`), and `SUNRISE_STATE_DIGEST_DETAIL=1` adds a raw line per entity and block entity. It is how a refactor proves it changes no behaviour: the same scene on the base and on the branch, identical on every tick.
+Build with `-p sunrise-game --features sunrise-client/state-digest` to produce the `sunrise-client` executable.
+Run with `SUNRISE_STATE_DIGEST=<file>` to write one line per level tick. The feature is off by default.
+The digest covers typed entities in join order and their sampled random sources, entities outside the typed lists,
+seat order and rider links, saved UUIDs, live shared fields, players, block entities in ticker order, and scheduled
+ticks. It includes the level random, `Level.randValue`, the entity ID counter and the join counter.
+Retained vehicles and passengers, saved entity memory, and portal state have their own groups.
+Groups prefixed with `server_` sample owners shared by the levels once, on the last level pass of each server tick.
+Their value is `-` on earlier level passes.
+`digest-sync U E S` on the dedicated console runs `sync_randoms` with `SUNRISE_TEST_SEEDS=1`.
+`SUNRISE_STATE_DIGEST_DETAIL=1` adds a raw line per typed entity, block entity and player. Player lines
+contain labelled values or component hashes and list non-zero statistics in key order. With details from both
+runs, the comparators print player component differences at the first tick where the `players` group differs.
 
-- `tools/state_digest_scene.py BINARY RESOURCES TEMPLATE OUT` runs a fixed dedicated-server scene (frozen before the first tick, `tick step N`) and writes `OUT/digest.txt`; `--generate` makes the forceloaded flat template once. Random ticks are off unless `--random-ticks`. `SUNRISE_SCENE_GATE` names an optional script to wait on before each run.
-- `tools/state_digest_players.py BINARY RESOURCES TEMPLATE OUT BOTS` is the same scene with two scripted `sunrise-bots` players (`as_guest`, the level swaps); `--nether` sends one to the Nether, and `--compare A B` compares two runs level by level. The players settle on a wall-clock number of frozen ticks, so the scene pins the randoms again after the settle and only then summons what they can reach; their final `players.txt` still depends on the settle and is reported, not compared; `--integrated` (a LAN guest on a server thread) has no `digest-sync`, so its digest is not comparable run to run either.
-- `--coverage` on either scene tool adds commands for code the default scene never runs (foxes, dolphins and allays that pick up items, a fox that spits out what it held, mobs that pick up loot, tridents, a furnace, a brewing stand, a village with five claimed beds for the cat, a saved wandering-trader delay that runs out inside the window, the siege spawner, and the gamerules and night time they need) and makes `--ticks` default to 2500; the default scene's commands are unchanged, so earlier digests stay comparable. With `state_digest_players.py` Alice stands in the village and gets a Loyalty trident back, and her pickup is placed beside her. After the run the tool writes `OUT/coverage.txt` (each spot reached or missed, the saved trader delay and chance, Alice's pickup stats) and fails when a spot was missed; `state_digest_compare.py` and `--compare` compare that file too. The two-player `--coverage` run is not reproducible run to run (two runs of one binary part within a few hundred ticks, as the bots' moves land on wall-clock ticks over the long window), so it checks its spots and its digest is reported, not compared; the playerless `--coverage` run is reproducible and is the one compared.
-- For gameplay that moved to `sunrise-gameplay` or `sunrise-client-gameplay` (#2210), the digest checks only what it hashes, in the dedicated-server scenes above: entity motion, health and sampled random states, block-entity data, counters and scheduled ticks, plus `coverage.txt`. It does not see the client (rendering, occlusion and particle culling, prediction), sounds, packets, saved stats beyond `coverage.txt`, or the LAN-host run, which cannot pin its randoms; check those with their own harnesses, `lan_e2e` or the game. Harness selection takes candidates from the crate graph (both crates are path dependencies of `sunrise-client`), but an older dependency record that names the old path keeps only the recorded paths when its probe cannot be found (`tools/parity_reach.py`), so read the selected list (`tools/parity.py --changed-files paths.txt --list`) or name the harness.
-- `tools/state_digest_compare.py A/digest.txt B/digest.txt` names the first differing step per group, the game time (`tick`) and the level (`dim`) of each step included. Compare runs from one toolchain: the hashes are not stable across Rust versions.
+- `tools/state_digest_scene.py BINARY RESOURCES TEMPLATE OUT` runs a fixed dedicated-server scene and writes
+  `OUT/digest.txt`. It freezes the server and steps a fixed number of ticks. `--generate` makes the forceloaded
+  flat template once. The scene includes occupied boats and minecarts, a nested passenger tree, a frame, a painting,
+  an armor stand and a mob leashed to a fence. Random ticks are off unless `--random-ticks`.
+  `SUNRISE_SCENE_GATE` names an optional script to wait on before each run.
+- `tools/state_digest_players.py BINARY RESOURCES TEMPLATE OUT BOTS` adds two scripted `sunrise-bots` players.
+  `--nether` sends one to the Nether. `--compare A B` compares two runs level by level. The scene pins the
+  randoms again after the players settle, then summons what they can reach. The digest reads the local body and
+  LAN guest records directly. A mismatch in the per-tick `players` group or final `players.txt` fails the
+  comparison. The `--integrated` run lacks `digest-sync` and may differ between runs. It uses `sunrise-ctl`
+  beside the game binary by default. Use `--ctl PATH` to select another copy.
+- `--coverage` on either scene tool adds commands for code the default scene never runs (foxes, dolphins and allays that pick up items, a fox that spits out what it held, mobs that pick up loot, tridents, a furnace, a brewing stand, a village with five claimed beds for the cat, a saved wandering-trader delay that runs out inside the window, the siege spawner, and the gamerules and night time they need) and makes `--ticks` default to 2500. With `state_digest_players.py` Alice stands in the village and gets a Loyalty trident back, and her pickup is placed beside her. The tool writes `OUT/coverage.txt` with the spots reached, the saved trader delay and chance, and Alice's pickup stats. A missed spot fails the run. Both comparators check that file when present. The two-player `--coverage` run is not reproducible run to run (two runs of one binary part within a few hundred ticks, as the bots' moves land on wall-clock ticks over the long window), so check repeatability group by group before comparing changes. The playerless `--coverage` run avoids the bots’ timing.
+- Check rendering, prediction, sounds, packets and other saved stats with their own harnesses, `lan_e2e` or the game. Harness selection uses the crate graph. For a move into `sunrise-gameplay` or `sunrise-client-gameplay` (#2210), inspect `tools/parity.py --changed-files paths.txt --list` or name the harness directly. A stale dependency record can retain the previous source paths when its probe is unavailable.
+- `tools/state_digest_compare.py A/digest.txt B/digest.txt` names the earliest differing group and reports each group’s first differing step and game time. First compare two runs of the same binary. With either comparator, repeat `--ignore-group GROUP` for observed run-to-run differences that should remain visible without failing the comparison. The player comparator also accepts `player_summary` for `players.txt`. Compare runs built with the same digest groups and Rust toolchain.
 - Keep the measured window free of chunk loading, generation and lighting, and of trial spawners, ominous item spawners and `/item modify` (clock-seeded UUIDs and loot random).
+
+### State transcript
+
+The state transcript compares what the integrated server does with the same scripted scene in vanilla and
+Sunrise. Start with the pinned server artifacts and prepared client resources from the vanilla harness setup.
+Use the JDK from the research lock on `PATH`.
+
+```sh
+python3 tools/test_state_transcript_parity.py --scene base --repeat
+python3 tools/test_state_transcript_parity.py --scene riding --binary target/fast/sunrise-client
+```
+
+The harness is manual and `parity.py` leaves it out. An existing client binary needs the
+`sunrise-client/state-digest` feature. Use `--only vanilla` or `--only sunrise` to record one engine.
+`--repeat` checks that fresh runs of each selected engine produce byte-identical transcripts with the oracle
+cache disabled before comparing across engines. The harness checks each engine's reported view and
+simulation distances, scene chunk readiness, and the clock and membership before the scene summons.
+
+Each run writes its script, fixture manifest, logs and transcripts to a fresh directory under
+`.local/state_transcript/<scene>/`. The cross-engine comparison writes `report.json` there.
+Keep those outputs local.
+
+The transcript covers overworld entities in the ticking set, their stored order, actual turns and departures,
+and the recorded member and level fields. A turn can survive its entity's removal from the ticking set.
+The riding group covers vehicles and passengers. Leashes, block and inventory state, packets, rendering,
+and other levels are outside the comparison.
+
+`tools/state_transcript_compare.py A B` validates the records and script and fixture provenance. Read the
+earliest differing point first, then the first difference in each group. The report includes the entity,
+field, values from both files, and nearby lines for the earliest difference. Later differences can follow
+from that first one. Member state is paired by id and type up to the first divergence in the id sequence
+at each point. The report counts any points with unmatched member state as uncompared. An unknown value
+is counted even when both engines report it. Only differences between known values enter the earliest
+difference or differing-point count. Repeat `--ignore-group GROUP`
+to keep a group visible while omitting it from the result. Use `--json PATH` to save the report.
+The comparator exits with 0 when the included groups match and have full coverage, 1 for a difference,
+unknown value or uncompared state, and 2 for invalid input.
+
+### Packet capture
+
+A build with `--features net-trace` on `sunrise-game` or `sunrise-client` (off by default and compiled out; enabling it on `sunrise-sim` alone is for transport tests without gameplay tick updates) and `SUNRISE_PACKET_CAPTURE=<dir>` pointing at a fresh empty directory atomically claims `<dir>` via `.capture-claim` (failing server startup immediately if `<dir>` is nonempty, already claimed, or unwritable) and records each play connection into `<player>-<conn>.pkt` plus an atomically renamed `manifest.tsv` on server shutdown (covering process crashes and termination, not OS/power-loss durability). Each packet is assigned its per-connection sequence number on the connection's network worker only after framing succeeds—covering reliable sends (after holding and transaction scopes commit), prepared and pairing payloads, keep-alives, kicks, and live droppable payloads in exact wire order without changing pending-byte refund timing—while prepared decompression, hashing (packet id plus length and XXH3-128 of the uncompressed payload after the packet id), file opens/writes, and overflow logging run off both game and network threads on one bounded writer thread (capped in both entry count and retained bytes). The `tick` column is the owning server's world game time at admission for reliable sends and at worker selection for keep-alives, kicks, and droppable sends (so frozen ticks share one game time and pre-advance work carries the previous value). On shutdown, capture seals the play admission gate, waits up to a deadline for active sessions to acknowledge close, drains accepted records, and writes `# end` footers and `# manifest v2` with a terminal session count; incomplete, truncated, overflowed, timed-out, or unflushed recordings fail validation. To compare two runs, record each into its own empty directory and run `python3 tools/packet_capture_compare.py A B` (optionally pinning `--run-id-a` / `--run-id-b`): it validates the manifest, claim, unique connection IDs, contiguous per-player ordinals, filenames, and `# end` footers, matches connections by exact `(player, ordinal)`, prints the first difference per connection (sequence number, tick, packet id and name, lengths, and hashes), and exits non-zero on any difference, unequal count, unmatched connection, or invalid/incomplete capture. Pass `--ignore` (off by default; `--help` lists the protocol packets carrying wall-clock fields) only when needed—filtered passes prove equality solely for retained records, and controlled parity runs should avoid clock-dependent commands (such as `/debug stop`) and network-driven chunk batching.
 
 ### Fuzzing scenarios
 
@@ -220,13 +281,16 @@ python3 tools/parity_fuzz.py --smoke --binary target/fast/sunrise-client  # fixe
 python3 tools/parity_fuzz.py persist --seed 1                            # summon or place, unload and reload, read
 python3 tools/parity_fuzz.py spawn --seed 1                              # each spawn mechanism, read tick by tick
 python3 tools/parity_fuzz.py --replay scenarios.json                      # run saved scenario steps, not a regenerated seed
+python3 tools/parity_fuzz.py --promote group.json --name case-name         # save passing reproductions
+python3 tools/parity_fuzz.py --corpus                                     # replay all saved cases
 ```
 
 - **Scenarios.** A scenario stores its seed and steps: summon or place with NBT, run a command, tick, activate a dispenser, reload a chunk, or read saved state. Each gets a forceloaded chunk away from the player. Both engines tick to the same game time before syncing their randoms ("Randoms that repeat"). A reload removes the forced ticket and ticks with chunk I/O enabled. A guard checks that the chunk is no longer loaded and vanilla has released its pending unload before it is forced back in; Sunrise's own unload is not read directly, it is inferred from the `/execute unless loaded` result. The load waits for terrain, lighting and entities without advancing game time. Summoned entities get fixed UUIDs.
 - **Families** (`tools/parity_fuzz_scenarios.py`). `persist` reads an entity or block entity with changed fields before and after a reload. It discovers vanilla's saved fields and caches them as `defaults.json` in the work directory; a crashed discovery is not cached. The default field order and set of types affect generation, so keep the steps when sharing a case. `spawn` uses its own tables, then reads the new entity across ticks. Item-drop reads observe all items in the scenario area as an unordered collection, preserving duplicate stacks: the order of entities in an area query is not something the scenarios pin down, so an order difference is not reported here.
 - **Comparison.** A `/data get` read is parsed as SNBT and compared field by field. Key order and the order of `attributes` records do not matter. Other commands compare like the harness (feedback, styles, results). Each batch also runs the same script in vanilla alone: a read that differs between the two vanilla runs is counted as `vanilla-unstable`, not compared against Sunrise.
-- **Grouping and shrinking.** Each diverging read is grouped by family, subject type, whether the read came after a reload, and first differing field. Each group's smallest scenario is shrunk (steps and NBT keys dropped, tick counts halved) while that group's divergence stays, trying all edits of a round in one batch. `report.json` in the work directory lists the groups, largest first, each with its seeds, its shrunk scenario as commands, and its differences.
-- **Triage before filing.** A group is a lead, not a bug: read the vanilla source for the field, check it isn't a seed-sync limit (above) or harness noise, and search existing issues first.
+- **Grouping and shrinking.** Each diverging read is grouped by family, subject type, whether the read came after a reload, and first differing field. Each group's smallest scenario is shrunk (steps and NBT keys dropped, tick counts halved) while that group's divergence stays, trying all edits of a round in one batch. `report.json` in the work directory lists the groups, largest first, each with its shrunk and original scenario, rendered commands, and differences. This report includes vanilla output; do not publish it.
+- **Promotion and corpus.** After fixing a divergence, save its group from the private report as JSON and promote it in the fix PR. The tool replays both the shrunk and original inputs, refuses anything that does not match, and writes one JSON file under `tools/fuzz_corpus/` with only the input scenarios and provenance. You can also promote a standalone saved scenario; it supplies both inputs and has no known divergence signature. `--corpus` discovers the files in that directory and replays both inputs of each case together. It exits nonzero and names any cases that did not match. The corpus is report-only, not a `parity.py` harness or release gate.
+- **Daily report.** On a writing run of main's head, `parity-fuzz.yml` runs after vanilla parity. It runs smoke, the promoted corpus, the scenarios in open fuzz issues, and a fresh seed window for each family derived from the UTC date. It shrinks only new groups, within a cap. The fuzz issues are leads: replay the input and check the field and random stream before changing the game. A passing replay closes an existing issue unless the run still sees the same signature. The raw report and logs stay on the runner under `fuzz/` in its keep folder (`$DYNA_CI_KEEP`, else `keep/` under `$DYNA_CI_BUILD`); runs older than 14 days are removed; the `fuzz-scenarios` artifact has only scenario inputs and signatures. Fuzz results never hold the SDK or Nightly.
 
 ### Fuzzing the shader-pack translator
 

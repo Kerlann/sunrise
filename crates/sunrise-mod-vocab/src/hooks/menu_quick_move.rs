@@ -1,5 +1,4 @@
 //! The `menu_quick_move` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0235
 
 pub trait Hooks {
     /// A player shift-clicked slot `slot` of the menu of the mod block
@@ -71,7 +70,7 @@ all you want in one call. The clicking player's state is swapped in (`subject.ho
 thread, LAN guests, a dedicated server) shift-click this way; a native mod's own menus (`native_open_menu`) get their
 clicks already."#]
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_menu_quick_move",
+        target = "sunrise_gameplay_common::game::native_hooks::base::native_menu_quick_move",
         receiver = "associated",
         dispatch = "flat",
         side = "server",

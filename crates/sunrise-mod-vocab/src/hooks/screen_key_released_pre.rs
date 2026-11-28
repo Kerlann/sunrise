@@ -1,5 +1,4 @@
 //! The `screen_key_released_pre` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0120
 
 pub trait Hooks {
     /// Before the currently open screen handles a named key's release.
@@ -10,15 +9,14 @@ pub trait Hooks {
     /// control-key release; a held mapping can stay down. Cancelling an unhandled release in
     /// Post instead skips normal mapped release on either route, after the screen has declined.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_screen_key_released_pre",
-        receiver = "read",
+        target = "sunrise_client_gameplay::game::native_hooks::base::ClientGame<'_>::native_screen_key_released_pre",
         dispatch = "flat",
         side = "client",
         contract = "cancel",
         out = "canceled",
         neoforge = "ScreenEvent.KeyReleased.Pre",
         cancellable = true,
-        version = 3
+        version = 4
     )]
     fn screen_key_released_pre(
         screen: &ScreenView<'_>,

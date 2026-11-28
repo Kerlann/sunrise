@@ -10,7 +10,10 @@
   <a href="#download"><b>Download</b></a> ·
   <a href="https://playsunrise.net/docs/"><b>Docs</b></a> ·
   <a href="ROADMAP.md"><b>Roadmap</b></a> ·
-  <a href="#contributing"><b>Contributing</b></a>
+  <a href="#contributing"><b>Contributing</b></a> ·
+  <a href="https://x.com/sunriserust"><b>X</b></a> ·
+  <a href="https://www.instagram.com/sunrise.rust/"><b>Instagram</b></a> ·
+  <a href="https://www.youtube.com/@playsunrise"><b>YouTube</b></a>
 </p>
 
 <p align="center">
@@ -31,7 +34,7 @@ Everything below is in the current release.
 
 - **The game.** Survival, creative, hardcore and spectator; vanilla world generation in all three dimensions, mobs, villagers, raids, redstone, every command, the HUD and the recipe book. Vanilla saves open as they are, and worlds from 1.8 to 26.2 are upgraded.
 - **Multiplayer.** Join vanilla and Sunrise servers (online mode included), open a world to LAN, or invite friends with a code from the launcher's Home page.
-- **Graphics.** Distant terrain up to 1,024 chunks, graphics presets, HDR and controllers, all off by default where they would change the vanilla look ([settings](https://playsunrise.net/docs/settings)).
+- **Graphics.** Graphics presets, HDR and controllers, all off by default where they would change the vanilla look ([settings](https://playsunrise.net/docs/settings)).
 - **Packs.** Resource packs, data packs and shader packs ([below](#mods-and-shader-packs)).
 - **Mods.** Content mods and native Rust mods, installed from the launcher ([below](#mods-and-shader-packs)).
 - **Servers.** Host one from the launcher, or run `sunrise-server` on a VPS ([below](#host-a-server)).
@@ -86,7 +89,7 @@ Get **the Sunrise launcher** from [playsunrise.net/download](https://playsunrise
 - **Content mods** (`.smod`): blocks, items, recipes, loot, models and textures, with no code.
 - **Native mods** (also `.smod`, whose manifest has a `[native]` table): Rust that the launcher compiles into the game for you, with nothing to install.
 - **Java mods** (Fabric, NeoForge, Forge) don't run: Sunrise has no Java. The launcher carries over the data and assets inside their jars, and imports modpacks (`.mrpack`, CurseForge zips, Prism instances) the same way ([modpacks](https://playsunrise.net/docs/modpacks)).
-- **Shader packs**: Iris/OptiFine-format packs (`shaders/` folders) and Sunrise's own WGSL packs, under Sunrise Graphics → Shaders → Shader Packs ([pack format](docs/shaders.md)).
+- **Shader packs**: Iris/OptiFine-format packs (`shaders/` folders), under Sunrise Graphics → Shaders → Shader Packs ([pack format](docs/shaders.md)).
 
 Mods are off by default: a fresh install plays exactly like vanilla 26.3. The launcher's Mods page browses Sunrise's registry and Modrinth. [Mods](https://playsunrise.net/docs/mods) · [make a mod](docs/modding/src/introduction.md).
 

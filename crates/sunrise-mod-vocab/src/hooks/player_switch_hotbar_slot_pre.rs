@@ -1,5 +1,4 @@
 //! The `player_switch_hotbar_slot_pre` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0291
 
 pub trait Hooks {
     /// `PlayerSwitchHotbarSlotEvent.Pre`: a server player is switching from hotbar slot
@@ -8,7 +7,7 @@ pub trait Hooks {
     /// swapped in. Set `cancel` to keep the old slot; the client is sent that slot again,
     /// and `player_switch_hotbar_slot_post` doesn't fire.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_player_switch_hotbar_slot_pre",
+        target = "sunrise_gameplay::game::native_hooks::base::ServerGame<'_>::native_player_switch_hotbar_slot_pre",
         dispatch = "flat",
         side = "server",
         contract = "cancel",

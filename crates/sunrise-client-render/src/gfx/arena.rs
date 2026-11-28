@@ -6,6 +6,9 @@
 //! page of each and draws in a few multi-draws.
 use std::collections::{BTreeMap, VecDeque};
 #[cfg(test)]
+#[path = "arena/normal_tests.rs"]
+mod normal_tests;
+#[cfg(test)]
 #[path = "arena/source_tests.rs"]
 mod source_tests;
 
@@ -22,9 +25,12 @@ pub const LARGE_PAGE_BYTES: u64 = (1 << 31) - (1 << 20);
 
 /// Bytes of a slot's source in a page's sidecar (`Page::sources`).
 const SOURCE_BYTES: u64 = std::mem::size_of::<crate::mesher::TerrainSource>() as u64;
+/// Bytes of a vertex's entry in a page's normal stream (`Page::normals`): its normal, its
+/// tangent, and its quad's block id and source word (`terrain_normals::Entry`).
+const NORMAL_BYTES: u64 = sunrise_render_shaderpack::pack_atlas::NORMAL_BYTES;
 
 /// Where a range names its quads, for their sources (`Arena::write_sources`): quad `i` by the
-/// slot `step * i` of the range. A flat draw finds a quad's source at that slot
+/// slot `step * i` of the range. A draw that reads the page finds a quad's source at that slot
 /// (`pack_atlas`'s `hz_slot`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QuadSlots {
@@ -54,16 +60,25 @@ impl QuadSlots {
         slots: u64,
         out: &mut Vec<crate::mesher::TerrainSource>,
     ) -> bool {
-        let quads = sources.len() as u64;
-        if quads == 0 || quads != self.quads || quads * self.step > slots {
+        let Some(len) = self.laid_out(sources.len(), slots) else {
             return false;
-        }
+        };
         out.clear();
-        out.resize((self.quads * self.step) as usize, Default::default());
+        out.resize(len as usize, Default::default());
         for (to, source) in out.iter_mut().step_by(self.step as usize).zip(sources) {
             *to = *source;
         }
         true
+    }
+}
+
+impl QuadSlots {
+    /// The slots `lay_out` fills for `sources` sources in a range of `slots`, or none where it
+    /// lays out nothing.
+    fn laid_out(self, sources: usize, slots: u64) -> Option<u64> {
+        let quads = sources as u64;
+        (quads > 0 && quads == self.quads && quads * self.step <= slots)
+            .then_some(quads * self.step)
     }
 }
 
@@ -135,6 +150,10 @@ struct Page {
     /// Optional shader-pack source records, one per vertex slot: a quad's sits at the slot
     /// that names it (`QuadSlots`), the others are zero.
     sources: Option<wgpu::Buffer>,
+    /// The normal stream: each vertex slot's normal, tangent, block id and source word
+    /// (`NORMAL_BYTES`), where the arena keeps one (`Arena::normals`); made, grown and dropped
+    /// with the page.
+    normals: Option<wgpu::Buffer>,
     /// Capacity in vertices.
     capacity: u64,
     free: FreeList,
@@ -145,13 +164,32 @@ struct Page {
 
 impl Page {
     fn bytes(&self) -> u64 {
-        self.buffer.size() + self.sources.as_ref().map_or(0, wgpu::Buffer::size)
+        self.buffer.size()
+            + self.sources.as_ref().map_or(0, wgpu::Buffer::size)
+            + self.normals.as_ref().map_or(0, wgpu::Buffer::size)
+    }
+
+    /// Its vertices up to the end of its last range in use (`Arena::binding`).
+    fn bound(&self) -> u64 {
+        let end = match self.free.0.last_key_value() {
+            Some((&start, &len)) if start + len == self.capacity => start,
+            _ => self.capacity,
+        };
+        // A page a draw names holds a range; wgpu refuses an empty slice.
+        end.max(GRAIN)
     }
 
     /// Vertices in the page's free ranges.
     fn free_vertices(&self) -> u64 {
         self.free.0.values().sum()
     }
+}
+
+/// A new page's buffers (`Arena::create_page`).
+struct PageBuffers {
+    buffer: wgpu::Buffer,
+    normals: Option<wgpu::Buffer>,
+    host: bool,
 }
 
 /// An arena with this many bytes in free ranges, at least half of its pages,
@@ -174,12 +212,16 @@ pub struct Arena {
     closing: Option<u32>,
     /// A page had to go to system memory (logged once).
     spilled: bool,
-    /// Flat draws read its sources (`read_sources`): a `shaders/` pack draws terrain from it.
+    /// Draws read its sources (`read_sources`): a `shaders/` pack draws terrain from it, flat or
+    /// per section reading its pages.
     sources_read: bool,
     /// Its pages have sidecars: a mesh with sources came while they are read.
     sources_enabled: bool,
     /// `write_sources`'s range of sources by slot, kept between uploads.
     source_slots: Vec<crate::mesher::TerrainSource>,
+    /// Every page has a normal stream (`with_normals`): a `shaders/` pack's terrain programs read
+    /// it in per-section draws (`pack_atlas::TerrainDraws::Normals`).
+    normals: bool,
     /// Tests: GPU-local pages fail as if video memory were full.
     #[cfg(test)]
     video_memory_full: bool,
@@ -218,7 +260,7 @@ impl Arena {
     }
     /// Sorted indices of the translucent arena's quads: pages up to
     /// `LARGE_PAGE_BYTES` as its own, so its draws keep to one index page too.
-    pub fn translucent_indices(device: &wgpu::Device, capacity: u64) -> Self {
+    pub(crate) fn translucent_indices(device: &wgpu::Device, capacity: u64) -> Self {
         let usage = wgpu::BufferUsages::INDEX;
         Self::with_usage(device, 4, capacity, usage, LARGE_PAGE_BYTES)
     }
@@ -226,11 +268,14 @@ impl Arena {
     /// (vertices of `stride`) with large pages, which no shader binds;
     /// otherwise translucent quads stay in the section arena. The indices go in
     /// large pages too, unless flat draws (`flat`) bind their pages as storage.
-    pub fn translucent_arenas(
+    /// The translucent arena keeps a normal stream where the section arena does
+    /// (`normals`, `with_normals`).
+    pub(crate) fn translucent_arenas(
         device: &wgpu::Device,
         stride: u64,
         flat: bool,
         split: bool,
+        normals: bool,
     ) -> (Self, Option<Self>) {
         let indices = if split && !flat {
             Self::translucent_indices(device, 1 << 16)
@@ -239,7 +284,7 @@ impl Arena {
         };
         (
             indices,
-            split.then(|| Self::translucent(device, stride, 1 << 18)),
+            split.then(|| Self::translucent(device, stride, 1 << 18).with_normals(normals)),
         )
     }
     fn with_usage(
@@ -263,9 +308,21 @@ impl Arena {
             sources_read: false,
             sources_enabled: false,
             source_slots: Vec::new(),
+            normals: false,
             #[cfg(test)]
             video_memory_full: false,
         }
+    }
+    /// The arena, with a normal stream beside every page's vertices where `on`
+    /// (`pack_atlas::TerrainDraws::Normals`). Before any page is made.
+    pub(crate) fn with_normals(mut self, on: bool) -> Self {
+        debug_assert!(self.pages.is_empty());
+        self.normals = on;
+        self
+    }
+    /// Whether every page has a normal stream (`with_normals`).
+    pub(crate) fn has_normals(&self) -> bool {
+        self.normals
     }
     /// Vertices of `stride` bytes a page of `usage` holds on a device of `limits`: pages of
     /// `page_bytes`, or less where the device's buffers (or the storage bindings that read them
@@ -293,7 +350,56 @@ impl Arena {
         spill: bool,
     ) -> Option<(wgpu::Buffer, bool)> {
         let usage = self.usage | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
-        let (label, bytes) = ("Section buffer arena", capacity * self.stride);
+        self.create_buffer(
+            device,
+            "Section buffer arena",
+            capacity * self.stride,
+            usage,
+            spill,
+        )
+    }
+    /// `create`'s page buffer and, where the arena keeps one (`normals`), its normal stream:
+    /// both or neither, so every page of such an arena has one. In system memory (`host`) when
+    /// either went there.
+    fn create_page(
+        &mut self,
+        device: &wgpu::Device,
+        capacity: u64,
+        spill: bool,
+    ) -> Option<PageBuffers> {
+        let (buffer, host) = self.create(device, capacity, spill)?;
+        if !self.normals {
+            return Some(PageBuffers {
+                buffer,
+                normals: None,
+                host,
+            });
+        }
+        let usage = wgpu::BufferUsages::VERTEX
+            | wgpu::BufferUsages::COPY_DST
+            | wgpu::BufferUsages::COPY_SRC;
+        let (normals, normals_host) = self.create_buffer(
+            device,
+            "Terrain normals",
+            capacity * NORMAL_BYTES,
+            usage,
+            spill,
+        )?;
+        Some(PageBuffers {
+            buffer,
+            normals: Some(normals),
+            host: host || normals_host,
+        })
+    }
+    /// `create` of `bytes` of `usage`.
+    fn create_buffer(
+        &mut self,
+        device: &wgpu::Device,
+        label: &str,
+        bytes: u64,
+        usage: wgpu::BufferUsages,
+        spill: bool,
+    ) -> Option<(wgpu::Buffer, bool)> {
         #[cfg(test)]
         let local = (!self.video_memory_full)
             .then(|| try_create(device, label, bytes, usage))
@@ -338,18 +444,14 @@ impl Arena {
     /// submitted, most of a page just made or grown.
     pub fn binding(&self, page: u32) -> wgpu::BufferSlice<'_> {
         let p = self.pages[page as usize].as_ref().expect("live arena page");
-        let end = match p.free.0.last_key_value() {
-            Some((&start, &len)) if start + len == p.capacity => start,
-            _ => p.capacity,
-        };
-        // A page a draw names holds a range; wgpu refuses an empty slice.
-        p.buffer.slice(..end.max(GRAIN) * self.stride)
+        p.buffer.slice(..p.bound() * self.stride)
     }
-    pub fn has_page(&self, page: u32) -> bool {
+
+    pub(crate) fn has_page(&self, page: u32) -> bool {
         self.pages.get(page as usize).is_some_and(Option::is_some)
     }
     /// Each live page's buffer, by page.
-    pub fn page_buffers(&self) -> impl Iterator<Item = (u32, &wgpu::Buffer)> {
+    pub(crate) fn page_buffers(&self) -> impl Iterator<Item = (u32, &wgpu::Buffer)> {
         let pages = self.pages.iter().enumerate();
         pages.filter_map(|(i, p)| Some((i as u32, &p.as_ref()?.buffer)))
     }
@@ -364,8 +466,20 @@ impl Arena {
         self.pages[page as usize].as_ref()?.sources.as_ref()
     }
 
+    /// `page`'s normal stream, where the arena keeps one (`with_normals`).
+    pub fn normals(&self, page: u32) -> Option<&wgpu::Buffer> {
+        self.pages[page as usize].as_ref()?.normals.as_ref()
+    }
+
+    /// `page`'s normal stream up to the end of its last range in use, as `binding` binds its
+    /// vertices; `None` where the arena keeps none.
+    pub(crate) fn normals_binding(&self, page: u32) -> Option<wgpu::BufferSlice<'_>> {
+        let p = self.pages[page as usize].as_ref().expect("live arena page");
+        Some(p.normals.as_ref()?.slice(..p.bound() * NORMAL_BYTES))
+    }
+
     fn source_buffer(device: &wgpu::Device, capacity: u64) -> Option<wgpu::Buffer> {
-        // Flat draws bind it whole (`pack_atlas`'s `hz_sources`).
+        // Draws that read the page bind it whole (`pack_atlas`'s `hz_sources`).
         if capacity * SOURCE_BYTES > device.limits().max_storage_buffer_binding_size {
             return None;
         }
@@ -379,12 +493,12 @@ impl Arena {
         )
     }
 
-    /// Whether flat draws read its sources (`read_sources`).
-    pub fn sources_read(&self) -> bool {
+    /// Whether draws read its sources (`read_sources`).
+    pub(crate) fn sources_read(&self) -> bool {
         self.sources_read
     }
 
-    /// Whether flat draws read its sources from now on: while they don't, sources are not kept
+    /// Whether draws read its sources from now on: while they don't, sources are not kept
     /// and its pages have no sidecars. Turning it off gives back their buffers, for a
     /// [`Graveyard`].
     pub fn read_sources(&mut self, on: bool) -> Vec<wgpu::Buffer> {
@@ -405,11 +519,11 @@ impl Arena {
     }
 
     /// The sources of the range of `slots` at `start` of `page`, one per quad as `names` says
-    /// where each quad is named, kept only while flat draws read them (`read_sources`).
+    /// where each quad is named, kept only while draws read them (`read_sources`).
     /// Native meshes allocate no sidecar. Once needed, existing pages also get a zeroed
     /// sidecar so moves can retain sources. Failure leaves geometry intact and attributes
-    /// unknown; a later source upload may retry its page.
-    pub fn write_sources(
+    /// unknown; a later source upload may retry its page. The bytes it uploaded.
+    pub(crate) fn write_sources(
         &mut self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
@@ -417,9 +531,9 @@ impl Arena {
         (page, start, slots): (u32, u64, u64),
         names: QuadSlots,
         sources: &[crate::mesher::TerrainSource],
-    ) {
+    ) -> u64 {
         if !self.sources_read {
-            return;
+            return 0;
         }
         if !sources.is_empty() && !self.sources_enabled {
             self.sources_enabled = true;
@@ -446,13 +560,79 @@ impl Arena {
                         start * SOURCE_BYTES,
                         bytemuck::cast_slice(&self.source_slots),
                     );
+                    return self.source_bytes(names, sources.len(), slots);
                 }
             }
         }
+        0
     }
-    /// Bytes of one vertex (or index).
-    pub fn stride(&self) -> u64 {
-        self.stride
+    /// The normal stream of `vertices`, written at `start` of `page` (`terrain_normals::stream`),
+    /// where the arena keeps one (`with_normals`): with each quad's source and its id under
+    /// `ids` where `sources` has one a quad, as `write_sources` keeps them, else none. The bytes
+    /// it wrote.
+    pub(crate) fn write_normals(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        uploads: &mut super::upload::Uploads,
+        (page, start): (u32, u64),
+        vertices: &[crate::mesher::TerrainVertex],
+        sources: &[crate::mesher::TerrainSource],
+        ids: &[i32],
+    ) -> u64 {
+        use super::terrain_normals::{CHUNK, Entry, stream};
+        if !self.normals || vertices.is_empty() {
+            return 0;
+        }
+        let p = self.pages[page as usize].as_ref().expect("live arena page");
+        let buffer = p.normals.as_ref().expect("every page has a normal stream");
+        let sources = if sources.len() == vertices.len() / 4 {
+            sources
+        } else {
+            &[]
+        };
+        // A chunk at a time, on the stack: the arena keeps no buffer of its own for it, nor
+        // grows the `Renderer` the game holds inline.
+        let mut entries = [Entry::default(); CHUNK];
+        let chunks = vertices.chunks(CHUNK);
+        for (i, chunk) in chunks.enumerate() {
+            let entries = &mut entries[..chunk.len()];
+            let quads = sources.get(i * CHUNK / 4..).unwrap_or(&[]);
+            stream(chunk, quads, ids, entries);
+            let at = start + (i * CHUNK) as u64;
+            uploads.buffer(
+                encoder,
+                buffer,
+                at * NORMAL_BYTES,
+                bytemuck::cast_slice(entries),
+            );
+        }
+        self.stream_bytes(vertices.len() as u64)
+    }
+    /// Bytes `write_sources` uploads for `sources` sources of a range of `slots` named as
+    /// `names` says: a source a slot it lays out while sources are read, else none.
+    pub(crate) fn source_bytes(&self, names: QuadSlots, sources: usize, slots: u64) -> u64 {
+        let laid_out = names.laid_out(sources, slots).filter(|_| self.sources_read);
+        laid_out.map_or(0, |slots| slots * SOURCE_BYTES)
+    }
+    /// Bytes `write_normals` uploads for `vertices` vertices: an entry each where the arena
+    /// keeps a normal stream (`with_normals`), else none.
+    pub(crate) fn stream_bytes(&self, vertices: u64) -> u64 {
+        if self.normals {
+            vertices * NORMAL_BYTES
+        } else {
+            0
+        }
+    }
+    /// Bytes a vertex (or index) takes in the arena's pages: its own (`stride`) and, where the arena keeps
+    /// a normal stream, its entry there, and where its pages have source sidecars, its slot's
+    /// source. What moving or uploading a vertex copies.
+    pub fn vertex_bytes(&self) -> u64 {
+        let sources = if self.sources_enabled {
+            SOURCE_BYTES
+        } else {
+            0
+        };
+        self.stride + if self.normals { NORMAL_BYTES } else { 0 } + sources
     }
     /// Vertices in `page`'s ranges in use (as `span` rounds them).
     pub fn used(&self, page: u32) -> u64 {
@@ -496,11 +676,16 @@ impl Arena {
         .max(len)
         .min(self.page_limit);
         // A page just large enough when memory is short.
-        let ((buffer, host), capacity) = match self.create(device, capacity, true) {
-            Some(buffer) => (buffer, capacity),
-            None if capacity > len => (self.create(device, len, true)?, len),
+        let (made, capacity) = match self.create_page(device, capacity, true) {
+            Some(made) => (made, capacity),
+            None if capacity > len => (self.create_page(device, len, true)?, len),
             None => return None,
         };
+        let PageBuffers {
+            buffer,
+            normals,
+            host,
+        } = made;
         let mut free = FreeList::new(capacity);
         let start = free.take(len).expect("a new page fits one section");
         let page = Page {
@@ -509,6 +694,7 @@ impl Arena {
                 .sources_enabled
                 .then(|| Self::source_buffer(device, capacity))
                 .flatten(),
+            normals,
             capacity,
             free,
             host,
@@ -527,7 +713,7 @@ impl Arena {
     }
     /// A range of `vertices` in a page that exists already and is not being
     /// emptied: never grows the arena.
-    pub fn alloc_existing(&mut self, vertices: u64) -> Option<(u32, u64)> {
+    pub(crate) fn alloc_existing(&mut self, vertices: u64) -> Option<(u32, u64)> {
         let len = Self::span(vertices).min(self.page_limit);
         let closing = self.closing;
         self.pages
@@ -538,7 +724,7 @@ impl Arena {
     }
     /// `alloc_existing` for a mesh moved off the closing page: only pages in
     /// video memory, so compaction never pushes terrain into system memory.
-    pub fn alloc_moved(&mut self, vertices: u64) -> Option<(u32, u64)> {
+    pub(crate) fn alloc_moved(&mut self, vertices: u64) -> Option<(u32, u64)> {
         let len = Self::span(vertices).min(self.page_limit);
         let closing = self.closing;
         self.pages
@@ -552,7 +738,7 @@ impl Arena {
     /// the one with the fewest vertices in use that the other pages' free
     /// ranges can take. `None` when the arena is dense enough or already
     /// emptying a page.
-    pub fn sparsest(&self) -> Option<u32> {
+    pub(crate) fn sparsest(&self) -> Option<u32> {
         self.sparsest_from(COMPACT_MIN_FREE)
     }
     /// `sparsest` for an arena with at least `min_free` bytes in free ranges.
@@ -568,7 +754,7 @@ impl Arena {
         };
         let free: u64 = pages().map(|(_, p)| p.free_vertices()).sum();
         let capacity: u64 = pages().map(|(_, p)| p.capacity).sum();
-        if free * self.stride < min_free || free * 2 < capacity {
+        if free * self.vertex_bytes() < min_free || free * 2 < capacity {
             return None;
         }
         // Moves only go to video-memory pages (`alloc_moved`).
@@ -590,7 +776,8 @@ impl Arena {
     }
     /// A page far larger than its ranges in use, and the capacity a page of them
     /// gets (`grown`: twice theirs, or `PAGE_BYTES` more; at least the first
-    /// page's): one of `SHRINK_MIN_BYTES` or more, with ranges in use (an empty
+    /// page's): one of `SHRINK_MIN_BYTES` or more (its normal stream counted,
+    /// `vertex_bytes`), with ranges in use (an empty
     /// one is `trim`'s), that this halves or makes `PAGE_BYTES` smaller. In
     /// system memory too (`open_page` makes the new one in video memory). None
     /// while a page is closing; the page it leads to is not oversized until its
@@ -609,7 +796,7 @@ impl Arena {
                 .next_multiple_of(GRAIN)
                 .min(self.page_limit);
             let smaller = 2 * capacity <= p.capacity || capacity + saving <= p.capacity;
-            (p.capacity * self.stride >= SHRINK_MIN_BYTES && used > 0 && smaller)
+            (p.capacity * self.vertex_bytes() >= SHRINK_MIN_BYTES && used > 0 && smaller)
                 .then_some((i as u32, capacity))
         })
     }
@@ -618,8 +805,13 @@ impl Arena {
     /// `oversized` page (`alloc_moved`) and for new ranges meanwhile. False, and
     /// nothing changes, when video memory has no room for it: in system memory it
     /// would slow every frame that draws it.
-    pub fn open_page(&mut self, device: &wgpu::Device, capacity: u64) -> bool {
-        let Some((buffer, host)) = self.create(device, capacity, false) else {
+    pub(crate) fn open_page(&mut self, device: &wgpu::Device, capacity: u64) -> bool {
+        let Some(PageBuffers {
+            buffer,
+            normals,
+            host,
+        }) = self.create_page(device, capacity, false)
+        else {
             return false;
         };
         let free = FreeList::new(capacity);
@@ -629,6 +821,7 @@ impl Arena {
                 .sources_enabled
                 .then(|| Self::source_buffer(device, capacity))
                 .flatten(),
+            normals,
             capacity,
             free,
             host,
@@ -663,6 +856,15 @@ impl Arena {
             to.1 * self.stride,
             vertices * self.stride,
         );
+        if let (Some(from_normals), Some(to_normals)) = (self.normals(from.0), self.normals(to.0)) {
+            encoder.copy_buffer_to_buffer(
+                from_normals,
+                from.1 * NORMAL_BYTES,
+                to_normals,
+                to.1 * NORMAL_BYTES,
+                vertices * NORMAL_BYTES,
+            );
+        }
         if let Some(to_sources) = self.sources(to.0) {
             let bytes = vertices * SOURCE_BYTES;
             if bytes > 0 {
@@ -732,7 +934,12 @@ impl Arena {
     ) -> bool {
         let capacity = capacity.next_multiple_of(GRAIN).min(self.page_limit);
         let spill = capacity * self.stride <= PAGE_BYTES;
-        let Some((buffer, host)) = self.create(device, capacity, spill) else {
+        let Some(PageBuffers {
+            buffer,
+            normals,
+            host,
+        }) = self.create_page(device, capacity, spill)
+        else {
             return false;
         };
         let sources = self
@@ -745,8 +952,12 @@ impl Arena {
         if let (Some(from), Some(to)) = (&old.sources, &sources) {
             encoder.copy_buffer_to_buffer(from, 0, to, 0, from.size());
         }
+        if let (Some(from), Some(to)) = (&old.normals, &normals) {
+            encoder.copy_buffer_to_buffer(from, 0, to, 0, from.size());
+        }
         self.page_bytes -= old.bytes();
         old.sources = sources;
+        old.normals = normals;
         let previous = old.capacity;
         old.buffer = buffer;
         old.host = host;
@@ -767,6 +978,7 @@ impl Arena {
             {
                 self.page_bytes -= p.bytes();
                 released.push(p.buffer);
+                released.extend(p.normals);
             }
         }
         if self.closing.is_some_and(|page| !self.has_page(page)) {
@@ -782,7 +994,11 @@ impl Arena {
     pub fn clear(&mut self) -> Vec<wgpu::Buffer> {
         self.closing = None;
         self.page_bytes = 0;
-        self.pages.drain(..).flatten().map(|p| p.buffer).collect()
+        self.pages
+            .drain(..)
+            .flatten()
+            .flat_map(|p| std::iter::once(p.buffer).chain(p.normals))
+            .collect()
     }
 }
 
@@ -829,7 +1045,7 @@ impl<T> Graveyard<T> {
 
 /// Drops `items` on a short-lived thread of its own, as `chunk::free_columns` does for
 /// unloaded chunks; should the thread not start, they drop here.
-pub fn free_later<T: Send + 'static>(items: Vec<T>) {
+pub(crate) fn free_later<T: Send + 'static>(items: Vec<T>) {
     if items.is_empty() {
         return;
     }
@@ -1154,7 +1370,6 @@ mod tests {
             solid,
             solid_slots: u64::from(solid) * 4,
             packed: false,
-            packed_far: false,
             sides: crate::mesher::Sides::unsorted(solid),
             translucent,
             sort: super::super::translucency::SortState::new(Vec::new()),
@@ -1162,8 +1377,6 @@ mod tests {
             flat_id: None,
             gpu_id: None,
             gpu_fading: false,
-            fading: None,
-            leaving: None,
             animated_layers: Box::new([]),
         };
         for split in [true, false] {
@@ -1221,14 +1434,13 @@ mod tests {
             assert_eq!(records.page_sections(), [recorded], "split {split}");
             arena.close(0);
             let mut encoder = device.create_command_encoder(&Default::default());
-            let meshes = sections.iter_mut().map(|s| (s, None));
+            let meshes = sections.iter_mut();
             let mut budget = u64::MAX;
             assert!(move_off_page(
                 &mut arena,
                 &mut encoder,
                 None,
                 Some(&mut records),
-                None,
                 meshes,
                 0,
                 Part::Section { split },
@@ -1370,7 +1582,6 @@ mod tests {
             solid: 64,
             solid_slots: 64 * 4,
             packed: false,
-            packed_far: false,
             sides: crate::mesher::Sides::unsorted(64),
             translucent: 128,
             sort: super::super::translucency::SortState::new(Vec::new()),
@@ -1378,8 +1589,6 @@ mod tests {
             flat_id: Some(id),
             gpu_id: None,
             gpu_fading: false,
-            fading: None,
-            leaving: None,
             animated_layers: Box::new([]),
         };
         translucent.close(0);
@@ -1389,8 +1598,7 @@ mod tests {
             &mut encoder,
             Some((&mut flat, &device, &mut uploads)),
             None,
-            None,
-            std::iter::once((&mut section, None)),
+            std::iter::once(&mut section),
             0,
             Part::Translucent,
             &mut budget
@@ -1537,7 +1745,8 @@ mod tests {
             for flat in [false, true] {
                 for split in [false, true] {
                     let case = format!("large {large}, flat {flat}, split {split}");
-                    let (indices, translucent) = Arena::translucent_arenas(device, 24, flat, split);
+                    let (indices, translucent) =
+                        Arena::translucent_arenas(device, 24, flat, split, false);
                     assert_eq!(translucent.is_some(), split, "{case}");
                     let bytes = indices.page_vertices() * 4;
                     let storage = indices.usage.contains(wgpu::BufferUsages::STORAGE);
@@ -1615,7 +1824,6 @@ mod tests {
                 solid,
                 solid_slots: u64::from(solid) * 4,
                 packed: false,
-                packed_far: false,
                 sides: crate::mesher::Sides::unsorted(solid),
                 translucent,
                 sort: super::super::translucency::SortState::new(Vec::new()),
@@ -1623,8 +1831,6 @@ mod tests {
                 flat_id: None,
                 gpu_id: None,
                 gpu_fading: false,
-                fading: None,
-                leaving: None,
                 animated_layers: Box::new([]),
             };
             let mut uploads = super::super::upload::Uploads::new(&device);
@@ -1674,9 +1880,9 @@ mod tests {
                          encoder: &mut _,
                          meshes: &mut [(u32, SectionGpu)],
                          budget: &mut u64| {
-                let held = meshes.iter_mut().map(|(_, s)| (s, None));
+                let held = meshes.iter_mut().map(|(_, s)| s);
                 assert!(move_off_page(
-                    arena, encoder, None, None, None, held, 0, part, budget
+                    arena, encoder, None, None, held, 0, part, budget
                 ));
                 let on = |s: &SectionGpu| part.of(s).is_some_and(|r| r.0 == 1);
                 meshes.iter().filter(|(_, s)| on(s)).count()
@@ -1745,6 +1951,7 @@ mod tests {
             let buffer = buffer.clone();
             arena.pages = vec![Some(Page {
                 sources: None,
+                normals: None,
                 buffer,
                 capacity,
                 free,

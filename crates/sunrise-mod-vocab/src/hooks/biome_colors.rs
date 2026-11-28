@@ -1,5 +1,4 @@
 //! The `biome_colors` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0111
 
 pub trait Hooks {
     /// Change the colours of `biome` (`minecraft:plains`) on this client: the
@@ -11,7 +10,7 @@ pub trait Hooks {
     /// still applies to the grass set here; the swamp's noise colours
     /// replace it.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_biome_colors",
+        target = "sunrise_client_gameplay::game::native_hooks::base::ClientGame<'_>::native_biome_colors",
         receiver = "read",
         dispatch = "flat",
         side = "client",

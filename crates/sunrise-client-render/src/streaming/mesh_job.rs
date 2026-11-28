@@ -1,6 +1,6 @@
 //! One section meshed on a pool worker: the `Job::Mesh` of the player's level and a viewed
 //! level's mesh job (`viewed_meshing`) run the same mesher with the same settings.
-use super::{MeshSettings, Streaming, WorkerContext};
+use super::{MeshSettings, MeshStreamer, WorkerContext};
 use crate::mesher::{
     AttachedTintScratch, MeshScratch, MeshTables, Mesher, Region, SectionMesh, borrow,
 };
@@ -23,8 +23,8 @@ pub(super) fn mesh_section(
     recycled: SectionMesh,
 ) -> SectionMesh {
     let visibility = match faces.take() {
-        Some((tables, visibility)) if Arc::ptr_eq(&tables, &context.tables) => visibility,
-        _ => context.tables.visibility.clone(),
+        Some((tables, visibility)) if Arc::ptr_eq(&tables, &context.mesh.tables) => visibility,
+        _ => context.mesh.tables.visibility.clone(),
     };
     let mut mesher = section_mesher(context, settings, visibility);
     let region = borrow(region);
@@ -45,7 +45,7 @@ pub(super) fn mesh_section(
         mesher.mesh_reusing(&region, sy, recycled, scratch)
     };
     mesh.sort_solid();
-    *faces = Some((context.tables.clone(), mesher.visibility));
+    *faces = Some((context.mesh.tables.clone(), mesher.visibility));
     mesh
 }
 
@@ -65,13 +65,14 @@ fn section_mesher<'a>(
         cutout_leaves: settings.cutout_leaves,
         opaque_ice: settings.opaque_ice,
         translucent_layers: &settings.translucent_layers,
+        layer_overrides: &settings.layer_overrides,
         leaf_culling: settings.leaf_culling,
-        hidden_states: &context.hidden_states,
-        part_tables: &context.part_tables,
-        assets: &context.assets,
-        render: &context.render,
-        tables: &context.tables,
-        biomes: &context.biomes,
+        hidden_states: &context.mesh.hidden_states,
+        part_tables: &context.mesh.part_tables,
+        assets: &context.chunk.assets,
+        render: &context.mesh.render,
+        tables: &context.mesh.tables,
+        biomes: &context.chunk.biomes,
         visibility,
     }
 }
@@ -91,7 +92,7 @@ impl TintPreparation {
         region: &Region,
         sy: i32,
     ) {
-        if !context.tables.has_custom_tint_sources()
+        if !context.mesh.tables.has_custom_tint_sources()
             || !region[1][1].as_ref().is_some_and(|chunk| {
                 chunk
                     .extra_models
@@ -106,8 +107,8 @@ impl TintPreparation {
             return;
         }
         let visibility = match self.faces.take() {
-            Some((tables, visibility)) if Arc::ptr_eq(&tables, &context.tables) => visibility,
-            _ => context.tables.visibility.clone(),
+            Some((tables, visibility)) if Arc::ptr_eq(&tables, &context.mesh.tables) => visibility,
+            _ => context.mesh.tables.visibility.clone(),
         };
         let mut mesher = section_mesher(context, settings, visibility);
         let colors = mesher.prepare_attached_tints(
@@ -120,12 +121,12 @@ impl TintPreparation {
             plan,
             &mut self.buffers,
         );
-        self.faces = Some((context.tables.clone(), mesher.visibility));
+        self.faces = Some((context.mesh.tables.clone(), mesher.visibility));
         settings.attached_tints = colors.map(|colors| (context.clone(), colors));
     }
 }
 
-impl Streaming {
+impl MeshStreamer {
     /// The settings the player's sections mesh with now.
     pub(super) fn mesh_settings(&self) -> MeshSettings {
         MeshSettings {
@@ -133,12 +134,13 @@ impl Streaming {
             shader_pack_lighting: self.shader_pack_lighting,
             separate_ao: self.separate_ao,
             shader_pack: self.shader_pack,
-            zoom: self.biome_zoom,
+            zoom: self.chunks.biome_zoom,
             blend_radius: self.biome_blend,
             smooth_lighting: self.smooth_lighting,
             cutout_leaves: self.cutout_leaves,
             opaque_ice: self.opaque_ice,
             translucent_layers: self.translucent_layers.clone(),
+            layer_overrides: self.layer_overrides.clone(),
             leaf_culling: self.leaf_culling,
             visibility: None,
             attached_tints: None,

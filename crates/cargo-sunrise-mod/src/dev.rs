@@ -1,19 +1,28 @@
-//! `build` and `run` for a native mod, with no launcher: the pinned SDK's compiled slices fetched
-//! and verified into a per-user cache, the Rust the SDK names, then the same compile the launcher's
-//! `native-build` runs (`sunrise_native_build::contract::run`, docs/modding/src/reference/sdk/08-native-build.md),
-//! and for `run` the result staged beside the SDK's game executable and started.
-use crate::sdk_fetch::{self, Base, CacheStamp};
+//! `build` and `run` for a native mod: fetch and verify the pinned SDK's compiled slices into a
+//! per-user cache, use the Rust the SDK names, and compile with the native builder
+//! (docs/modding/src/reference/sdk/08-native-build.md). `run` stages the result beside the SDK's
+//! game executable and starts it.
+use crate::sdk_fetch::{self, Base, CacheStamp, VerifiedSurface};
 use std::collections::BTreeMap;
 use std::fs;
 use sunrise_mod_package::Package;
 
 mod libraries;
+mod work_dir;
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use sunrise_mod_package::sdk::{self, Index};
-use sunrise_native_build::{contract, library_record::Library, prebuilt::Route, rust::Unpacked};
+use sunrise_native_build::{
+    BuildDiagnostics, Bundle, Timings,
+    api::Project,
+    contract,
+    library_record::Library,
+    prebuilt::{self, Route},
+    rust::Unpacked,
+};
+use work_dir::work_dir;
 
 /// Names the cache's folder instead of the platform's.
 const CACHE_ENV: &str = "SUNRISE_MOD_CACHE";
@@ -183,15 +192,12 @@ pub(crate) struct NativeSdk {
     pub rust: Unpacked,
     base: Base,
     dir: PathBuf,
+    surface: VerifiedSurface,
     stamp: CacheStamp,
 }
 
 impl NativeSdk {
-    fn slices(
-        &self,
-        side: sdk::Side,
-        route: Route,
-    ) -> Result<sunrise_native_build::prebuilt::Package, String> {
+    fn slices(&self, side: sdk::Side, route: Route) -> Result<prebuilt::Package, String> {
         sdk_fetch::fetch_slices(
             &self.base,
             &self.index,
@@ -202,28 +208,103 @@ impl NativeSdk {
             &self.stamp,
         )
     }
+
+    fn compile(
+        &self,
+        bundles: &[Bundle],
+        plan: &contract::Plan,
+        events: &mut Events,
+        diagnostics: BuildDiagnostics,
+    ) -> Result<(), String> {
+        let mut needs_tool = false;
+        for bundle in bundles {
+            if prebuilt::needs_pinned_patch_tool(&plan.package, bundle)? {
+                needs_tool = true;
+                break;
+            }
+        }
+        if needs_tool {
+            if diagnostics.stderr == sunrise_native_build::CompilerStderr::Mirror {
+                return Err(format!(
+                    "SDK build {} compiles this mod's lower-crate copies with its own pinned tool, \
+                     which cannot show compiler output while it runs; use a newer SDK build or drop --verbose.",
+                    self.index.build.commit
+                ));
+            }
+            let (_temporary, tool) =
+                sdk_fetch::fetch_tool(&self.base, &self.index, &self.rust.target, &self.dir)?;
+            events.run_tool(&tool, plan, diagnostics)
+        } else {
+            contract::run(plan, &mut std::io::empty(), events, diagnostics)
+        }
+    }
 }
 
-pub(crate) fn native_sdk(cache: &Path, build: &str) -> Result<NativeSdk, String> {
-    let target = computer()?;
-    let base = Base::from_env();
-    let dir = cache.join("sdk").join(build);
-    let keys = sdk_fetch::keys();
-    sdk_fetch::fetch(&base, &keys, build, &dir, false)?;
-    let index = Index::read(
-        &std::fs::read(dir.join(sunrise_mod_package::sdk::INDEX))
-            .map_err(|e| format!("{}: {e}", dir.display()))?,
-        build,
-    )
-    .map_err(|e| format!("sdk-{build}: {e}"))?;
-    let rust = toolchain(&index.toolchain.rust, target, cache.join("cargo-home"))?;
+fn native_sdk_from(
+    cache: &Path,
+    base: Base,
+    keys: &[sunrise_release_sign::PublicKey],
+    target: &str,
+    build: &str,
+    rust: impl FnOnce(&str, &str, PathBuf) -> Result<Unpacked, String>,
+) -> Result<NativeSdk, String> {
+    let stamp = CacheStamp::new(build, keys);
+    let dir = sdk_fetch::cache_root(cache, build, &stamp);
+    let metadata = dir.join(sdk_fetch::METADATA_DIR);
+    let (index, surface) = {
+        let _lock = sdk_fetch::cache_lock(&dir, &["metadata", stamp.as_str()])?;
+        sdk_fetch::fetch_metadata(&base, keys, build, &metadata)?
+    };
+    let rust = rust(&index.toolchain.rust, target, cache.join("cargo-home"))?;
     Ok(NativeSdk {
         index,
         rust,
         base,
         dir,
-        stamp: CacheStamp::new(build, &keys),
+        surface,
+        stamp,
     })
+}
+
+pub(crate) fn native_sdk(cache: &Path, build: &str) -> Result<NativeSdk, String> {
+    let target = computer()?;
+    let base = Base::from_env();
+    let keys = sdk_fetch::keys();
+    native_sdk_from(cache, base, &keys, target, build, toolchain)
+}
+
+/// Refuses a `Cargo.lock` that Cargo would change for the mod's manifests and the SDK of `build` in
+/// `.sunrise/sdk/`, with the registry's release scan's own command (`cargo fetch --locked`). The
+/// lock names the SDK's local packages and their dependencies, so a pin moved without it is stale;
+/// the native build reads only the lock's registry pins and would pass it.
+pub(crate) fn check_lock(rust: &Unpacked, project: &Path, build: &str) -> Result<(), String> {
+    // The toolchain's commands run from outside the project: name it absolutely.
+    let project =
+        dunce::canonicalize(project).map_err(|e| format!("{}: {e}", project.display()))?;
+    let mut fetch = sunrise_native_build::cargo(rust, &project, "fetch");
+    fetch.args(["--locked", "--color", "never"]);
+    let out = fetch.output().map_err(|e| format!("cargo fetch: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let error = String::from_utf8_lossy(&out.stderr);
+    if !error.contains("--locked was passed") {
+        return Err(format!("cargo fetch --locked failed: {}", error.trim()));
+    }
+    Err(format!(
+        "Cargo.lock does not match Cargo.toml and the pinned SDK (Sunrise {build}), and the registry refuses such a release. \
+         Regenerate it with `cargo sunrise-mod pin {build}`, which brings the lock to the pinned SDK, then commit Cargo.lock and release again."
+    ))
+}
+
+/// Brings `Cargo.lock` to the SDK in `.sunrise/sdk/`: Cargo resolves the mod's and the SDK's local
+/// packages again and keeps every registry pin they still use.
+pub(crate) fn refresh_lock(rust: &Unpacked, project: &Path) -> Result<(), String> {
+    let project =
+        dunce::canonicalize(project).map_err(|e| format!("{}: {e}", project.display()))?;
+    let mut update = sunrise_native_build::cargo(rust, &project, "update");
+    update.args(["--workspace", "--color", "never"]);
+    output(&mut update).map(drop)
 }
 
 /// What a native build made.
@@ -238,9 +319,43 @@ pub(crate) struct Built {
 }
 
 /// Turns the build's event lines into the lines a developer reads, and keeps its result.
+#[derive(Default)]
 struct Events {
     partial: Vec<u8>,
     built: Option<contract::Event>,
+    failed: Option<String>,
+}
+
+impl Events {
+    /// Run the verified SDK tool using the native-build contract. The plan already answers consent.
+    fn run_tool(
+        &mut self,
+        tool: &Path,
+        plan: &contract::Plan,
+        diagnostics: BuildDiagnostics,
+    ) -> Result<(), String> {
+        let mut input = serde_json::to_vec(plan).map_err(|e| e.to_string())?;
+        input.push(b'\n');
+        let describe = |error: std::io::Error| format!("{}: {error}", tool.display());
+        let mut command = Command::new(tool);
+        command
+            .arg("native-build")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped());
+        diagnostics.configure(&mut command);
+        let mut child = command.spawn().map_err(describe)?;
+        let sent = child.stdin.take().expect("piped stdin").write_all(&input);
+        let received = std::io::copy(&mut child.stdout.take().expect("piped stdout"), self);
+        let status = child.wait().map_err(describe)?;
+        if !status.success() {
+            return Err(self.failed.take().unwrap_or_else(|| {
+                format!("{}: native-build exited with {status}", tool.display())
+            }));
+        }
+        sent.map_err(describe)?;
+        received.map_err(describe)?;
+        Ok(())
+    }
 }
 
 impl Write for Events {
@@ -253,7 +368,7 @@ impl Write for Events {
                     println!("Compiling {id} ({done}/{total})")
                 }
                 Ok(event @ contract::Event::Built { .. }) => self.built = Some(event),
-                // A failure is the build's returned error; consent is never asked (the plan answers).
+                Ok(contract::Event::Failed { error, .. }) => self.failed = Some(error),
                 _ => {}
             }
         }
@@ -267,6 +382,9 @@ impl Write for Events {
 
 struct Prepared {
     plan: contract::Plan,
+    sdk: NativeSdk,
+    staged: Vec<Bundle>,
+    route: Route,
     id: String,
     crate_name: String,
     mixins: String,
@@ -309,25 +427,29 @@ fn stage_name(id: &str) -> String {
     format!("mod-{id}")
 }
 
+/// The source bundle whose Cargo manifest is validated before native work starts.
+pub(crate) fn project_bundle(project: &Path, package: &Package) -> Result<Bundle, String> {
+    let dir = dunce::canonicalize(project).map_err(|e| format!("{}: {e}", project.display()))?;
+    Ok(Bundle {
+        manifest: package.manifest.clone(),
+        dir,
+    })
+}
+
 fn prepare(
-    project: &Path,
+    cargo: &Project<'_>,
     package: &Package,
     with: &[&Path],
     update_lock: bool,
     target: contract::TargetName,
     release_check: bool,
 ) -> Result<Prepared, String> {
-    let project =
-        dunce::canonicalize(project).map_err(|e| format!("{}: {e}", project.display()))?;
-    let bundle = sunrise_native_build::Bundle {
-        manifest: package.manifest.clone(),
-        dir: project.clone(),
-    };
+    let bundle = cargo.bundle;
+    let project = &bundle.dir;
     let build = bundle.native().sunrise.clone();
     let id = bundle.manifest.id.clone();
-    let cargo = sunrise_native_build::api::Project::read(&bundle).map_err(|e| e.to_string())?;
     let crate_name = cargo.crate_name();
-    let registry = matches!(Route::of(&[cargo]), Route::Registry);
+    let registry = matches!(Route::of(std::slice::from_ref(cargo)), Route::Registry);
     let side = sunrise_native_build::prebuilt::side(target.into());
     let cache = cache_dir()?;
     let dependencies = libraries::Libraries::read(
@@ -339,7 +461,7 @@ fn prepare(
         },
         &cache,
     )?;
-    let work = cache.join("work").join(&id);
+    let work = work_dir(&cache, &id, project);
     fs::create_dir_all(&work).map_err(|e| format!("{}: {e}", work.display()))?;
     let work = dunce::canonicalize(&work).map_err(|e| format!("{}: {e}", work.display()))?;
     let lock_path = work.join("build.lock");
@@ -355,11 +477,10 @@ fn prepare(
         .map_err(|e| format!("{}: {e}", lock_path.display()))?;
     let input = tempfile::tempdir_in(&work).map_err(|e| format!("{}: {e}", work.display()))?;
     let sdk = native_sdk(&cache, &build)?;
-    let mut origins = dependencies.stage(&bundle, &sdk, &cache, input.path(), release_check)?;
+    let mut origins = dependencies.stage(bundle, &sdk, &cache, input.path(), release_check)?;
     origins.insert(id.clone(), project.clone());
     let mixins = if bundle.needs_mixins() {
-        sunrise_native_build::MixinsIdentity::resolve([&bundle], Some(&sdk.index.mixins))?
-            .revision()
+        sunrise_native_build::MixinsIdentity::resolve([bundle], Some(&sdk.index.mixins))?.revision()
     } else {
         bundle
             .native()
@@ -378,17 +499,36 @@ fn prepare(
     let lock = project.join("Cargo.lock");
     if registry && (update_lock || !lock.exists()) {
         println!("Pinning dependencies in Cargo.lock");
+        // The lock names the SDK's packages, read from `.sunrise/sdk/` (`run` fetches no SDK before).
+        sdk_fetch::fetch_pinned(project, &build)?;
+        let before = fs::read(&lock).ok();
         sunrise_native_build::registry_generate::generate(
             || Ok(rust.clone()),
             sunrise_native_build::registry_generate::game_lock,
-            &bundle,
+            bundle,
             update_lock,
         )
         .map_err(build_error)?;
+        // Those pins come from a copy without the SDK's path packages; the committed lock also
+        // names them, as the registry's `cargo fetch --locked` requires. A lock without them is
+        // never left behind: the one before comes back.
+        if let Err(error) = refresh_lock(rust, project) {
+            let restored = match &before {
+                Some(text) => fs::write(&lock, text),
+                None => fs::remove_file(&lock),
+            };
+            return Err(match restored {
+                Ok(()) => format!("Cargo.lock could not name the SDK's packages: {error}"),
+                Err(e) => format!(
+                    "Cargo.lock could not name the SDK's packages: {error}\n{} was left without them: {e}",
+                    lock.display()
+                ),
+            });
+        }
     }
     crate::registry_source::write_files(
         &input.path().join(stage_name(&id)),
-        package.directory_files(&project)?,
+        package.directory_files(project)?,
     )?;
     let staged = sunrise_native_build::scan_bundles(input.path())?;
     let projects = staged
@@ -396,8 +536,9 @@ fn prepare(
         .map(sunrise_native_build::api::Project::read)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
-    let slices = sdk.slices(side, Route::of(&projects))?;
-    let rust = sdk.rust;
+    let route = Route::of(&projects);
+    let slices = sdk.slices(side, route)?;
+    let rust = sdk.rust.clone();
     // A stable source path keeps the native builder's Cargo stage and fingerprints reusable.
     let mods = work.join("input");
     match fs::remove_dir_all(&mods) {
@@ -418,6 +559,9 @@ fn prepare(
             registry: Some(true),
             mixins_from_source: false,
         },
+        sdk,
+        staged,
+        route,
         id,
         crate_name,
         mixins,
@@ -426,35 +570,42 @@ fn prepare(
     })
 }
 
-pub(crate) fn check(project: &Path, package: &Package, with: &[&Path]) -> Result<(), String> {
+pub(crate) fn check(cargo: &Project<'_>, package: &Package, with: &[&Path]) -> Result<(), String> {
     let prepared = prepare(
-        project,
+        cargo,
         package,
         with,
         false,
         contract::TargetName::Client,
         false,
     )?;
-    contract::check_rust(&prepared.plan).map_err(|error| prepared.failed(error))
+    contract::check_rust(&prepared.plan, BuildDiagnostics::default().with_env())
+        .map_err(|error| prepared.failed(error))
 }
 
 /// Compiles the project and its libraries against the project's pinned SDK.
 pub(crate) fn build(
-    project: &Path,
+    cargo: &Project<'_>,
     package: &Package,
     with: &[&Path],
     update_lock: bool,
     target: contract::TargetName,
     release_check: bool,
+    diagnostics: BuildDiagnostics,
 ) -> Result<Built, String> {
-    let prepared = prepare(project, package, with, update_lock, target, release_check)?;
+    let prepared = prepare(cargo, package, with, update_lock, target, release_check)?;
     let id = &prepared.id;
     let failed = |error| prepared.failed(error);
-    let mut events = Events {
-        partial: Vec::new(),
-        built: None,
-    };
-    contract::run(&prepared.plan, &mut std::io::empty(), &mut events).map_err(failed)?;
+    let mut events = Events::default();
+    prepared
+        .sdk
+        .compile(
+            &prepared.staged,
+            &prepared.plan,
+            &mut events,
+            diagnostics.with_env(),
+        )
+        .map_err(failed)?;
     let Some(contract::Event::Built {
         binary,
         libraries,
@@ -480,6 +631,23 @@ pub(crate) fn build(
                 record.file
             ))
         })?;
+    if diagnostics.timings == Timings::Html {
+        if prepared.route == Route::Registry {
+            // A successful timed Cargo build writes under the target directory that returned
+            // this mod's library (`target/<triple>/release/<library>`), including for a pinned tool.
+            let report = library
+                .ancestors()
+                .nth(3)
+                .map(|target| target.join("cargo-timings/cargo-timing.html"))
+                .filter(|report| report.is_file());
+            match report {
+                Some(report) => eprintln!("Cargo timings: {}", report.display()),
+                None => eprintln!("Cargo did not leave a timings report; see the build log."),
+            }
+        } else {
+            eprintln!("No Cargo timings: this build route did not run Cargo.");
+        }
+    }
     println!(
         "Built {}\nBuild log: {}",
         library.display(),
@@ -537,7 +705,26 @@ pub(crate) fn run(
     } else {
         contract::TargetName::Client
     };
-    let built = build(project, mod_package, with, false, target, false)?;
+    // A missing or wrong original jar is known before the native compile: say so now.
+    let libraries = with
+        .iter()
+        .filter_map(|path| Package::read(path).ok())
+        .collect::<Vec<_>>();
+    crate::jar::check_for_run(
+        std::iter::once(&mod_package.manifest).chain(libraries.iter().map(|p| &p.manifest)),
+        jars,
+    )?;
+    let bundle = project_bundle(project, mod_package)?;
+    let cargo = Project::read(&bundle).map_err(|e| e.to_string())?;
+    let built = build(
+        &cargo,
+        mod_package,
+        with,
+        false,
+        target,
+        false,
+        BuildDiagnostics::default(),
+    )?;
     let mut staged = fs::read_dir(&built.prepared.plan.mods)
         .map_err(|e| e.to_string())?
         .map(|entry| {

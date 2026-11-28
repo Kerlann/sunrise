@@ -2,11 +2,10 @@
 
 A recipe file's `type` is a **serializer ID**, not its recipe type. These are two
 independent registries. All crafting serializers produce `minecraft:crafting`,
-which the engine registers. Each mod registers its own serializer IDs and any new
-recipe type IDs in namespaces it owns (including namespaces of content packages
-delegated to it through `served_by` with `[native] serves_content = true`).
-Duplicate serializer IDs and duplicate
-recipe type IDs refuse startup, naming the ID.
+which the engine registers. A bare serializer or recipe type name uses the
+declaring mod's namespace, while an explicit valid `namespace:path` keeps its
+namespace. Duplicate or built-in serializer IDs and recipe type IDs refuse
+startup, naming the ID.
 
 In a recipe file, a `type` serializer ID written without a namespace (`crafting_shaped`,
 or `:crafting_shaped`) means `minecraft`; it is never the recipe file's own namespace
@@ -52,11 +51,13 @@ empty tag has no members and membership is `Some(false)`. Lookup does not
 allocate or do I/O. Reload and sync publish a new snapshot, so one callback
 cannot mix generations.
 
-`RegistrationContext` does not resolve `TagKey`s. Resolve the name with
-`r.tag_key("minecraft:logs")` on the `Registrar` in `Hooks::register` and store the
-returned key in the registered kind. The key does not need the tag to have members yet.
-A hook with a `Host`, such as `tags_updated`, can resolve the same key with
-`host.tags().key(&id)`. Keep the key across reloads; only the generation's membership changes.
+`RegistrationContext` does not resolve `TagKey`s. Resolve a dynamic name with
+`r.tag_key("minecraft:logs")` on the `Registrar` in `Hooks::register`, bind it to
+items with `.typed()`, and store the resulting `TagKey<ItemKey>` in the registered
+kind (or use a typed built-in constant from `mod_api::tags::c::items`). The key does
+not need the tag to have members yet. A hook with a `Host`, such as `tags_updated`,
+can resolve the same key with `host.tags().key(&id)` followed by `.typed()`. Keep
+the key across reloads; only the generation's membership changes.
 
 `default_remainder(cell)` reads that cell's original, **pre-take** stack and runs
 the caller's existing default rule, including `ItemPart::crafting_remainder` on

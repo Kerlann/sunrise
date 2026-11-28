@@ -1,5 +1,4 @@
 //! The `block_signal` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0054
 
 pub trait Hooks {
     /// The redstone signal the block `state` at `pos` gives on its `face`, the
@@ -19,7 +18,7 @@ pub trait Hooks {
         contract = "listen",
         scope = "block",
         key = "state",
-        target = "sunrise_client::game::native_hooks::base::GameLevel<'_>::native_block_signal",
+        target = "sunrise_gameplay_common::game::native_hooks::base::GameLevel<'_>::native_block_signal",
         neoforge = "none (vanilla BlockBehaviour.getSignal and getDirectSignal; NeoForge adds no event or extension for it)"
     )]
     fn block_signal(

@@ -12,7 +12,7 @@ pub const FILE: &str = "sunrise-graphics.txt";
 pub const HDR_MARKER: &str = "sunrise-hdr-pending";
 /// The marker's text for a window whose HDR output starts on `driver`
 /// (`gfx::output::window_driver`).
-pub fn hdr_marker_text(driver: &str) -> String {
+pub(crate) fn hdr_marker_text(driver: &str) -> String {
     format!("driver:{driver}\n")
 }
 /// The driver a marker names; empty for one written before markers named it.
@@ -53,7 +53,7 @@ pub enum HdrSetup {
 pub const PEAK_STEPS: u32 = 52;
 /// Peak Brightness's value at `step` of its scale, the slider's and calibration's: 200 to
 /// 2000 nits by 50, where most displays' peaks are, then up to PQ's 10 000 by 500.
-pub fn peak_nits_at(step: u32) -> u32 {
+pub(crate) fn peak_nits_at(step: u32) -> u32 {
     match step.min(PEAK_STEPS) {
         s @ 0..=36 => 200 + s * 50,
         s => 2000 + (s - 36) * 500,
@@ -61,7 +61,7 @@ pub fn peak_nits_at(step: u32) -> u32 {
 }
 /// Where `nits` sits on Peak Brightness's scale ([`peak_nits_at`]), between steps for a value
 /// off it.
-pub fn peak_step_of(nits: f32) -> f32 {
+pub(crate) fn peak_step_of(nits: f32) -> f32 {
     let step = if nits <= 2000.0 {
         (nits - 200.0) / 50.0
     } else {
@@ -72,11 +72,11 @@ pub fn peak_step_of(nits: f32) -> f32 {
 /// The steps of Paper White's and UI Brightness's scale: Auto (0), then 10 to 480 nits by 10.
 pub const NITS_STEPS: u32 = 48;
 /// Paper White's or UI Brightness's setting at slider position `v`, 0 to 1 ([`NITS_STEPS`]).
-pub fn nits_at(v: f32) -> u32 {
+pub(crate) fn nits_at(v: f32) -> u32 {
     (v * NITS_STEPS as f32).round() as u32 * 10
 }
 /// Where a Paper White or UI Brightness setting sits on its slider, 0 to 1.
-pub fn nits_position(nits: u32) -> f32 {
+pub(crate) fn nits_position(nits: u32) -> f32 {
     nits as f32 / (NITS_STEPS * 10) as f32
 }
 /// A saved Paper White or UI Brightness: Auto (0), or 10 to 480 nits.
@@ -340,38 +340,6 @@ pub enum Pacing {
     Precise,
 }
 
-/// How finely far terrain is drawn (`FarDetail` in the LOD options).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum FarDetail {
-    /// Each tile level starts at eight times its size from the camera.
-    #[default]
-    Full,
-    /// Coarser levels start at half that distance: about a quarter of the
-    /// far quads, for GPUs that far terrain slows down. Changes the picture.
-    Reduced,
-}
-impl FarDetail {
-    pub fn name(self) -> &'static str {
-        match self {
-            FarDetail::Full => "full",
-            FarDetail::Reduced => "reduced",
-        }
-    }
-    pub fn label(self) -> &'static str {
-        match self {
-            FarDetail::Full => "Full",
-            FarDetail::Reduced => "Reduced",
-        }
-    }
-    fn parse(s: &str) -> Self {
-        if s == "reduced" {
-            FarDetail::Reduced
-        } else {
-            FarDetail::Full
-        }
-    }
-}
-
 /// Frame generation: a frame made between each two real ones.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum FrameGeneration {
@@ -522,16 +490,6 @@ impl Upscaling {
     }
 }
 
-static REDUCED_SUGGESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-/// Whether the settings suggest Reduced far detail: set when the renderer
-/// starts, on the GPUs `lod_capped` names (far terrain slows them most).
-pub fn suggest_reduced_far_detail(on: bool) {
-    REDUCED_SUGGESTED.store(on, std::sync::atomic::Ordering::Relaxed);
-}
-pub fn reduced_far_detail_suggested() -> bool {
-    REDUCED_SUGGESTED.load(std::sync::atomic::Ordering::Relaxed)
-}
-
 /// The Screenshot Quality choices, times the game's resolution.
 pub const SCREENSHOT_QUALITIES: [u32; 4] = [1, 2, 4, 8];
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -573,51 +531,14 @@ static TRANSLUCENT_BATCHING_OFFERED: std::sync::atomic::AtomicBool =
 /// the renderer starts; not without indirect multi-draw or on OpenGL, which loops over a
 /// multi-draw's entries on the CPU, nor where vanilla frames draw flat (they read the section
 /// arena's translucent quads). Where it can't, the settings grey its switch out.
-pub fn offer_translucent_batching(on: bool) {
+pub(crate) fn offer_translucent_batching(on: bool) {
     TRANSLUCENT_BATCHING_OFFERED.store(on, std::sync::atomic::Ordering::Relaxed);
 }
-pub fn translucent_batching_offered() -> bool {
+pub(crate) fn translucent_batching_offered() -> bool {
     TRANSLUCENT_BATCHING_OFFERED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Parallel Tick's setting, for the worlds this game runs itself (single player, open to LAN):
-/// whether the server tick's phases that give the same result in any order share their work
-/// among helper threads (`parallel`). Auto shares it only while the tick is heavy and sharing
-/// makes it faster; a quiet world stays on one thread and starts no helper.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum ParallelTickMode {
-    #[default]
-    Off = 0,
-    Auto = 1,
-    On = 2,
-}
-impl ParallelTickMode {
-    pub const ALL: [ParallelTickMode; 3] = [
-        ParallelTickMode::Off,
-        ParallelTickMode::Auto,
-        ParallelTickMode::On,
-    ];
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Off => "off",
-            Self::Auto => "auto",
-            Self::On => "on",
-        }
-    }
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Off => "Off",
-            Self::Auto => "Auto",
-            Self::On => "On",
-        }
-    }
-    fn parse(s: &str) -> Self {
-        Self::ALL
-            .into_iter()
-            .find(|m| m.name() == s)
-            .unwrap_or_default()
-    }
-}
+pub use sunrise_level::tick_mode::ParallelTickMode;
 
 /// GPU Culling's setting: off, on where it is offered, or Auto, which has it on only where the
 /// CPU limits the frame and it makes the frame faster (`autotune::GpuCullingAuto`).
@@ -704,7 +625,7 @@ impl GpuCullingOffer {
 }
 static GPU_CULLING_OFFER: std::sync::atomic::AtomicU8 =
     std::sync::atomic::AtomicU8::new(GpuCullingOffer::Unsupported as u8);
-pub fn offer_gpu_culling(offer: GpuCullingOffer) {
+pub(crate) fn offer_gpu_culling(offer: GpuCullingOffer) {
     GPU_CULLING_OFFER.store(offer as u8, std::sync::atomic::Ordering::Relaxed);
 }
 pub fn gpu_culling_offer() -> GpuCullingOffer {
@@ -724,37 +645,15 @@ static GPU_CULLING_LOST: std::sync::atomic::AtomicBool = std::sync::atomic::Atom
 pub fn lose_gpu_culling() {
     GPU_CULLING_LOST.store(true, std::sync::atomic::Ordering::Relaxed);
 }
-pub fn gpu_culling_lost() -> bool {
+pub(crate) fn gpu_culling_lost() -> bool {
     GPU_CULLING_LOST.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// The farthest LOD Distance, in chunks, on integrated GPUs other than
-/// Apple's: they share the CPU's memory bandwidth, and past it far terrain
-/// costs them more frame time than it is worth.
-pub const INTEGRATED_LOD_DISTANCE: u32 = 128;
-/// Whether `INTEGRATED_LOD_DISTANCE` applies to this adapter. Apple's GPUs
-/// are integrated too, with memory and bandwidth enough for every distance.
-pub fn lod_capped(info: &wgpu::AdapterInfo) -> bool {
-    info.device_type == wgpu::DeviceType::IntegratedGpu && !info.name.starts_with("Apple")
-}
-/// A LOD distance as far terrain uses it on this adapter.
-pub fn lod_distance_capped(distance: u32, info: &wgpu::AdapterInfo) -> u32 {
-    let distance = distance.min(crate::lod::MAX_CHUNKS);
-    if lod_capped(info) {
-        distance.min(INTEGRATED_LOD_DISTANCE)
-    } else {
-        distance
-    }
-}
 impl Graphics {
-    /// `lod_distance` as far terrain uses it on this adapter.
-    pub fn lod_distance_on(&self, info: &wgpu::AdapterInfo) -> u32 {
-        lod_distance_capped(self.lod_distance, info)
-    }
     /// Whether the selected packs leave vanilla's block models in place.
     /// Sunrise's occlusion assumptions (entity and leaf culling) hold only
     /// for those: a pack can replace an opaque cube's model or a leaf's.
-    pub fn vanilla_models(&self, resource_packs: &[String]) -> bool {
+    pub(crate) fn vanilla_models(&self, resource_packs: &[String]) -> bool {
         resource_packs.iter().all(|id| id == "vanilla")
     }
     /// The same check including packs overlaid by the connected server.
@@ -797,20 +696,17 @@ pub struct Graphics {
     /// Records no engine setting recognized; a registered store may replace them on save.
     pub(crate) unclaimed: Vec<(String, String)>,
     pub preset: Preset,
-    /// Distant surface terrain range, in chunks; 0 disables LODs.
-    pub lod_distance: u32,
-    /// How finely far terrain is drawn; Full unless the player picks Reduced.
-    pub far_detail: FarDetail,
-    /// Far terrain from servers' BlueMap web maps; no server has one unless
-    /// the player names it (`blueMap:` lines).
-    pub blue_map: crate::bluemap::Settings,
     /// Skip sections hidden behind closed ones (vanilla's occlusion graph).
     pub cave_culling: bool,
     /// Near solid terrain culled, and its draws listed, on the GPU (`gfx::gpu_culling`), where it
     /// is offered (`gpu_culling_offer`). Off by default (GPU Culling, Performance graphics); it
-    /// applies at once, and every preset sets it to Auto. Every save writes it, so a default
-    /// turned on later needs a new key, as `batchTranslucent` did. Auto turns it on only where
-    /// the CPU limits the frame and it makes the frame faster (`autotune`).
+    /// applies at once, and no preset sets it, nor does changing it leave the preset. Every save
+    /// writes it, so a default turned on later needs a new key, as `batchTranslucent` did. Its
+    /// key is `gpuCullingMode`; saves also write `gpuCulling`, which builds from before it read,
+    /// and `gpuCullingWritten`, the same value again, so a later change there is told apart
+    /// (`Graphics::parse`). An older file's `gpuCulling` reads Auto as Off, because every preset
+    /// set Auto then. Auto turns it on only where the CPU limits the frame and it makes the frame
+    /// faster (`autotune`).
     pub gpu_culling: GpuCullingMode,
     /// Skip drawing entities hidden behind opaque terrain, synchronously or asynchronously.
     pub entity_culling: EntityCullingMode,
@@ -840,7 +736,8 @@ pub struct Graphics {
     pub cache_copper_golem_statues: bool,
     /// Meshed sections uploaded per frame; 0 uploads all that are ready.
     pub chunk_updates: u32,
-    /// Section mesh bytes uploaded per frame, in KiB; 0 is unlimited.
+    /// Section mesh bytes uploaded per frame (`Renderer::mesh_upload_bytes`), in KiB; 0 is
+    /// unlimited.
     pub upload_budget_kib: u32,
     /// The block textures' video memory (their top mip level), in MiB; 0 leaves it to
     /// Sunrise (`sprites::DEFAULT_TEXTURE_BUDGET`). Applies when resources next load.
@@ -927,15 +824,61 @@ pub struct Graphics {
     /// not `shaderPack`, which versions before the clean-room rewrite saved and which stays
     /// ignored.
     pub shader_pack: String,
+    /// Iris compatibility (Sunrise Settings › Shaders), by the pack's file or folder name in
+    /// `shaderpacks/`, for the packs where the player chose On or Off; any other pack is on
+    /// Auto. Kept by name, apart from the pack's own options and profiles, so a pack replaced
+    /// under the same name keeps it. Each is a `shaderPackIrisCompat:<on|off>:<name>` line.
+    pub iris_compat: std::collections::BTreeMap<String, IrisCompat>,
+}
+
+/// Whether a shader pack gets `IS_IRIS` and `IRIS_VERSION`, the macros that select its Iris path
+/// (decision D-8 in docs/cleanroom/).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IrisCompat {
+    /// When its programs test them (`sunrise_shaders::asks_for_identity`).
+    #[default]
+    Auto,
+    On,
+    Off,
+}
+
+impl IrisCompat {
+    /// The mode after this one, as the switch steps it (before it with `back`).
+    pub fn step(self, back: bool) -> Self {
+        match (self, back) {
+            (Self::Auto, false) | (Self::Off, true) => Self::On,
+            (Self::On, false) | (Self::Auto, true) => Self::Off,
+            (Self::Off, false) | (Self::On, true) => Self::Auto,
+        }
+    }
+    /// Its word in `sunrise-graphics.txt`; Auto is never written.
+    fn key(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+}
+
+impl Graphics {
+    /// The Iris compatibility chosen for pack `name`.
+    pub fn iris_compat_of(&self, name: &str) -> IrisCompat {
+        self.iris_compat.get(name).copied().unwrap_or_default()
+    }
+    /// Chooses `mode` for pack `name`; Auto forgets the choice.
+    pub fn set_iris_compat(&mut self, name: &str, mode: IrisCompat) {
+        match mode {
+            IrisCompat::Auto => _ = self.iris_compat.remove(name),
+            mode => _ = self.iris_compat.insert(name.to_owned(), mode),
+        }
+    }
 }
 impl Default for Graphics {
     fn default() -> Self {
         Self {
             unclaimed: Vec::new(),
             preset: Preset::Custom,
-            lod_distance: 0,
-            far_detail: FarDetail::Full,
-            blue_map: crate::bluemap::Settings::default(),
             cave_culling: true,
             gpu_culling: GpuCullingMode::Off,
             entity_culling: EntityCullingMode::Off,
@@ -985,6 +928,7 @@ impl Default for Graphics {
             translucent_batching: true,
             hdr_smooth_gradients: true,
             shader_pack: String::new(),
+            iris_compat: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -1000,14 +944,6 @@ impl Graphics {
     /// Load the shared settings text already read for the registered stores.
     pub(super) fn load_text(dir: &Path, text: &str) -> Self {
         let mut g = Self::parse(text);
-        g.blue_map.servers = match fs::read_to_string(dir.join(crate::bluemap::SERVERS_FILE)) {
-            Ok(text) => crate::bluemap::Settings::parse_servers(&text),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(e) => {
-                log::warn!("{}: {e}; no BlueMap is named", crate::bluemap::SERVERS_FILE);
-                Vec::new()
-            }
-        };
         let marker = dir.join(HDR_MARKER);
         if let Ok(text) = fs::read_to_string(&marker)
             && fs::remove_file(&marker).is_ok()
@@ -1024,7 +960,7 @@ impl Graphics {
     /// Whether HDR output is held back on a window whose graphics driver is `driver`
     /// (`gfx::output::window_driver`): the last start on it ended before HDR output
     /// showed a frame ([`Graphics::hdr_failed_start`]).
-    pub fn hdr_held(&self, driver: &str) -> bool {
+    pub(crate) fn hdr_held(&self, driver: &str) -> bool {
         self.hdr_failed_start
             .as_deref()
             .is_some_and(|failed| failed.is_empty() || failed == driver)
@@ -1043,7 +979,7 @@ impl Graphics {
     /// `before`, as Undo brings it back, but never the hold on a driver HDR output failed to
     /// start on: that stays as it is now, and goes when Undo changes the mode, as any change of
     /// the mode drops it.
-    pub fn undone_to(&self, before: &Self) -> Self {
+    pub(crate) fn undone_to(&self, before: &Self) -> Self {
         Self {
             hdr_failed_start: self
                 .hdr_failed_start
@@ -1056,6 +992,8 @@ impl Graphics {
         let mut g = Self::default();
         // UI Brightness: `hdrUiNits`, else an older file's share of Paper White.
         let (mut ui_nits, mut ui_share) = (None, None);
+        // GPU Culling: `gpuCullingMode`, an older build's `gpuCulling`, and the marker beside it.
+        let (mut gpu_culling, mut gpu_culling_before, mut gpu_culling_written) = (None, None, None);
         for line in text.lines() {
             let Some((key, value)) = line.split_once(':') else {
                 continue;
@@ -1069,17 +1007,14 @@ impl Graphics {
             let number = |d: u32| value.parse().unwrap_or(d);
             match key.trim() {
                 "preset" => g.preset = Preset::parse(value),
-                "lodDistance" => {
-                    g.lod_distance = number(g.lod_distance).min(crate::lod::MAX_CHUNKS)
-                }
-                "farDetail" => g.far_detail = FarDetail::parse(value),
-                "blueMapRadius" => {
-                    if let Some(radius) = crate::bluemap::Settings::parse_radius(value) {
-                        g.blue_map.radius = radius;
-                    }
-                }
                 "caveCulling" => g.cave_culling = flag(g.cave_culling),
-                "gpuCulling" => g.gpu_culling = GpuCullingMode::parse(value, g.gpu_culling),
+                "gpuCullingMode" => gpu_culling = Some(GpuCullingMode::parse(value, g.gpu_culling)),
+                "gpuCulling" => {
+                    gpu_culling_before = Some(GpuCullingMode::parse(value, g.gpu_culling))
+                }
+                "gpuCullingWritten" => {
+                    gpu_culling_written = Some(GpuCullingMode::parse(value, g.gpu_culling))
+                }
                 "entityCulling" => g.entity_culling = EntityCullingMode::parse(value),
                 "entityCullingPrecheck" => {
                     g.entity_culling_precheck = number(g.entity_culling_precheck).min(512)
@@ -1164,6 +1099,18 @@ impl Graphics {
                 "hdrSmoothGradients" => g.hdr_smooth_gradients = flag(g.hdr_smooth_gradients),
                 "graphicsApi" => g.api = GraphicsApi::from_name(value).unwrap_or_default(),
                 "pickedShaderPack" => g.shader_pack = value.to_owned(),
+                // The mode, then the pack's name, which may hold `:` itself; a later line wins.
+                "shaderPackIrisCompat" => {
+                    let (mode, name) = value.split_once(':').unwrap_or((value, ""));
+                    let mode = match mode {
+                        "on" => IrisCompat::On,
+                        "off" => IrisCompat::Off,
+                        _ => continue,
+                    };
+                    if !name.is_empty() {
+                        g.set_iris_compat(name, mode);
+                    }
+                }
                 // Keys older versions saved that no setting or store reads: dropped on the next save.
                 "level" | "shaderPack" | "hdrKey" | "cullLeaves" | "translucentBatching" => {}
                 key => g.unclaimed.push((key.to_owned(), value.to_owned())),
@@ -1178,14 +1125,27 @@ impl Graphics {
             }
             _ => 0,
         });
+        // A build from before `gpuCullingMode` reads and saves only `gpuCulling`, and keeps the
+        // lines it doesn't know as they were. Its presets all set Auto, so its Auto reads as Off
+        // once: what it holds is a preset's, not a choice. This build saves `gpuCulling` with
+        // the same value as `gpuCullingWritten`, so where the two differ such a build changed
+        // it later, and its value wins. Otherwise `gpuCullingMode` does, as it does in a file
+        // saved without the marker by a build that writes `gpuCullingMode` alone.
+        let older = gpu_culling_before.map(|before| match before {
+            GpuCullingMode::Auto => GpuCullingMode::Off,
+            other => other,
+        });
+        g.gpu_culling = match (gpu_culling_written, gpu_culling_before) {
+            (Some(written), Some(before)) if written != before => older,
+            _ => gpu_culling.or(older),
+        }
+        .unwrap_or(g.gpu_culling);
         g
     }
     pub fn serialize(&self) -> String {
         let mut text = format!(
-            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nentityCullingPrecheck:{}\nparticleCulling:{}\nleafCulling:{}\nopaqueIce:{}\nblockEntityCacheShulkerBoxes:{}\nblockEntityCacheSigns:{}\nblockEntityCacheDecoratedPots:{}\nblockEntityCacheBells:{}\nblockEntityCacheChests:{}\nblockEntityCacheBanners:{}\nblockEntityCacheCopperGolemStatues:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\ntextureBudgetMiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\nresolutionScale:{}\ndynamicResolution:{}\ntargetFps:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nupscalingSharpness:{}\nscreenshotQuality:{}\nframeGeneration:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiNits:{}\nhdrLighting:{}\nbatteryMode:{}\nshadowCache:{}\ngraphicsApi:{}\npickedShaderPack:{}\nbatchTranslucent:{}\nhdrSmoothGradients:{}\ngpuCulling:{}\nparallelTick:{}\n",
+            "preset:{}\ncaveCulling:{}\nentityCulling:{}\nentityCullingPrecheck:{}\nparticleCulling:{}\nleafCulling:{}\nopaqueIce:{}\nblockEntityCacheShulkerBoxes:{}\nblockEntityCacheSigns:{}\nblockEntityCacheDecoratedPots:{}\nblockEntityCacheBells:{}\nblockEntityCacheChests:{}\nblockEntityCacheBanners:{}\nblockEntityCacheCopperGolemStatues:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\ntextureBudgetMiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\nresolutionScale:{}\ndynamicResolution:{}\ntargetFps:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nupscalingSharpness:{}\nscreenshotQuality:{}\nframeGeneration:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiNits:{}\nhdrLighting:{}\nbatteryMode:{}\nshadowCache:{}\ngraphicsApi:{}\npickedShaderPack:{}\nbatchTranslucent:{}\nhdrSmoothGradients:{}\ngpuCullingMode:{}\ngpuCulling:{}\ngpuCullingWritten:{}\nparallelTick:{}\n",
             self.preset.name(),
-            self.lod_distance,
-            self.far_detail.name(),
             bool_text(self.cave_culling),
             self.entity_culling.name(),
             self.entity_culling_precheck,
@@ -1235,12 +1195,16 @@ impl Graphics {
             bool_text(self.translucent_batching),
             bool_text(self.hdr_smooth_gradients),
             self.gpu_culling.key(),
+            self.gpu_culling.key(),
+            self.gpu_culling.key(),
             self.parallel_tick.name(),
         );
         if let Some(driver) = &self.hdr_failed_start {
             text += &format!("hdrFailedStart:{driver}\n");
         }
-        text += &self.blue_map.serialize();
+        for (name, mode) in &self.iris_compat {
+            text += &format!("shaderPackIrisCompat:{}:{name}\n", mode.key());
+        }
         text
     }
     /// The settings stores of this file follow these lines (`sunrise_hooks::settings`).
@@ -1263,14 +1227,14 @@ impl Graphics {
     }
     /// Paper white, in nits: the player's, or on Auto the desktop's SDR white as the
     /// system `reported` it for the renderer's display, else 203 (BT.2408's reference white).
-    pub fn paper_white_nits(&self, reported: Option<Reported>) -> u32 {
+    pub(crate) fn paper_white_nits(&self, reported: Option<Reported>) -> u32 {
         match self.hdr_paper_white {
             0 => reported.map_or(203, |r| r.paper_white),
             n => n,
         }
     }
     /// The HUD and menus' brightness, in nits: the player's, or on Auto paper white's.
-    pub fn ui_nits(&self, reported: Option<Reported>) -> u32 {
+    pub(crate) fn ui_nits(&self, reported: Option<Reported>) -> u32 {
         match self.hdr_ui_nits {
             0 => self.paper_white_nits(reported),
             n => n,
@@ -1278,14 +1242,14 @@ impl Graphics {
     }
     /// The peak the world's highlights reach, in nits: the player's, or on Auto
     /// what the system `reported`, else 1000.
-    pub fn peak_nits(&self, reported: Option<Reported>) -> u32 {
+    pub(crate) fn peak_nits(&self, reported: Option<Reported>) -> u32 {
         match self.hdr_peak {
             0 => reported.map_or(1000, |r| r.peak),
             n => n,
         }
     }
     /// How HDR is set up for the display the system `reported`.
-    pub fn hdr_setup(&self, reported: Option<Reported>) -> HdrSetup {
+    pub(crate) fn hdr_setup(&self, reported: Option<Reported>) -> HdrSetup {
         match reported {
             None => HdrSetup::Unknown,
             Some(_) if self.hdr_peak != 0 || self.hdr_paper_white != 0 => HdrSetup::Changed,
@@ -1295,7 +1259,7 @@ impl Graphics {
     }
     /// The black level, in nits. Not the system's: files from before saved 0 for that
     /// (Auto), and a reported black would lift every display's shadows by default.
-    pub fn black_level_nits(&self) -> f32 {
+    pub(crate) fn black_level_nits(&self) -> f32 {
         self.hdr_black_level as f32 / 100.0
     }
     /// Worker threads for chunk generation and meshing.
@@ -1467,10 +1431,10 @@ mod tests {
         let dir = scratch("graphics-unclaimed");
         fs::write(dir.join(FILE), "overlay:graph\n").unwrap();
         let mut graphics = Graphics::load(&dir);
-        graphics.lod_distance = 12;
+        graphics.chunk_updates = 12;
         graphics.save(&dir);
         let saved = fs::read_to_string(dir.join(FILE)).unwrap();
-        assert_eq!(Graphics::parse(&saved).lod_distance, 12);
+        assert_eq!(Graphics::parse(&saved).chunk_updates, 12);
         assert_eq!(
             saved
                 .lines()
@@ -1554,13 +1518,6 @@ mod tests {
         let g = Graphics {
             unclaimed: Vec::new(),
             preset: Preset::Balanced,
-            lod_distance: 256,
-            far_detail: FarDetail::Reduced,
-            blue_map: crate::bluemap::Settings {
-                radius: 40,
-                // In their own file (`bluemap::SERVERS_FILE`).
-                servers: Vec::new(),
-            },
             cave_culling: false,
             gpu_culling: GpuCullingMode::On,
             entity_culling: EntityCullingMode::Synchronous,
@@ -1611,6 +1568,11 @@ mod tests {
             translucent_batching: false,
             hdr_smooth_gradients: false,
             shader_pack: "Golden Hour".into(),
+            iris_compat: [
+                ("Golden Hour".to_owned(), IrisCompat::Off),
+                ("Dawn: v2.zip".to_owned(), IrisCompat::On),
+            ]
+            .into(),
         };
         assert_eq!(Graphics::parse(&g.serialize()), g);
         // A legacy marker's hold, which names no driver, round-trips too; none writes no line.
@@ -1647,13 +1609,6 @@ mod tests {
             Graphics::parse("entityCulling:false\n").entity_culling,
             EntityCullingMode::Off
         );
-        // A map named here (a shared instance's, a pack's) is no map.
-        assert!(
-            Graphics::parse("blueMap:play.example.net https://map.example.net\n")
-                .blue_map
-                .servers
-                .is_empty()
-        );
         assert_eq!(Graphics::parse(""), Graphics::default());
         // Translucent Batching is on, in files from before it too; only false turns it off,
         // and only under its key: the old one held the false every save wrote while it was
@@ -1666,24 +1621,35 @@ mod tests {
         assert!(Graphics::parse("translucentBatching:false\n").translucent_batching);
         // GPU Culling is opt-in: only the file or its switch turns it on.
         assert_eq!(Graphics::default().gpu_culling, GpuCullingMode::Off);
+        let read = |text: &str| Graphics::parse(text).gpu_culling;
+        // Its key is `gpuCullingMode`, with Auto a third value.
+        assert_eq!(read("gpuCullingMode:true\n"), GpuCullingMode::On);
+        assert_eq!(read("gpuCullingMode:auto\n"), GpuCullingMode::Auto);
+        assert_eq!(read("gpuCullingMode:false\n"), GpuCullingMode::Off);
+        assert_eq!(read("gpuCullingMode:maybe\n"), GpuCullingMode::Off);
+        // A file from before it has `gpuCulling`, whose Auto every preset wrote: read once as
+        // Off. On and Off read as they were, and the new key wins where both are.
+        assert_eq!(read("gpuCulling:auto\n"), GpuCullingMode::Off);
+        assert_eq!(read("gpuCulling:true\n"), GpuCullingMode::On);
+        assert_eq!(read("gpuCulling:false\n"), GpuCullingMode::Off);
         assert_eq!(
-            Graphics::parse("gpuCulling:true\n").gpu_culling,
-            GpuCullingMode::On
-        );
-        // Auto is a third value of the same key. A file from before it reads as before, and an
-        // older Sunrise reading `auto` finds a value it doesn't know and keeps Off.
-        assert_eq!(
-            Graphics::parse("gpuCulling:auto\n").gpu_culling,
+            read("gpuCulling:false\ngpuCullingMode:auto\n"),
             GpuCullingMode::Auto
         );
         assert_eq!(
-            Graphics::parse("gpuCulling:false\n").gpu_culling,
-            GpuCullingMode::Off
+            read("gpuCullingMode:on\ngpuCulling:auto\n"),
+            GpuCullingMode::On
         );
-        assert_eq!(
-            Graphics::parse("gpuCulling:maybe\n").gpu_culling,
-            GpuCullingMode::Off
+        // The next save writes the new key, the old one and the marker, so a later Auto stays
+        // Auto.
+        let mut chosen = Graphics::parse("gpuCulling:auto\n");
+        chosen.gpu_culling = GpuCullingMode::Auto;
+        assert!(
+            chosen
+                .serialize()
+                .contains("gpuCullingMode:auto\ngpuCulling:auto\ngpuCullingWritten:auto\n")
         );
+        assert_eq!(read(&chosen.serialize()), GpuCullingMode::Auto);
         for mode in GpuCullingMode::ALL {
             let g = Graphics {
                 gpu_culling: mode,
@@ -1755,6 +1721,49 @@ mod tests {
         );
     }
 
+    /// Iris compatibility is kept by pack name, one line each: a name with `:` in it, a
+    /// later line over an earlier one, and Auto chosen again forgets the pack; an unknown mode
+    /// or a line without a name is ignored. Nothing is written while every pack is on Auto.
+    #[test]
+    fn iris_compatibility_is_kept_by_pack_name() {
+        let g = Graphics::parse(
+            "shaderPackIrisCompat:off:A.zip\nshaderPackIrisCompat:on:B: v2\n\
+             shaderPackIrisCompat:on:A.zip\nshaderPackIrisCompat:maybe:C\n\
+             shaderPackIrisCompat:off\nshaderPackIrisCompat:auto:D\n",
+        );
+        assert_eq!(
+            g.iris_compat,
+            [
+                ("A.zip".to_owned(), IrisCompat::On),
+                ("B: v2".to_owned(), IrisCompat::On),
+            ]
+            .into()
+        );
+        assert!(g.unclaimed.is_empty(), "{:?}", g.unclaimed);
+        assert_eq!(g.iris_compat_of("C"), IrisCompat::Auto);
+        let mut g = g;
+        g.set_iris_compat("B: v2", IrisCompat::Off);
+        g.set_iris_compat("A.zip", IrisCompat::Auto);
+        let text = g.serialize();
+        assert!(
+            text.contains("\nshaderPackIrisCompat:off:B: v2\n"),
+            "{text}"
+        );
+        assert!(!text.contains("A.zip"), "{text}");
+        assert_eq!(Graphics::parse(&text).iris_compat, g.iris_compat);
+        assert!(!Graphics::default().serialize().contains("IrisCompat"));
+        // The switch steps Auto, On, Off and back round.
+        let steps: Vec<_> = std::iter::successors(Some(IrisCompat::Auto), |m| Some(m.step(false)))
+            .take(4)
+            .collect();
+        use IrisCompat::{Auto, Off, On};
+        assert_eq!(steps, [Auto, On, Off, Auto]);
+        assert_eq!(
+            (Auto.step(true), Off.step(true), On.step(true)),
+            (Off, On, Auto)
+        );
+    }
+
     #[test]
     fn peak_scale_steps_by_50_to_2000_then_by_500_to_10000() {
         let scale: Vec<u32> = (0..=PEAK_STEPS).map(peak_nits_at).collect();
@@ -1795,6 +1804,123 @@ mod tests {
                 LeafCullingMode::Off,
                 "{text:?}"
             );
+        }
+    }
+
+    /// What a build from before `gpuCullingMode` saves after reading `text`: `gpuCulling` as it
+    /// read it (Off without one), or as the player or a preset there set it (`set`), and the
+    /// lines it doesn't know after its own, as they were.
+    fn saved_by_an_older_build(text: &str, set: Option<&str>) -> String {
+        let mut value = "false".to_owned();
+        let (mut own, mut kept) = (String::new(), String::new());
+        for line in text.lines() {
+            match line.split_once(':') {
+                Some(("gpuCulling", v)) => value = v.to_owned(),
+                Some(("gpuCullingMode" | "gpuCullingWritten", _)) => kept += &format!("{line}\n"),
+                _ => own += &format!("{line}\n"),
+            }
+        }
+        format!("{own}gpuCulling:{}\n{kept}", set.unwrap_or(&value))
+    }
+
+    #[test]
+    fn gpu_culling_keeps_the_last_builds_choice_across_a_downgrade() {
+        let saved = |mode| {
+            Graphics {
+                gpu_culling: mode,
+                ..Graphics::default()
+            }
+            .serialize()
+        };
+        let read = |text: &str| Graphics::parse(text).gpu_culling;
+        let older = saved_by_an_older_build;
+        // A file with `gpuCullingMode` alone, saved again by an older build that changed
+        // something else: it adds its Off, and the On stays.
+        assert_eq!(
+            read(&older("gpuCullingMode:true\n", None)),
+            GpuCullingMode::On
+        );
+        // This build's value, saved there with something else changed, stays: every value.
+        for mode in GpuCullingMode::ALL {
+            assert_eq!(read(&older(&saved(mode), None)), mode);
+        }
+        // Changed there, the older build's value wins, read its way.
+        assert_eq!(
+            read(&older(&saved(GpuCullingMode::On), Some("false"))),
+            GpuCullingMode::Off
+        );
+        assert_eq!(
+            read(&older(&saved(GpuCullingMode::Off), Some("true"))),
+            GpuCullingMode::On
+        );
+        assert_eq!(
+            read(&older(&saved(GpuCullingMode::On), Some("auto"))),
+            GpuCullingMode::Off
+        );
+        // A file from before `gpuCullingMode` reads its Auto as Off; one with the new key alone
+        // keeps Auto.
+        assert_eq!(read("gpuCulling:auto\n"), GpuCullingMode::Off);
+        assert_eq!(read("gpuCullingMode:auto\n"), GpuCullingMode::Auto);
+        // A build that writes `gpuCullingMode` alone drops `gpuCulling` and keeps the marker,
+        // a line it doesn't know; `mode` is its value as it saves it.
+        let mode_alone = |text: &str, mode: &str| {
+            text.lines()
+                .filter(|line| {
+                    !line.starts_with("gpuCulling:") && !line.starts_with("gpuCullingMode:")
+                })
+                .map(|line| format!("{line}\n"))
+                .collect::<String>()
+                + &format!("gpuCullingMode:{mode}\n")
+        };
+        // Its value stands.
+        assert_eq!(
+            read(&mode_alone(&saved(GpuCullingMode::On), "false")),
+            GpuCullingMode::Off
+        );
+        // Left as is: On here, saved unchanged by a build that writes `gpuCullingMode` alone,
+        // then by a build from before it with something else changed, which adds its default
+        // `gpuCulling:false`. Back here it reads Off: those builds' own saves write the same
+        // bytes as an explicit Off in that older build, so nothing tells the two apart, and Off
+        // is kept. The model here compares the lines, not their order.
+        let three = older(&mode_alone(&saved(GpuCullingMode::On), "true"), None);
+        let sorted = |text: &str| {
+            let mut lines: Vec<&str> = text.lines().collect();
+            lines.sort_unstable();
+            lines.join("\n")
+        };
+        let explicit_off = older(&saved(GpuCullingMode::On), Some("false"));
+        assert_eq!(
+            sorted(&three),
+            sorted(&explicit_off),
+            "the same lines as an explicit Off there"
+        );
+        assert_eq!(read(&three), GpuCullingMode::Off);
+        // Left as is: Auto here, Off there, then a preset there sets Auto again. The older
+        // build's last value equals the marker, so Auto, the player's own choice here, reads.
+        let there = older(
+            &older(&saved(GpuCullingMode::Auto), Some("false")),
+            Some("auto"),
+        );
+        assert_eq!(read(&there), GpuCullingMode::Auto);
+    }
+
+    #[test]
+    fn presets_leave_gpu_culling_off_and_keep_the_players_choice() {
+        // Its picture isn't proven to be vanilla's, so no preset turns it on.
+        for preset in Preset::ALL {
+            let mut s = crate::settings::Settings::default();
+            apply_preset(preset, &mut s);
+            assert_eq!(s.sunrise.gpu_culling, GpuCullingMode::Off, "{preset:?}");
+        }
+        // A choice made in the options, saved Auto included, outlasts every preset.
+        for mode in GpuCullingMode::ALL {
+            for preset in Preset::ALL {
+                let mut s = crate::settings::Settings::default();
+                s.sunrise.gpu_culling = mode;
+                apply_preset(preset, &mut s);
+                assert_eq!(s.sunrise.gpu_culling, mode, "{preset:?}");
+                assert_eq!(Graphics::parse(&s.sunrise.serialize()).gpu_culling, mode);
+            }
         }
     }
 
@@ -1852,82 +1978,6 @@ mod tests {
             "removing the server pack restores the selected local mode"
         );
         assert!(g.vanilla_models_with_server_packs(selected, []));
-    }
-
-    #[test]
-    fn integrated_gpus_other_than_apple_cap_the_lod_distance() {
-        let adapter = |name: &str, device_type| wgpu::AdapterInfo {
-            name: name.into(),
-            vendor: 0,
-            device: 0,
-            device_type,
-            device_pci_bus_id: String::new(),
-            driver: String::new(),
-            driver_info: String::new(),
-            backend: wgpu::Backend::Vulkan,
-            subgroup_min_size: 0,
-            subgroup_max_size: 0,
-            transient_saves_memory: None,
-            limit_bucket: None,
-        };
-        let hd620 = adapter(
-            "Intel(R) HD Graphics 620 (KBL GT2)",
-            wgpu::DeviceType::IntegratedGpu,
-        );
-        let m4 = adapter("Apple M4 Pro", wgpu::DeviceType::IntegratedGpu);
-        let discrete = adapter("NVIDIA GeForce RTX 4070", wgpu::DeviceType::DiscreteGpu);
-        for (distance, capped) in [(0, 0), (64, 64), (128, 128), (256, 128), (1024, 128)] {
-            let g = Graphics {
-                lod_distance: distance,
-                ..Graphics::default()
-            };
-            assert_eq!(g.lod_distance_on(&hd620), capped);
-            assert_eq!(g.lod_distance_on(&m4), distance);
-            assert_eq!(g.lod_distance_on(&discrete), distance);
-        }
-        assert!(
-            crate::graphics_ui::rows()
-                .into_iter()
-                .flat_map(|(_, groups)| groups.into_iter().flat_map(|(_, rows)| rows))
-                .any(|r| r
-                    .text
-                    .contains(&format!("{INTEGRATED_LOD_DISTANCE} chunks"))),
-            "the LOD Distance description names the cap"
-        );
-    }
-
-    #[test]
-    fn lod_distance_is_opt_in_and_bounded() {
-        assert_eq!(Graphics::default().lod_distance, 0);
-        for distance in [0, 64, 128, 256, 512, 1024] {
-            let g = Graphics::parse(&format!("lodDistance:{distance}\n"));
-            assert_eq!(g.lod_distance, distance);
-            assert_eq!(Graphics::parse(&g.serialize()), g);
-        }
-        for old in ["4194304", "99999999"] {
-            let g = Graphics::parse(&format!("lodDistance:{old}\n"));
-            assert_eq!(g.lod_distance, 1024);
-        }
-        assert_eq!(Graphics::parse("lodDistance:-1\n").lod_distance, 0);
-        assert_eq!(Graphics::parse("lodDistance:invalid\n").lod_distance, 0);
-    }
-
-    #[test]
-    fn far_detail_is_full_unless_reduced_is_picked() {
-        assert_eq!(Graphics::default().far_detail, FarDetail::Full);
-        assert_eq!(
-            Graphics::parse("farDetail:reduced\n").far_detail,
-            FarDetail::Reduced
-        );
-        for text in ["farDetail:full\n", "farDetail:other\n", ""] {
-            assert_eq!(Graphics::parse(text).far_detail, FarDetail::Full);
-        }
-        // No preset changes it.
-        for preset in Preset::ALL {
-            let mut s = crate::settings::Settings::default();
-            apply_preset(preset, &mut s);
-            assert_eq!(s.sunrise.far_detail, FarDetail::Full, "{preset:?}");
-        }
     }
 
     #[test]

@@ -1,10 +1,16 @@
 //! Narrow cold lookup views for API-owned registration tests.
-/// The immutable controller identities, copied without exposing Installed.
+/// Installed controller ids, tokens and validator presence, without lending the callbacks.
 #[cfg(any(test, feature = "testing"))]
-pub fn testing_controllers() -> Vec<super::ControllerInfoInput> {
+pub fn testing_controllers() -> Vec<(&'static str, u64, bool)> {
     crate::parts::installed_controllers()
         .iter()
-        .map(Into::into)
+        .map(|controller| {
+            (
+                &*controller.id,
+                controller.token,
+                controller.validator.is_some(),
+            )
+        })
         .collect()
 }
 /// The immutable command argument declarations, copied without exposing Installed.
@@ -36,7 +42,7 @@ pub fn check_parts(
 #[cfg(any(test, feature = "testing"))]
 pub fn empty_pose_table() -> impl Sized {
     (
-        crate::client::arm_pose::test_table(Vec::new()),
+        crate::content::arm_pose::test_table(Vec::new()),
         std::marker::PhantomData::<std::rc::Rc<()>>,
     )
 }

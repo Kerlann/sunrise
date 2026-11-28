@@ -1,5 +1,4 @@
 //! The `difficulty_changed` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0193
 
 pub trait Hooks {
     /// The server's difficulty changed, from `from` to `to` (`peaceful`,
@@ -9,7 +8,7 @@ pub trait Hooks {
     /// go through, and it is told only when the difficulty is another one. It
     /// only hears: the change has already happened. Server-side.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_difficulty_changed",
+        target = "sunrise_gameplay::game::native_hooks::base::ServerGame<'_>::native_difficulty_changed",
         dispatch = "flat",
         side = "server",
         contract = "listen",

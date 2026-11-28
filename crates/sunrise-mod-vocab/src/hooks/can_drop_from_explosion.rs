@@ -17,11 +17,12 @@ pub trait Hooks {
         receiver = "read",
         dispatch = "flat",
         side = "server",
+        version = 2,
         contract = "replace",
         out = "drops",
         scope = "block",
         key = "state",
-        target = "sunrise_client::game::native_hooks::can_drop_from_explosion::GameLevel<'_>::native_can_drop_from_explosion",
+        target = "sunrise_gameplay_common::game::native_hooks::can_drop_from_explosion::GameLevel<'_>::native_can_drop_from_explosion",
         neoforge = "IBlockExtension.canDropFromExplosion"
     )]
     fn can_drop_from_explosion(

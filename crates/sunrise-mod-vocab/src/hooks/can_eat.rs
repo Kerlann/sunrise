@@ -1,5 +1,4 @@
 //! The `can_eat` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0103
 
 pub trait Hooks {
     /// `Player.canEat`, from `Consumable.canConsume` when eating starts
@@ -18,7 +17,7 @@ pub trait Hooks {
     /// Not asked without a resident eater or an open lifecycle epoch; vanilla's
     /// answer stands during those world/login lifecycle gaps.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_can_eat",
+        target = "sunrise_gameplay_common::game::native_hooks::base::GameHooks::native_can_eat",
         receiver = "read",
         dispatch = "flat",
         side = "both",

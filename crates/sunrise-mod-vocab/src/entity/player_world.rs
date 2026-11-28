@@ -48,11 +48,19 @@ pub enum PlayerWorldRefusal {
     Fenced,
     /// This placement completes a wither pattern and cannot run inside a Host transaction.
     InTransaction,
+    /// An `entity_place` listener vetoed `place_block`.
+    Canceled,
+    /// A cell the placement writes no longer holds its tentative state, is unloaded or is fenced.
+    PlacementChanged,
 }
 
 impl crate::NoBackend for PlayerWorldRefusal {
     fn no_backend() -> Self {
         Self::Stale
+    }
+
+    fn wrong_side() -> Self {
+        Self::Client
     }
 }
 

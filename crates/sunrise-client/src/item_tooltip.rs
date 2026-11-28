@@ -6,17 +6,15 @@ use crate::{
     hud::rgba,
     items::{ItemInfo, ItemStack, Items},
 };
-use mod_api::TooltipPlacement;
 pub use mod_api::item::item_tooltip::TooltipDisplay;
 use sunrise_core::nbt::Tag;
 use sunrise_items::creative_catalog::Holders;
 use sunrise_world::attributes::{Display, Sentiment, Tooltip};
-/// Borrow the engine's modelled visibility without allocating an API stack.
-pub fn tooltip_display(stack: &ItemStack) -> TooltipDisplay<'_> {
+/// Borrow the engine's modelled visibility without allocating an API stack: the stack's
+/// `minecraft:tooltip_display`, or `info`'s default ([`ItemStack::component`]).
+pub fn tooltip_display<'a>(stack: &'a ItemStack, info: Option<&'a ItemInfo>) -> TooltipDisplay<'a> {
     TooltipDisplay::from_component(
-        stack
-            .data()
-            .and_then(|data| data.other("minecraft:tooltip_display")),
+        stack.component(info, "minecraft:tooltip_display"),
         stack.data().is_some_and(|data| data.ominous_banner),
     )
 }
@@ -332,52 +330,11 @@ pub fn attribute_lines_filtered(
     lines
 }
 
-/// The attribute modifiers a mob effect adds per amplifier level
-/// (`MobEffects`): attribute, amount, operation id.
-fn effect_modifier(effect: &str) -> Option<(&'static str, f64, usize)> {
-    Some(match effect {
-        "speed" => ("movement_speed", 0.2, 2),
-        "slowness" => ("movement_speed", -0.15, 2),
-        "strength" => ("attack_damage", 3.0, 0),
-        "weakness" => ("attack_damage", -4.0, 0),
-        "jump_boost" => ("safe_fall_distance", 1.0, 0),
-        "luck" => ("luck", 1.0, 0),
-        "invisibility" => ("waypoint_transmit_range", -1.0, 2),
-        _ => return None,
-    })
-}
-
 fn is_potion_item(item: &str) -> bool {
     item.ends_with("potion") || item == "minecraft:tipped_arrow"
 }
 
-/// `PlayerHeadItem.getName`: a player head whose profile has a name is titled
-/// after it.
-pub struct PlayerHeadName(String);
-
-impl PlayerHeadName {
-    /// The title as `getName`'s `%s's Head` translation.
-    pub fn title(&self, translate: &dyn Fn(&str) -> Option<String>) -> String {
-        translate("block.minecraft.player_head.named")
-            .unwrap_or_else(|| "%s's Head".to_owned())
-            .replacen("%s", &self.0, 1)
-    }
-    /// The title as a component, for command feedback.
-    pub fn text(&self) -> crate::text::Text {
-        crate::text::Text::from(serde_json::json!({
-            "translate": "block.minecraft.player_head.named",
-            "with": [&self.0],
-        }))
-    }
-}
-
-/// The name in a player head's `minecraft:profile`, if it has one.
-pub fn player_head_name(stack: &ItemStack) -> Option<PlayerHeadName> {
-    if &*stack.item != "minecraft:player_head" {
-        return None;
-    }
-    Some(PlayerHeadName(stack.profile_name()?))
-}
+pub use crate::stations::{PlayerHeadName, player_head_name, rarity};
 
 /// The name line of `stack`, as the item's translation or, for potions and
 /// smithing templates, its name component gives it.
@@ -429,40 +386,11 @@ pub fn name_line(stack: &ItemStack, translate: &dyn Fn(&str) -> Option<String>) 
         .unwrap_or_else(|| path.replace('_', " "))
 }
 
-/// ItemStack.getRarity: the stack's `minecraft:rarity` (the item's default
-/// unless a command or server set it; the ominous banner's uncommon), then
-/// the enchantment upgrade.
-pub fn rarity<'a>(stack: &ItemStack, default: &'a str) -> &'a str {
-    let set = match stack.data().and_then(|d| d.other("minecraft:rarity")) {
-        Some(Tag::String(s)) => match &*s.to_string_lossy() {
-            "common" => Some("common"),
-            "uncommon" => Some("uncommon"),
-            "rare" => Some("rare"),
-            "epic" => Some("epic"),
-            _ => None,
-        },
-        _ => None,
-    };
-    let rarity = if let Some(set) = set {
-        set
-    } else if stack
-        .data()
-        .is_some_and(|data| data.other("!minecraft:rarity").is_some())
-    {
-        "common"
-    } else if stack.data().is_some_and(|data| data.ominous_banner) {
-        "uncommon"
-    } else {
-        default
-    };
-    sunrise_items::properties::ItemRarity::of(rarity, !stack.enchantments().is_empty()).as_str()
-}
-
 /// `BundleItem.getTooltipImage`: select a stack's bundle tooltip only when it carries
 /// `minecraft:bundle_contents` and `minecraft:tooltip_display` shows that component.
 /// Selection does not copy the contents or compute their weight.
 pub fn shows_bundle_tooltip(items: &Items, stack: &ItemStack) -> bool {
-    tooltip_display(stack).shows("minecraft:bundle_contents")
+    tooltip_display(stack, items.get(&stack.item)).shows("minecraft:bundle_contents")
         && crate::bundle::Contents::is_bundle(items, stack)
 }
 
@@ -479,6 +407,7 @@ pub struct PaintingTooltip<'a> {
 
 pub fn painting_lines<'a>(
     stack: &ItemStack,
+    info: Option<&ItemInfo>,
     display: &TooltipDisplay,
     creative: bool,
     variant: impl FnOnce(&str) -> Option<PaintingTooltip<'a>>,
@@ -487,10 +416,7 @@ pub fn painting_lines<'a>(
     if &*stack.item != "minecraft:painting" || !display.shows("minecraft:painting/variant") {
         return Vec::new();
     }
-    match stack
-        .data()
-        .and_then(|d| d.other("minecraft:painting/variant"))
-    {
+    match stack.component(info, "minecraft:painting/variant") {
         Some(Tag::String(id)) => {
             let id = sunrise_world::datafix::dynamic::namespaced(&id.to_string_lossy());
             let Some(variant) = variant(&id) else {
@@ -516,6 +442,7 @@ pub fn painting_lines<'a>(
 /// A caller without an instrument lookup does not include instrument details.
 pub fn instrument_line(
     stack: &ItemStack,
+    info: Option<&ItemInfo>,
     display: &TooltipDisplay,
     lookup: Option<impl FnOnce(&str) -> Option<String>>,
 ) -> Option<String> {
@@ -523,7 +450,7 @@ pub fn instrument_line(
     if !display.shows("minecraft:instrument") {
         return None;
     }
-    let id = match stack.data().and_then(|d| d.other("minecraft:instrument")) {
+    let id = match stack.component(info, "minecraft:instrument") {
         Some(Tag::String(id)) => id.to_string_lossy(),
         // An inline instrument carries its own description.
         Some(inline) => {
@@ -568,21 +495,23 @@ const COMMON_TROPICAL_FISH: [(&str, &str, &str); 22] = [
 /// common variant, or else shows the pattern and then the base colour (with
 /// the pattern colour when it differs), all in italic gray. Only a stack that
 /// has the pattern component shows it.
-pub fn tropical_fish_lines(stack: &ItemStack, display: &TooltipDisplay) -> Vec<Text> {
+pub fn tropical_fish_lines(
+    stack: &ItemStack,
+    info: Option<&ItemInfo>,
+    display: &TooltipDisplay,
+) -> Vec<Text> {
     if !display.shows("minecraft:tropical_fish/pattern") {
         return Vec::new();
     }
-    let Some(data) = stack.data() else {
-        return Vec::new();
-    };
-    let name = |key: &str, default: &'static str| match data.other(key) {
+    let name = |key: &str, default: &'static str| match stack.component(info, key) {
         Some(Tag::String(s)) => s
             .to_string_lossy()
             .trim_start_matches("minecraft:")
             .to_owned(),
         _ => default.to_owned(),
     };
-    let Some(Tag::String(pattern)) = data.other("minecraft:tropical_fish/pattern") else {
+    let Some(Tag::String(pattern)) = stack.component(info, "minecraft:tropical_fish/pattern")
+    else {
         return Vec::new();
     };
     let pattern = pattern
@@ -665,13 +594,14 @@ pub fn map_id_lines(
 /// the component has the item's default, none).
 pub fn bees_line(
     stack: &ItemStack,
+    info: Option<&ItemInfo>,
     display: &TooltipDisplay,
     translate: &dyn Fn(&str) -> Option<String>,
 ) -> Option<String> {
     if !display.shows("minecraft:bees") {
         return None;
     }
-    let bees = match stack.data().and_then(|d| d.other("minecraft:bees")) {
+    let bees = match stack.component(info, "minecraft:bees") {
         Some(Tag::List(bees)) => bees.len(),
         Some(_) => return None,
         None if is_beehive(stack.item.trim_start_matches("minecraft:")) => 0,
@@ -710,13 +640,14 @@ pub fn spawn_egg_peaceful_line(
 /// item without the component has the item's default, 0).
 pub fn honey_line(
     stack: &ItemStack,
+    info: Option<&ItemInfo>,
     display: &TooltipDisplay,
     translate: &dyn Fn(&str) -> Option<String>,
 ) -> Option<String> {
     if !display.shows("minecraft:block_state") {
         return None;
     }
-    let level = match stack.data().and_then(|d| d.other("minecraft:block_state")) {
+    let level = match stack.component(info, "minecraft:block_state") {
         Some(Tag::Compound(state)) => {
             match state.get(&sunrise_core::nbt::JavaString::from("honey_level")) {
                 Some(Tag::String(level)) => level.to_string_lossy().parse::<u32>().ok()?,
@@ -773,18 +704,14 @@ pub fn jukebox_line(
     if !display.shows("minecraft:jukebox_playable") {
         return None;
     }
-    let song = match stack
-        .data()
-        .and_then(|d| d.other("minecraft:jukebox_playable"))
-    {
-        Some(Tag::String(song)) => song.to_string_lossy(),
+    let song = match stack.component(info, "minecraft:jukebox_playable")? {
+        Tag::String(song) => song.to_string_lossy(),
         // An inline song carries its own description.
-        Some(inline) => {
+        inline => {
             return inline
                 .get("description")
                 .map(|d| crate::entity_nbt::name_text(d).plain());
         }
-        None => info?.jukebox_song.clone()?,
     };
     let key = format!("jukebox_song.{}", song.replacen(':', ".", 1));
     Some(translate(&key).unwrap_or(key))
@@ -794,11 +721,14 @@ pub fn jukebox_line(
 /// tooltips the colour's hex code.
 pub fn dyed_line(
     stack: &ItemStack,
+    info: Option<&ItemInfo>,
     display: &TooltipDisplay,
     advanced: bool,
     translate: &dyn Fn(&str) -> Option<String>,
 ) -> Option<(String, bool)> {
-    let rgb = stack.data()?.dyed_color?;
+    let rgb = stack
+        .component_data(info, "minecraft:dyed_color")?
+        .dyed_color?;
     if !display.shows("minecraft:dyed_color") {
         return None;
     }
@@ -814,23 +744,26 @@ pub fn dyed_line(
 /// `ItemStack.UNBREAKABLE_TOOLTIP`.
 pub fn unbreakable_line(
     stack: &ItemStack,
+    info: Option<&ItemInfo>,
     display: &TooltipDisplay,
     translate: &dyn Fn(&str) -> Option<String>,
 ) -> Option<String> {
-    (stack.data()?.other("minecraft:unbreakable").is_some()
+    (stack.component(info, "minecraft:unbreakable").is_some()
         && display.shows("minecraft:unbreakable"))
     .then(|| translate("item.unbreakable").unwrap_or_else(|| "item.unbreakable".into()))
 }
 
-/// `ItemStack.addDetailsToTooltip`'s adventure lines, `can_break` then
-/// `can_place_on`: each shown one adds an empty line, its gray header
-/// (`AdventureModePredicate.CAN_BREAK_HEADER` / `CAN_PLACE_HEADER`) and
+/// `ItemStack.addDetailsToTooltip`'s adventure lines for `component`,
+/// `minecraft:can_break` or `minecraft:can_place_on`: when shown, an empty line, its gray
+/// header (`AdventureModePredicate.CAN_BREAK_HEADER` / `CAN_PLACE_HEADER`) and
 /// `AdventureModePredicate.computeTooltip`: `item.canUse.unknown` in gray when
 /// some predicate names no blocks, else every distinct block of the
 /// predicates' holder sets by its name (`Block.getName`) in dark gray.
 /// `tag_blocks` lists the blocks of a block tag.
 pub fn adventure_lines(
     stack: &ItemStack,
+    info: Option<&ItemInfo>,
+    component: &str,
     display: &TooltipDisplay,
     tag_blocks: &dyn Fn(&str) -> Vec<String>,
     translate: &dyn Fn(&str) -> Option<String>,
@@ -844,58 +777,58 @@ pub fn adventure_lines(
         }
     };
     let (gray, dark_gray) = (rgba(170, 170, 170, 255), rgba(85, 85, 85, 255));
+    let header = if component == "minecraft:can_break" {
+        "item.canBreak"
+    } else {
+        "item.canPlace"
+    };
+    let Some(tag) = stack.component(info, component) else {
+        return Vec::new();
+    };
+    if !display.shows(component) {
+        return Vec::new();
+    }
     let mut lines = Vec::new();
-    for (component, header) in [
-        ("minecraft:can_break", "item.canBreak"),
-        ("minecraft:can_place_on", "item.canPlace"),
-    ] {
-        let Some(tag) = stack.data().and_then(|d| d.other(component)) else {
-            continue;
-        };
-        if !display.shows(component) {
-            continue;
-        }
-        lines.push((String::new(), u32::MAX));
-        lines.push((text(header), gray));
-        let predicates: Vec<&Tag> = match tag {
-            Tag::List(list) => list.iter().collect(),
-            single => vec![single],
-        };
-        if predicates.iter().any(|p| p.get("blocks").is_none()) {
-            lines.push((text("item.canUse.unknown"), gray));
-            continue;
-        }
-        let mut blocks: Vec<String> = Vec::new();
-        for p in predicates {
-            let ids = match p.get("blocks") {
-                Some(Tag::String(entry)) => {
-                    let entry = entry.to_string_lossy();
-                    match entry.strip_prefix('#') {
-                        Some(tag) => tag_blocks(&namespaced(tag)),
-                        None => vec![namespaced(&entry)],
-                    }
-                }
-                Some(Tag::List(entries)) => entries
-                    .iter()
-                    .filter_map(|e| match e {
-                        Tag::String(id) => Some(namespaced(&id.to_string_lossy())),
-                        _ => None,
-                    })
-                    .collect(),
-                _ => Vec::new(),
-            };
-            for id in ids {
-                if !blocks.contains(&id) {
-                    blocks.push(id);
+    lines.push((String::new(), u32::MAX));
+    lines.push((text(header), gray));
+    let predicates: Vec<&Tag> = match tag {
+        Tag::List(list) => list.iter().collect(),
+        single => vec![single],
+    };
+    if predicates.iter().any(|p| p.get("blocks").is_none()) {
+        lines.push((text("item.canUse.unknown"), gray));
+        return lines;
+    }
+    let mut blocks: Vec<String> = Vec::new();
+    for p in predicates {
+        let ids = match p.get("blocks") {
+            Some(Tag::String(entry)) => {
+                let entry = entry.to_string_lossy();
+                match entry.strip_prefix('#') {
+                    Some(tag) => tag_blocks(&namespaced(tag)),
+                    None => vec![namespaced(&entry)],
                 }
             }
+            Some(Tag::List(entries)) => entries
+                .iter()
+                .filter_map(|e| match e {
+                    Tag::String(id) => Some(namespaced(&id.to_string_lossy())),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        for id in ids {
+            if !blocks.contains(&id) {
+                blocks.push(id);
+            }
         }
-        for id in blocks {
-            lines.push((
-                text(&format!("block.{}", id.replacen(':', ".", 1))),
-                dark_gray,
-            ));
-        }
+    }
+    for id in blocks {
+        lines.push((
+            text(&format!("block.{}", id.replacen(':', ".", 1))),
+            dark_gray,
+        ));
     }
     lines
 }
@@ -948,51 +881,66 @@ pub fn potion_modifier_lines(
     if !is_potion_item(&stack.item) {
         return Vec::new();
     }
-    let effects = stack
-        .potion()
-        .and_then(crate::brewing::potion)
-        .into_iter()
-        .flat_map(|p| p.effects.iter())
-        .map(|(effect, _, amplifier)| (*effect, *amplifier));
-    effect_modifier_lines(effects, translate)
+    let effects = crate::brewing::contents_effects(stack);
+    effect_modifier_lines(
+        effects
+            .iter()
+            .map(|&(effect, _, amplifier)| (effect, amplifier)),
+        translate,
+    )
 }
 
-/// `addPotionTooltip`'s attribute block for (effect id, amplifier) entries.
+/// `addPotionTooltip`'s attribute block for (effect id, amplifier) entries:
+/// each effect's `MobEffect.createModifiers`, vanilla's or the ones a content
+/// mod's effect declares, under an empty line and "When Applied:" whenever
+/// there is one; a modifier of amount 0 adds the heading but no line. The
+/// amount reads as itself added, times 100 multiplied, whatever the
+/// attribute (no `ItemAttributeModifiers` display rule applies here).
 fn effect_modifier_lines<'a>(
     effects: impl IntoIterator<Item = (&'a str, i32)>,
     translate: &dyn Fn(&str) -> Option<String>,
 ) -> Vec<(String, u32)> {
-    let applied: Vec<(String, u32)> = effects
-        .into_iter()
-        .filter_map(|(effect, amplifier)| {
-            let (attribute, amount, operation) =
-                effect_modifier(effect.trim_start_matches("minecraft:"))?;
-            let amount = amount * (amplifier + 1) as f64;
-            let line = modifier_line(
-                translate,
-                attribute,
-                amount,
-                operation,
-                false,
-                Display::Ranged,
-            )?;
-            let color = if amount > 0.0 {
-                rgba(85, 85, 255, 255)
+    let text = |key: &str| translate(key).unwrap_or_else(|| key.to_owned());
+    let mut any = false;
+    let mut applied = Vec::new();
+    for (effect, amplifier) in effects {
+        let Some(def) = crate::brewing::effect(effect) else {
+            continue;
+        };
+        for (attribute, _, amount, operation) in crate::effects::effect_modifiers(def) {
+            any = true;
+            let amount = amount * f64::from(amplifier.wrapping_add(1));
+            let operation = operation as usize;
+            let shown = if operation == 0 {
+                amount
             } else {
-                rgba(255, 85, 85, 255)
+                amount * 100.0
             };
-            Some((line, color))
-        })
-        .collect();
-    if applied.is_empty() {
+            let (kind, shown, color) = if amount > 0.0 {
+                ("plus", shown, rgba(85, 85, 255, 255))
+            } else if amount < 0.0 {
+                ("take", -shown, rgba(255, 85, 85, 255))
+            } else {
+                continue;
+            };
+            let path = attribute.strip_prefix("minecraft:").unwrap_or(attribute);
+            let line = crate::text::format_translation(
+                &text(&format!("attribute.modifier.{kind}.{operation}")),
+                &[
+                    crate::text::Text::literal(format_amount(shown)),
+                    crate::text::Text::literal(text(&format!("attribute.name.{path}"))),
+                ],
+            )
+            .plain();
+            applied.push((line, color));
+        }
+    }
+    if !any {
         return applied;
     }
     let mut lines = vec![
         (String::new(), u32::MAX),
-        (
-            translate("potion.whenDrank").unwrap_or_else(|| "potion.whenDrank".into()),
-            rgba(170, 0, 170, 255),
-        ),
+        (text("potion.whenDrank"), rgba(170, 0, 170, 255)),
     ];
     lines.extend(applied);
     lines
@@ -1059,12 +1007,13 @@ pub fn component_count(stack: &ItemStack, info: Option<&ItemInfo>) -> usize {
     keys.len()
 }
 
-/// Where each component detail of a tooltip starts, for the placements of the appenders a mod
-/// registered. Recorded only when some appender is registered: otherwise it is empty.
+/// Where each vanilla tooltip component's lines start, for the appenders a mod registered.
+/// Recorded only when some appender is registered: otherwise it is empty.
 pub struct DetailMarks {
-    /// Each detail's component and the line it starts at, in the order they are listed.
+    /// Each component and the line its lines start at: one per
+    /// [`VANILLA_TOOLTIP_COMPONENTS`](mod_api::VANILLA_TOOLTIP_COMPONENTS) entry, in its order.
     starts: Option<Vec<(&'static str, usize)>>,
-    /// The line the details end at, before the durability and advanced lines.
+    /// The line the components' lines end at, before the advanced lines.
     finish: usize,
 }
 
@@ -1076,76 +1025,60 @@ impl DetailMarks {
             finish: 0,
         }
     }
-    /// The detail of component `component` starts before line `at`.
+    /// The lines of component `component` start before line `at`.
     pub fn start(&mut self, component: &'static str, at: usize) {
         if let Some(starts) = &mut self.starts {
             starts.push((component, at));
         }
     }
-    /// The details end before line `at`.
+    /// The components' lines end before line `at`.
     pub fn end(&mut self, at: usize) {
         self.finish = at;
     }
 }
 
-/// The line and logical component boundary for a placement, with a rank at the same boundary.
-fn anchor(
-    placement: &TooltipPlacement,
-    starts: &[(&str, usize)],
-    end: usize,
-) -> (usize, usize, u8) {
-    let start_of = |id: &str| starts.iter().position(|(component, _)| *component == id);
-    match placement {
-        TooltipPlacement::BeforeAll => (starts.first().map_or(end, |s| s.1), 0, 0),
-        TooltipPlacement::Before(id) => {
-            let i = start_of(id.as_str()).unwrap_or(starts.len());
-            (starts.get(i).map_or(end, |s| s.1), i, 1)
-        }
-        TooltipPlacement::After(id) => {
-            let i = start_of(id.as_str()).map_or(starts.len(), |i| i + 1);
-            (starts.get(i).map_or(end, |s| s.1), i, 0)
-        }
-        TooltipPlacement::AfterAll => (end, starts.len(), 2),
-    }
-}
-
-/// `RegisterTooltipAppendersEvent`: adds the lines of each registered appender where its
-/// placement puts them. `registered` yields (component, placement, its mod enabled, appender) in
-/// registration order; an appender is asked only for a stack that carries its component and
-/// whose tooltip `display` shows it.
+/// `ItemTooltipHandler`'s sorted appenders: adds each registered appender's lines after those of
+/// the vanilla components before its slot. `registered` yields (component, slot, its mod
+/// enabled, appender) in the sorted order; an appender is asked only for a stack that carries
+/// its component and whose tooltip `display` shows it.
 pub fn add_appender_lines<'a, A: ?Sized + 'a>(
     lines: &mut Vec<(Text, u32)>,
     marks: &DetailMarks,
     stack: &ItemStack,
     info: Option<&ItemInfo>,
     append: impl Fn(&A, &ItemStack, &mut Vec<(Text, u32)>),
-    registered: impl Iterator<Item = (&'a str, &'a TooltipPlacement, bool, &'a A)>,
+    registered: impl Iterator<Item = (&'a str, usize, bool, &'a A)>,
 ) {
     let starts = marks.starts.as_deref().unwrap_or(&[]);
-    let display = tooltip_display(stack);
+    debug_assert!(
+        starts
+            .iter()
+            .map(|(id, _)| id)
+            .eq(mod_api::VANILLA_TOOLTIP_COMPONENTS.iter()),
+        "a mark for each vanilla tooltip component, in order"
+    );
+    let display = tooltip_display(stack, info);
     let mut added = Vec::new();
-    for (seq, (component, placement, enabled, appender)) in registered.enumerate() {
+    for (component, slot, enabled, appender) in registered {
         if !enabled || !display.shows(component) || !stack.carries_component(info, component) {
             continue;
         }
         let mut out = Vec::new();
         append(appender, stack, &mut out);
-        let (at, boundary, rank) = anchor(placement, starts, marks.finish);
-        added.push((at, boundary, rank, seq, out));
+        added.push((starts.get(slot).map_or(marks.finish, |s| s.1), out));
     }
     if added.is_empty() {
         return;
     }
-    added.sort_by_key(|(at, boundary, rank, seq, _)| (*at, *boundary, *rank, *seq));
     let mut added = added.into_iter().peekable();
     let mut merged = Vec::with_capacity(lines.len());
     for (index, line) in std::mem::take(lines).into_iter().enumerate() {
-        while let Some((_, _, _, _, out)) = added.next_if(|(at, ..)| *at <= index) {
+        while let Some((_, out)) = added.next_if(|(at, _)| *at <= index) {
             merged.extend(out);
         }
         merged.push(line);
     }
-    merged.extend(added.flat_map(|(.., out)| out));
+    merged.extend(added.flat_map(|(_, out)| out));
     *lines = merged;
 }
 
@@ -1310,10 +1243,11 @@ pub fn detail_lines(
             .map(|l| l.0),
     );
     lines.extend(disc_fragment_line(stack, translate));
-    let display = tooltip_display(stack);
+    let display = tooltip_display(stack, info);
     lines.extend(
         painting_lines(
             stack,
+            info,
             &display,
             creative,
             |id| holders.painting(id),
@@ -1324,11 +1258,12 @@ pub fn detail_lines(
     );
     lines.extend(instrument_line(
         stack,
+        info,
         &display,
         holders.instrument_lookup(),
     ));
-    lines.extend(bees_line(stack, &display, translate));
-    lines.extend(honey_line(stack, &display, translate));
+    lines.extend(bees_line(stack, info, &display, translate));
+    lines.extend(honey_line(stack, info, &display, translate));
     let data = stack.data();
     // PotDecorations.addToTooltip.
     if display.shows("minecraft:pot_decorations")
@@ -1343,7 +1278,7 @@ pub fn detail_lines(
         }
     }
     lines.extend(written_book_lines(stack, &display, translate));
-    lines.extend(firework_lines(stack, translate));
+    lines.extend(firework_lines(stack, info, translate));
     // PotionContents.addToTooltip: the effects, then their attribute modifiers.
     if is_potion_item(&stack.item) && display.shows("minecraft:potion_contents") {
         let scale = match path {
@@ -1352,7 +1287,7 @@ pub fn detail_lines(
             _ => 1.0,
         };
         lines.extend(
-            crate::brewing::tooltip(stack.potion(), scale, translate)
+            crate::brewing::tooltip(stack, scale, translate)
                 .into_iter()
                 .map(|l| l.0),
         );
@@ -1365,7 +1300,8 @@ pub fn detail_lines(
     lines.extend(jukebox_line(stack, info, &display, translate));
     // Trim.addToTooltip.
     if display.shows("minecraft:trim")
-        && let Some((material, pattern)) = data
+        && let Some((material, pattern)) = stack
+            .component_data(info, "minecraft:trim")
             .and_then(|d| d.trim.as_ref())
             .and_then(crate::item_data::trim::named)
     {
@@ -1387,7 +1323,7 @@ pub fn detail_lines(
                 .map(|(text, _)| text),
         );
     }
-    lines.extend(dyed_line(stack, &display, false, translate).map(|l| l.0));
+    lines.extend(dyed_line(stack, info, &display, false, translate).map(|l| l.0));
     let modifiers =
         crate::item_attributes::attribute_modifiers_or(stack, info.map_or(&[], |i| &i.modifiers));
     let (modifier_lines, added) = attribute_tooltip(
@@ -1401,7 +1337,7 @@ pub fn detail_lines(
     );
     lines.extend(modifier_lines.into_iter().map(|(line, _)| line));
     lines.extend(added.into_iter().map(|(text, _)| text.plain()));
-    lines.extend(unbreakable_line(stack, &display, translate));
+    lines.extend(unbreakable_line(stack, info, &display, translate));
     lines.extend(ominous_bottle_line(stack, &display, translate).map(|l| l.0));
     lines
 }
@@ -1412,8 +1348,21 @@ pub fn detail_lines(
 /// the component has the item's default: flight duration 1, no explosions.
 pub fn firework_lines(
     stack: &ItemStack,
+    info: Option<&ItemInfo>,
     translate: &dyn Fn(&str) -> Option<String>,
 ) -> Vec<String> {
+    let (mut lines, explosion) = firework_component_lines(stack, info, translate);
+    lines.extend(explosion);
+    lines
+}
+
+/// [`firework_lines`] by component: `minecraft:fireworks`'s lines, then
+/// `minecraft:firework_explosion`'s.
+pub fn firework_component_lines(
+    stack: &ItemStack,
+    info: Option<&ItemInfo>,
+    translate: &dyn Fn(&str) -> Option<String>,
+) -> (Vec<String>, Vec<String>) {
     use crate::particles::FireworkExplosion;
     let text = |key: &str| translate(key).unwrap_or_else(|| key.to_owned());
     let shape = |e: &FireworkExplosion| {
@@ -1460,7 +1409,7 @@ pub fn firework_lines(
             ));
         }
     };
-    let display = tooltip_display(stack);
+    let display = tooltip_display(stack, info);
     let data = stack.data();
     let mut lines = Vec::new();
     let fireworks = match data.and_then(|d| d.fireworks.as_ref()) {
@@ -1492,13 +1441,14 @@ pub fn firework_lines(
             details(e, "  ", &mut lines);
         }
     }
+    let mut explosion = Vec::new();
     if let Some(e) = data.and_then(|d| d.firework_explosion.as_ref())
         && display.shows("minecraft:firework_explosion")
     {
-        lines.push(shape(e));
-        details(e, "", &mut lines);
+        explosion.push(shape(e));
+        details(e, "", &mut explosion);
     }
-    lines
+    (lines, explosion)
 }
 
 /// `ItemContainerContents.addToTooltip`: "count x name" for the first five
@@ -1548,7 +1498,7 @@ pub fn lines(
     translate: &dyn Fn(&str) -> Option<String>,
     style: &dyn Fn(&str) -> Option<AttributeStyle>,
 ) -> Vec<String> {
-    let display = tooltip_display(stack);
+    let display = tooltip_display(stack, info);
     if !display.name_visible(creative) {
         // Recipe search still asks listeners, but a hidden tooltip contributes no text.
         attribute_tooltip(
@@ -1564,7 +1514,7 @@ pub fn lines(
     }
     let mut lines = vec![name_line(stack, translate)];
     if display.shows("minecraft:lore") {
-        lines.extend(lore_texts(stack).into_iter().map(|t| t.plain()));
+        lines.extend(lore_texts(stack, info).into_iter().map(|t| t.plain()));
     }
     lines.extend(detail_lines(
         stack, info, attributes, holders, creative, translate, style,
@@ -1573,9 +1523,10 @@ pub fn lines(
 }
 
 /// `ItemLore.addToTooltip`: each lore component under dark purple italic, with
-/// the component's own styles (including explicit `false`) winning on children.
-pub fn lore_texts(stack: &ItemStack) -> Vec<crate::text::Text> {
-    let Some(raw) = stack.data().and_then(|d| d.other("minecraft:lore")) else {
+/// the component's own styles (including explicit `false`) winning on children. The lore is
+/// the stack's own, or `info`'s default unless the stack removes it ([`ItemStack::component`]).
+pub fn lore_texts(stack: &ItemStack, info: Option<&ItemInfo>) -> Vec<crate::text::Text> {
+    let Some(raw) = stack.component(info, "minecraft:lore") else {
         return Vec::new();
     };
     let base = crate::text::Style {
@@ -1700,7 +1651,7 @@ mod tests {
                 ("with", Tag::List(vec![Tag::String("argument".into())])),
             ])])),
         );
-        let lines = lore_texts(&stack);
+        let lines = lore_texts(&stack, None);
         // Decoding canonicalizes string arguments to literal text components.
         assert_eq!(
             lines[0].component(),
@@ -1731,7 +1682,7 @@ mod tests {
                 Tag::String("Plain lore".into()),
             ])),
         );
-        let lines = lore_texts(&stack);
+        let lines = lore_texts(&stack, None);
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].plain(), "Gold line");
         assert_eq!(lines[0].spans[0].style.color, Some(crate::text::GOLD));
@@ -1742,7 +1693,7 @@ mod tests {
             Some(crate::text::DARK_PURPLE)
         );
         assert!(lines[1].spans[0].style.is_italic());
-        assert!(tooltip_display(&stack).shows("minecraft:lore"));
+        assert!(tooltip_display(&stack, None).shows("minecraft:lore"));
         stack.data_mut().set_other(
             "minecraft:tooltip_display",
             Some(Tag::compound([(
@@ -1750,13 +1701,13 @@ mod tests {
                 Tag::List(vec![Tag::String("minecraft:lore".into())]),
             )])),
         );
-        assert!(!tooltip_display(&stack).shows("minecraft:lore"));
+        assert!(!tooltip_display(&stack, None).shows("minecraft:lore"));
     }
 
     #[test]
     fn tooltip_display_controls_name_and_component_visibility() {
         let mut stack = ItemStack::new("minecraft:diamond_sword", 1);
-        let display = tooltip_display(&stack);
+        let display = tooltip_display(&stack, None);
         assert!(display.name_visible(false));
         assert!(display.shows("minecraft:attribute_modifiers"));
 
@@ -1767,7 +1718,7 @@ mod tests {
                 Tag::List(vec![Tag::String("minecraft:attribute_modifiers".into())]),
             )])),
         );
-        let display = tooltip_display(&stack);
+        let display = tooltip_display(&stack, None);
         assert!(display.name_visible(false));
         assert!(!display.shows("minecraft:attribute_modifiers"));
         assert!(display.shows("minecraft:enchantments"));
@@ -1776,7 +1727,7 @@ mod tests {
             "minecraft:tooltip_display",
             Some(Tag::compound([("hide_tooltip", Tag::Byte(1))])),
         );
-        let display = tooltip_display(&stack);
+        let display = tooltip_display(&stack, None);
         assert!(!display.name_visible(false));
         assert!(display.name_visible(true));
         assert!(!display.shows("minecraft:attribute_modifiers"));
@@ -1840,7 +1791,7 @@ mod tests {
         };
         let (blue, red) = (rgba(85, 85, 255, 255), rgba(255, 85, 85, 255));
         let lines = |stack: &ItemStack, creative: bool| {
-            stew_lines(stack, creative, &tooltip_display(stack), &translate)
+            stew_lines(stack, creative, &tooltip_display(stack, None), &translate)
         };
         let mut stew = ItemStack::new("minecraft:suspicious_stew", 1);
         // The item's default, an empty list.
@@ -1869,6 +1820,81 @@ mod tests {
         assert!(lines(&ItemStack::new("minecraft:bowl", 1), true).is_empty());
     }
 
+    /// #4473: a potion's tooltip reads `PotionContents.getAllEffects`, its
+    /// potion's effects then its `custom_effects`, and "When Applied:" lists
+    /// each one's `MobEffect.createModifiers`, a content mod's declared ones
+    /// as vanilla's: times the amplifier plus one, an added amount as itself
+    /// (knockback resistance too) and a multiplied one times 100. A list of
+    /// zero amounts still has its heading (`addPotionTooltip`, read in 26.2).
+    #[test]
+    fn a_potions_tooltip_lists_its_custom_effects_and_their_modifiers() {
+        use sunrise_core::nbt::Tag;
+        let _scope = sunrise_game_data::potions::register_test_mod_effects();
+        let translate = |key: &str| {
+            Some(
+                match key {
+                    "effect.minecraft.speed" => "Speed",
+                    "effect.testfx.stun" => "Stun",
+                    "potion.potency.1" => "II",
+                    "potion.whenDrank" => "When Applied:",
+                    "attribute.modifier.plus.0" => "+%s %s",
+                    "attribute.modifier.plus.1" => "+%s%% %s",
+                    "attribute.modifier.plus.2" => "+%s%% %s",
+                    "attribute.modifier.take.2" => "-%s%% %s",
+                    "attribute.name.armor" => "Armor",
+                    "attribute.name.attack_damage" => "Attack Damage",
+                    "attribute.name.knockback_resistance" => "Knockback Resistance",
+                    "attribute.name.luck" => "Luck",
+                    "attribute.name.movement_speed" => "Speed",
+                    "attribute.name.scale" => "Scale",
+                    _ => return None,
+                }
+                .to_owned(),
+            )
+        };
+        let custom = |id: &str, amplifier: i8| {
+            let mut stack =
+                ItemStack::new("minecraft:potion", 1).with_potion("minecraft:swiftness");
+            stack.data_mut().potion_extra.push((
+                "custom_effects".into(),
+                Tag::List(vec![Tag::compound([
+                    ("id", Tag::String(id.into())),
+                    ("duration", Tag::Int(600)),
+                    ("amplifier", Tag::Byte(amplifier)),
+                ])]),
+            ));
+            stack
+        };
+        let stunned = custom("testfx:stun", 1);
+        let names: Vec<_> = crate::brewing::tooltip(&stunned, 1.0, &translate)
+            .into_iter()
+            .map(|(line, _)| line)
+            .collect();
+        assert_eq!(names, ["Speed (03:00)", "Stun II (00:30)"]);
+        let (blue, red) = (rgba(85, 85, 255, 255), rgba(255, 85, 85, 255));
+        let heading = [
+            (String::new(), u32::MAX),
+            ("When Applied:".to_owned(), rgba(170, 0, 170, 255)),
+        ];
+        let mut expected = heading.to_vec();
+        expected.extend([
+            ("+20% Speed".to_owned(), blue),
+            ("-50% Speed".to_owned(), red),
+            ("+3 Attack Damage".to_owned(), blue),
+            ("+4 Armor".to_owned(), blue),
+            ("+100% Scale".to_owned(), blue),
+            ("+2 Luck".to_owned(), blue),
+            ("+1 Knockback Resistance".to_owned(), blue),
+        ]);
+        assert_eq!(potion_modifier_lines(&stunned, &translate), expected);
+        let mut still = custom("testfx:still", 0);
+        still.data_mut().potion = None;
+        assert_eq!(potion_modifier_lines(&still, &translate), heading);
+        let mut plain = custom("testfx:glow", 0);
+        plain.data_mut().potion = None;
+        assert!(potion_modifier_lines(&plain, &translate).is_empty());
+    }
+
     #[test]
     fn ominous_bottle_lists_bad_omen_at_its_amplifier_for_100_minutes() {
         let enchantments = Enchantments::default();
@@ -1888,7 +1914,7 @@ mod tests {
         let blue = rgba(85, 85, 255, 255);
         // The item's default amplifier, 0: no potency.
         let mut bottle = ItemStack::new("minecraft:ominous_bottle", 1);
-        let line = |s: &ItemStack| ominous_bottle_line(s, &tooltip_display(s), &lang);
+        let line = |s: &ItemStack| ominous_bottle_line(s, &tooltip_display(s, None), &lang);
         assert_eq!(
             line(&bottle),
             Some((format!("Bad Omen ({duration})"), blue))
@@ -1926,7 +1952,7 @@ mod tests {
             other => lang(other),
         };
         assert_eq!(
-            ominous_bottle_line(&bottle, &tooltip_display(&bottle), &numbered).map(|l| l.0),
+            ominous_bottle_line(&bottle, &tooltip_display(&bottle, None), &numbered).map(|l| l.0),
             Some(format!("{duration}: Bad Omen IV"))
         );
         bottle.data_mut().set_other(
@@ -1945,14 +1971,14 @@ mod tests {
     #[test]
     fn ominous_banner_keeps_its_default_hidden_pattern_tooltip() {
         let mut banner = crate::mobs::raider::ominous_banner();
-        let display = tooltip_display(&banner);
+        let display = tooltip_display(&banner, None);
         assert!(!display.shows("minecraft:banner_patterns"));
 
         banner.data_mut().set_other(
             "minecraft:tooltip_display",
             Some(Tag::Compound(Default::default())),
         );
-        let display = tooltip_display(&banner);
+        let display = tooltip_display(&banner, None);
         assert!(display.shows("minecraft:banner_patterns"));
     }
 
@@ -2019,12 +2045,12 @@ mod tests {
         assert_eq!(name.plain(), "Simple Custom Name");
         assert_eq!(name.spans[0].style.italic, Some(false));
 
-        let lore = lore_texts(&stack);
+        let lore = lore_texts(&stack, None);
         assert_eq!(lore.len(), 1);
         assert_eq!(lore[0].plain(), "Simple Custom Lore");
         assert_eq!(lore[0].spans[0].style.italic, Some(false));
         assert_eq!(lore[0].spans[0].style.color, Some(crate::text::DARK_PURPLE));
-        assert!(tooltip_display(&stack).shows("minecraft:lore"));
+        assert!(tooltip_display(&stack, None).shows("minecraft:lore"));
     }
 
     /// `PotionItem.getName`: the hotbar's and the tooltip's name of a potion
@@ -2188,7 +2214,10 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
         let translate = |key: &str| enchantments.translate(key).map(str::to_owned);
         let mut rocket = ItemStack::new("minecraft:firework_rocket", 1);
-        assert_eq!(firework_lines(&rocket, &translate), ["Flight Duration: 1"]);
+        assert_eq!(
+            firework_lines(&rocket, None, &translate),
+            ["Flight Duration: 1"]
+        );
         let explosion = crate::particles::FireworkExplosion {
             colors: vec![0xB3312C],
             fade: vec![0x123456],
@@ -2198,7 +2227,7 @@ mod tests {
         };
         rocket.data_mut().fireworks = Some((3, vec![explosion.clone(), explosion.clone()]));
         assert_eq!(
-            firework_lines(&rocket, &translate),
+            firework_lines(&rocket, None, &translate),
             [
                 "Flight Duration: 3",
                 "2 x Small Ball",
@@ -2211,7 +2240,7 @@ mod tests {
         let mut star = ItemStack::new("minecraft:firework_star", 1);
         star.data_mut().firework_explosion = Some(explosion);
         assert_eq!(
-            firework_lines(&star, &translate),
+            firework_lines(&star, None, &translate),
             ["Small Ball", "Red", "Fade to Custom", "Trail", "Twinkle"]
         );
     }
@@ -2912,7 +2941,7 @@ mod tests {
             |k: &str| (k == "item.spawn_egg.peaceful").then(|| "Disabled in Peaceful".to_owned());
         let monsters = |id: &str| !matches!(id, "minecraft:zombie" | "minecraft:creeper");
         let stack = ItemStack::new("minecraft:zombie_spawn_egg", 1);
-        let display = tooltip_display(&stack);
+        let display = tooltip_display(&stack, None);
         let line =
             |kind, peaceful| spawn_egg_peaceful_line(kind, peaceful, &display, &monsters, &lang);
         let zombie = Some("minecraft:zombie");
@@ -2930,104 +2959,56 @@ mod tests {
         }
     }
 
-    #[test]
-    fn empty_component_boundaries_keep_builder_order() {
+    /// Marks for a tooltip whose lines are `vanilla`: each vanilla component's lines start at
+    /// the line given for it, or where the next one's start when none is given.
+    fn marks(vanilla: &[(&str, usize)], finish: usize) -> DetailMarks {
         let mut marks = DetailMarks::new(true);
-        for id in [
-            "minecraft:tropical_fish/pattern",
-            "minecraft:instrument",
-            "minecraft:map_id",
-            "minecraft:bees",
-            "minecraft:container",
-            "minecraft:banner_patterns",
-            "minecraft:written_book_content",
-            "minecraft:charged_projectiles",
-            "minecraft:fireworks",
-            "minecraft:potion_contents",
-            "minecraft:jukebox_playable",
-            "minecraft:trim",
-            "minecraft:stored_enchantments",
-            "minecraft:enchantments",
-            "minecraft:dyed_color",
-            "minecraft:lore",
-            "minecraft:attribute_modifiers",
-            "minecraft:unbreakable",
-            "minecraft:ominous_bottle_amplifier",
-            "minecraft:suspicious_stew_effects",
-            "minecraft:block_state",
-            "minecraft:entity_data",
-            "minecraft:block_entity_data",
-        ] {
-            marks.start(id, 1);
+        let mut at = finish;
+        let mut starts = Vec::new();
+        for id in mod_api::VANILLA_TOOLTIP_COMPONENTS.iter().rev() {
+            if let Some((_, line)) = vanilla.iter().find(|(v, _)| v == id) {
+                at = *line;
+            }
+            starts.push((*id, at));
         }
-        marks.end(1);
-        let before = TooltipPlacement::Before("minecraft:bees".into());
-        let after = TooltipPlacement::After("minecraft:enchantments".into());
-        let starts = marks.starts.as_deref().unwrap();
-        assert!(anchor(&TooltipPlacement::BeforeAll, starts, 1) < anchor(&before, starts, 1));
-        assert!(anchor(&before, starts, 1) < anchor(&after, starts, 1));
-        assert!(anchor(&after, starts, 1) < anchor(&TooltipPlacement::AfterAll, starts, 1));
-        let mut stack = ItemStack::new("minecraft:stick", 1);
-        stack
-            .data_mut()
-            .set_other("test:component", Some(Tag::Int(1)));
-        let names = [
-            Named("after"),
-            Named("before 1"),
-            Named("first"),
-            Named("before 2"),
-            Named("last"),
-        ];
-        let placements = [
-            &after,
-            &before,
-            &TooltipPlacement::BeforeAll,
-            &before,
-            &TooltipPlacement::AfterAll,
-        ];
-        let mut lines = vec![(Text::literal("name"), u32::MAX)];
-        add_appender_lines(
-            &mut lines,
-            &marks,
-            &stack,
-            None,
-            Named::append,
-            placements
-                .into_iter()
-                .zip(&names)
-                .map(|(placement, appender)| {
-                    ("test:component", placement, true, appender as &Named)
-                }),
-        );
-        assert_eq!(
-            lines
-                .iter()
-                .map(|(text, _)| text.plain())
-                .collect::<Vec<_>>(),
-            ["name", "first", "before 1", "before 2", "after", "last"]
-        );
+        for (id, line) in starts.into_iter().rev() {
+            marks.start(id, line);
+        }
+        marks.end(finish);
+        marks
     }
 
-    /// Two mods' appenders, before and after the details: a component's lines go where its
-    /// placement puts them, and only for a stack that carries the component, whose tooltip
-    /// shows it, and whose mod is enabled.
+    /// Two mods' appenders in their sorted order: each one's lines go after the vanilla
+    /// components before its slot, and only for a stack that carries the component, whose
+    /// tooltip shows it, and whose mod is enabled.
     #[test]
-    fn appended_lines_go_where_their_placement_puts_them() {
-        let mut lines = vec![
-            (Text::literal("lore"), u32::MAX),
-            (Text::literal("enchantments"), u32::MAX),
-        ];
-        let marks = DetailMarks {
-            starts: Some(vec![("minecraft:lore", 0), ("minecraft:enchantments", 1)]),
-            finish: 2,
+    fn appended_lines_go_after_the_vanilla_components_before_their_slot() {
+        let vanilla = |id| {
+            mod_api::VANILLA_TOOLTIP_COMPONENTS
+                .iter()
+                .position(|v| *v == id)
+                .unwrap()
         };
+        let mut lines = vec![
+            (Text::literal("name"), u32::MAX),
+            (Text::literal("enchantments"), u32::MAX),
+            (Text::literal("dyed color"), u32::MAX),
+            (Text::literal("durability"), u32::MAX),
+        ];
+        let marks = marks(
+            &[
+                ("minecraft:enchantments", 1),
+                ("minecraft:dyed_color", 2),
+                ("minecraft:damage", 3),
+            ],
+            4,
+        );
         let mut stack = ItemStack::new("minecraft:stick", 1);
         for id in [
             "mymod:charge",
             "mymod:glow",
             "mymod:hidden",
             "mymod:tail",
-            "mymod:pre",
             "mymod:off",
         ] {
             stack.data_mut().set_other(id, Some(Tag::Int(1)));
@@ -3039,29 +3020,23 @@ mod tests {
                 Tag::List(vec![Tag::String("mymod:hidden".into())]),
             )])),
         );
-        let (after_lore, before_all, after_all, before_enchantments) = (
-            TooltipPlacement::After("minecraft:lore".into()),
-            TooltipPlacement::BeforeAll,
-            TooltipPlacement::AfterAll,
-            TooltipPlacement::Before("minecraft:enchantments".into()),
-        );
-        let (charge, glow, hidden, tail, pre, off, absent) = (
-            Named("mod A: after lore"),
+        let (glow, charge, hidden, absent, off, tail) = (
             Named("mod B: before all"),
+            Named("mod A: after enchantments"),
             Named("mod A: hidden"),
-            Named("mod A: after all"),
-            Named("mod A: before enchantments"),
-            Named("mod B: disabled"),
             Named("mod B: not carried"),
+            Named("mod B: disabled"),
+            Named("mod A: after all"),
         );
+        let after_enchantments = vanilla("minecraft:enchantments") + 1;
+        let after_all = mod_api::VANILLA_TOOLTIP_COMPONENTS.len();
         let registered = [
-            ("mymod:charge", &after_lore, true, &charge as &Named),
-            ("mymod:glow", &before_all, true, &glow as &Named),
-            ("mymod:hidden", &after_all, true, &hidden as &Named),
-            ("other:absent", &after_all, true, &absent as &Named),
-            ("mymod:off", &after_all, false, &off as &Named),
-            ("mymod:pre", &before_enchantments, true, &pre as &Named),
-            ("mymod:tail", &after_all, true, &tail as &Named),
+            ("mymod:glow", 0, true, &glow as &Named),
+            ("mymod:charge", after_enchantments, true, &charge as &Named),
+            ("mymod:hidden", after_enchantments, true, &hidden as &Named),
+            ("other:absent", after_all, true, &absent as &Named),
+            ("mymod:off", after_all, false, &off as &Named),
+            ("mymod:tail", after_all, true, &tail as &Named),
         ];
         add_appender_lines(
             &mut lines,
@@ -3075,11 +3050,12 @@ mod tests {
         assert_eq!(
             texts,
             [
+                "name",
                 "mod B: before all",
-                "lore",
-                "mod A: after lore",
-                "mod A: before enchantments",
                 "enchantments",
+                "mod A: after enchantments",
+                "dyed color",
+                "durability",
                 "mod A: after all",
             ]
         );
@@ -3093,16 +3069,15 @@ mod tests {
         map.data_mut().map_post_processing = Some(1);
         let mut lines = Vec::new();
         let scale = Named("scale");
-        let after_all = TooltipPlacement::AfterAll;
         add_appender_lines(
             &mut lines,
-            &DetailMarks::new(true),
+            &marks(&[], 0),
             &map,
             None,
             Named::append,
             [(
                 "minecraft:map_post_processing",
-                &after_all,
+                mod_api::VANILLA_TOOLTIP_COMPONENTS.len(),
                 true,
                 &scale as &Named,
             )]
@@ -3110,6 +3085,92 @@ mod tests {
         );
         let texts: Vec<String> = lines.iter().map(|(text, _)| text.plain()).collect();
         assert_eq!(texts, ["scale"]);
+    }
+
+    /// An item catalog from `items` (an `items.json` body), read as the game reads one.
+    fn catalog_of(items: &str) -> crate::items::Items {
+        let root = std::env::temp_dir().join(format!(
+            "sunrise-tooltip-defaults-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        std::fs::create_dir_all(root.join("data/minecraft/loot_table")).unwrap();
+        std::fs::write(root.join("items.json"), items).unwrap();
+        let defaults = sunrise_world::item_defaults::read(&root).unwrap();
+        let items = crate::items::Items::catalog(&root, &PackOverlay::NONE, &defaults).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        items
+    }
+
+    /// `item` with the command patch `components` (`[lore=...]`, `[!lore]`).
+    fn patched(item: &str, components: &str) -> ItemStack {
+        let patch = sunrise_items::item_data::command_components(components).unwrap();
+        let (damage, extra) = sunrise_items::item_data::decode_components(Some(&patch));
+        ItemStack {
+            item: item.into(),
+            count: 1,
+            damage,
+            extra,
+        }
+    }
+
+    /// `ItemStack.get` reads the item's default components through the stack's patch: a mod
+    /// item declared with `minecraft:lore` and `minecraft:unbreakable` shows both while its
+    /// stack neither sets nor removes them, its own lore when it sets one, and none when it
+    /// removes them (`!minecraft:lore`, `!minecraft:unbreakable`).
+    #[test]
+    fn an_items_default_components_reach_its_tooltip() {
+        let items = catalog_of(
+            r#"{"testmod:charm": {"minecraft:max_stack_size": 1,
+                "minecraft:lore": [{"color": "gray", "text": "Hums softly"}],
+                "minecraft:unbreakable": {}}}"#,
+        );
+        let info = items.get("testmod:charm");
+        let lore = |stack: &ItemStack| -> Vec<String> {
+            lore_texts(stack, info).iter().map(Text::plain).collect()
+        };
+        let unbreakable = |stack: &ItemStack| {
+            unbreakable_line(stack, info, &tooltip_display(stack, info), &|_: &str| None).is_some()
+        };
+
+        let plain = ItemStack::new("testmod:charm", 1);
+        assert_eq!(lore(&plain), ["Hums softly"], "the item's default lore");
+        assert!(unbreakable(&plain), "the item's default unbreakable");
+        let own = patched("testmod:charm", r#"[lore=["Its own"]]"#);
+        assert_eq!(
+            lore(&own),
+            ["Its own"],
+            "the stack's lore replaces the default"
+        );
+        let removed = patched("testmod:charm", "[!lore,!unbreakable]");
+        assert!(lore(&removed).is_empty(), "a removed default shows nothing");
+        assert!(!unbreakable(&removed));
+        assert!(
+            lore_texts(&plain, None).is_empty(),
+            "without the item, the patch alone"
+        );
+    }
+
+    /// `JukeboxPlayable.addToTooltip` runs only while the stack has the component: a music disc
+    /// names its default song, and one whose patch removes `minecraft:jukebox_playable` names
+    /// none (it used to fall back to the item's song).
+    #[test]
+    fn a_disc_without_its_jukebox_component_names_no_song() {
+        let items = catalog_of(
+            r#"{"minecraft:music_disc_cat": {"minecraft:max_stack_size": 1,
+                "minecraft:jukebox_playable": "minecraft:cat"}}"#,
+        );
+        let info = items.get("minecraft:music_disc_cat");
+        let song = |stack: &ItemStack| {
+            jukebox_line(stack, info, &tooltip_display(stack, info), &|_: &str| None)
+        };
+        let disc = ItemStack::new("minecraft:music_disc_cat", 1);
+        assert_eq!(song(&disc).as_deref(), Some("jukebox_song.minecraft.cat"));
+        let removed = patched("minecraft:music_disc_cat", "[!jukebox_playable]");
+        assert_eq!(song(&removed), None);
     }
 }
 
@@ -3152,5 +3213,12 @@ mod stack_modifier_tests {
             )>::new())),
         );
         assert!(sword.default_attribute_modifiers_or(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_raid_banner_keeps_its_tooltip_display_across_the_wire() {
+        let (renamed, hidden) = crate::item_sync::raid_banner_round_trip_fixture();
+        assert!(!super::tooltip_display(&renamed, None).shows("minecraft:banner_patterns"));
+        assert!(!super::tooltip_display(&hidden, None).shows("minecraft:banner_patterns"));
     }
 }

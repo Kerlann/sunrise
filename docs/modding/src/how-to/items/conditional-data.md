@@ -3,9 +3,13 @@
 Add a `neoforge:conditions` array to control whether a server JSON file loads.
 Supported readers are
 recipes, loot tables, item modifiers, predicates, enchantments, jukebox songs,
-instruments, damage types, advancements, and synchronized registry JSON.
+instruments, damage types, advancements, other supported synchronized vanilla registries, and
+[mod-declared datapack registries](../content-mods.md), even if their entries are never sent to clients.
 Every condition must hold; a false condition omits the file. Mods can also
 [register custom conditions](#registering-custom-conditions) for this same evaluator.
+Register one handler per id using the read-only `RegistrationContext`. A handler
+reads the condition's JSON from a borrowed raw value and validates its own
+arguments. Invalid mod input must return `ConditionError`, never panic.
 
 Ordinary JSON resources select the winning pack file first, then evaluate its
 conditions before decoding the data. If the winner is omitted, a lower pack's
@@ -27,29 +31,87 @@ server-mod IDs, including active code-only mods, plus
 resource namespaces are not mod IDs. Other supported forms are `neoforge:always`
 (true), `neoforge:never` (false), `neoforge:not` (`value`), `neoforge:and` / `neoforge:or`
 (`values`), `neoforge:feature_flags_enabled`, `neoforge:registered` and
-`neoforge:tag_empty`. `feature_flags_enabled` takes `flags`, an array of feature-id
-strings that must all be enabled. `registered` and `tag_empty` take a `registry` (default `minecraft:item`)
-and a `value` or `tag`: `registered` reads the registries as this load holds them,
-and `tag_empty` reads the block, item and fluid tags this load bound, so it is
-answered for recipes and the readers after them, never for tag files.
-Within a supplied view, a registry absent from it has no entries or tags: `registered` is false and `tag_empty` is true, with no diagnostic.
+`neoforge:tag_empty`. `feature_flags_enabled` takes `flags`, a nonempty array of feature IDs that must
+all be enabled. `registered` and `tag_empty` take a `registry` (default `minecraft:item`) and a `value` or
+`tag`, respectively. They look up an admitted entry or test whether a tag has any resolved members.
+Within a supplied view, an absent registry has no entries or tags: `registered` is false and `tag_empty`
+is true, with no diagnostic. That is different from a loader that cannot supply the context at all:
+a check that reaches an unavailable context reports a load error.
+
+## Fabric's `fabric:load_conditions`
+
+A Java jar's data files (the passive pack layers of [Java jars](../content-mods.md#java-jars-as-external-assets))
+may be guarded by Fabric API's key instead. The same readers evaluate it, at the top of a file only: tags
+ignore it, and a loot pool's or data-map value's own key is NeoForge's alone. Its value is one condition
+object, or a list that must all hold, each named by `condition`:
+
+- `fabric:true`, `fabric:false`; `fabric:not` (`value`); `fabric:and` / `fabric:or` (`values`).
+- `fabric:all_mods_loaded` / `fabric:any_mods_loaded` (`values`, mod IDs read as `neoforge:mod_loaded` reads them).
+- `fabric:registry_contains` and `fabric:tags_populated`: a `registry` (`minecraft:item` when it is missing or
+  not a valid ID) and `values`. Every entry must be registered, read as `neoforge:registered` reads it, or
+  every tag bound by this load. A bound tag counts even when it holds nothing, for example one whose entries
+  are all optional and absent; `neoforge:tag_empty` calls that tag empty.
+- `fabric:features_enabled` (`features`): every flag enabled; an unknown flag fails the test. Sunrise answers
+  from the world's enabled flags, in worldgen files too. Fabric reads a flag set captured at its last data
+  reload instead: none during the first world's registry load (the test fails there), an older one later.
+- Any other ID goes to the handler registered under it, which reads the object without `condition`.
+
+Sunrise loads a file that has both keys only when both hold. That is Sunrise's own rule: NeoForge reads
+only its key and Fabric only its own, so neither loader defines the pair. Unlike NeoForge's key, a Fabric
+key that does not decode (an unknown ID or a malformed node) is logged once per load candidate and the
+file loads, as Fabric API does. Fabric's `fabric:overlays` pack metadata is not read.
+
+One known difference: while vanilla loads the dynamic registries together (worldgen, damage types), each
+co-loaded registry's tag lookup is a registration getter in which every tag is present, so on Fabric a
+`fabric:tags_populated` naming a tag of one of those registries always holds there. Sunrise answers from the
+tags that load has bound, so such a tag that no file defines does not count.
+
+## Registry conditions
+
+A registry file sees the current candidate's static holders and resolved static tags, including tags
+staged for the load but not yet published. A mod-declared registry also sees the available frozen world
+registries and completed dependencies in the candidate. Only `registered` and `tag_empty` tests that
+actually run can make a registry wait; short-circuited branches and strings in custom condition arguments
+are not dependencies. It finishes each
+dependency's entries and tags before testing its consumers. The file's own registry and registries in the
+same dependency cycle are still pending: their entries do not satisfy `registered` and their tags count
+as empty. A consumer outside the cycle sees the whole batch after it binds. A rejected file never makes
+its ID visible, and no condition reads the previous generation to fill in missing pending entries.
+
+Registry entry codecs use the vanilla feature flag set. Downstream readers such as recipes use the
+world's enabled flags and the completed candidate registry and tag view. If an entry condition needs
+an experimental world flag or a tag in its own registry, put that test in a downstream consumer instead.
+An unknown feature flag name is a decode error, distinct from a valid flag that is not enabled.
+At world open, a biome's `neoforge:value` (or its fields beside `neoforge:conditions`) must decode as a
+biome after its conditions pass. Its effects and positional attributes must use their value formats, and
+its carver and placed-feature holder sets resolve against the world's generation registries. A false
+condition omits the biome without decoding it; a passing condition on an invalid biome fails world open.
+Only admitted biomes count for `registered` and bind as tag members. The server keeps the generation
+settings and local attributes; joining clients receive only the admitted climate, effects and syncable
+attributes, without evaluating conditions again.
 
 ## Errors by loader
 
-The loader resolves every type ID in a conditions list before testing any of
-it, including all children of `not`, `and` and `or`. An unknown ID is a decode
-error no matter its namespace, whether a mod of that name is installed, or
-whether a sibling would decide the result.
+The loader decodes the entire conditions array before testing any of it,
+including all children of `not`, `and` and `or`. If the key is present, its
+value must be an array. An unknown ID or malformed node is a decode error
+even if a sibling would decide the result. A namespace or installed mod does
+not make an unregistered condition ID valid. Once decoded, the top-level list
+and `and` stop at the first false result; `or` stops at the first true result.
+Handlers in an untested branch do not run.
 
-| Loader | Unknown condition type or handler error |
+| Loader | Condition decode or handler error |
 | --- | --- |
-| World and mod-declared data-pack registries that read conditions | Report the failing entries and refuse the world open. |
+| World-open registries that read conditions, including frozen vanilla definitions | Report the failing entries and refuse the world open. |
+| Mod-declared datapack registries | Report the registry, entry, pack and file. Refuse world open or keep the previous generation on reload. |
 | Reloadable registries (loot tables and their pools, predicates, item modifiers, advancements, recipes) | Report the failing entries and keep the previous data generation. At world open, refuse the open. |
 | Simple JSON reload listeners, including global loot modifiers | Log the condition ID and file path and skip only that file. |
 | Data maps | Log the condition ID, file path, map type and registry. Skip the entire file, so its values, removals and `replace` flag have no effect. |
 
-A file without the conditions array loads normally. Successful reloads publish
-changed enabled IDs together with the data generation; retained readers keep
+A file without the conditions key, or with an empty array, loads normally. A handler error is not a false
+condition. A handler panic is logged and queues an error toast naming the mod; only that handler is disabled
+for the session. Returned errors and phase refusals follow the loader's error policy without disabling the
+handler. Successful reloads publish changed enabled IDs with the new data generation; retained readers keep
 their old snapshot.
 
 ## Registering custom conditions

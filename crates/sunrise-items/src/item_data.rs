@@ -15,7 +15,7 @@ pub mod ingredient_components;
 mod persistence;
 use crate::banner_layer::BannerLayer;
 use crate::items::{ItemInfo, ItemStack};
-use persistence::encode_stack_components;
+use persistence::encode_persistent_components;
 use sunrise_core::nbt::{Compound, JavaString, Tag};
 
 /// One item attribute modifier, as `ItemAttributeModifiers.Entry` holds it.
@@ -47,7 +47,7 @@ impl ModifierRow {
 /// list (`type`, `id`, `amount`, `operation`, `slot` defaulting to `any`).
 /// An entry missing a field is skipped.
 pub fn modifier_rows(tag: &Tag) -> Vec<ModifierRow> {
-    use sunrise_client_core::nbt_value::{float, text};
+    use sunrise_game_data::nbt_value::{float, text};
     let Tag::List(entries) = tag else {
         return Vec::new();
     };
@@ -147,6 +147,9 @@ pub struct StackData {
     pub pot_decorations: Option<Box<[Option<ItemStack>; 4]>>,
     /// `minecraft:bundle_contents`.
     pub bundle_contents: Vec<ItemStack>,
+    /// The resolved weight of `bundle_contents`, dropped whenever the data is handed out for
+    /// editing.
+    pub(crate) bundle_weight: crate::bundle::WeightCache,
     /// `BundleContents.selectedItem`: runtime only, never saved or sent.
     pub bundle_selected: BundleSelected,
     /// `minecraft:suspicious_stew_effects`: (effect id, duration).
@@ -159,9 +162,16 @@ pub struct StackData {
     /// What the server sent for this stack, for sending it back unchanged.
     pub wire: Wire,
 }
-impl PartialEq for StackData {
-    fn eq(&self, other: &Self) -> bool {
-        // Exhaustive: adding a component must also choose its equality here.
+impl StackData {
+    /// `PartialEq` with `overlay_enchantments` (when non-empty) and
+    /// `overlay_trim` (when `Some`) substituted for `self`'s fields without
+    /// cloning. Exhaustive: adding a component must also choose its equality here.
+    fn eq_with_overlay(
+        &self,
+        other: &Self,
+        overlay_enchantments: &[(Arc<str>, u32)],
+        overlay_trim: Option<&Trim>,
+    ) -> bool {
         // The two ItemEnchantments fields use map equality; all other fields
         // retain their existing equality, including ordered list components.
         let Self {
@@ -199,14 +209,21 @@ impl PartialEq for StackData {
             pot_decorations,
             bundle_contents,
             bundle_selected,
+            bundle_weight: _,
             stew_effects,
             map_post_processing,
             other: preserved,
             wire,
         } = self;
+        let effective_enchantments = if overlay_enchantments.is_empty() {
+            enchantments.as_slice()
+        } else {
+            overlay_enchantments
+        };
+        let effective_trim = overlay_trim.or(trim.as_ref());
         damage_set == &other.damage_set
             && banner_patterns_set == &other.banner_patterns_set
-            && enchantments_equal(enchantments, &other.enchantments)
+            && enchantments_equal(effective_enchantments, &other.enchantments)
             && enchantments_equal(stored_enchantments, &other.stored_enchantments)
             && repair_cost == &other.repair_cost
             && explicit_zero_damage == &other.explicit_zero_damage
@@ -217,7 +234,7 @@ impl PartialEq for StackData {
             && villager_food == &other.villager_food
             && potion == &other.potion
             && potion_extra == &other.potion_extra
-            && trim == &other.trim
+            && effective_trim == other.trim.as_ref()
             && container == &other.container
             && charged == &other.charged
             && fireworks == &other.fireworks
@@ -238,6 +255,11 @@ impl PartialEq for StackData {
             && map_post_processing == &other.map_post_processing
             && preserved == &other.other
             && wire == &other.wire
+    }
+}
+impl PartialEq for StackData {
+    fn eq(&self, other: &Self) -> bool {
+        self.eq_with_overlay(other, &[], None)
     }
 }
 impl std::hash::Hash for StackData {
@@ -278,6 +300,7 @@ impl std::hash::Hash for StackData {
             pot_decorations,
             bundle_contents,
             bundle_selected: _,
+            bundle_weight: _,
             stew_effects,
             map_post_processing,
             other: preserved,
@@ -339,7 +362,7 @@ fn hash_enchantments<H: std::hash::Hasher>(levels: &Levels, state: &mut H) {
 /// ItemEnchantments is a map, but keeps its written order for display. Compare
 /// without allocating or reordering either component. The usual same-order
 /// case uses slice equality; only reordered entries need the quadratic scan.
-fn enchantments_equal(first: &Levels, second: &Levels) -> bool {
+fn enchantments_equal(first: &[(Arc<str>, u32)], second: &[(Arc<str>, u32)]) -> bool {
     first == second
         || (first.len() == second.len()
             && first.iter().all(|entry| {
@@ -354,7 +377,7 @@ use sunrise_world::component_value::{consume_effects::Admitted, source::normaliz
 #[derive(Clone, Debug, PartialEq)]
 struct ConsumableComponent {
     raw: Tag,
-    value: crate::items::ItemConsumable,
+    value: Arc<crate::items::ItemConsumable>,
     refused: bool,
 }
 impl ConsumableComponent {
@@ -390,7 +413,7 @@ impl ConsumableComponent {
         };
         Some(Arc::new(Self {
             raw,
-            value,
+            value: Arc::new(value),
             refused,
         }))
     }
@@ -581,10 +604,11 @@ impl StackData {
                     .flat_map(|effects| effects.iter()),
             )
             .find_map(|effect| match effect {
-                crate::items::ConsumeEffect::Native {
-                    registered: Some(effect),
-                    ..
-                } if matches(effect) => Some(effect.clone()),
+                crate::items::ConsumeEffect::Native(effect) => effect
+                    .registered
+                    .as_ref()
+                    .filter(|effect| matches(effect))
+                    .cloned(),
                 _ => None,
             })
             .or_else(|| {
@@ -635,6 +659,12 @@ impl StackData {
             .flatten()
     }
 
+    /// Whether the stack's own changes remove component `id` (a `!id` entry).
+    pub fn removes_component(&self, id: &str) -> bool {
+        self.other
+            .iter()
+            .any(|(key, _)| key.strip_prefix('!') == Some(id))
+    }
     /// Whether the stack's own data sets component `id`, read from the live fields: the same
     /// components `components_tag` saves, plus the transient ones it leaves out
     /// (`map_post_processing`), without encoding anything.
@@ -678,7 +708,7 @@ impl StackData {
     }
     /// `SetNameFunction.run`: retain a loot name as its original component.
     pub fn set_loot_name(&mut self, id: &str, text: &serde_json::Value) {
-        let tag = sunrise_client_core::scoreboard::json_to_tag(text);
+        let tag = sunrise_game_data::scoreboard::json_to_tag(text);
         self.set_other(id, Some(tag));
     }
     /// Apply an ordered loot component patch without changing its NBT type.
@@ -724,19 +754,12 @@ impl StackData {
                 );
             }
             _ if MODELLED.contains(&id) => {
-                let mut saved = match components_tag(0, Some(self)) {
-                    Some(Tag::Compound(c)) => c,
-                    _ => Default::default(),
-                };
-                saved.remove(&JavaString::from(id));
-                if let Some(tag) = tag {
-                    saved.insert(JavaString::from(id), tag);
+                if self.ominous_banner && is_ominous_component(id) {
+                    self.materialize_ominous_banner();
                 }
-                // A damage set before stays where it was: reading would take it.
-                let damage = self.other("minecraft:damage").cloned();
-                let (_, read) = decode_components(Some(&Tag::Compound(saved)));
-                *self = read.map_or_else(Default::default, |data| *data);
-                self.set_other("minecraft:damage", damage);
+                let decoded =
+                    tag.and_then(|tag| decode_components(Some(&Tag::compound([(id, tag)]))).1);
+                self.apply_component_changes(decoded, std::iter::once(id));
             }
             _ => self.set_other(id, tag),
         }
@@ -1030,7 +1053,10 @@ impl StackData {
                 "minecraft:firework_explosion" => replace_fields!(firework_explosion),
                 "minecraft:dyed_color" => replace_fields!(dyed_color),
                 "minecraft:pot_decorations" => replace_fields!(pot_decorations),
-                "minecraft:bundle_contents" => replace_fields!(bundle_contents, bundle_selected),
+                "minecraft:bundle_contents" => {
+                    replace_fields!(bundle_contents, bundle_selected);
+                    data.bundle_weight = Default::default();
+                }
                 "minecraft:suspicious_stew_effects" => replace_fields!(stew_effects),
                 "minecraft:map_post_processing" => replace_fields!(map_post_processing),
                 "minecraft:charged_projectiles" => replace_fields!(charged),
@@ -1068,6 +1094,18 @@ pub fn destroyed_container(stack: &mut ItemStack) -> Vec<ItemStack> {
     // `nonEmptyItemCopyStream` walks the 256 slots in order.
     held.sort_by_key(|(slot, _)| *slot);
     held.into_iter().map(|(_, stack)| stack).collect()
+}
+
+/// [`component_bool`] for a component held as JSON, as the item table reads its defaults: a
+/// mod's declared patch reaches them from NBT, where a boolean is a byte, so a number is a
+/// boolean too (`NbtOps.getBooleanValue`: true unless its double value is zero).
+pub(crate) trait CodecBool {
+    fn codec_bool(&self) -> Option<bool>;
+}
+impl CodecBool for serde_json::Value {
+    fn codec_bool(&self) -> Option<bool> {
+        self.as_bool().or_else(|| self.as_f64().map(|d| d != 0.0))
+    }
 }
 
 /// `NbtOps.getBooleanValue`, used by boolean component codecs: every numeric tag
@@ -1139,6 +1177,34 @@ impl ItemStack {
     pub fn data(&self) -> Option<&StackData> {
         self.extra.as_deref()
     }
+    /// The data `ItemStack.get(id)` reads component `id` from: the stack's own when its changes
+    /// set it, none when they remove it (a `!id` entry), else the item's prototype when that has
+    /// it (`PatchedDataComponentMap.get`). Read the component's field from the returned data;
+    /// for a component kept as its raw value, [`Self::component`] does both.
+    pub fn component_data<'a>(
+        &'a self,
+        info: Option<&'a ItemInfo>,
+        id: &str,
+    ) -> Option<&'a StackData> {
+        if let Some(data) = self.data() {
+            if data.sets_component(id) {
+                return Some(data);
+            }
+            if data.removes_component(id) {
+                return None;
+            }
+        }
+        info?
+            .component_prototype
+            .data()
+            .filter(|prototype| prototype.sets_component(id))
+    }
+    /// `ItemStack.get(id)` for a component kept as its raw value ([`StackData::other`]): the
+    /// stack's own value, or the item's default unless the stack removes it
+    /// ([`Self::component_data`]).
+    pub fn component<'a>(&'a self, info: Option<&'a ItemInfo>, id: &str) -> Option<&'a Tag> {
+        self.component_data(info, id)?.other(id)
+    }
     /// Whether the stack carries component `id`: its own data sets it, or its item has it by
     /// default and the stack's changes don't remove it (a `!id` entry). Reads the live
     /// components, so nothing is encoded.
@@ -1152,7 +1218,7 @@ impl ItemStack {
         if own {
             return true;
         }
-        if data.is_some_and(|d| d.other.iter().any(|(k, _)| k.strip_prefix('!') == Some(id))) {
+        if data.is_some_and(|d| d.removes_component(id)) {
             return false;
         }
         info.is_some_and(|info| info.components.iter().any(|c| c == id))
@@ -1214,7 +1280,7 @@ impl ItemStack {
     pub fn consumable<'a>(
         &'a self,
         info: Option<&'a ItemInfo>,
-    ) -> Option<&'a crate::items::ItemConsumable> {
+    ) -> Option<&'a Arc<crate::items::ItemConsumable>> {
         if let Some(data) = self.data() {
             if data.other("!minecraft:consumable").is_some() {
                 return None;
@@ -1282,7 +1348,9 @@ impl ItemStack {
     }
 
     pub fn data_mut(&mut self) -> &mut StackData {
-        self.extra.get_or_insert_with(Box::default)
+        let data = self.extra.get_or_insert_with(Box::default);
+        data.bundle_weight = Default::default();
+        data
     }
     /// Apply only the named component fields from a decoded snapshot of this same item.
     /// Unchanged fields keep their runtime data, including in nested stacks. The engine
@@ -1412,6 +1480,11 @@ impl ItemStack {
     /// `Item.isFoil` (enchantments, or a compass carrying a lodestone tracker).
     /// Stored book enchantments do not count.
     pub fn has_foil(&self, item_glint: Option<bool>) -> bool {
+        self.has_foil_with_enchantments(item_glint, !self.enchantments().is_empty())
+    }
+
+    /// Use the enchantments of a borrowed equipment stack, which can carry a gear overlay.
+    pub fn has_foil_with_enchantments(&self, item_glint: Option<bool>, enchanted: bool) -> bool {
         let own = self
             .data()
             .and_then(|data| data.other("minecraft:enchantment_glint_override"))
@@ -1425,7 +1498,7 @@ impl ItemStack {
             &self.item,
             self.data()
                 .is_some_and(|data| data.other("minecraft:lodestone_tracker").is_some()),
-            !self.enchantments().is_empty(),
+            enchanted,
         );
         crate::properties::foil(override_glint, item_foil)
     }
@@ -1457,13 +1530,15 @@ impl ItemStack {
     /// by `ominous_banner` instead.
     pub fn item_name(&self) -> Option<String> {
         let name = self.data()?.other("minecraft:item_name")?;
-        Some(sunrise_client_core::component::name_text(name).plain())
+        Some(sunrise_game_data::component::name_text(name).plain())
     }
     pub fn potion(&self) -> Option<&str> {
         self.data().and_then(|d| d.potion.as_deref())
     }
     /// `PotionContents.customEffects` as saved: (id, duration, amplifier). Both
-    /// default to 0 like `MobEffectInstance.CODEC`.
+    /// default to 0 like `MobEffectInstance.CODEC`. The amplifier is
+    /// `ExtraCodecs.UNSIGNED_BYTE`: a saved number narrows to a byte and reads
+    /// back unsigned (`-56b` and `-56` are 200, `256` is 0), not clamped (#6850).
     pub fn custom_potion_effects(&self) -> Vec<(String, i32, i32)> {
         let Some((_, Tag::List(list))) = self
             .data()
@@ -1476,7 +1551,7 @@ impl ItemStack {
                 Some((
                     string(e.get("id")?)?,
                     e.get("duration").and_then(int).unwrap_or(0) as i32,
-                    e.get("amplifier").and_then(int).unwrap_or(0).clamp(0, 255) as i32,
+                    e.get("amplifier").and_then(unsigned_byte).unwrap_or(0),
                 ))
             })
             .collect()
@@ -1506,6 +1581,13 @@ impl ItemStack {
     pub fn same_item_same_components(&self, other: &Self) -> bool {
         self.item == other.item && self.damage == other.damage && self.data() == other.data()
     }
+    /// A hash equal for stacks that are [`Self::same_item_same_components`], whatever their counts.
+    pub fn merge_kind(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (&*self.item, self.damage, self.data()).hash(&mut hasher);
+        hasher.finish()
+    }
     /// Compare live component identity as `PatchedDataComponentMap.fromPatch` does:
     /// ignore sets equal to the prototype and removals of absent defaults. This
     /// reads decoded components, including transient ones the save codec drops.
@@ -1520,11 +1602,28 @@ impl ItemStack {
         if self.same_item_same_components(other) {
             return true;
         }
+        let prototype = items
+            .get(&self.item)
+            .filter(|_| items.component_defaults.contains_key(self.item.as_ref()));
         let matches_patch = |stack: &Self, other: &Self| {
-            let keep = component_patch_filter(stack, items);
+            let keep = |id: &str, removed| {
+                prototype.is_none_or(|info| {
+                    keep_component_patch_entry(
+                        removed,
+                        info.components.iter().any(|key| key == id),
+                        || {
+                            ingredient_components::component_equal(
+                                id,
+                                stack,
+                                &info.component_prototype,
+                            )
+                        },
+                    )
+                })
+            };
             let mut matches = true;
             ingredient_components::visit_components(stack, |id| {
-                if matches && keep(&JavaString::from(id), false) {
+                if matches && keep(id, false) {
                     matches = other.carries_component(None, id)
                         && ingredient_components::component_equal(id, stack, other);
                 }
@@ -1535,16 +1634,35 @@ impl ItemStack {
                     .into_iter()
                     .flat_map(StackData::preserved_components)
                     .filter_map(|(id, _)| id.strip_prefix('!'))
-                    .all(|id| {
-                        !keep(&JavaString::from(id), true)
-                            || ingredient_components::removed(other, id)
-                    })
+                    .all(|id| !keep(id, true) || ingredient_components::removed(other, id))
         };
         matches_patch(self, other) && matches_patch(other, self)
     }
     /// `ItemStack.matches`: the same item, count and components.
     pub fn matches(&self, other: &Self) -> bool {
         self.count == other.count && self.same_item_same_components(other)
+    }
+    /// `ItemStack.matches` with separate mob gear overlays (`enchantments` when
+    /// non-empty, `trim` when `Some`) applied to `self` without cloning.
+    pub fn matches_with_overlay(
+        &self,
+        other: &Self,
+        enchantments: &[(Arc<str>, u32)],
+        trim: Option<&Trim>,
+    ) -> bool {
+        if self.count != other.count || self.item != other.item || self.damage != other.damage {
+            return false;
+        }
+        if enchantments.is_empty() && trim.is_none() {
+            return self.data() == other.data();
+        }
+        let Some(other_data) = other.data() else {
+            return false;
+        };
+        match self.data() {
+            Some(self_data) => self_data.eq_with_overlay(other_data, enchantments, trim),
+            None => StackData::default().eq_with_overlay(other_data, enchantments, trim),
+        }
     }
     /// `getOrDefault(DataComponents.ATTRIBUTE_MODIFIERS)`: the stack's own
     /// `attribute_modifiers` component when it has one (none at all when it
@@ -1612,6 +1730,13 @@ pub fn set_level(list: &mut Levels, id: &str, level: u32) {
 fn levels_tag(levels: &Levels) -> Tag {
     Tag::compound(levels.iter().map(|(id, l)| (&**id, Tag::Int(*l as i32))))
 }
+/// `ExtraCodecs.UNSIGNED_BYTE`: any numeric tag narrows to a byte first, then
+/// reads as unsigned (`-56b` and `-56` are 200, `256` is 0, `-1.75d` is 255). Shared with the
+/// brewing colour/tooltip path so both read a custom amplifier the same way.
+pub fn unsigned_byte(t: &Tag) -> Option<i32> {
+    sunrise_world::datafix::dynamic::as_number(t).map(|n| i32::from(n.byte_value() as u8))
+}
+
 fn int(t: &Tag) -> Option<i64> {
     match t {
         Tag::Byte(v) => Some(i64::from(*v)),
@@ -1759,7 +1884,7 @@ impl WrittenBook {
         let mut tags = Vec::with_capacity(self.page_tags.len());
         for tag in &self.page_tags {
             let resolved = resolve_page_tag(tag, &mut text);
-            let plain = sunrise_client_core::component::name_text(&resolved).plain();
+            let plain = sunrise_game_data::component::name_text(&resolved).plain();
             if plain.chars().count() > 32767 {
                 return false;
             }
@@ -1811,9 +1936,7 @@ fn read_text(t: &Tag) -> Option<String> {
         // this), so flatten the whole component instead of reading one key.
         // ComponentSerialization.CODEC also takes a list (its first element
         // styling the rest), as servers behind ViaVersion send book pages.
-        Tag::Compound(_) | Tag::List(_) => {
-            Some(sunrise_client_core::component::name_text(t).plain())
-        }
+        Tag::Compound(_) | Tag::List(_) => Some(sunrise_game_data::component::name_text(t).plain()),
         _ => None,
     }
 }
@@ -1925,7 +2048,7 @@ fn template_from_with(tag: &Tag, effects: Option<&Arc<[Admitted]>>) -> Option<It
 /// The stack a `show_item` hover event holds (`HoverEvent.ShowItem`): its
 /// `{id, count?, components?}` object.
 pub fn stack_from_hover(event: &serde_json::Value) -> Option<ItemStack> {
-    template_from(&sunrise_client_core::scoreboard::json_to_tag(event))
+    template_from(&sunrise_game_data::scoreboard::json_to_tag(event))
 }
 /// Sorted-key, type-annotated text of a tag (the differential harnesses
 /// print the same form from the vanilla side).
@@ -2024,26 +2147,61 @@ fn canonical_other_component(id: &str, tag: &Tag) -> Tag {
     }
     value
 }
-/// An explicit component snapshot, preserving live presence even at an item's default.
-/// Persistent stacks use [`encode_components`] with the loaded catalog instead.
-pub fn component_snapshot(stack: &ItemStack) -> Option<Tag> {
-    encode_stack_components(stack, true, &|_| true, &raw_template_tag)
+/// The live component patch, including transient components and explicit defaults.
+/// Omit the top-level damage field when the caller already carries it as a scalar.
+pub fn live_component_patch(stack: &ItemStack, include_damage: bool) -> Option<Tag> {
+    live_component_patch_matching(stack, include_damage, |_| true)
 }
 
-/// Encode the extra patch for a snapshot whose typed scalar already carries damage.
-/// This uses the same component codec and canonicalization as persistent stacks.
+/// Select live component IDs without the `!` on removals. Nested stacks keep their full live patches.
+pub fn live_component_patch_matching(
+    stack: &ItemStack,
+    include_damage: bool,
+    selector: impl Fn(&str) -> bool,
+) -> Option<Tag> {
+    let mut components = components_tag_inner(
+        stack.damage,
+        stack.data(),
+        include_damage,
+        true,
+        &selector,
+        &|nested| template_tag(nested, live_component_patch(nested, true)),
+    )?;
+    canonicalize_component_patch(&mut components);
+    Some(components)
+}
+
+/// An explicit snapshot of persistable components, including overrides equal to the item's default.
+/// Persistent stacks use [`encode_components`] with the loaded catalog instead.
+pub fn component_snapshot(stack: &ItemStack) -> Option<Tag> {
+    encode_persistent_components(stack, true, &|_| true)
+}
+
+/// Encode the persistable extra patch for a snapshot whose typed scalar already carries damage.
 pub fn encode_extra_components(stack: &ItemStack) -> Option<Tag> {
     encode_extra_components_matching(stack, |_| true)
 }
 
-/// Engine-only projection of the extra patch, excluding the typed damage scalar.
+/// Engine-only projection of the persistable extra patch, excluding the typed damage scalar.
 /// The selector sees the component ID without `!` for removals. Selected nested
-/// stacks keep their full patches.
+/// stacks keep their full persistable patches.
 pub fn encode_extra_components_matching(
     stack: &ItemStack,
     selector: impl Fn(&str) -> bool,
 ) -> Option<Tag> {
-    encode_stack_components(stack, false, &selector, &raw_template_tag)
+    encode_persistent_components(stack, false, &selector)
+}
+
+fn keep_component_patch_entry(
+    removed: bool,
+    present_by_default: bool,
+    equals_default: impl FnOnce() -> bool,
+) -> bool {
+    if removed {
+        present_by_default
+    } else {
+        !present_by_default || !equals_default()
+    }
 }
 
 /// `PatchedDataComponentMap`: retain sets that differ from the item's prototype and
@@ -2060,25 +2218,20 @@ pub fn component_patch_filter<'a>(
         let Some((keys, info)) = prototype else {
             return true;
         };
-        let present = keys.contains_key(id);
-        if removed {
-            present
-        } else {
-            // Equality belongs to the component codec, not its saved NBT numeric width.
-            !present
-                || !ingredient_components::component_equal(
-                    &id.to_string_lossy(),
-                    stack,
-                    &info.component_prototype,
-                )
-        }
+        keep_component_patch_entry(removed, keys.contains_key(id), || {
+            ingredient_components::component_equal(
+                &id.to_string_lossy(),
+                stack,
+                &info.component_prototype,
+            )
+        })
     }
 }
 
 /// The saved `DataComponentPatch.CODEC`, compared against the loaded prototype.
 /// Nested templates retain their raw patches, including redundant entries and removals.
 pub fn encode_components(stack: &ItemStack, items: &crate::items::Items) -> Option<Tag> {
-    let mut components = encode_stack_components(stack, true, &|_| true, &raw_template_tag)?;
+    let mut components = encode_persistent_components(stack, true, &|_| true)?;
     if let Tag::Compound(entries) = &mut components {
         let keep = component_patch_filter(stack, items);
         entries.retain(|id, _| {
@@ -2094,15 +2247,17 @@ pub fn encode_components(stack: &ItemStack, items: &crate::items::Items) -> Opti
     }
     Some(components)
 }
-/// Live component fields from damage and extras, without item-prototype elision.
+/// Component fields from damage and extras, without item-prototype elision or the
+/// typed map post-processing directive.
 pub fn components_tag(damage: u32, data: Option<&StackData>) -> Option<Tag> {
-    components_tag_inner(damage, data, true, &|_| true, &raw_template_tag)
+    components_tag_inner(damage, data, true, false, &|_| true, &raw_template_tag)
 }
 
 fn components_tag_inner(
     damage: u32,
     data: Option<&StackData>,
     include_damage: bool,
+    include_map_post_processing: bool,
     selector: &impl Fn(&str) -> bool,
     template_tag: &impl Fn(&ItemStack) -> Tag,
 ) -> Option<Tag> {
@@ -2273,8 +2428,16 @@ fn components_tag_inner(
                 ),
             ));
         }
-        // minecraft:map_post_processing is transient: ItemStack.CODEC never
-        // saves it (only the network carries it).
+        // MapPostProcessing.id: this is part of the live patch, not ItemStack.CODEC.
+        if include_map_post_processing
+            && let Some(directive) = d.map_post_processing
+            && selector("minecraft:map_post_processing")
+        {
+            entries.push((
+                "minecraft:map_post_processing",
+                Tag::Int(i32::from(directive)),
+            ));
+        }
         if !d.charged.is_empty() && selector("minecraft:charged_projectiles") {
             entries.push((
                 "minecraft:charged_projectiles",
@@ -2315,6 +2478,31 @@ fn components_tag_inner(
     }
     (!out.is_empty()).then_some(Tag::Compound(out))
 }
+
+fn canonicalize_component_patch(components: &mut Tag) {
+    // MobEffectInstance.Details' codec always saves the resolved icon flag.
+    // An omitted icon follows show_particles, whose default is true.
+    if let Some(Tag::List(effects)) = components
+        .get_mut("minecraft:potion_contents")
+        .and_then(|potion| potion.get_mut("custom_effects"))
+    {
+        for effect in effects {
+            let shown = effect.get("show_particles").and_then(int).unwrap_or(1) != 0;
+            if let Tag::Compound(fields) = effect {
+                fields
+                    .entry(JavaString::from("show_icon"))
+                    .or_insert(Tag::Byte(i8::from(shown)));
+            }
+        }
+    }
+    // LodestoneTracker.CODEC: optionalFieldOf("tracked", true).
+    if let Some(Tag::Compound(tracker)) = components.get_mut("minecraft:lodestone_tracker")
+        && tracker.get(&JavaString::from("tracked")) == Some(&Tag::Byte(1))
+    {
+        tracker.remove(&JavaString::from("tracked"));
+    }
+}
+
 /// Borrow an ASCII component key in `buf` without allocating. Every modeled ID
 /// is ASCII and fits; other spellings are preserved in the raw patch.
 fn ascii_key<'a>(key: &JavaString, buf: &'a mut [u8; 64]) -> Option<&'a str> {
@@ -2500,9 +2688,11 @@ fn decode_components_inner(
         writable_pages: writable_raw(seen.writable_book_content),
         writable_filtered: writable_filtered(seen.writable_book_content),
         written: seen.written_book_content.map(written_book_from_tag),
+        // Fireworks.CODEC decodes an empty explosion list regardless of the item's prototype.
         fireworks: seen
             .fireworks
-            .map(|f| {
+            .filter(|f| matches!(f, Tag::Compound(_)))
+            .and_then(|f| {
                 let flight = f
                     .get("flight_duration")
                     .and_then(int)
@@ -2510,11 +2700,11 @@ fn decode_components_inner(
                     .clamp(0, 255) as u8;
                 let explosions = match f.get("explosions") {
                     Some(Tag::List(list)) => list.iter().map(explosion_from).collect(),
-                    _ => Vec::new(),
+                    None => Vec::new(),
+                    Some(_) => return None,
                 };
-                (flight, explosions)
-            })
-            .filter(|(flight, explosions)| !(*flight == 1 && explosions.is_empty())),
+                Some((flight, explosions))
+            }),
         firework_explosion: seen.firework_explosion.map(explosion_from),
         dyed_color: seen
             .dyed_color
@@ -2582,6 +2772,7 @@ fn decode_components_inner(
             .map(|v| v as u8),
         trim: seen.trim.and_then(trim::from_nbt),
         bundle_selected: BundleSelected::default(),
+        bundle_weight: Default::default(),
         other: Vec::new(),
         wire: Wire::default(),
     };
@@ -2807,6 +2998,34 @@ mod tests {
         let mut other = half.clone();
         other.fireworks = Some((3, Vec::new()));
         assert_ne!(hasher.hash_one(full), hasher.hash_one(&other));
+    }
+
+    #[test]
+    fn prototype_match_uses_decoded_fireworks() {
+        let paper = |count, fields| {
+            let patch = Tag::compound([("minecraft:fireworks", Tag::compound(fields))]);
+            let (damage, extra) = decode_components(Some(&patch));
+            ItemStack {
+                damage,
+                extra,
+                ..ItemStack::new("minecraft:paper", count)
+            }
+        };
+        let implicit = paper(1, vec![("flight_duration", Tag::Byte(1))]);
+        let explicit = paper(
+            2,
+            vec![
+                ("flight_duration", Tag::Byte(1)),
+                ("explosions", Tag::List(Vec::new())),
+            ],
+        );
+        let different = paper(1, vec![("flight_duration", Tag::Byte(2))]);
+        let absent = ItemStack::new("minecraft:paper", 1);
+        let items = crate::items::Items::empty();
+        assert!(implicit.same_item_same_components_with_prototype(&explicit, &items));
+        assert!(explicit.same_item_same_components_with_prototype(&implicit, &items));
+        assert!(!implicit.same_item_same_components_with_prototype(&different, &items));
+        assert!(!implicit.same_item_same_components_with_prototype(&absent, &items));
     }
 
     #[test]
@@ -3844,7 +4063,55 @@ mod tests {
             encode_components(&stack, prototype_items())
                 .unwrap()
                 .get("minecraft:custom_name"),
-            Some(&sunrise_client_core::scoreboard::json_to_tag(&styled))
+            Some(&sunrise_game_data::scoreboard::json_to_tag(&styled))
+        );
+    }
+
+    /// `ExtraCodecs.UNSIGNED_BYTE`: an amplifier narrows to a byte first, then reads
+    /// unsigned. `-56b`/`-56` are 200 (not clamped to 0); `256` is 0 (not clamped to
+    /// 255), matching vanilla 26.3 (#6850).
+    #[test]
+    fn issue_6850_potion_amplifier_decodes_an_unsigned_byte() {
+        let decode = |amplifier: Tag| {
+            let effects = Tag::compound([(
+                "custom_effects",
+                Tag::List(vec![Tag::compound([
+                    ("id", Tag::String("minecraft:speed".into())),
+                    ("duration", Tag::Int(100)),
+                    ("amplifier", amplifier),
+                ])]),
+            )]);
+            let mut stack = ItemStack::new("minecraft:potion", 1);
+            stack
+                .data_mut()
+                .set_loot_component("minecraft:potion_contents", &Some(effects));
+            stack.custom_potion_effects()
+        };
+        assert_eq!(
+            decode(Tag::Byte(-56)),
+            [("minecraft:speed".to_owned(), 100, 200)]
+        );
+        assert_eq!(
+            decode(Tag::Int(-56)),
+            [("minecraft:speed".to_owned(), 100, 200)]
+        );
+        assert_eq!(
+            decode(Tag::Int(256)),
+            [("minecraft:speed".to_owned(), 100, 0)]
+        );
+        assert_eq!(
+            decode(Tag::Int(200)),
+            [("minecraft:speed".to_owned(), 100, 200)]
+        );
+        // `Number.byteValue` of a float or double truncates to an int first:
+        // 1.75 is 1 and -1.75 is -1, which reads as 255.
+        assert_eq!(
+            decode(Tag::Float(1.75f32.to_bits())),
+            [("minecraft:speed".to_owned(), 100, 1)]
+        );
+        assert_eq!(
+            decode(Tag::Double((-1.75f64).to_bits())),
+            [("minecraft:speed".to_owned(), 100, 255)]
         );
     }
 
@@ -3857,7 +4124,7 @@ mod tests {
             &Some(sunrise_core::json_nbt::json_to_tag(&name).unwrap()),
         );
         assert_eq!(stack.custom_name().as_deref(), Some("Prize"));
-        let expected = sunrise_client_core::scoreboard::json_to_tag(&name);
+        let expected = sunrise_game_data::scoreboard::json_to_tag(&name);
         assert_eq!(
             encode_components(&stack, prototype_items())
                 .unwrap()
@@ -4238,6 +4505,7 @@ mod tests {
                 .map(|v| v.clamp(0, 4) as u8),
             trim: c.get("minecraft:trim").and_then(trim::from_nbt),
             bundle_selected: BundleSelected::default(),
+            bundle_weight: Default::default(),
             other: Vec::new(),
             wire: Wire::default(),
         };
@@ -4427,21 +4695,21 @@ mod carried_component_tests {
         let mut stack = ItemStack::new("minecraft:stick", 1);
         stack.extra = extra;
         let copied = stack.clone();
-        let (ConsumeEffect::Native { data: a, .. }, ConsumeEffect::Native { data: b, .. }) = (
+        let (ConsumeEffect::Native(a), ConsumeEffect::Native(b)) = (
             &stack.death_protection(None).unwrap()[0],
             &copied.death_protection(None).unwrap()[0],
         ) else {
             panic!("native effect")
         };
-        assert!(Arc::ptr_eq(a, b));
-        assert_eq!(a.get("amount"), Some(&Tag::Int(42)));
+        assert!(Arc::ptr_eq(&a.data, &b.data));
+        assert_eq!(a.data.get("amount"), Some(&Tag::Int(42)));
         assert_eq!(components_tag(0, stack.data()), Some(patch));
         stack
             .data_mut()
             .set_other("minecraft:death_protection", Some(component));
         assert!(matches!(
             &stack.death_protection(None).unwrap()[0],
-            ConsumeEffect::Native { .. }
+            ConsumeEffect::Native(_)
         ));
         stack
             .data_mut()
@@ -4853,5 +5121,33 @@ mod custom_data_boundary_tests {
             assert_eq!(loaded.other(CUSTOM), Some(&bad));
             assert_eq!(components_tag(0, Some(&loaded)), Some(input));
         }
+    }
+
+    #[test]
+    fn matches_with_overlay_matches_projected_enchantments_and_trim_without_cloning() {
+        let mut base = ItemStack::new("minecraft:iron_chestplate", 1);
+        base.damage = 4;
+        let enchants = vec![
+            (Arc::from("minecraft:protection"), 2),
+            (Arc::from("minecraft:unbreaking"), 3),
+        ];
+        let trim: Trim = ("minecraft:gold".into(), "minecraft:coast".into());
+
+        let mut projected = base.clone();
+        projected.data_mut().enchantments = vec![
+            (Arc::from("minecraft:unbreaking"), 3),
+            (Arc::from("minecraft:protection"), 2),
+        ];
+        projected.data_mut().trim = Some(trim.clone());
+
+        assert!(base.matches_with_overlay(&projected, &enchants, Some(&trim)));
+        assert!(!base.matches_with_overlay(&projected, &[], Some(&trim)));
+        assert!(!base.matches_with_overlay(&projected, &enchants, None));
+        assert!(!base.matches_with_overlay(&base, &enchants, Some(&trim)));
+        assert!(base.matches_with_overlay(&base, &[], None));
+
+        let mut different_damage = projected.clone();
+        different_damage.damage = 5;
+        assert!(!base.matches_with_overlay(&different_damage, &enchants, Some(&trim)));
     }
 }

@@ -5,11 +5,12 @@ import subprocess
 import tempfile
 import unittest
 
-from test_world_input_capture import method
+from tests.test_world_input_capture import method
 
 ROOT = Path(__file__).resolve().parents[1]
 LEVEL = ROOT / "crates/sunrise-world/src/level"
-CLIENT = ROOT / "crates/sunrise-client/src"
+COMMON = ROOT / "crates/sunrise-gameplay-common/src"
+CLIENT_GAMEPLAY = ROOT / "crates/sunrise-client-gameplay/src"
 
 
 def between(source, start, end):
@@ -74,6 +75,8 @@ impl World { fn block(&self, x: i32, y: i32, z: i32) -> BlockStateId { BlockStat
 struct GameLevel {
     world: World, carries: Option<bool>, state: BlockStateId, removed: Option<BlockStateId>,
 }
+// The extracted chunk writer's LevelAccess parameter is this fixture's level.
+type L = GameLevel;
 impl GameLevel {
     HAS_MOD
     HAS_NATIVE
@@ -93,8 +96,9 @@ impl GameLevel {
     }
 }
 struct ViewDistances { furthest: f64 }
-struct Game { world: World, res: Res }
-impl Game {
+struct CommonGame { world: World, res: Res }
+struct ClientGame { common: CommonGame }
+impl ClientGame {
     // The parts' view distances are their own test (`view_distances_are_asked_once_per_mod_block`).
     fn view_distances(&self) -> ViewDistances { ViewDistances { furthest: VIEW_DISTANCE } }
     UNTEMPLATED
@@ -107,9 +111,9 @@ impl WireGraph {
 }
 #[derive(Default)] struct Ticks { wire_graph: WireGraph, comparator_outputs: std::collections::HashMap<BlockPos, u8> }
 struct MovingPiston { moved_state: BlockStateId }
-struct Sim { b: Blocks, level: GameLevel, ticks: Ticks }
-impl Sim {
-    fn new(b: Blocks, level: GameLevel) -> Self { Self { b, level, ticks: Ticks::default() } }
+struct Sim<'a> { b: Blocks, level: &'a mut L, ticks: Ticks }
+impl<'a> Sim<'a> {
+    fn new(b: Blocks, level: &'a mut L) -> Self { Self { b, level, ticks: Ticks::default() } }
     fn is_in_valid_bounds(&self, _: BlockPos) -> bool { true }
     fn state(&self, _: BlockPos) -> BlockStateId { self.level.state }
     fn block_of(&self, state: BlockStateId) -> BlockId { self.b.table.block(state) }
@@ -124,7 +128,7 @@ impl Sim {
         self.level.removed = None;
         let write = self.begin_block_write(pos, state, 0).unwrap();
         let journal_removal = write.effectful_removal();
-        assert!(self.finish_chunk_write(write.pos, write.old, write.state, write.flags, write.remove_entity, None));
+        assert!(self.finish_chunk_write(write, None, GameLevel::ensure_block_entity));
         assert_eq!(self.level.removed, journal_removal);
         self.level.removed.is_some()
     }
@@ -142,7 +146,8 @@ fn level(entities: &[(i32, BlockEntity)]) -> GameLevel {
 #[test]
 fn a_mod_block_entity_on_a_template_without_one_is_removed_and_not_pushed() {
     let stone = BlockStateId(0);
-    let mut sim = Sim::new(Blocks::new(vec![BlockStateId(1)]), level(&[(5, BlockEntity::Mod(0))]));
+    let mut world = level(&[(5, BlockEntity::Mod(0))]);
+    let mut sim = Sim::new(Blocks::new(vec![BlockStateId(1)]), &mut world);
     // the same block replaced by itself (state change) keeps it
     assert!(!sim.removes(stone, BlockStateId(10), at(5)));
     // stone template, a mod entity here: removed with its block, never pushed
@@ -159,14 +164,15 @@ fn a_mod_block_entity_on_a_template_without_one_is_removed_and_not_pushed() {
     assert!(sim.removes(BlockStateId(2), BlockStateId(9), at(6)));
     assert!(!sim.pushable_tail(BlockStateId(2), at(6)));
     // a vanilla entity on a template without the flag is not a mod's
-    let mut sim = Sim::new(Blocks::new(vec![]), level(&[(5, BlockEntity::Chest(0)), (6, BlockEntity::Mod(0))]));
+    let mut world = level(&[(5, BlockEntity::Chest(0)), (6, BlockEntity::Mod(0))]);
+    let mut sim = Sim::new(Blocks::new(vec![]), &mut world);
     assert!(!sim.removes(stone, BlockStateId(9), at(5)));
 }
 #[test]
 fn a_carry_answer_moves_mod_and_vanilla_block_entities_alike() {
     let stone = BlockStateId(0);
-    let mut sim = Sim::new(Blocks::new(vec![BlockStateId(1)]),
-                           level(&[(5, BlockEntity::Mod(0)), (6, BlockEntity::Chest(0))]));
+    let mut world = level(&[(5, BlockEntity::Mod(0)), (6, BlockEntity::Chest(0))]);
+    let mut sim = Sim::new(Blocks::new(vec![BlockStateId(1)]), &mut world);
     sim.level.carries = Some(true);
     // a mod entity moves, whatever its template
     assert!(sim.pushable_tail(stone, at(5)));
@@ -184,10 +190,12 @@ fn a_carry_answer_moves_mod_and_vanilla_block_entities_alike() {
 }
 #[test]
 fn the_render_list_holds_mod_entities_of_templates_without_one() {
-    let game = Game {
-        world: World { block_entities: Entities([((0, 64, 0), BlockEntity::Mod(0)), ((1, 64, 0), BlockEntity::Mod(0)),
-                                        ((2, 64, 0), BlockEntity::Chest(0))].into_iter().collect()) },
-        res: Res,
+    let game = ClientGame {
+        common: CommonGame {
+            world: World { block_entities: Entities([((0, 64, 0), BlockEntity::Mod(0)), ((1, 64, 0), BlockEntity::Mod(0)),
+                                            ((2, 64, 0), BlockEntity::Chest(0))].into_iter().collect()) },
+            res: Res,
+        },
     };
     // x == 0 gives state 0 (template without an entity); x != 0 state 1 (has one: the mesher lists it)
     let mut listed = game.untemplated_mod_block_entities(DVec3 { x: 0.0, z: 0.0 });
@@ -200,9 +208,8 @@ fn the_render_list_holds_mod_entities_of_templates_without_one() {
 class ModBlockEntityAnyTemplateTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("rustc"), "requires Rust")
     def test_removal_piston_and_render_list(self):
-        game = ((CLIENT / "game.rs").read_text(encoding="utf-8")
-                + (CLIENT / "game/blocks/level_access.rs").read_text(encoding="utf-8"))
-        draw = (next(CLIENT.glob('game/*/native_block_entity_draw.rs'))).read_text(encoding="utf-8")
+        game = (COMMON / "game/blocks/level_access.rs").read_text(encoding="utf-8")
+        draw = (CLIENT_GAMEPLAY / "game/modding/native_block_entity_draw.rs").read_text(encoding="utf-8")
         update = (LEVEL / "update.rs").read_text(encoding="utf-8")
         pistons = (LEVEL / "pistons.rs").read_text(encoding="utf-8")
         journal_start = update.index("pub struct BlockWrite {")

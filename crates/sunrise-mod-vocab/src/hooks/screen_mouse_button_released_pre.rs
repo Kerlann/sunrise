@@ -1,5 +1,4 @@
 //! The `screen_mouse_button_released_pre` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0094
 
 pub trait Hooks {
     /// A mouse button went up over the open screen
@@ -15,11 +14,10 @@ pub trait Hooks {
     /// does in vanilla, and no guard here un-cancels it. Same screens as the
     /// press; a press that opened another screen ends on that one.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_screen_mouse_button_released_pre",
-        receiver = "read",
+        target = "sunrise_client_gameplay::game::native_hooks::base::ClientGame<'_>::native_screen_mouse_button_released_pre",
         dispatch = "flat",
         side = "client",
-        version = 2,
+        version = 3,
         contract = "cancel",
         out = "canceled",
         neoforge = "ScreenEvent.MouseButtonReleased.Pre",

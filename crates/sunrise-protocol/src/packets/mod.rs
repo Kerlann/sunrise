@@ -26,6 +26,7 @@ macro_rules! packet_enum {
             Unknown(i32, Vec<u8>),
         }
         impl $crate::retained::OwnedHeap for $name {
+            #[inline]
             fn owned_heap_bytes(&self) -> usize { match self {
                 $(Self::$variant(value) => $crate::retained::OwnedHeap::owned_heap_bytes(value),)*
                 Self::Unknown(_, bytes) => bytes.capacity(),
@@ -76,12 +77,17 @@ macro_rules! packet_enum {
                 }
                 Ok(packet)
             }
-            /// Validate directional constraints before allocating an encoded body.
-            pub fn try_encode(&self) -> $crate::Result<Vec<u8>> {
+            /// Validate directional and codec field constraints without allocating an encoded body.
+            pub fn validate(&self) -> $crate::Result<()> {
                 match self {
                     $(Self::$variant(p) => <$crate::packet_codec!($ty $(, $codec)?) as $crate::buf::Codec<$ty>>::validate(p)?,)*
                     Self::Unknown(_, _) => {}
                 }
+                Ok(())
+            }
+            /// Validate directional constraints before allocating an encoded body.
+            pub fn try_encode(&self) -> $crate::Result<Vec<u8>> {
+                self.validate()?;
                 Ok(self.encode())
             }
             /// Validate registered custom payloads in this connection's codec context.
@@ -92,15 +98,18 @@ macro_rules! packet_enum {
                 }
                 Ok(self.encode())
             }
+            fn write_payload(&self, w: &mut ::sunrise_core::vanilla_bytes::Writer) {
+                match self {
+                    $(Self::$variant(p) => <$crate::packet_codec!($ty $(, $codec)?) as $crate::buf::Codec<$ty>>::write(p, w),)*
+                    Self::Unknown(_, payload) => w.bytes(payload),
+                }
+            }
             /// The packet body: VarInt id then payload, for trusted values.
             /// Use `try_encode` for values supplied by mods or other untrusted producers.
             pub fn encode(&self) -> Vec<u8> {
                 let mut w = ::sunrise_core::vanilla_bytes::Writer::new();
                 w.varint(self.id());
-                match self {
-                    $(Self::$variant(p) => <$crate::packet_codec!($ty $(, $codec)?) as $crate::buf::Codec<$ty>>::write(p, &mut w),)*
-                    Self::Unknown(_, payload) => w.bytes(payload),
-                }
+                self.write_payload(&mut w);
                 w.data
             }
         }

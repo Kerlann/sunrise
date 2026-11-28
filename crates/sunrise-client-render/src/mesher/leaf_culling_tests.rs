@@ -32,11 +32,11 @@ fn fixture() -> Fixture {
         root.to_path_buf(),
     ))
     .unwrap();
-    let render = assets
-        .reload(&sunrise_assets::resource_source::ResourceRoot::directory(
-            root.to_path_buf(),
-        ))
-        .unwrap();
+    let render = crate::assets::RenderAssets::load(
+        &sunrise_assets::resource_source::ResourceRoot::directory(root.to_path_buf()),
+        &assets,
+    )
+    .unwrap();
     let visibility = models::load_visibility(&root, assets.registry).unwrap();
     let tables = MeshTables::new(&assets, &render, &facts, visibility.clone(), None).unwrap();
     Fixture {
@@ -92,6 +92,7 @@ fn mesh(
         cutout_leaves: true,
         opaque_ice: false,
         translucent_layers: &[],
+        layer_overrides: &[],
         leaf_culling: mode,
         hidden_states: &[],
         part_tables: Default::default(),
@@ -333,6 +334,7 @@ fn a_hidden_state_draws_nothing_and_shows_its_neighbours_face() {
             cutout_leaves: true,
             opaque_ice: false,
             translucent_layers: &[],
+            layer_overrides: &[],
             leaf_culling: LeafCullingMode::Off,
             hidden_states: hidden,
             part_tables: Default::default(),

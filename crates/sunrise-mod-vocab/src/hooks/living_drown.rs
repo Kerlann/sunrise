@@ -1,5 +1,4 @@
 //! The `living_drown` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0345
 
 pub trait Hooks {
     /// An entity that can't breathe and has no air (`LivingDrownEvent`, posted
@@ -20,7 +19,7 @@ pub trait Hooks {
         context = "loop",
         neoforge = "LivingDrownEvent",
         version = 3,
-        target = "sunrise_client_lib::breathing::native_living_drown"
+        target = "sunrise_sim::breathing::native_living_drown"
     )]
     fn living_drown(
         entity: u32,

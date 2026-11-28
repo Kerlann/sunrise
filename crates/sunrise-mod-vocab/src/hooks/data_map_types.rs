@@ -1,5 +1,4 @@
 //! The `data_map_types` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0150
 
 pub trait Hooks {
     /// The server is assembling its data tables, as for
@@ -24,7 +23,7 @@ pub trait Hooks {
     /// copy values only if you need them after the borrow. Server-side, not
     /// synced to clients.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_data_map_types",
+        target = "sunrise_gameplay::game::native_hooks::base::ServerGame<'_>::native_data_map_types",
         dispatch = "flat",
         side = "server",
         version = 2,

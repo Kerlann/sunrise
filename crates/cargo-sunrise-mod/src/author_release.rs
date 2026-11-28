@@ -22,10 +22,15 @@ const CALLER_MARK: &str =
     "# Written by `cargo sunrise-mod release`, which rewrites it: edits here are replaced.\n";
 const NOT_REGISTERED: &str = "This repository isn't registered yet: register it at https://playsunrise.net/mods/submit, or with a Register issue on https://github.com/sunrise-org/sunrise-mods";
 
-type Fetch<'a> = &'a dyn Fn(&str) -> Result<Option<String>, String>;
+pub(crate) type Fetch<'a> = &'a dyn Fn(&str) -> Result<Option<String>, String>;
 
-fn fetch(url: &str) -> Result<Option<String>, String> {
-    match sunrise_proxy::get(url, &[("User-Agent", "cargo-sunrise-mod")], None) {
+pub(crate) fn fetch(url: &str) -> Result<Option<String>, String> {
+    let authorization = github_authorization(url, |name| std::env::var(name).ok());
+    let mut headers = vec![("User-Agent", "cargo-sunrise-mod")];
+    if let Some(authorization) = &authorization {
+        headers.push(("Authorization", authorization));
+    }
+    match sunrise_proxy::get(url, &headers, None) {
         Ok(response) => response
             .into_string()
             .map(Some)
@@ -35,45 +40,34 @@ fn fetch(url: &str) -> Result<Option<String>, String> {
     }
 }
 
-fn registry_file(fetch: Fetch<'_>, name: &str) -> Result<String, String> {
+/// `Bearer <token>` for a GitHub API request (`https://api.github.com/`) when `GH_TOKEN` or
+/// `GITHUB_TOKEN` is set, in that order as the GitHub CLI reads them, so a batch of releases is
+/// not held to the 60 unauthenticated requests an hour. No other host is sent the token, and
+/// `sunrise_proxy::get` does not carry it to a redirect's destination.
+fn github_authorization(url: &str, var: impl Fn(&str) -> Option<String>) -> Option<String> {
+    if !url.starts_with("https://api.github.com/") {
+        return None;
+    }
+    ["GH_TOKEN", "GITHUB_TOKEN"]
+        .into_iter()
+        .filter_map(var)
+        .map(|token| token.trim().to_owned())
+        .find(|token| !token.is_empty())
+        .map(|token| format!("Bearer {token}"))
+}
+
+pub(crate) fn registry_file(fetch: Fetch<'_>, name: &str) -> Result<String, String> {
     let url = format!("{}/{name}", sunrise_addresses::MOD_REGISTRY_METADATA);
     fetch(&url)?.ok_or_else(|| format!("{url}: not found"))
 }
 
-/// `registry/repositories/<numeric repository id>.toml`: one file per registered repository.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Repository {
-    // A name can be reused after a rename: the ID in the file name is the identity.
-    #[serde(rename = "name")]
-    _name: String,
-    package: Vec<RegisteredPackage>,
+pub(crate) fn github_name(origin: &str) -> Option<String> {
+    github_name_from_origin(origin, url::Url::parse(origin).ok().as_ref())
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RegisteredPackage {
-    path: String,
-    project: String,
-}
-
-/// The fields of `registry/projects/<project>/project.toml` a release must agree with.
-#[derive(Deserialize)]
-struct ProjectRecord {
-    #[serde(rename = "mod")]
-    mod_id: String,
-    kind: String,
-}
-
-#[derive(Deserialize)]
-struct GitHubRepository {
-    id: u64,
-}
-
-fn github_name(origin: &str) -> Option<String> {
-    let url;
+fn github_name_from_origin(origin: &str, url: Option<&url::Url>) -> Option<String> {
     let path = if origin.contains("://") {
-        url = url::Url::parse(origin).ok()?;
+        let url = url?;
         if !matches!(url.scheme(), "https" | "ssh")
             || !url.host_str()?.eq_ignore_ascii_case("github.com")
             || url.query().is_some()
@@ -104,42 +98,40 @@ fn github_name(origin: &str) -> Option<String> {
     (valid(owner) && valid(repo)).then(|| path.to_owned())
 }
 
-/// GitHub's page for opening a pull request from `head` into `base`, for a GitHub `origin`.
-fn pull_request_url(origin: &str, base: &str, head: &str) -> Option<String> {
-    github_name(origin)
-        .map(|name| format!("https://github.com/{name}/compare/{base}...{head}?expand=1"))
+/// GitHub's page for opening a pull request from `head` into `base` in `repository`.
+fn pull_request_url(repository: &str, base: &str, head: &str) -> String {
+    format!("https://github.com/{repository}/compare/{base}...{head}?expand=1")
 }
 
-/// The registered package this release is for: origin's repository, found by its numeric GitHub ID
-/// (a name can be reused after a rename), at exactly this package path, with the project record's
-/// mod ID. Returns the project's registered kind.
-fn registered(fetch: Fetch<'_>, origin: &str, path: &str, mod_id: &str) -> Result<String, String> {
-    let name = github_name(origin).ok_or(NOT_REGISTERED)?;
+/// Resolve the stable GitHub ID of a parsed `owner/name`, since a name can be reused after a rename.
+pub(crate) fn github_repository_id(fetch: Fetch<'_>, name: &str) -> Result<u64, String> {
+    #[derive(Deserialize)]
+    struct GitHubRepository {
+        id: u64,
+    }
     let url = format!("https://api.github.com/repos/{name}");
     let text = fetch(&url)?.ok_or(NOT_REGISTERED)?;
     let GitHubRepository { id } = serde_json::from_str(&text).map_err(|e| format!("{url}: {e}"))?;
-    let file = format!("repositories/{id}.toml");
-    let url = format!("{}/{file}", sunrise_addresses::MOD_REGISTRY_METADATA);
-    let text = fetch(&url)?.ok_or(NOT_REGISTERED)?;
-    let repository: Repository =
-        toml::from_str(&text).map_err(|e| format!("registry/{file}: {e}"))?;
-    let package = repository
-        .package
-        .iter()
-        .find(|p| p.path == path)
-        .ok_or(NOT_REGISTERED)?;
-    let record = format!("projects/{}/project.toml", package.project);
-    let ProjectRecord {
-        mod_id: registered_id,
-        kind: registered_kind,
-    } = toml::from_str(&registry_file(fetch, &record)?)
-        .map_err(|e| format!("registry/{record}: {e}"))?;
-    if registered_id != mod_id {
-        return Err(format!(
-            "this package is registered as `{registered_id}`, but its manifest's id is `{mod_id}`"
-        ));
+    Ok(id)
+}
+
+fn registered_repository_name(fetch: Fetch<'_>, origin: &str) -> Result<String, String> {
+    let url = url::Url::parse(origin).ok();
+    // Git would pass a token embedded in the URL on to every command line that names it.
+    if url.as_ref().is_some_and(|url| {
+        matches!(url.scheme(), "http" | "https")
+            && (!url.username().is_empty() || url.password().is_some())
+    }) {
+        return Err("origin's push URL carries credentials; remove them and use a Git credential helper or SSH".into());
     }
-    Ok(registered_kind)
+    let name = github_name_from_origin(origin, url.as_ref()).ok_or(NOT_REGISTERED)?;
+    let id = github_repository_id(fetch, &name)?;
+    let url = format!(
+        "{}/repositories/{id}.toml",
+        sunrise_addresses::MOD_REGISTRY_METADATA
+    );
+    fetch(&url)?.ok_or(NOT_REGISTERED)?;
+    Ok(name)
 }
 
 fn workflow(fetch: Fetch<'_>) -> Result<String, String> {
@@ -509,9 +501,9 @@ impl Change {
 }
 
 #[derive(Default)]
-struct Git {
+pub(crate) struct Git {
     #[cfg(test)]
-    env: Vec<(&'static str, std::ffi::OsString)>,
+    pub(crate) env: Vec<(&'static str, std::ffi::OsString)>,
 }
 
 impl Git {
@@ -523,7 +515,7 @@ impl Git {
         cmd
     }
 
-    fn text(
+    pub(crate) fn text(
         &self,
         root: &Path,
         args: impl IntoIterator<Item: AsRef<OsStr>>,
@@ -674,24 +666,7 @@ fn release(
     if origin.lines().count() != 1 {
         return Err("origin pushes to more than one URL; release needs exactly one".into());
     }
-    // Git would pass a token embedded in the URL on to every command line that names it.
-    if url::Url::parse(&origin).is_ok_and(|url| {
-        matches!(url.scheme(), "http" | "https")
-            && (!url.username().is_empty() || url.password().is_some())
-    }) {
-        return Err("origin's push URL carries credentials; remove them and use a Git credential helper or SSH".into());
-    }
-    let kind = if project.manifest.native.is_some() {
-        "native-mod"
-    } else {
-        "mod"
-    };
-    let registered_kind = registered(fetch, &origin, &project.path, &project.manifest.id)?;
-    if registered_kind != kind {
-        println!(
-            "This release makes the project a {kind} (it is registered as a {registered_kind}): the registry's pull request for it changes the project's kind and removes its earlier releases."
-        );
-    }
+    let repository = registered_repository_name(fetch, &origin)?;
     let version = next_version(&project.manifest.version, requested)?;
     let tag = format!("{}v{version}", project.prefix);
     let tag_ref = format!("refs/tags/{tag}");
@@ -862,7 +837,7 @@ fn release(
         "Released {version}: pushed {tag} to origin. GitHub Actions will build and attest the release."
     );
     if let Some(name) = &release_branch {
-        let page = pull_request_url(&origin, base, name).unwrap_or_default();
+        let page = pull_request_url(&repository, base, name);
         println!(
             "Open a pull request from {name} into {base} and merge it, so {base} carries the version before the next release. {page}"
         );

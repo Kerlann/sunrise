@@ -37,14 +37,24 @@ pub trait LevelDimensionBackend {
     /// scale, ambient light, fixed time, infiniburn, monster spawn light, sky and the gameplay
     /// switches a mod's `DimensionSettings` or a data pack sets. A level whose type neither gave
     /// fields for has the Overworld's. None for a stale handle; on a client, the level it shows.
-    fn level_dimension_type(&self, level: LevelRef) -> Option<LevelDimensionType>;
+    fn level_dimension_type(&self, level: LevelRef) -> Option<LevelDimensionType<'_>>;
     /// Side: server.
     /// `Level.getSeaLevel`: 63 in the Overworld, 32 in the Nether, 0 in the End; for a level of the
     /// noise generator the `sea_level` of its noise settings (a data pack's too, when it replaces
-    /// them), for another level the `sea_level` its `DimensionSettings` gave, else 63. It is the sea
-    /// level the game uses for the level: terrain and aquifers, mob spawning and mob behaviour, rain
-    /// and snow, and maps. None for a stale handle and on a client.
+    /// them), for a superflat level -63 regardless of noise settings (a mod's explicit
+    /// `DimensionSettings::sea_level` still wins), for another level the `sea_level` its
+    /// `DimensionSettings` gave, else 63. This is the value the level reports and the game uses for
+    /// mob spawning and behaviour, rain and snow, and maps; terrain and aquifers use the generator's
+    /// own sea level instead. Superflat's value is -63, a sea-level value and not a water-placement
+    /// rule: it fills its configured layers. None for a stale handle and on a client.
     fn level_sea_level(&self, level: LevelRef) -> Option<i32>;
+    /// Side: server.
+    /// `ServerLevel.isVillage`: whether `pos` is within one section of a section
+    /// with an occupied village point of interest. Uses the same village centers
+    /// as raids. Returns `Stale` for a stale level, or `Unavailable` if the level
+    /// is not in place or the position is unloaded or outside build height.
+    /// Does not open levels, load chunks, or take tickets.
+    fn level_is_village(&self, level: LevelRef, pos: [i32; 3]) -> Result<bool, LevelReadError>;
     /// Side: server.
     /// Where an entity of box `size` (width, height), not a player, centred in the portal block
     /// at `portal_pos` of this level arrives through it

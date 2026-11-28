@@ -62,11 +62,6 @@ pub struct JigsawDef {
     aliases: Vec<PoolAliasBinding>,
     padding: [i32; 2],
     waterlogging: bool,
-    /// A carried mod's start rules (`"sunrise:start_checks"`).
-    checks: super::start_checks::StartChecks,
-    /// Laid out by Repurposed Structures' and Moog's piece-limited
-    /// assembler (`"sunrise:piece_limited"`).
-    piece_limited: Option<super::piece_limited::Config>,
 }
 #[derive(Debug)]
 pub enum StructureKind {
@@ -97,8 +92,6 @@ pub enum StructureKind {
     Fortress,
     NetherFossil(HeightProvider),
     EndCity,
-    /// `sunrise:formations`: Formations' SimpleStructure.
-    Formations(super::formations::Def),
     /// A structure type a mod registered (`"type": "modid:tower"`): vanilla's
     /// `StructureType` as code, with the structure's own JSON config.
     Mod(ModType),
@@ -403,12 +396,6 @@ impl StructureRegistry {
                             .collect(),
                         padding: pair(v.get("dimension_padding"), "bottom", "top", 0, 0),
                         waterlogging: v["liquid_settings"].as_str() != Some("ignore_waterlogging"),
-                        checks: super::start_checks::StartChecks::decode(
-                            v.get("sunrise:start_checks"),
-                        ),
-                        piece_limited: v
-                            .get("sunrise:piece_limited")
-                            .map(super::piece_limited::Config::decode),
                     };
                     // JigsawStructure's codec requires and bounds `size` and
                     // bounds `max_distance_from_center`, and verifyRange
@@ -459,10 +446,6 @@ impl StructureRegistry {
                 "minecraft:nether_fossil" => StructureKind::NetherFossil(
                     HeightProvider::from_json(&v["height"].to_string())?,
                 ),
-                "sunrise:formations" => match super::formations::Def::decode(&v) {
-                    Ok(def) => StructureKind::Formations(def),
-                    Err(_) => StructureKind::Unsupported("sunrise:formations".into()),
-                },
                 other => match mod_types.get(other) {
                     Some(ty) => StructureKind::Mod(ModType {
                         ty: ty.clone(),
@@ -595,12 +578,12 @@ impl StructureRegistry {
         self.origin
     }
     /// The origin the generator reports for this dimension.
-    pub fn set_dimension_origin(&mut self, origin: ChunkPos) {
+    pub(crate) fn set_dimension_origin(&mut self, origin: ChunkPos) {
         self.origin = origin;
     }
     /// Whether a set is placed by the dimension's origin chunk alone, so the
     /// generator has to work out where its origin is.
-    pub fn needs_dimension_origin(&self) -> bool {
+    pub(crate) fn needs_dimension_origin(&self) -> bool {
         self.sets
             .iter()
             .any(|set| matches!(set.placement, Placement::DimensionOrigin))
@@ -608,7 +591,7 @@ impl StructureRegistry {
     /// ChunkGeneratorStructureState.generatePositions: the ring positions of
     /// each concentric-ring set among `possible_sets` before their biome
     /// searches (set index, searches in order).
-    pub fn ring_searches(
+    pub(crate) fn ring_searches(
         &self,
         possible_sets: &[usize],
         seed: i64,
@@ -632,7 +615,7 @@ impl StructureRegistry {
     /// How far from a chunk, in chunks, deciding its starts can look at
     /// other sets' start chunks through exclusion zones: every set's zones
     /// summed, a bound on any chain of them.
-    pub fn zone_reach(&self) -> i32 {
+    pub(crate) fn zone_reach(&self) -> i32 {
         self.sets
             .iter()
             .map(|s| {
@@ -642,7 +625,7 @@ impl StructureRegistry {
             .sum()
     }
     /// The preferred biomes of a concentric-ring set (empty for others).
-    pub fn ring_biomes(&self, set: usize) -> &BTreeSet<BiomeId> {
+    pub(crate) fn ring_biomes(&self, set: usize) -> &BTreeSet<BiomeId> {
         static NONE: BTreeSet<BiomeId> = BTreeSet::new();
         match &self.sets[set].placement {
             Placement::ConcentricRings { preferred, .. } => preferred,
@@ -652,7 +635,12 @@ impl StructureRegistry {
     /// RandomSpreadStructurePlacement.getPotentialStructureChunk et al.
     /// RandomSpreadStructurePlacement.getPotentialStructureChunk for the
     /// sector holding chunk (`x`, `z`); `None` for other placements.
-    pub fn potential_chunk(set: &StructureSet, seed: i64, x: i32, z: i32) -> Option<ChunkPos> {
+    pub(crate) fn potential_chunk(
+        set: &StructureSet,
+        seed: i64,
+        x: i32,
+        z: i32,
+    ) -> Option<ChunkPos> {
         let Placement::RandomSpread {
             spacing,
             separation,
@@ -674,9 +662,12 @@ impl StructureRegistry {
         };
         let sx = spread(&mut random);
         let sz = spread(&mut random);
-        Some(ChunkPos::new(gx * spacing + sx, gz * spacing + sz))
+        Some(ChunkPos::new(
+            gx.wrapping_mul(spacing).wrapping_add(sx),
+            gz.wrapping_mul(spacing).wrapping_add(sz),
+        ))
     }
-    pub fn is_structure_chunk(
+    pub(crate) fn is_structure_chunk(
         &self,
         set: &StructureSet,
         seed: i64,
@@ -725,7 +716,8 @@ impl StructureRegistry {
                 };
                 let sx = spread(&mut random);
                 let sz = spread(&mut random);
-                gx * spacing + sx == x && gz * spacing + sz == z
+                gx.wrapping_mul(spacing).wrapping_add(sx) == x
+                    && gz.wrapping_mul(spacing).wrapping_add(sz) == z
             }
             Placement::ConcentricRings { .. } => rings
                 .get(&set.name)
@@ -780,9 +772,9 @@ impl StructureRegistry {
         let Some(other) = self.sets.iter().find(|s| s.name == other) else {
             return false;
         };
-        (x - range..=x + range).any(|tx| {
-            (z - range..=z + range)
-                .any(|tz| self.structure_chunk(other, seed, tx, tz, rings, zones))
+        (i64::from(x) - i64::from(range)..=i64::from(x) + i64::from(range)).any(|tx| {
+            (i64::from(z) - i64::from(range)..=i64::from(z) + i64::from(range))
+                .any(|tz| self.structure_chunk(other, seed, tx as i32, tz as i32, rings, zones))
         })
     }
 }
@@ -796,9 +788,13 @@ impl StructureSet {
     }
     /// StructurePlacement.getLocatePos: the chunk's corner at y 0, moved by
     /// the set's `locate_offset`.
-    pub fn locate_pos(&self, chunk: ChunkPos) -> [i32; 3] {
+    pub(crate) fn locate_pos(&self, chunk: ChunkPos) -> [i32; 3] {
         let o = self.locate_offset;
-        [chunk.x * 16 + o[0], o[1], chunk.z * 16 + o[2]]
+        [
+            chunk.x.wrapping_mul(16).wrapping_add(o[0]),
+            o[1],
+            chunk.z.wrapping_mul(16).wrapping_add(o[2]),
+        ]
     }
 }
 fn reduce(method: Reduction, seed: i64, salt: i32, x: i32, z: i32, probability: f32) -> bool {
@@ -1003,7 +999,7 @@ pub trait StartContext: JigsawContext {
         kind: &dyn Fn(usize) -> HeightmapType,
     ) -> Vec<Vec<bool>>;
     /// ChunkGenerator.getBaseColumn's blocks: the noise column's states, as
-    /// mods' placements test them (Formations').
+    /// mods' placements test them.
     fn noise_column(&mut self, x: i32, z: i32) -> NoiseColumn {
         let mut column = NoiseColumn::default();
         self.noise_column_into(x, z, &mut column);
@@ -1016,6 +1012,8 @@ pub trait StartContext: JigsawContext {
     fn generation(&self) -> WorldGenerationContext;
     /// Noise biome at a quart position (caching resolver, no zoom).
     fn noise_biome(&mut self, quart: [i32; 3]) -> BiomeId;
+    /// The loaded registry key for a biome id issued by this generator's resolver.
+    fn biome_key(&self, biome: BiomeId) -> mod_api::BiomeKey;
     /// Noise biomes of `quarts` in order through one resolver, as
     /// BiomeSource.findBiomeHorizontal samples: each climate lookup starts
     /// from the previous result, which a tie keeps.
@@ -1026,7 +1024,7 @@ pub trait StartContext: JigsawContext {
 }
 
 /// ChunkGenerator.createStructures for one chunk: the starts it owns.
-pub fn create_starts(
+pub(crate) fn create_starts(
     registry: &StructureRegistry,
     resources: &StructureResources,
     bindings: &FeatureBlockBindings<'_>,
@@ -1187,9 +1185,7 @@ fn generate(
     stub_only: bool,
 ) -> Option<Generated> {
     let def = &registry.structures[structure];
-    let vanilla_jigsaw =
-        matches!(&def.kind, StructureKind::Jigsaw(jigsaw) if jigsaw.piece_limited.is_none());
-    if stub_only && !vanilla_jigsaw {
+    if stub_only && !matches!(def.kind, StructureKind::Jigsaw(_)) {
         return Some(Generated::Stub);
     }
     context.set_valid_biomes((!any_biome).then_some(&def.biomes));
@@ -1202,14 +1198,6 @@ fn generate(
                 .start_height
                 .sample(&mut random, context.generation())
                 .ok()?;
-            // A carried mod's own start rules keep the structure's biome set:
-            // they read it directly, not through the context's predicate.
-            if !jigsaw
-                .checks
-                .pass(context, &def.biomes, chunk, height, jigsaw.project_to)
-            {
-                return None;
-            }
             let start = [chunk.x * 16, height, chunk.z * 16];
             let aliases = resolve_aliases(&jigsaw.aliases, start, seed);
             let config = JigsawConfig {
@@ -1223,48 +1211,34 @@ fn generate(
                 padding: jigsaw.padding,
                 waterlogging: jigsaw.waterlogging,
             };
-            let (position, pieces) = match &jigsaw.piece_limited {
-                Some(limits) => super::piece_limited::assemble(
-                    &config,
-                    limits,
-                    context,
-                    &registry.pools,
-                    resources,
-                    bindings,
-                    chunk,
-                    start,
-                )?,
-                None => {
-                    let placed = place_start(
-                        &config,
-                        context,
-                        &registry.pools,
-                        resources,
-                        bindings,
-                        &mut random,
-                        start,
-                    )?;
-                    // Structure.findValidGenerationPoint checks the stub's biome before its
-                    // GenerationStub lays the pieces out: a start in another biome costs its
-                    // start piece, not its whole layout (an ancient city's, a camp's).
-                    let quart = placed.position.map(|v| v >> 2);
-                    if !any_biome && !def.biomes.contains(&context.noise_biome(quart)) {
-                        return None;
-                    }
-                    if stub_only {
-                        return Some(Generated::Stub);
-                    }
-                    lay_out_children(
-                        placed,
-                        &config,
-                        context,
-                        &registry.pools,
-                        resources,
-                        bindings,
-                        &mut random,
-                    )
-                }
-            };
+            let placed = place_start(
+                &config,
+                context,
+                &registry.pools,
+                resources,
+                bindings,
+                &mut random,
+                start,
+            )?;
+            // Structure.findValidGenerationPoint checks the stub's biome before its
+            // GenerationStub lays the pieces out: a start in another biome costs its
+            // start piece, not its whole layout (an ancient city's, a camp's).
+            let quart = placed.position.map(|v| v >> 2);
+            if !any_biome && !def.biomes.contains(&context.noise_biome(quart)) {
+                return None;
+            }
+            if stub_only {
+                return Some(Generated::Stub);
+            }
+            let (position, pieces) = lay_out_children(
+                placed,
+                &config,
+                context,
+                &registry.pools,
+                resources,
+                bindings,
+                &mut random,
+            );
             (
                 position,
                 pieces.into_iter().map(Piece::Pool).collect::<Vec<_>>(),
@@ -1500,18 +1474,6 @@ fn generate(
             }
             let piece = super::nether_fossil::piece(resources, &mut random, position)?;
             (position, legacy(vec![piece]))
-        }
-        StructureKind::Formations(formations) => {
-            let (position, pieces) = super::formations::generate(
-                formations,
-                context,
-                &registry.pools,
-                resources,
-                bindings,
-                &mut random,
-                chunk,
-            )?;
-            (position, pieces.into_iter().map(Piece::Pool).collect())
         }
         StructureKind::Mod(mod_type) => {
             // The type's own start and pieces; the biome check below and the

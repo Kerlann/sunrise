@@ -152,15 +152,35 @@ pub fn checkbox(
     on: bool,
     (lit, live): (bool, bool),
 ) {
+    let top = y + ((ROW - 17.0) / 2.0).floor();
+    let orig_rect = [right - 17.0, top, 17.0, 17.0];
+    let (rect, lit, live, alpha) =
+        match crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
+            bucket: crate::widgets::WidgetBucket::Checkbox,
+            rect: orig_rect,
+            label: None,
+            explicit_key: None,
+            active: live,
+            hovered: lit,
+            focused: false,
+            tab_order_group: 0,
+        }) {
+            crate::widgets::ResolvedEngineWidget::Skip => return,
+            crate::widgets::ResolvedEngineWidget::Unchanged => (orig_rect, lit, live, 1.0),
+            crate::widgets::ResolvedEngineWidget::Draw(props) => {
+                (props.rect, props.hovered, props.active, props.alpha)
+            }
+        };
     let sprite = match (on, lit && live) {
         (true, true) => "widget/checkbox_selected_highlighted",
         (true, false) => "widget/checkbox_selected",
         (false, true) => "widget/checkbox_highlighted",
         (false, false) => "widget/checkbox",
     };
-    let tint = if live { WHITE } else { muted() };
-    let top = y + ((ROW - 17.0) / 2.0).floor();
-    ui::nine_slice(batch, atlas, sprite, right - 17.0, top, 17.0, 17.0, tint);
+    let tint = crate::widgets::scale_abgr_alpha(if live { WHITE } else { muted() }, alpha);
+    ui::nine_slice(
+        batch, atlas, sprite, rect[0], rect[1], rect[2], rect[3], tint,
+    );
 }
 /// Vanilla's button with its label centred; pointed at or focused, its highlighted sprite.
 pub fn button(
@@ -179,17 +199,91 @@ pub fn button_with_room(
     atlas: &HudAtlas,
     rect: [f32; 4],
     label: &Text,
-    (hover, live, _): (bool, bool, bool),
+    (hover, live, focused): (bool, bool, bool),
     room: f32,
 ) {
-    let [x, y, w, h] = rect;
-    let sprite = match (live, hover) {
-        (false, _) => "widget/button_disabled",
-        (true, true) => "widget/button_highlighted",
-        (true, false) => "widget/button",
+    match crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
+        bucket: crate::widgets::WidgetBucket::Button,
+        rect,
+        label: Some(label),
+        explicit_key: None,
+        active: live,
+        hovered: hover,
+        focused,
+        tab_order_group: 0,
+    }) {
+        crate::widgets::ResolvedEngineWidget::Skip => {}
+        crate::widgets::ResolvedEngineWidget::Unchanged => {
+            button_with_room_resolved(batch, atlas, rect, label, (hover, live), room, None);
+        }
+        crate::widgets::ResolvedEngineWidget::Draw(props) => {
+            button_with_room_resolved(
+                batch,
+                atlas,
+                props.rect,
+                props.message.as_ref().unwrap_or(label),
+                (props.hovered, props.active),
+                room,
+                Some(&props),
+            );
+        }
+    }
+}
+
+pub(crate) fn button_with_room_resolved(
+    batch: &mut HudBatch,
+    atlas: &HudAtlas,
+    rect: [f32; 4],
+    label: &Text,
+    (hover, live): (bool, bool),
+    room: f32,
+    props: Option<&crate::widgets::ResolvedWidgetProps>,
+) {
+    let (alpha, label_text_color, sprites, override_hl) = match props {
+        None => (1.0, None, None, None),
+        Some(p) => (
+            p.alpha,
+            p.label_text_color,
+            p.sprites.as_ref(),
+            p.override_render_highlighted_sprite,
+        ),
     };
-    ui::nine_slice(batch, atlas, sprite, x, y, w, h, WHITE);
-    let color = if live { WHITE } else { muted() };
+    let [x, y, w, h] = rect;
+    let highlighted = match override_hl {
+        Some(forced) => live && forced,
+        None => live && hover,
+    };
+    let sprite_tint = crate::widgets::white_abgr_alpha(alpha);
+    let custom = sprites.and_then(|sprites| {
+        let state = if !live {
+            sprites.disabled.as_deref()
+        } else if highlighted {
+            sprites.highlighted.as_deref()
+        } else {
+            None
+        };
+        [state, Some(sprites.normal.as_str())]
+            .into_iter()
+            .flatten()
+            .find_map(|id| match atlas.gui_lookup(id) {
+                Some(crate::hud::GuiSprite::Present { rect, .. }) => Some(rect),
+                _ => None,
+            })
+    });
+    if let Some(sprite) = custom {
+        batch.rect_uv(x, y, w, h, sprite, sprite_tint);
+    } else {
+        let sprite = match (live, highlighted) {
+            (false, _) => "widget/button_disabled",
+            (true, true) => "widget/button_highlighted",
+            (true, false) => "widget/button",
+        };
+        ui::nine_slice(batch, atlas, sprite, x, y, w, h, sprite_tint);
+    }
+    let color = match label_text_color {
+        Some(argb) => crate::widgets::label_abgr_color(live, Some(argb), alpha),
+        None => crate::widgets::scale_abgr_alpha(if live { WHITE } else { muted() }, alpha),
+    };
     let left = x + 2.0 + room;
     scrolling_label(batch, atlas, label, [left, w - 4.0 - room], (y, h), color);
 }
@@ -234,15 +328,42 @@ pub fn slider(
     position: f32,
     state: SliderState,
 ) {
+    let (rect, message, hover, live, alpha, label_text_color) =
+        match crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
+            bucket: crate::widgets::WidgetBucket::Slider,
+            rect,
+            label: Some(value),
+            explicit_key: None,
+            active: state.live,
+            hovered: state.hover,
+            focused: state.focused,
+            tab_order_group: 0,
+        }) {
+            crate::widgets::ResolvedEngineWidget::Skip => return,
+            crate::widgets::ResolvedEngineWidget::Unchanged => {
+                (rect, None, state.hover, state.live, 1.0, None)
+            }
+            crate::widgets::ResolvedEngineWidget::Draw(props) => (
+                props.rect,
+                props.message,
+                props.hovered,
+                props.active,
+                props.alpha,
+                props.label_text_color,
+            ),
+        };
+    let value = message.as_ref().unwrap_or(value);
     let [x, y, w, h] = rect;
-    let live = state.live;
-    let tint = if live { WHITE } else { muted() };
+    let tint = crate::widgets::scale_abgr_alpha(if live { WHITE } else { muted() }, alpha);
     let (track, handle) =
-        ui::slider_sprites_ext(state.hover, live, state.focused, state.editing, state.held);
+        ui::slider_sprites_ext(hover, live, state.focused, state.editing, state.held);
     ui::nine_slice(batch, atlas, track, x, y, w, h, tint);
     let at = x + (position.clamp(0.0, 1.0) * (w - 8.0)).floor();
     ui::nine_slice(batch, atlas, handle, at, y, 8.0, h, tint);
-    let color = if live { WHITE } else { muted() };
+    let color = match label_text_color {
+        Some(argb) => crate::widgets::label_abgr_color(live, Some(argb), alpha),
+        None => crate::widgets::scale_abgr_alpha(if live { WHITE } else { muted() }, alpha),
+    };
     scrolling_label(batch, atlas, value, [x + 2.0, w - 4.0], (y, h), color);
 }
 /// A value that a press steps through: a button showing the value, as vanilla's `CycleButton`.
@@ -552,17 +673,21 @@ mod tests {
             let mut batch = HudBatch::scratch([640, 480]);
             draw(&mut batch, &atlas, rect, &long);
             assert!(batch.vertices.len() > base, "{name}: long label drawn");
-            // The widget's own fill, track and handle also draw: only the label's vertices count.
+            // The widget's own fill, track and handle also draw: only the label's quads count.
+            let widget: Vec<_> = plain.quad_scissors().map(|(bounds, _)| bounds).collect();
             let label = batch
-                .vertices
-                .iter()
-                .filter(|v| !plain.vertices.iter().any(|p| p.pos == v.pos));
-            for v in label {
+                .quad_scissors()
+                .zip(batch.visible_quads())
+                .filter(|((bounds, _), _)| !widget.contains(bounds))
+                .filter_map(|(_, visible)| visible);
+            for [x0, y0, x1, y1] in label {
                 assert!(
-                    (rect[0]..=rect[0] + rect[2]).contains(&v.pos[0])
-                        && (rect[1]..=rect[1] + rect[3]).contains(&v.pos[1]),
+                    rect[0] <= x0
+                        && x1 <= rect[0] + rect[2]
+                        && rect[1] <= y0
+                        && y1 <= rect[1] + rect[3],
                     "{name}: {:?} outside the widget",
-                    v.pos
+                    [x0, y0, x1, y1]
                 );
             }
             // The label's own glyphs (past the widget's fill) start centred.

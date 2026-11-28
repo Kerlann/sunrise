@@ -7,7 +7,6 @@ pub(super) enum FrameDraw {
     Calibration(crate::hdr_calibration::Layout),
     Shell(Page),
     RadialName,
-    Studio([f32; 4]),
     Mods,
     Packs,
     Standard(std::sync::Arc<OptionsLayout>),
@@ -20,8 +19,7 @@ impl OptionsUi {
     pub fn discard_draw(&mut self) {
         if let Some(FrameDraw::Shell(page)) = self.frame_draw.take() {
             let hosted: &mut dyn shell::Hosted = match page {
-                Page::Extras => &mut self.extras,
-                page if Self::graphics_page(page).is_some() => &mut self.graphics,
+                page if Self::sunrise_tab(page).is_some() => &mut self.sunrise,
                 Page::ControllerRadial => &mut self.radial,
                 Page::ControllerRadialPick => &mut self.radial_pick,
                 page if Self::controller_page(page).is_some() => &mut self.controller,
@@ -40,6 +38,9 @@ impl OptionsUi {
         batch: &mut HudBatch,
         atlas: &HudAtlas,
     ) {
+        if crate::widgets::is_collecting_widgets() {
+            return;
+        }
         self.discard_draw();
         self.output = output;
         let (w, h) = (batch.width, batch.height);
@@ -69,12 +70,7 @@ impl OptionsUi {
             shell.draw_background(s, batch, atlas, in_world, waiting);
             self.size = (w, h);
             FrameDraw::Shell(page)
-        } else if page == Page::Studio {
-            FrameDraw::Studio(self.studio.draw_background(batch, atlas, in_world))
         } else if matches!(page, Page::Mods | Page::Packs) {
-            if page == Page::Packs {
-                self.watch_data_packs(atlas, (w, h));
-            }
             ui::menu_background(batch, atlas, 0.0, 0.0, w, h, in_world);
             match page {
                 Page::Mods => FrameDraw::Mods,
@@ -82,9 +78,6 @@ impl OptionsUi {
                 _ => unreachable!(),
             }
         } else {
-            if page == Page::Pvp {
-                self.wide_extras = wide_extras(s, |t| atlas.font.width(t));
-            }
             let layout = self.built_layout(s, w, h);
             let (_, top, bottom, _) = layout.parts();
             self.size = (w, h);
@@ -104,6 +97,77 @@ impl OptionsUi {
         atlas: &HudAtlas,
         cursor: (f32, f32),
     ) {
+        if crate::widgets::is_collecting_widgets() {
+            let (w, h) = (batch.width, batch.height);
+            let page = self.page();
+            let in_world = self.in_world;
+            if self.resource_error.is_some() {
+                self.draw_resource_error(batch, atlas, cursor);
+            } else if page == Page::HdrCalibration
+                && let Some(calibration) = self.calibration.as_ref()
+            {
+                let layout = calibration.draw_background(batch, atlas);
+                calibration.draw_contents(batch, atlas, cursor, layout);
+            } else if page == Page::ControllerRadialName
+                && let Some(naming) = self.radial.screen.naming.as_ref()
+            {
+                naming.collect_widgets(batch, atlas, cursor);
+            } else if let Some(shell) = self.shell() {
+                shell.collect_widgets(s, batch, atlas, cursor);
+            } else if matches!(page, Page::Mods | Page::Packs) {
+                let (iw, ih) = (w as i32, h as i32);
+                let blink = self.pack_focus.elapsed().as_millis() as u64;
+                let m = crate::screen_draw::Measure(&atlas.font);
+                let mouse = (cursor.0.floor() as i32, cursor.1.floor() as i32);
+                let draws = if page == Page::Mods {
+                    if let Some(screen) = self
+                        .mods_screen
+                        .as_ref()
+                        .filter(|p| p.width == iw && p.height == ih)
+                    {
+                        screen.draw(&m, mouse, blink, crate::hud_overlays::now_ms())
+                    } else {
+                        let screen = crate::mods_screen::ModsScreen::new(iw, ih, in_world, &s.mods);
+                        screen.draw(&m, mouse, blink, crate::hud_overlays::now_ms())
+                    }
+                } else if let Some(screen) = self
+                    .pack_screen
+                    .as_ref()
+                    .filter(|p| p.width == iw && p.height == ih)
+                {
+                    screen.draw(&m, mouse, blink, crate::hud_overlays::now_ms())
+                } else {
+                    let title = if self.data_pack_dir.is_some() {
+                        "dataPack.title"
+                    } else {
+                        "resourcePack.title"
+                    };
+                    let mut screen = crate::pack_screen::PackScreen::new(
+                        &m,
+                        crate::text::Text::translate(title, &[]),
+                        iw,
+                        ih,
+                        in_world,
+                        self.pack_infos.clone(),
+                        &self.pack_selection,
+                    );
+                    if self.data_pack_dir.is_none() {
+                        screen.with_options = self
+                            .pack_configs
+                            .iter()
+                            .filter(|(_, c)| !c.entries().is_empty())
+                            .map(|(id, _)| id.clone())
+                            .collect();
+                    }
+                    screen.draw(&m, mouse, blink, crate::hud_overlays::now_ms())
+                };
+                let _ = crate::screen_draw::paint(batch, atlas, &draws);
+            } else {
+                let layout = self.built_layout(s, w, h);
+                let _ = self.draw_standard_contents(s, batch, atlas, cursor, &layout);
+            }
+            return;
+        }
         let frame = self
             .frame_draw
             .take()
@@ -135,17 +199,13 @@ impl OptionsUi {
                     .draw_contents(batch, atlas, cursor);
                 FrameDraw::Complete
             }
-            FrameDraw::Studio(rect) => {
-                self.studio.draw_contents(batch, atlas, cursor, rect);
-                FrameDraw::Complete
-            }
             kind @ (FrameDraw::Mods | FrameDraw::Packs) => {
                 let size = (batch.width, batch.height);
                 let blink = self.pack_focus.elapsed().as_millis() as u64;
                 let m = crate::screen_draw::Measure(&atlas.font);
                 let mouse = (cursor.0.floor() as i32, cursor.1.floor() as i32);
                 let draws = if matches!(kind, FrameDraw::Mods) {
-                    let screen = self.mods_page(s, size);
+                    let screen = self.mods_page(s, atlas, size);
                     let mut draws = screen.draw(&m, mouse, blink, crate::hud_overlays::now_ms());
                     screen.bind_icons(&mut draws, atlas, &mut batch.patches);
                     draws
@@ -167,6 +227,9 @@ impl OptionsUi {
     }
     /// Paint deferred overlays and consume this frame's continuation.
     pub fn draw_overlays(&mut self, batch: &mut HudBatch, atlas: &HudAtlas, cursor: (f32, f32)) {
+        if crate::widgets::is_collecting_widgets() {
+            return;
+        }
         match self
             .frame_draw
             .take()
@@ -297,7 +360,27 @@ impl OptionsUi {
             // does not: the description goes when the mouse leaves, like
             // vanilla's.
             let tip_hover = pointer_over || (is_focused && self.focus_from_keyboard);
-            if tip_hover && let Some(tip) = tooltip_text(s, wd) {
+            let tip_overridden = match &wd.kind {
+                WKind::Button { label, .. } => {
+                    crate::widgets::active_tooltip_overridden(&crate::widgets::EngineWidgetKey {
+                        key: crate::widgets::stable_key_from_text(label),
+                        bucket: crate::widgets::WidgetBucket::Button,
+                        occurrence: 0,
+                    })
+                }
+                WKind::Slider { label, .. } => {
+                    crate::widgets::active_tooltip_overridden(&crate::widgets::EngineWidgetKey {
+                        key: crate::widgets::stable_key_from_text(label),
+                        bucket: crate::widgets::WidgetBucket::Slider,
+                        occurrence: 0,
+                    })
+                }
+                _ => false,
+            };
+            if tip_hover
+                && !tip_overridden
+                && let Some(tip) = tooltip_text(s, wd)
+            {
                 tooltip = Some(match &wd.kind {
                     // The duplicate keybinds tooltip keeps its own lines.
                     WKind::Button {
@@ -445,21 +528,17 @@ impl OptionsUi {
                     true,
                 );
             }
-            self.language_search = search;
+            if !crate::widgets::is_collecting_widgets() {
+                self.language_search = search;
+            }
         }
-        if matches!(
-            self.page(),
-            Page::Video | Page::Controls | Page::KeyBinds | Page::ModBrowser
-        ) {
+        if matches!(self.page(), Page::Video | Page::Controls | Page::KeyBinds) {
             let mut search = self.settings_search.clone();
             if self.focus == Some(FocusId::Search) {
                 search.focused = true;
             }
             search.draw(batch, atlas, None);
-            let hint = match self.page() {
-                Page::ModBrowser => "sunrise.mods.browse.search",
-                _ => "sunrise.options.search",
-            };
+            let hint = "sunrise.options.search";
             // Sunrise's search box sits in the header, before the list.
             crate::widgets::last_narratable(|n| {
                 n.order = -1;
@@ -477,7 +556,9 @@ impl OptionsUi {
                     true,
                 );
             }
-            self.settings_search = search;
+            if !crate::widgets::is_collecting_widgets() {
+                self.settings_search = search;
+            }
         }
         FrameDraw::Tooltip(tooltip, tooltip_rect)
     }

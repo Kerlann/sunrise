@@ -7,7 +7,7 @@
 use crate::{
     gfx::EffectiveOutput,
     graphics::{
-        EntityCullingMode, FarDetail, FrameGeneration, GpuCullingMode, GraphicsApi, HdrMode,
+        EntityCullingMode, FrameGeneration, GpuCullingMode, GraphicsApi, HdrMode,
         HdrSetup as Setup, LeafCullingMode, Pacing, ParallelTickMode, ParticleCullingMode,
         PresentMode, Preset, Upscaling,
     },
@@ -28,7 +28,7 @@ pub enum Page {
     General,
     Quality,
     Performance,
-    /// Shader packs, either kind (`shader_pack_list`), and what they cost.
+    /// Shader packs (`shader_pack_list`), and what they cost.
     Shaders,
     Advanced,
     /// HDR output's own settings.
@@ -70,9 +70,6 @@ impl Page {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum H {
     Preset,
-    LodDistance,
-    FarDetail,
-    BlueMapRadius,
     CaveCulling,
     GpuCulling,
     EntityCulling,
@@ -116,8 +113,6 @@ pub enum H {
     HdrLighting,
     BatteryMode,
     ShadowCache,
-    /// Opens the shader pack list (`options_ui::Page::ShaderPacks`).
-    ShaderPacks,
     GraphicsApi,
     TranslucentBatching,
     HdrSmoothGradients,
@@ -163,12 +158,6 @@ fn e(item: crate::extras::Item, cost: Cost) -> Setting {
 /// Every page's settings, in named groups of related rows.
 pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
     use Cost::*;
-    // Suggested, never switched on, where far terrain costs the GPU most.
-    let far = if crate::graphics::reduced_far_detail_suggested() {
-        "Reduced draws far terrain coarser: faster on this integrated GPU."
-    } else {
-        "Reduced draws far terrain coarser, for GPUs it slows down."
-    };
     let mut pages = vec![
         (
             Page::General,
@@ -176,43 +165,23 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
                 (
                     "Preset",
                     vec![
+                        // Vanilla's own preset stays on vanilla's Video Settings.
                         h(
                             H::Preset,
                             None,
                             "Sets the options below together. Changing one makes it Custom.",
-                        ),
-                        v(
-                            Opt::Preset,
-                            None,
-                            "Vanilla's own preset: sets only vanilla's options, as Minecraft does.",
                         ),
                     ],
                 ),
                 (
                     "Distance",
                     vec![
-                        v(
-                            Opt::RenderDistance,
-                            High,
-                            "Full-detail terrain range. LOD Distance can extend local worlds farther.",
-                        ),
-                        h(
-                            H::LodDistance,
-                            Medium,
-                            "Coarse distant terrain in local worlds. Integrated GPUs stop at 128 chunks.",
-                        ),
-                        h(H::FarDetail, Medium, far),
-                        h(
-                            H::BlueMapRadius,
-                            None,
-                            "How far around you BlueMap tiles are downloaded. Next join.",
-                        ),
+                        v(Opt::RenderDistance, High, "Full-detail terrain range."),
                         v(
                             Opt::SimulationDistance,
                             Medium,
                             "How far mobs, crops and machines keep working. CPU time.",
                         ),
-                        v(Opt::Gamma, None, "Brightens dark places."),
                     ],
                 ),
                 (
@@ -245,6 +214,7 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
                             None,
                             "Lowers the frame rate when minimised, or idle too.",
                         ),
+                        v(Opt::Gamma, None, "Brightens dark places."),
                     ],
                 ),
                 (
@@ -311,7 +281,6 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
                         v(Opt::Vignette, None, "Darkens the screen's edges."),
                         v(Opt::ChunkFade, None, "Fades newly loaded chunks in."),
                         e(crate::extras::Item::DynamicLights, Low),
-                        e(crate::extras::Item::Fullbright, None),
                     ],
                 ),
                 (
@@ -526,20 +495,14 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
         ),
         (
             Page::Shaders,
+            // The packs themselves are listed over these (`sunrise_ui`).
             vec![(
-                "Shader packs",
-                vec![
-                    h(
-                        H::ShaderPacks,
-                        High,
-                        "Picks a shader pack, Sunrise's or a shaders/ folder one, and sets its options.",
-                    ),
-                    h(
-                        H::ShadowCache,
-                        Saves,
-                        "Reuses the pack shadow map when sun, view and world match. Off by default.",
-                    ),
-                ],
+                crate::shader_ui::BUILT_IN,
+                vec![h(
+                    H::ShadowCache,
+                    Saves,
+                    "Reuses the pack shadow map when sun, view and world match. Off by default.",
+                )],
             )],
         ),
         (
@@ -649,27 +612,7 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
     pages
 }
 
-/// BlueMap download radii, in chunks.
-const BLUE_MAP_RADII: [u32; 5] = [16, 32, 64, 128, 256];
 const UPLOAD_STEPS: [u32; 8] = [0, 256, 512, 1024, 2048, 4096, 8192, 16384];
-/// What the LOD Distance slider stops at, in chunks: off, fine steps up to 256
-/// for a short ring of far terrain past a small render distance (a phone or an
-/// integrated GPU at 8 chunks wants LOD to 12 or 16, not 64), then 512 and the
-/// farthest far terrain plans.
-const LOD_STEPS: [u32; 12] = [
-    0,
-    16,
-    24,
-    32,
-    48,
-    64,
-    96,
-    128,
-    192,
-    256,
-    512,
-    crate::lod::MAX_CHUNKS,
-];
 
 /// `out`: the output of the renderer the settings are shown for, with what its display reports.
 fn setup(s: &Settings, out: &EffectiveOutput) -> Setup {
@@ -781,13 +724,6 @@ impl H {
                     .unwrap_or(UPLOAD_STEPS.len() - 1);
                 Some(i as f32 / (UPLOAD_STEPS.len() - 1) as f32)
             }
-            H::LodDistance => {
-                let i = LOD_STEPS
-                    .iter()
-                    .position(|&d| d >= g.lod_distance)
-                    .unwrap_or(LOD_STEPS.len() - 1);
-                Some(i as f32 / (LOD_STEPS.len() - 1) as f32)
-            }
             H::Workers => Some(g.workers as f32 / max_workers() as f32),
             H::ResolutionScale => Some((g.resolution_scale as f32 - 50.0) / 150.0),
             H::TargetFps => Some((g.target_fps as f32 - 30.0) / 210.0),
@@ -806,7 +742,6 @@ impl H {
     }
     pub fn slider_steps(self) -> Option<u32> {
         match self {
-            H::LodDistance => Some((LOD_STEPS.len() - 1) as u32),
             H::ChunkUpdates => Some(64),
             H::EntityCullingPrecheck => Some(32),
             H::UploadBudget => Some((UPLOAD_STEPS.len() - 1) as u32),
@@ -838,15 +773,6 @@ impl H {
         let g = &s.sunrise;
         match self {
             H::Preset => labelled("Sunrise Preset", g.preset.label()),
-            H::LodDistance => match g.lod_distance {
-                0 => labelled("LOD Distance", "Off"),
-                n => labelled("LOD Distance", lang::tr("%s chunks", &[&n])),
-            },
-            H::FarDetail => labelled("Far Detail", g.far_detail.label()),
-            H::BlueMapRadius => labelled(
-                "BlueMap Radius",
-                lang::tr("%s chunks", &[&g.blue_map.radius_chunks()]),
-            ),
             H::CaveCulling => labelled("Cave Culling", on_off(g.cave_culling)),
             // Greyed out where it isn't offered (`Item::blocked`): Off, as it is there, while
             // the saved value waits.
@@ -944,8 +870,6 @@ impl H {
             H::HdrLighting => labelled("HDR Lighting", on_off(g.hdr_lighting)),
             H::BatteryMode => labelled("Battery Mode", on_off(g.battery)),
             H::ShadowCache => labelled("Shadow Cache", on_off(g.shadow_cache)),
-            // A press across the row, as Calibrate...: the list it opens shows the pick.
-            H::ShaderPacks => Text::literal(lang::get("Shader Packs...")),
             H::GraphicsApi => labelled("Graphics API", g.api.label()),
             // These two are greyed out where the device can't (`Item::blocked`): Off, as
             // they are there, while the saved value waits for a device that can.
@@ -967,9 +891,6 @@ impl H {
             H::UploadBudget => {
                 g.upload_budget_kib =
                     UPLOAD_STEPS[(v * (UPLOAD_STEPS.len() - 1) as f32).round() as usize]
-            }
-            H::LodDistance => {
-                g.lod_distance = LOD_STEPS[(v * (LOD_STEPS.len() - 1) as f32).round() as usize]
             }
             H::Workers => g.workers = (v * max_workers() as f32).round() as u32,
             H::ResolutionScale => g.resolution_scale = (50.0 + (v * 30.0).round() * 5.0) as u32,
@@ -1001,12 +922,6 @@ impl H {
         }
         let g = &mut s.sunrise;
         match self {
-            H::FarDetail => {
-                g.far_detail = step(&[FarDetail::Full, FarDetail::Reduced], g.far_detail, back)
-            }
-            H::BlueMapRadius => {
-                g.blue_map.radius = step(&BLUE_MAP_RADII, g.blue_map.radius_chunks(), back)
-            }
             H::CaveCulling => g.cave_culling = !g.cave_culling,
             H::GpuCulling => g.gpu_culling = step(&GpuCullingMode::ALL, g.gpu_culling, back),
             H::EntityCulling => {
@@ -1159,7 +1074,7 @@ impl Item {
     fn steps(self, s: &Settings, out: &EffectiveOutput) -> bool {
         self.switch(s, out).is_none()
             && self.slider(s).is_none()
-            && !matches!(self, Item::Sunrise(H::HdrCalibrate | H::ShaderPacks))
+            && !matches!(self, Item::Sunrise(H::HdrCalibrate))
     }
     /// On/off settings and their value.
     pub fn switch(self, s: &Settings, out: &EffectiveOutput) -> Option<bool> {
@@ -1211,13 +1126,6 @@ impl Item {
     }
     pub fn label(self, s: &Settings, out: &EffectiveOutput) -> Text {
         match self {
-            // Far terrain renames the row; its value stays vanilla's `options.chunks`.
-            Item::Vanilla(Opt::RenderDistance) if s.sunrise.lod_distance > 0 => {
-                Text::option_name_value(
-                    Text::literal(lang::get("Full Detail Distance")),
-                    Text::tr("options.chunks", &[&s.render_distance]),
-                )
-            }
             Item::Vanilla(o) => o.label(s),
             Item::Sunrise(h) => h.label(s, out),
             Item::Extra(e) => Text::option_name_value(
@@ -1231,7 +1139,7 @@ impl Item {
             return;
         }
         match self {
-            // Options.applyGraphicsPreset, as Video Settings' slider does it.
+            // A vanilla option's slider, as Video Settings' does it.
             Item::Vanilla(o) => crate::options_ui::set_slider(o, s, v),
             Item::Sunrise(h) => h.set_slider(s, v as f32),
             Item::Extra(_) => {}
@@ -1245,7 +1153,7 @@ impl Item {
         match self {
             Item::Vanilla(o) => o.cycle(s, back, framebuffer),
             Item::Sunrise(h) => h.cycle(s, back, out),
-            Item::Extra(e) => e.cycle(&mut s.extras, back),
+            Item::Extra(e) => e.cycle(&mut s.extras),
         }
         self.touched(s);
     }
@@ -1256,7 +1164,6 @@ impl Item {
             Item::Extra(_)
                 | Item::Sunrise(
                     H::Preset
-                        | H::BlueMapRadius
                         | H::ScreenshotQuality
                         | H::Pacing
                         | H::PresentMode
@@ -1267,6 +1174,7 @@ impl Item {
                         | H::ShadowCache
                         | H::GraphicsApi
                         | H::TranslucentBatching
+                        | H::GpuCulling
                         | H::HdrSmoothGradients
                 )
                 | Item::Vanilla(
@@ -1313,7 +1221,6 @@ impl Item {
 fn shown(item: Item, s: &Settings) -> bool {
     match item {
         Item::Sunrise(H::Upscaling) => s.sunrise.taa,
-        Item::Extra(crate::extras::Item::Fullbright) => !s.fullbright_held,
         _ => true,
     }
 }
@@ -1455,9 +1362,8 @@ impl Screen for GraphicsScreen {
             self.output,
             g::translucent_batching_offered(),
             g::gpu_culling_offer(),
-            g::reduced_far_detail_suggested(),
         );
-        shell::stamp_of(&(read(s), s.fullbright_held, offers))
+        shell::stamp_of(&(read(s), offers))
     }
     fn sheets(&self, s: &Settings) -> Vec<Sheet<Page, Item>> {
         let sheet = |(page, groups): (Page, Vec<(&'static str, Vec<Setting>)>)| Sheet {
@@ -1488,15 +1394,6 @@ impl Screen for GraphicsScreen {
                 vec![Output::Event(Event::Changed)]
             }
             Item::Sunrise(H::HdrCalibrate) => vec![Output::Push(OptionsPage::HdrCalibration)],
-            // The list of either kind, as the Shaders page opens it from anywhere.
-            Item::Sunrise(H::ShaderPacks) => {
-                s.shader_options = None;
-                vec![
-                    Output::Event(Event::ListShaderPacks),
-                    Output::Event(Event::OpenShaderOptions),
-                    Output::Push(OptionsPage::ShaderPacks),
-                ]
-            }
             _ => {
                 item.cycle(s, back, self.framebuffer, &self.output);
                 vec![Output::Event(Event::Changed)]
@@ -1534,7 +1431,6 @@ impl Screen for GraphicsScreen {
         s.max_fps = b.max_fps;
         s.inactivity_fps_limit = b.inactivity_fps_limit.clone();
         s.menu_blur = b.menu_blur;
-        s.extras.fullbright = b.extras.fullbright;
         s.extras.dynamic_lights = b.extras.dynamic_lights;
         s.extras.hide_block_particles = b.extras.hide_block_particles;
         s.attack_indicator = b.attack_indicator;
@@ -1781,12 +1677,11 @@ mod tests {
         ui.set_search("tearing");
         let found = ui.listed(&s, SIZE);
         assert!(found.iter().any(|(_, i)| *i == Item::Vanilla(Opt::Vsync)));
-        // Both presets answer "preset"; Sunrise's own, named apart from vanilla's, answers its name.
+        // Sunrise's preset answers "preset" and its name (vanilla's stays on Video Settings).
         ui.set_search("preset");
         let found = ui.listed(&s, SIZE);
         let general = |item| (Page::General, item);
         assert!(found.contains(&general(Item::Sunrise(H::Preset))));
-        assert!(found.contains(&general(Item::Vanilla(Opt::Preset))));
         ui.set_search("sunrise preset");
         assert_eq!(ui.listed(&s, SIZE), [general(Item::Sunrise(H::Preset))]);
         ui.set_search("hdr");
@@ -1900,23 +1795,11 @@ mod tests {
         assert!(!ui.scroller_held());
     }
 
-    /// The rows only vanilla's Video Settings had work here as they do there: its preset
-    /// applies its distances (`Options.applyGraphicsPreset`), Max Anisotropy waits for
-    /// Anisotropic filtering, Exclusive Fullscreen is a tick box of `options.txt`.
+    /// The rows only vanilla's Video Settings had work here as they do there: Max Anisotropy
+    /// waits for Anisotropic filtering, Exclusive Fullscreen is a tick box of `options.txt`.
     #[test]
     fn vanilla_video_rows_work_on_the_graphics_screen() {
         let mut s = Settings::default();
-        let preset = Item::Vanilla(Opt::Preset);
-        preset.set_slider(&mut s, 0.0, &NONE);
-        assert_eq!(
-            (s.graphics_preset.as_str(), s.render_distance, s.cloud_range),
-            ("fast", 8, 32)
-        );
-        preset.set_slider(&mut s, 2.0 / 3.0, &NONE);
-        assert_eq!(
-            (s.graphics_preset.as_str(), s.render_distance, s.cloud_range),
-            ("fabulous", 32, 128)
-        );
         let anisotropy = Item::Vanilla(Opt::MaxAnisotropy);
         let filtering = Item::Vanilla(Opt::TextureFiltering);
         while s.file.int("textureFiltering") == 2 {
@@ -2053,31 +1936,6 @@ mod tests {
         assert_eq!(key(&mut ui, &mut s, K::Escape), [Output::Done]);
     }
 
-    /// On another's server Fullbright's row is gone and the screen draws again; its choice is
-    /// kept for the next world that allows it (#3823).
-    #[test]
-    fn fullbright_row_is_hidden_while_held_and_keeps_its_choice() {
-        let mut s = Settings::default();
-        s.extras.fullbright = true;
-        let screen = GraphicsScreen::default();
-        let listed = |s: &Settings, item| {
-            let sheets = screen.sheets(s);
-            let groups = sheets.into_iter().flat_map(|sheet| sheet.groups);
-            groups.flat_map(|group| group.rows).any(|r| r.id == item)
-        };
-        let fullbright = Item::Extra(crate::extras::Item::Fullbright);
-        let lights = Item::Extra(crate::extras::Item::DynamicLights);
-        assert!(listed(&s, fullbright));
-        let free = screen.stamp(&s);
-        s.fullbright_held = true;
-        assert!(!listed(&s, fullbright));
-        assert!(listed(&s, lights));
-        assert_ne!(screen.stamp(&s), free);
-        assert!(s.extras.fullbright);
-        s.fullbright_held = false;
-        assert!(listed(&s, fullbright));
-    }
-
     /// The strip says what a row does, what its chosen value does where that differs, and why a
     /// greyed row can't be used; the search finds a row by what it does.
     #[test]
@@ -2144,64 +2002,12 @@ mod tests {
     #[test]
     fn rows_split_vanilla_labels_into_name_and_value() {
         let s = Settings::default();
-        let (name, value) = parts(Item::Sunrise(H::LodDistance), &s, &NONE);
-        assert_eq!(
-            (name.as_str(), value.as_deref()),
-            ("LOD Distance", Some("Off"))
-        );
         let (name, value) = parts(Item::Sunrise(H::HdrCalibrate), &s, &NONE);
         assert!(!name.is_empty() && value.is_none());
     }
 
     #[test]
-    fn lod_distance_slides_after_render_distance_without_changing_it() {
-        let mut s = Settings::default();
-        let item = Item::Sunrise(H::LodDistance);
-        let near = s.render_distance;
-        assert_eq!(item.label(&s, &NONE).plain(), "LOD Distance: Off");
-        assert_eq!(item.slider(&s), Some(0.0));
-        let items: Vec<_> = items().into_iter().map(|(_, i)| i).collect();
-        let render = items
-            .iter()
-            .position(|i| *i == Item::Vanilla(Opt::RenderDistance))
-            .unwrap();
-        assert_eq!(items[render + 1], item);
-        // Every stop is reachable and reads back as the same position.
-        for (i, &distance) in LOD_STEPS.iter().enumerate() {
-            let at = i as f32 / (LOD_STEPS.len() - 1) as f32;
-            item.set_slider(&mut s, f64::from(at), &NONE);
-            assert_eq!(s.sunrise.lod_distance, distance);
-            assert_eq!(item.slider(&s), Some(f64::from(at)));
-            assert_eq!(s.render_distance, near);
-        }
-        // The ends are off and the farthest far terrain plans.
-        item.set_slider(&mut s, 0.0, &NONE);
-        assert_eq!(s.sunrise.lod_distance, 0);
-        item.set_slider(&mut s, 1.0, &NONE);
-        assert_eq!(s.sunrise.lod_distance, crate::lod::MAX_CHUNKS);
-        assert_eq!(
-            item.label(&s, &NONE).plain(),
-            format!("LOD Distance: {} chunks", crate::lod::MAX_CHUNKS)
-        );
-        // The fine stops: a ring of far terrain just past a small render
-        // distance, which the doubling steps skipped (#9694).
-        item.set_slider(&mut s, 1.0 / 11.0, &NONE);
-        assert_eq!(s.sunrise.lod_distance, 16);
-        assert_eq!(item.label(&s, &NONE).plain(), "LOD Distance: 16 chunks");
-        item.set_slider(&mut s, 2.0 / 11.0, &NONE);
-        assert_eq!(s.sunrise.lod_distance, 24);
-        // A distance between stops (from the file) sits on the next one.
-        s.sunrise.lod_distance = 300;
-        assert_eq!(item.slider(&s), Some(f64::from(10.0_f32 / 11.0)));
-        s.sunrise.lod_distance = 12;
-        assert_eq!(item.slider(&s), Some(f64::from(1.0_f32 / 11.0)));
-    }
-
-    /// With far terrain on, Render Distance reads "Full Detail Distance" but keeps vanilla's
-    /// `options.chunks` value: it was Sunrise's "%s chunks", so "12 Chunks" became "12 chunks"
-    /// (#14880).
-    #[test]
-    fn full_detail_distance_keeps_the_vanilla_chunk_count() {
+    fn render_distance_keeps_the_vanilla_chunk_count() {
         struct Vanilla;
         impl lang::ResourceSource for Vanilla {
             fn read(&self, path: &str) -> Option<Vec<u8>> {
@@ -2215,40 +2021,13 @@ mod tests {
                 })
             }
         }
-        let mut s = Settings::default();
+        let s = Settings::default();
         let near = s.render_distance;
         let render = Item::Vanilla(Opt::RenderDistance);
-        let ((off, on), _) = lang::scoped(lang::Language::load(&[&Vanilla], "en_us"), || {
-            let off = render.label(&s, &NONE).plain();
-            s.sunrise.lod_distance = 256;
-            (off, render.label(&s, &NONE).plain())
+        let (label, _) = lang::scoped(lang::Language::load(&[&Vanilla], "en_us"), || {
+            render.label(&s, &NONE).plain()
         });
-        assert_eq!(off, format!("Render Distance: {near} Chunks"));
-        assert_eq!(on, format!("Full Detail Distance: {near} Chunks"));
-    }
-
-    #[test]
-    fn blue_map_settings_sit_with_far_terrain() {
-        let mut s = Settings::default();
-        let radius = Item::Sunrise(H::BlueMapRadius);
-        let distance: Vec<Item> = rows()
-            .into_iter()
-            .flat_map(|(_, groups)| groups)
-            .find(|(name, _)| *name == "Distance")
-            .unwrap()
-            .1
-            .iter()
-            .map(|r| r.item)
-            .collect();
-        assert!(distance.contains(&radius));
-        assert!(distance.contains(&Item::Sunrise(H::FarDetail)));
-        assert_eq!(radius.label(&s, &NONE).plain(), "BlueMap Radius: 64 chunks");
-        radius.cycle(&mut s, false, FB, &NONE);
-        assert_eq!(s.sunrise.blue_map.radius, 128);
-        radius.cycle(&mut s, true, FB, &NONE);
-        radius.cycle(&mut s, true, FB, &NONE);
-        assert_eq!(radius.label(&s, &NONE).plain(), "BlueMap Radius: 32 chunks");
-        assert_eq!(s.sunrise.preset, Preset::Custom);
+        assert_eq!(label, format!("Render Distance: {near} Chunks"));
     }
 
     #[test]
@@ -2276,8 +2055,8 @@ mod tests {
         assert_eq!(s.sunrise.preset, Preset::Ultra);
         // Ultra keeps the optimizations that leave the picture as it is, and no others.
         assert_eq!(s.sunrise.entity_culling, EntityCullingMode::Asynchronous);
-        assert_eq!(s.sunrise.gpu_culling, GpuCullingMode::Auto);
-        assert_eq!((s.sunrise.lod_distance, s.sunrise.fxaa), (128, true));
+        assert_eq!(s.sunrise.gpu_culling, GpuCullingMode::Off);
+        assert!(s.sunrise.fxaa);
         assert_eq!(
             (s.sunrise.resolution_scale, s.sunrise.opaque_ice),
             (100, false)
@@ -2605,7 +2384,7 @@ mod tests {
             assert!(key(&mut ui, &mut s, K::Enter).is_empty());
             assert_eq!(s.sunrise.gpu_culling, GpuCullingMode::On, "{offer:?}");
         }
-        // Where it is, it steps through its three values and leaves the preset.
+        // Where it is, it steps through its three values; the preset stays.
         crate::graphics::offer_gpu_culling(GpuCullingOffer::Offered);
         assert_eq!(item.blocked(&s, &NONE), None);
         for label in ["Auto", "Off", "On"] {
@@ -2621,7 +2400,8 @@ mod tests {
         }
         item.cycle(&mut s, true, FB, &NONE);
         assert_eq!(s.sunrise.gpu_culling, GpuCullingMode::Off);
-        assert_eq!(s.sunrise.preset, Preset::Custom);
+        // No preset sets it, so changing it keeps the preset.
+        assert_eq!(s.sunrise.preset, Preset::Balanced);
         // Auto says what it does.
         s.sunrise.gpu_culling = GpuCullingMode::Auto;
         assert!(description(item, &s, &NONE, "").starts_with("Auto: "));
@@ -2746,7 +2526,6 @@ mod tests {
         // HDR's sliders step only where the display offers HDR.
         let out = offering(true, None);
         let options = [
-            H::LodDistance,
             H::ChunkUpdates,
             H::UploadBudget,
             H::Workers,

@@ -1,5 +1,4 @@
 //! The `block_entity_update_tag` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0025
 
 pub trait Hooks {
     /// What clients get of the block entity at `pos` when its `id` is
@@ -10,15 +9,20 @@ pub trait Hooks {
     /// Leave it unset to send no tag of yours. A block change puts the one-shot fields of
     /// `BlockEntityView::set_client_update_fields` over it, and sends them alone when it is unset.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_block_entity_update_tag",
+        target = "sunrise_gameplay_common::game::native_hooks::base::native_block_entity_update_tag",
         receiver = "associated",
         dispatch = "flat",
         side = "server",
+        version = 2,
         contract = "replace",
         out = "tag",
         scope = "block_entity",
         key = "entity",
         neoforge = "none (vanilla BlockEntity.getUpdateTag; NeoForge adds no event or extension for it); IBlockEntityExtension.handleUpdateTag is the client half"
     )]
-    fn block_entity_update_tag(pos: [i32; 3], entity: &ModBlockEntity, tag: &mut Option<Compound>);
+    fn block_entity_update_tag(
+        pos: [i32; 3],
+        entity: BlockEntityDataView<'_>,
+        tag: &mut Option<Compound>,
+    );
 }

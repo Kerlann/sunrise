@@ -4,6 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests.os_support import BASH, needs_runner_shell
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "tools/ci/keep_jdk_on_disk.sh"
 DOWNLOAD = "8309b892-4600-4032-b712-207917b8b639"
@@ -31,11 +33,12 @@ class KeepJdkOnDiskTests(unittest.TestCase):
         env = {**os.environ, "RUNNER_TEMP": str(temp), "RUNNER_TOOL_CACHE": str(tools),
                "DYNA_CI_BUILD": str(self.build)}
         listing = job / "listing"
-        subprocess.run(["bash", SCRIPT, "before", listing], env=env, check=True)
+        subprocess.run([BASH, SCRIPT, "before", listing], env=env, check=True)
         setup_java(temp, tools)
-        subprocess.run(["bash", SCRIPT, "after", listing], env=env, check=True)
+        subprocess.run([BASH, SCRIPT, "after", listing], env=env, check=True)
         return temp, tools
 
+    @needs_runner_shell
     def test_the_jdk_leaves_memory_and_a_later_job_reuses_it(self):
         def download(temp, tools):
             # setup-java finds no JDK: it downloads, extracts and installs one.

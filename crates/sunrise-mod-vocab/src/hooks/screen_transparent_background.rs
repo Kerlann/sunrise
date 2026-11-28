@@ -14,14 +14,7 @@ screen's contents. Its `batch` is a `DrawContext`: custom drawing survives
 cancellation. `ClientHost::apply_screen_blur()` requests the normal menu blur
 at most once per frame; `menu_blur_radius()` reads the configured radius.
 `DrawContext::draw_menu_background` and `tiled_sprite` draw menu textures through
-the same atlas. The whole-screen `screen_render_pre` remains a separate moment.
-
-`Hooks::entity_change_block_pre` can cancel a player's landing block change before
-its neighbour notifications and level events. The resident write is restored
-before those consumers run, so a crop above cancelled farmland stays untouched.
-The event identifies the player, position and old/new block names. This veto is
-separate from `entity_change_block`, the existing post-change mob notification,
-and from `farmland_trample`, the farmland-specific in-write event."#]
+the same atlas. The whole-screen `screen_render_pre` remains a separate moment."#]
     #[hook(
         receiver = "read",
         dispatch = "flat",
@@ -30,7 +23,7 @@ and from `farmland_trample`, the farmland-specific in-write event."#]
         neoforge = "ScreenEvent.Render.Pre (transparent background)",
         cancellable = true,
         out = "canceled",
-        target = "sunrise_client::game::native_hooks::screen_transparent_background::Game<'_>::native_screen_transparent_background"
+        target = "sunrise_client_gameplay::game::native_hooks::screen_transparent_background::ClientGame<'_>::native_screen_transparent_background"
     )]
     fn screen_transparent_background(
         screen: &str,

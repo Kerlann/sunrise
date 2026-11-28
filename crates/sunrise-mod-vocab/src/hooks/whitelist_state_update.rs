@@ -1,10 +1,9 @@
 //! The `whitelist_state_update` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0342
 
 pub trait Hooks {
     /// The dedicated server's whitelist changed to `enabled`.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_whitelist_state_update",
+        target = "sunrise_gameplay::game::native_hooks::base::ServerGame<'_>::native_whitelist_state_update",
         dispatch = "flat",
         side = "server",
         contract = "listen",

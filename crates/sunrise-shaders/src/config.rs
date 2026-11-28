@@ -273,18 +273,14 @@ impl Config {
     /// `formats`: whether colortex formats count; `shadow`: whether the shadow settings do (those
     /// of [`VERTEX_IGNORED`] only with it); `others`: whether every other setting does.
     fn read_stage(&mut self, pp: &Preprocessed, formats: bool, shadow: bool, others: bool) {
-        let line = |at: usize| pp.locate(code_line(&pp.code, at));
-        for (at, ty, name, value) in constants(&pp.code, false) {
+        let line = |at: usize| pp.locate(code_line(pp.code(), at));
+        for (at, ty, name, value) in constants(pp.code(), false) {
             let place = line(at);
             self.constant(&place, ty, name, value, [formats, shadow, others]);
         }
-        for (origin, comment) in &pp.comments {
+        for (origin, comment) in pp.comments() {
             for (at, ty, name, value) in constants(comment, true) {
-                let file = pp
-                    .files
-                    .get(origin.file as usize)
-                    .map_or("?", String::as_str);
-                let place = format!("{file}:{}", origin.line);
+                let place = format!("{}:{}", pp.file_of(*origin), origin.line);
                 // Our probes' Iris 1.11.7 values fit this (a fit, not a rule Iris states): a
                 // `colortexNFormat` in a block comment counts only when `const` starts its line.
                 // Iris ignored one on the line of the `/*` (`/* const int colortex2Format =
@@ -481,7 +477,7 @@ impl Config {
 /// of its live code, or `None` without one (then the program loader decides). 6.1.4.
 pub fn draw_buffers(pp: &Preprocessed) -> Option<Vec<u32>> {
     let mut found = None;
-    for (_, comment) in &pp.comments {
+    for (_, comment) in pp.comments() {
         let text = comment.trim();
         if let Some(digits) = text.strip_prefix("DRAWBUFFERS:") {
             let list: Option<Vec<u32>> = digits.trim().chars().map(|c| c.to_digit(10)).collect();

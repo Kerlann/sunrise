@@ -22,7 +22,7 @@ description and dependencies as needed (`reference/manifest.md`); do not write t
 or change the generated build pin by hand. For code mods, `cargo sunrise-mod pin` moves the build pin.
 
 - `cargo sunrise-mod help all` lists the commands; `reference/sdk/05-commands.md` describes the SDK commands.
-- Find a hook with `cargo sunrise-mod hooks <words>`, never by guessing a name.
+- Find a hook with `cargo sunrise-mod hooks <words>`, never by guessing a name. It fetches nothing: run `cargo sunrise-mod check` first so the pinned SDK is prepared.
 - The mod tools need no launcher. If a step seems to need one, that is a bug in the tool or the book: report it.
 - To try a mod in game, follow `AGENTS.md` for a scratch home and game directory, never an existing player
   install. Use resources prepared from the user's own Minecraft (`start/first-mod.md`, "Prepared resources").
@@ -34,7 +34,7 @@ or change the generated build pin by hand. For code mods, `cargo sunrise-mod pin
 |---|---|
 | Blocks, items, recipes, loot, worldgen as data files | `how-to/content-mods.md` |
 | The crate, the package, data files of a native mod | `how-to/native-mods.md` and its numbered pages |
-| A compile fails | `how-to/native-mods/05-build-log.md` |
+| A compile fails | `how-to/native-mods/04-what-the-launcher-does.md` (Build log) |
 | Changing game code (`[native.*]` tables, mixins, loops) | `concepts/native-route.md` |
 | The SDK: what a release holds, the pin, signatures | `reference/sdk.md`, `reference/sdk/01-release.md`, `reference/sdk/03-in-a-project.md` |
 | Does a mod still fit a newer build (`check --build`, `pin`, `uses.json`) | `reference/sdk/04-fit.md`, `how-to/native-mods/14-checking-a-mod-against-a-build.md` |

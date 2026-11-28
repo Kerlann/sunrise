@@ -1,26 +1,25 @@
-use super::Hook;
+use super::{Hook, RegistrationAppend};
 use serde_json::json;
 
 #[test]
-fn validators_are_paths_and_only_apply_to_global_collectors() {
+fn attributed_append_only_applies_to_global_non_answered_collectors() {
     let parse = |api| {
         Hook::parse(json!({
-            "name": "validated", "doc": "Doc.", "side": "both", "target": "crate::native_validated",
+            "name": "attributed", "doc": "Doc.", "side": "both", "target": "crate::native_attributed",
             "mod_api": api,
         }))
     };
     assert_eq!(
-        parse(json!({"contract":"collect", "out":"items", "collect_validator":"crate::validate"}))
+        parse(json!({"contract":"collect", "out":"items", "registration_append":"attributed"}))
             .unwrap()
-            .collect_validator
-            .as_deref(),
-        Some("crate::validate")
+            .registration_append,
+        Some(RegistrationAppend::Attributed)
     );
     for api in [
-        json!({"contract":"listen", "collect_validator":"crate::validate"}),
-        json!({"contract":"collect", "out":"items", "scope":"item", "key":"stack", "collect_validator":"crate::validate"}),
-        json!({"contract":"collect", "out":"items", "collect_validator":"not a path; panic!()"}),
-        json!({"contract":"collect", "out":"items", "answered_by":"mod", "collect_validator":"crate::validate"}),
+        json!({"contract":"listen", "registration_append":"attributed"}),
+        json!({"contract":"collect", "out":"items", "scope":"item", "key":"stack", "registration_append":"attributed"}),
+        json!({"contract":"collect", "out":"items", "answered_by":"mod", "registration_append":"attributed"}),
+        json!({"contract":"collect", "out":"items", "collect_validator":"crate::validate"}),
     ] {
         assert!(parse(api).is_err());
     }
@@ -41,6 +40,7 @@ fn an_output_validator_is_a_path_on_a_global_cancel_or_plain_listen_hook() {
     for api in [
         json!({"contract":"cancel", "out":"canceled", "output_validator":"crate::check"}),
         json!({"contract":"listen", "output_validator":"crate::check"}),
+        json!({"contract":"collect", "out":"value", "output_validator":"crate::check"}),
     ] {
         assert_eq!(
             parse(api, None).unwrap().output_validator.as_deref(),
@@ -52,6 +52,8 @@ fn an_output_validator_is_a_path_on_a_global_cancel_or_plain_listen_hook() {
         json!({"contract":"cancel", "out":"canceled", "output_validator":"not a path"}),
         json!({"contract":"listen", "staged_surface":"sink", "output_validator":"crate::check"}),
         json!({"contract":"listen", "owner":"mod_id", "output_validator":"crate::check"}),
+        json!({"contract":"collect", "out":"items", "answered_by":"mod", "output_validator":"crate::check"}),
+        json!({"contract":"collect", "out":"items", "registration_append":"attributed", "output_validator":"crate::check"}),
     ] {
         assert!(parse(api, None).is_err());
     }

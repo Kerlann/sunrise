@@ -1,5 +1,4 @@
 //! The `state_for_placement` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0089
 
 pub trait Hooks {
     /// Choose a block's placement candidate (`Block.getStateForPlacement(BlockPlaceContext)`),
@@ -80,7 +79,7 @@ before returning it: `setPlacedBy` does not recheck its companion cell.
         out = "answer",
         scope = "block",
         key = "state",
-        target = "sunrise_client::game::native_hooks::base::LevelView<'_>::native_state_for_placement",
+        target = "sunrise_gameplay_common::game::native_hooks::base::LevelView<'_>::native_state_for_placement",
         neoforge = "none (vanilla Block.getStateForPlacement; NeoForge adds no event or extension for it)"
     )]
     fn state_for_placement(

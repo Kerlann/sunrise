@@ -13,14 +13,14 @@ const COMMANDS: &[Command] = &[
     Command {
         name: "new",
         everyday: true,
-        usage: "new <path> [--name \"Name\"] [--template content|native [--sunrise <build>]]",
+        usage: "new <path> [--name \"Name\"] [--template content | --template native [--sunrise <build>]]",
         summary: "Makes a mod project in <path> with a page template and a release workflow; a native one is pinned to the current Nightly's SDK unless --sunrise names another build.",
     },
     Command {
         name: "build",
         everyday: true,
-        usage: "build [--update-lock] [--with <path>]…",
-        summary: "Compiles a native mod with its required libraries and any optional libraries supplied with --with, then packs only the mod into target/sunrise-mod/<id>.smod, and its page.toml and screenshots, if it has them, into target/sunrise-mod/<id>.page.tar. Use --with for local folders or .smod files; the Sunrise mod registry supplies other required libraries. --update-lock resolves its Cargo.lock again.",
+        usage: "build [--update-lock] [--with <path>]… [--timings] [--verbose | -v]",
+        summary: "Compiles a native mod with its required libraries and any optional libraries supplied with --with, then packs only the mod into target/sunrise-mod/<id>.smod, and its page.toml and screenshots, if it has them, into target/sunrise-mod/<id>.page.tar. Use --with for local folders or .smod files; the Sunrise mod registry supplies other required libraries. --update-lock resolves its Cargo.lock again. For native mods only, --timings reports Cargo's HTML timings when Cargo builds the mod, and --verbose (or -v) shows compiler stderr live as well as keeping the build log.",
     },
     Command {
         name: "run",
@@ -44,13 +44,19 @@ const COMMANDS: &[Command] = &[
         name: "hooks",
         everyday: true,
         usage: "hooks <text> [--all]",
-        summary: "Searches the pinned build's hooks, or with --all every item of its API, offline.",
+        summary: "Searches the pinned build's hooks, or with --all every item of its API, offline; reads the SDK that check has already fetched and verified in .sunrise/sdk/, and fetches or changes nothing.",
     },
     Command {
         name: "release",
         everyday: true,
         usage: crate::author_release::USAGE,
-        summary: "Checks a registered mod, commits the version bump (patch by default), and pushes the release tag and branch to origin. --check previews without changing your checkout; --pull-request commits on a new release/<tag> branch for a default branch that takes only pull requests. release setup only refreshes the shared workflow caller and removes old release files.",
+        summary: "Checks a mod in a registered repository, commits the version bump (patch by default), and pushes the release tag and branch to origin. --check previews without changing your checkout; --pull-request commits on a new release/<tag> branch for a default branch that takes only pull requests. release setup only refreshes the shared workflow caller and removes old release files.",
+    },
+    Command {
+        name: "collection",
+        everyday: false,
+        usage: crate::collection::USAGE,
+        summary: "Checks the registry collection kept in this folder (collection.toml and icon.png) with the registry's rules, then pushes it from your fork of sunrise-org/sunrise-mods and prints the link that opens its pull request. Without collection.toml it writes one listing this repository's published projects from the signed registry index; without an id it gives the collection a permanent one. --check stops after the checks. The registry publishes a collection only once at least 2 members, including a default, have a release.",
     },
     Command {
         name: "internals",
@@ -67,8 +73,8 @@ const COMMANDS: &[Command] = &[
     Command {
         name: "use-jar",
         everyday: false,
-        usage: "use-jar <path>",
-        summary: "Lists an exact original Java jar as a passive asset and data source and caches it for runs.",
+        usage: "use-jar <path | modrinth-url | <project> <version>>",
+        summary: "Lists an exact original Java jar as a passive asset and data source from a local file, a Modrinth version URL, or a Modrinth project and version, and caches it for runs.",
     },
     Command {
         name: "self-update",

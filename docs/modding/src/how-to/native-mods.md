@@ -5,9 +5,9 @@ toolchain, against the prebuilt game of the exact Sunrise build the mod pins in 
 rebuilt for a mod: the mods are compiled and linked against that prebuilt game, and the instance then plays the
 result.
 
-Native code runs with the player's rights, outside any sandbox. The first install shows a trust notice, and the
-launcher builds native mods only on an install that allows native code (`--trust-native-code`, revocable in
-**Settings > Storage**).
+Native code runs with the player's rights, outside any sandbox. Reviewed registry releases install without a
+warning after the launcher verifies their signature and hash; unreviewed sources (**Add from source**, local `.smod`
+files, and CLI `--trust-native-code`) require explicit confirmation before building or running native code.
 
 If your mod calls another mod's Rust library, put the requirement in `sunrise-mod.toml`. In the add-on's folder,
 use `cargo sunrise-mod check --with ../library` for a local copy, then use the same flag with `build` or `run`.

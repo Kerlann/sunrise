@@ -10,6 +10,7 @@ import textwrap
 import unittest
 from unittest import mock
 
+from tests.os_support import BASH, needs_runner_shell
 from tools.ci import nightly
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -67,6 +68,7 @@ class DryStateTests(unittest.TestCase):
             update.assert_not_called()
             self.assertIs(build.call_args.args[-1], True)
 
+    @needs_runner_shell
     def test_cleanup_is_independent_of_pick_outputs_and_fails_on_api_errors(self):
         workflow = (ROOT / ".github/workflows/nightly-build.yml").read_text()
         job = workflow.split("\n  cleanup-dry-run:\n", 1)[1].split("\n  answer:", 1)[0]
@@ -86,13 +88,14 @@ class DryStateTests(unittest.TestCase):
                            "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2", "GH_TOKEN": "test",
                            "GITHUB_API_URL": "https://api.github.com", "GITHUB_REPOSITORY": "arismoko/horizon",
                            "RUNNER_TEMP": folder, "CAPTURE": str(path / "request"), "STATUS": status, "LOOKUP": "200" if status == "204" else status}
-                    result = subprocess.run(["bash", "-euo", "pipefail", "-c", script], env=env, capture_output=True)
+                    result = subprocess.run([BASH, "-euo", "pipefail", "-c", script], env=env, capture_output=True)
                     self.assertEqual(result.returncode == 0, success)
                     last_attempt = 2 if success else 1
                     endpoint = "refs" if status == "204" else "ref"
                     self.assertIn(f"https://api.github.com/repos/arismoko/horizon/git/{endpoint}/heads/nightly/dry-run-123-{last_attempt}",
                                   (path / "request").read_text().splitlines())
 
+    @needs_runner_shell
     def test_failed_cleanup_retry_removes_the_producers_earlier_attempt_only(self):
         workflow = (ROOT / ".github/workflows/nightly-build.yml").read_text()
         job = workflow.split("\n  cleanup-dry-run:\n", 1)[1].split("\n  answer:", 1)[0]
@@ -125,11 +128,11 @@ else:
                    "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1", "GH_TOKEN": "test",
                    "GITHUB_API_URL": "https://api.github.com", "GITHUB_REPOSITORY": "arismoko/horizon",
                    "RUNNER_TEMP": folder}
-            first = subprocess.run(["bash", "-euo", "pipefail", "-c", script], env=env, capture_output=True)
+            first = subprocess.run([BASH, "-euo", "pipefail", "-c", script], env=env, capture_output=True)
             self.assertNotEqual(first.returncode, 0)
             self.assertIn(original, json.loads((path / "refs").read_text()))
             # Successful pick was not rerun: only cleanup has a new attempt number.
             env["GITHUB_RUN_ATTEMPT"] = "2"
-            retry = subprocess.run(["bash", "-euo", "pipefail", "-c", script], env=env, capture_output=True)
+            retry = subprocess.run([BASH, "-euo", "pipefail", "-c", script], env=env, capture_output=True)
             self.assertEqual(retry.returncode, 0, retry.stderr)
             self.assertEqual(set(json.loads((path / "refs").read_text())), unrelated)

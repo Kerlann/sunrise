@@ -1,9 +1,15 @@
 # Hot-path performance trends
 
-The `hot-paths` workflow measures the game's hot paths on main once a day (its schedule dispatches it on main, since Dyna's
-runners take dispatches, not scheduled events) and records the result, so a slow drift over many
+The `hot-paths` workflow measures the game's hot paths on main and records the result, so a slow drift over many
 small merges shows up as a trend. It measures; it never judges: nothing in it fails on a slow result, it never runs
 on a pull request, and no contributor has to run it.
+
+The daily schedule dispatches it on main (Dyna's runners take dispatches, not scheduled events) only if GitHub
+Actions shows no unfinished heavy gate, daily, or game release run in this repository. Ordinary PR checks don't
+block once their light routing is known. If Actions metadata is unavailable or the routing is unclear, the tick
+also starts nothing. Check the scheduled run's summary for the reason. A skipped tick leaves a gap: nothing is
+queued or retried, and manual dispatch is unchanged. This is a check at dispatch time, not a reservation against
+jobs arriving later or work from other repositories.
 
 The trend page is `index.html` on the [`perf-history`](https://github.com/sunrise-org/sunrise/tree/perf-history) branch
 (download it, or read the run's summary in Actions); `runs/` beside it holds one small JSON record per run.
@@ -11,7 +17,7 @@ The trend page is `index.html` on the [`perf-history`](https://github.com/sunris
 ## What is measured
 
 Each workload is fixed and seeded, built by the benchmark itself on a server `Game`
-(`crates/sunrise-client/src/game/runtime/hot_paths/`), in the release profile players get (ThinLTO). Every number
+(`crates/sunrise-gameplay/src/game/runtime/hot_paths/`), in the release profile players get (ThinLTO). Every number
 is divided by the workload's operations.
 
 | Workload | What runs | One operation |
@@ -83,7 +89,7 @@ python3 tools/hot_paths.py record hot-paths.json history && python3 tools/hot_pa
 
 ## Add a workload
 
-Add it to a file under `hot_paths/`, or a new one called from `Game::hot_paths`: build the level with
+Add it to a file under `hot_paths/`, or a new one called from `ServerGame::hot_paths`: build the level with
 `hot_level`, do the setup, then wrap the measured work in `recorder.measure(name, operations, || ...)` and return
 from the closure something that shows the work was done (it becomes the checksum). Keep setup out of the closure,
 keep it single-threaded and seeded, and check that the work really happened: the tick workloads fail when their

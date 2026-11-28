@@ -43,10 +43,11 @@ pub enum SwapWith {
     Offhand,
 }
 
-/// Whether `open_menu` or `PlayerRef::open_mod_menu` first sends the client a close for the menu
-/// it replaces, as a Java `MenuProvider` chooses (`shouldTriggerClientSideContainerClosingOnOpen`).
-/// Either way the old menu closes on the server, its cursor stack going back to the player's
-/// inventory and `player_container_close` firing once.
+/// Whether [`PlayerRef::open_chest_menu`] or [`PlayerRef::open_mod_menu`] first sends the client a
+/// close for the menu it replaces, as a Java `MenuProvider` chooses
+/// (`shouldTriggerClientSideContainerClosingOnOpen`). Either way the old menu closes on the
+/// server, its cursor stack going back to the player's inventory and `player_container_close`
+/// firing once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 // exhaustive: vanilla's choice is a boolean
 #[derive(sunrise_mod_api_macros::Wire)]
@@ -82,6 +83,66 @@ pub struct MenuButtonContext {
 }
 
 #[cfg(test)]
+mod stacked_on_other_tests {
+    use super::{ClickAction, StackedEdit, StackedEdits, StackedOnOther, StackedOnOtherDirection};
+    use crate::{ItemKey, ItemStack};
+
+    fn dirt(count: u32) -> Option<ItemStack> {
+        ItemStack::new(ItemKey(3), count)
+    }
+
+    /// `take_clicked` as `Slot.safeTake(count, count, player)` on a slot of 3 dirt.
+    fn take(count: u32) -> (Option<ItemStack>, Vec<StackedEdit>) {
+        let mut edits = StackedEdits::new(None, dirt(3));
+        let mut click = StackedOnOther::new(
+            None,
+            None,
+            0,
+            0,
+            0,
+            ClickAction::Primary,
+            StackedOnOtherDirection::CarriedOnOther,
+            &mut edits,
+        );
+        let taken = click.take_clicked(count);
+        (taken, edits.into_edits())
+    }
+
+    #[test]
+    fn a_take_of_nothing_records_nothing_and_a_large_take_takes_what_the_slot_holds() {
+        assert_eq!(take(0), (None, vec![]));
+        assert_eq!(take(4), (dirt(3), vec![StackedEdit::Take(3)]));
+        assert_eq!(take(3), (dirt(3), vec![StackedEdit::Take(3)]));
+        assert_eq!(take(2), (dirt(2), vec![StackedEdit::Take(2)]));
+    }
+
+    #[test]
+    fn a_rollback_restores_the_stacks_handled_and_the_edit_log() {
+        let mut edits = StackedEdits::new(None, dirt(3));
+        let mut click = StackedOnOther::new(
+            None,
+            None,
+            0,
+            0,
+            0,
+            ClickAction::Primary,
+            StackedOnOtherDirection::Event,
+            &mut edits,
+        );
+        click.set_carried(dirt(1));
+        let checkpoint = click.checkpoint();
+        click.handled = false;
+        click.set_carried(None);
+        click.set_clicked(None);
+        click.rollback(checkpoint);
+        assert!(click.handled);
+        assert_eq!(click.carried(), dirt(1).as_ref());
+        assert_eq!(click.clicked(), dirt(3).as_ref());
+        assert_eq!(edits.into_edits(), vec![StackedEdit::Carried(dirt(1))]);
+    }
+}
+
+#[cfg(test)]
 mod menu_button_context_tests {
     use super::MenuButtonContext;
     use crate::wire::{Reader, Writer};
@@ -104,24 +165,6 @@ mod menu_button_context_tests {
             assert_eq!(decoded.id, context.id);
         }
     }
-
-    #[test]
-    fn stacked_on_other_direction_round_trips_on_wire() {
-        use super::{StackedOnOther, StackedOnOtherDirection};
-        for direction in [
-            StackedOnOtherDirection::Event,
-            StackedOnOtherDirection::CarriedOnOther,
-            StackedOnOtherDirection::OtherStackedOnMe,
-        ] {
-            let click = StackedOnOther::new(Some(7), Some(9), 1, 2, 3, true, None, None)
-                .with_direction(direction);
-            let mut writer = Writer::new();
-            writer.put(&click);
-            let decoded = Reader::decode::<StackedOnOther>(writer.bytes()).unwrap();
-            assert_eq!(decoded, click);
-            assert_eq!(decoded.direction, direction);
-        }
-    }
 }
 
 /// The logical side on which a menu click runs.
@@ -136,7 +179,7 @@ pub enum LogicalSide {
 /// asking `item_stacked_on_other`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 // exhaustive: NeoForge's event, then vanilla's carried-on-other and other-on-me overrides
-#[derive(sunrise_mod_api_macros::Wire)]
+// no wire: read only from the lent click within one call.
 pub enum StackedOnOtherDirection {
     /// The global `Hooks::item_stacked_on_other` event, before either item override.
     #[default]
@@ -146,13 +189,87 @@ pub enum StackedOnOtherDirection {
     /// `Item.overrideOtherStackedOnMe`: the clicked slot stack's `ItemPart`, asked second.
     OtherStackedOnMe,
 }
-/// A pickup click on a menu slot, as `item_stacked_on_other` is asked about it: the stacks are the
-/// ones the click found, frozen before any listener ran. A listener answers through
-/// [`StackedOnOtherResult`]; it does not write these.
+/// Vanilla's `ClickAction`: which action a pickup click is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// exhaustive: vanilla's two click actions
+// no wire: read only from the lent click within one call.
+pub enum ClickAction {
+    /// `ClickAction.PRIMARY`: with the default bindings, a left click.
+    Primary,
+    /// `ClickAction.SECONDARY`: with the default bindings, a right click.
+    Secondary,
+}
+/// One edit a listener made to a pickup click's cursor or clicked slot, in the order it made it.
 #[derive(Clone, Debug, PartialEq)]
+// hidden: the game's record of a click's edits; mods edit through `StackedOnOther`
+// exhaustive: a cursor write, a slot write, or a take from the slot
+// no wire: recorded and applied in-process within one click.
+#[doc(hidden)]
+pub enum StackedEdit {
+    /// `SlotAccess.set` on the cursor.
+    Carried(Option<ItemStack>),
+    /// `Slot.set` on the clicked slot.
+    Clicked(Option<ItemStack>),
+    /// `Slot.safeTake` of this many items from the clicked slot.
+    Take(u32),
+}
+/// The cursor and the clicked slot as one pickup click's listeners have left them so far, and
+/// the edits that put them there, in order. Every phase of the click shares it.
+#[derive(Debug, Default)]
+// hidden: the game's working stacks for a click; mods edit through `StackedOnOther`
+// exhaustive: the game builds it and reads it back
+// no wire: lent to listeners within one click.
+#[doc(hidden)]
+pub struct StackedEdits {
+    carried: Option<ItemStack>,
+    clicked: Option<ItemStack>,
+    edits: Vec<StackedEdit>,
+}
+impl StackedEdits {
+    /// The click's cursor and clicked slot before any listener ran.
+    // hidden: a game-side helper, not part of the mod surface
+    #[doc(hidden)]
+    pub fn new(carried: Option<ItemStack>, clicked: Option<ItemStack>) -> Self {
+        Self {
+            carried,
+            clicked,
+            edits: Vec::new(),
+        }
+    }
+    /// The edits made since edit `from`.
+    // hidden: a game-side helper, not part of the mod surface
+    #[doc(hidden)]
+    pub fn since(&self, from: usize) -> &[StackedEdit] {
+        &self.edits[from..]
+    }
+    /// Every edit, in the order the listeners made them.
+    // hidden: a game-side helper, not part of the mod surface
+    #[doc(hidden)]
+    pub fn into_edits(self) -> Vec<StackedEdit> {
+        self.edits
+    }
+}
+/// The working stacks of a lent click at one moment, for the generated dispatch to undo a
+/// panicking listener's edits. Only [`StackedOnOther::checkpoint`] makes one.
+#[derive(Debug)]
+// hidden: the generated dispatch's unwind checkpoint, not part of the mod surface
+// exhaustive: its fields are private and only `checkpoint` builds it.
+// no wire: lives for one listener call.
+#[doc(hidden)]
+pub struct StackedCheckpoint {
+    carried: Option<ItemStack>,
+    clicked: Option<ItemStack>,
+    handled: bool,
+    len: usize,
+}
+/// A pickup click on a menu slot, as `item_stacked_on_other` is asked about it, with the cursor
+/// and the clicked slot lent for this call (NeoForge's `getCarriedSlotAccess` and `getSlot`).
+/// Reads see what earlier phases and this call already changed. Edits are applied to the menu in
+/// the order they were made, once the click is decided.
+#[derive(Debug)]
 #[non_exhaustive]
-#[derive(sunrise_mod_api_macros::Wire)]
-pub struct StackedOnOther {
+// no wire: borrows the click's working stacks for the hook call.
+pub struct StackedOnOther<'a> {
     /// The clicking player's UUID, when a player is clicking.
     pub player: Option<u128>,
     /// The clicking player's entity id, when a player is clicking.
@@ -163,19 +280,22 @@ pub struct StackedOnOther {
     pub container: usize,
     /// The slot's index in that container.
     pub container_slot: usize,
-    /// A left-button click (a right-button click is not primary).
-    pub primary: bool,
-    /// The stack on the cursor, `None` when it is empty.
-    pub carried: Option<ItemStack>,
-    /// The stack in the clicked slot, `None` when it is empty.
-    pub clicked: Option<ItemStack>,
+    /// The click action (`ItemStackedOnOtherEvent.getClickAction`).
+    pub action: ClickAction,
     /// Which phase of `tryItemClickBehaviourOverride` is firing: the global event, the carried
     /// stack's `ItemPart` (`CarriedOnOther`), or the clicked stack's `ItemPart`
     /// (`OtherStackedOnMe`).
     pub direction: StackedOnOtherDirection,
+    /// `ItemStackedOnOtherEvent.setCancellationResult`, for global listeners: on a cancelled
+    /// click, `true` (the start value, as in NeoForge) when the listener's work is all of it,
+    /// `false` when plain pickup still runs. An `ItemPart` answers with its `Flow` instead.
+    pub handled: bool,
+    edits: &'a mut StackedEdits,
 }
-impl StackedOnOther {
-    /// The click `slot` (menu index) of `container`'s slot `container_slot`, with the stacks it found.
+impl<'a> StackedOnOther<'a> {
+    /// The click `slot` (menu index) of `container`'s slot `container_slot`, lending `edits`.
+    // hidden: a game-side helper, not part of the mod surface
+    #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         player: Option<u128>,
@@ -183,9 +303,9 @@ impl StackedOnOther {
         slot: usize,
         container: usize,
         container_slot: usize,
-        primary: bool,
-        carried: Option<ItemStack>,
-        clicked: Option<ItemStack>,
+        action: ClickAction,
+        direction: StackedOnOtherDirection,
+        edits: &'a mut StackedEdits,
     ) -> Self {
         Self {
             player,
@@ -193,17 +313,70 @@ impl StackedOnOther {
             slot,
             container,
             container_slot,
-            primary,
-            carried,
-            clicked,
-            direction: StackedOnOtherDirection::Event,
+            action,
+            direction,
+            handled: true,
+            edits,
         }
     }
-
-    /// This click in the given `direction` phase.
-    pub fn with_direction(mut self, direction: StackedOnOtherDirection) -> Self {
-        self.direction = direction;
-        self
+    /// The working stacks, `handled` and the number of edits, for undoing a panicking
+    /// listener's edits.
+    // hidden: the generated dispatch's unwind checkpoint, not part of the mod surface
+    #[doc(hidden)]
+    pub fn checkpoint(&self) -> StackedCheckpoint {
+        let edits = &*self.edits;
+        StackedCheckpoint {
+            carried: edits.carried.clone(),
+            clicked: edits.clicked.clone(),
+            handled: self.handled,
+            len: edits.edits.len(),
+        }
+    }
+    /// Undo the edits made since `checkpoint`. Only a checkpoint taken on this click can be
+    /// given back, so it never reaches past the edits the click had then.
+    // hidden: the generated dispatch's unwind restore, not part of the mod surface
+    #[doc(hidden)]
+    pub fn rollback(&mut self, checkpoint: StackedCheckpoint) {
+        self.edits.carried = checkpoint.carried;
+        self.edits.clicked = checkpoint.clicked;
+        self.handled = checkpoint.handled;
+        self.edits.edits.truncate(checkpoint.len);
+    }
+    /// The stack on the cursor, `None` when it is empty (`SlotAccess.get`).
+    pub fn carried(&self) -> Option<&ItemStack> {
+        self.edits.carried.as_ref()
+    }
+    /// Put `stack` on the cursor (`SlotAccess.set`). It must be a valid stack: a known item and
+    /// a count from 1 to the item's maximum, or the click is refused.
+    pub fn set_carried(&mut self, stack: Option<ItemStack>) {
+        self.edits.carried = stack.clone();
+        self.edits.edits.push(StackedEdit::Carried(stack));
+    }
+    /// The stack in the clicked slot, `None` when it is empty (`Slot.getItem`).
+    pub fn clicked(&self) -> Option<&ItemStack> {
+        self.edits.clicked.as_ref()
+    }
+    /// Write the clicked slot directly (`Slot.set`), without the slot's take side effects:
+    /// `None` clears it. The slot's rules still answer: a write they refuse, or an invalid
+    /// stack, refuses the click.
+    pub fn set_clicked(&mut self, stack: Option<ItemStack>) {
+        self.edits.clicked = stack.clone();
+        self.edits.edits.push(StackedEdit::Clicked(stack));
+    }
+    /// Take up to `count` items from the clicked slot through `Slot.safeTake(count, count,
+    /// player)`, which runs the slot's take side effects (furnace experience, `recipes_used`,
+    /// crafting remainders, take hooks) when the click applies. As vanilla's `Slot.tryRemove`
+    /// and `Container.removeItem`, a `count` above what the slot holds takes all of it, and
+    /// nothing is taken from an empty slot or for a `count` of 0: then it returns `None` and
+    /// records nothing. Only `ItemPart` overrides may take: a global listener's take refuses
+    /// the click.
+    pub fn take_clicked(&mut self, count: u32) -> Option<ItemStack> {
+        let current = self.edits.clicked.take_if(|_| count > 0)?;
+        let count = count.min(current.count());
+        let split = current.split(count);
+        self.edits.clicked = split.remainder;
+        self.edits.edits.push(StackedEdit::Take(count));
+        split.taken
     }
 }
 /// Whether a listener keeps the original stack or replaces it.
@@ -217,52 +390,11 @@ pub enum StackResult {
     /// Replace the stack: `None` empties it.
     Set(Option<ItemStack>),
 }
-/// What a listener does to the clicked slot's stack in [`StackedOnOtherResult`].
-#[derive(Clone, Debug, Default, PartialEq)]
-// exhaustive: a clicked slot is left alone, directly written, or taken from
-#[derive(sunrise_mod_api_macros::Wire)]
-pub enum ClickedStackResult {
-    /// Leave the clicked slot unchanged.
-    #[default]
-    Keep,
-    /// Directly write the clicked slot (`Slot.set`): `None` clears the slot without running
-    /// `Slot.onTake` side effects.
-    Set(Option<ItemStack>),
-    /// Take `count` items from the clicked slot via `Slot.safeTake` / `Slot.onTake`, running the
-    /// slot's take side effects (such as furnace smelting experience, `recipes_used`, crafting
-    /// remainders, or potion take hooks). Valid only in `ItemPart` overrides (refused for global
-    /// listeners); `count` must be at least `1` and at most the slot's current stack size.
-    /// Two accepted takes run their effects separately, in carried-then-clicked order.
-    Take(u32),
-}
-/// A listener's answer to [`StackedOnOther`], validated once and applied once.
-///
-/// For global `Hooks::item_stacked_on_other` listeners (`StackedOnOtherDirection::Event`), setting
-/// a stack is allowed only on a cancelled click that is also `handled` (and
-/// [`ClickedStackResult::Take`] is refused); on any other answer the click is refused and nothing
-/// changes.
-///
-/// For `ItemPart::item_stacked_on_other` overrides (`CarriedOnOther` / `OtherStackedOnMe`),
-/// [`ClickedStackResult::Set`] performs a direct write (without `Slot.onTake` side effects, even
-/// when clearing a result/output slot to `None`), while [`ClickedStackResult::Take`] takes from
-/// the clicked slot through `Slot.safeTake` / `Slot.onTake`. A replaced stack must be a valid
-/// stack (a known item, a count of at least one within the item's maximum).
-#[derive(Clone, Debug, Default, PartialEq)]
-#[non_exhaustive]
-#[derive(sunrise_mod_api_macros::Wire)]
-pub struct StackedOnOtherResult {
-    /// `ItemStackedOnOtherEvent.setCancellationResult`: on a cancelled click, whether the click
-    /// is done (`true`: the listener's work is all of it) or the plain pickup still runs.
-    pub handled: bool,
-    /// The cursor after the click.
-    pub carried: StackResult,
-    /// The clicked slot edit after the click.
-    pub clicked: ClickedStackResult,
-}
 /// The inputs and vanilla result of `AnvilMenu.createResult`, borrowed for
 /// the `anvil_update` callback. Edits by earlier listeners do not change these values.
 #[derive(Clone, Debug, PartialEq)]
-// exhaustive: the game builds it with a literal; mods only read it
+// exhaustive: the game builds it with a literal, and a mod's own anvil menu builds one for
+// `PlayerRef::anvil_update`
 // no wire: borrows the converted stacks and rename text for the hook call.
 pub struct AnvilUpdateInputs<'a> {
     /// The stack in the left input slot. The hook is not asked without one.
@@ -299,6 +431,131 @@ pub struct AnvilUpdateEdits {
     /// zero or a value exceeding the stack consumes all of it on take.
     pub material_cost: i32,
 }
+
+/// A mutable host that can run an anvil menu's listeners on its logical side.
+pub trait AnvilUpdateHost {
+    /// Borrows the active hook host for the duration of an anvil update.
+    fn anvil_update_host(&mut self) -> HostSide<'_>;
+}
+
+impl<H: ServerHost> AnvilUpdateHost for H {
+    fn anvil_update_host(&mut self) -> HostSide<'_> {
+        HostSide::Server(self)
+    }
+}
+
+impl AnvilUpdateHost for dyn ServerHost + '_ {
+    fn anvil_update_host(&mut self) -> HostSide<'_> {
+        HostSide::Server(self)
+    }
+}
+
+impl AnvilUpdateHost for dyn ClientHost + '_ {
+    fn anvil_update_host(&mut self) -> HostSide<'_> {
+        HostSide::Client(self)
+    }
+}
+
+impl AnvilUpdateHost for HostSide<'_> {
+    fn anvil_update_host(&mut self) -> HostSide<'_> {
+        self.reborrow()
+    }
+}
+
+impl PlayerRef {
+    /// Side: both.
+    /// Runs every mod's `anvil_update` listeners for a mod's own anvil menu, as NeoForge's
+    /// `CommonHooks.onAnvilUpdate` does for a menu that is not vanilla's `AnvilMenu`: an
+    /// upgraded or portable anvil computes its own result, then asks this so the other mods'
+    /// anvil recipes, cost changes and repair rules work in it too. `pos` is the anvil's block
+    /// (any position for one with no block) and `inputs` lends the stacks, the rename text and
+    /// the menu's own result and costs, which the listeners see as vanilla's. The listeners run
+    /// in their usual order, on this side, for `player`, starting from `Keep` and those costs.
+    /// Returns the edits they left (apply the output, the level cost, clamped at 0 as
+    /// `AnvilMenu.setCost` does, and the material cost to your menu), or None when a listener
+    /// canceled, which clears your result and both costs as it does vanilla's. Also None, with
+    /// no listener asked, for a stale player, a client's player other than its local one, and a
+    /// call from inside an `anvil_update` listener, which would run them again without bound.
+    /// Pass the active server or client hook host, or borrow its `HostSide`.
+    pub fn anvil_update(
+        self,
+        host: &mut (impl AnvilUpdateHost + ?Sized),
+        pos: [i32; 3],
+        inputs: &AnvilUpdateInputs<'_>,
+    ) -> Option<AnvilUpdateEdits> {
+        match host.anvil_update_host() {
+            HostSide::Server(host) => backend_mut_of(host)?.player_anvil_update(self, pos, inputs),
+            HostSide::Client(host) => {
+                client_backend_mut_of(host)?.player_anvil_update(self, pos, inputs)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn anvil_update_uses_the_active_sides_backend() {
+    struct Stub;
+    impl Host for Stub {}
+    crate::impl_host_areas!(Stub);
+    impl ServerHost for Stub {}
+    crate::impl_server_host_areas!(Stub);
+    impl ClientHost for Stub {
+        fn client_backend_mut(&mut self) -> Option<ClientBackendMutRef<'_>> {
+            Some(ClientBackendMutRef::of(self))
+        }
+    }
+    crate::impl_client_host_areas!(Stub);
+    impl ClientBackendMut for Stub {}
+    crate::impl_client_backend_mut_areas!(Stub, except(player_menus));
+    impl prelude::PlayerMenusClientBackendMut for Stub {
+        fn player_anvil_update(
+            &mut self,
+            player: PlayerRef,
+            pos: [i32; 3],
+            inputs: &AnvilUpdateInputs<'_>,
+        ) -> Option<AnvilUpdateEdits> {
+            assert_eq!(player.uuid(), 42);
+            assert_eq!(pos, [7, 64, 7]);
+            Some(AnvilUpdateEdits {
+                output: StackResult::Keep,
+                xp_cost: inputs.vanilla_xp_cost + 1,
+                material_cost: inputs.vanilla_material_cost,
+            })
+        }
+    }
+
+    let player = __private::game::player_ref(EntityRef::new(WorldEpoch::new(1), 7), 42);
+    let inputs = AnvilUpdateInputs {
+        left: &ItemStack::of(ItemKey(3)),
+        right: None,
+        name: None,
+        vanilla_output: None,
+        vanilla_xp_cost: 3,
+        vanilla_material_cost: 1,
+    };
+    let stub = &mut Stub;
+    let pos = [7, 64, 7];
+    assert_eq!(player.anvil_update(stub, pos, &inputs), None);
+    assert_eq!(
+        player.anvil_update(stub as &mut dyn ServerHost, pos, &inputs),
+        None
+    );
+    let client: &mut dyn ClientHost = stub;
+    assert_eq!(
+        player.anvil_update(client, pos, &inputs).unwrap().xp_cost,
+        4
+    );
+    let mut side = HostSide::Client(client);
+    assert_eq!(
+        player
+            .anvil_update(&mut side, pos, &inputs)
+            .unwrap()
+            .xp_cost,
+        4
+    );
+}
+
 /// The inputs and vanilla result of `GrindstoneMenu.createResult`, borrowed for
 /// the `grindstone_place` callback. Edits by earlier listeners do not change these values.
 #[derive(Clone, Debug, PartialEq)]
@@ -366,6 +623,9 @@ pub struct AnvilCraftInputs<'a> {
     pub right: Option<&'a ItemStack>,
     /// The result stack that was taken.
     pub output: &'a ItemStack,
+    /// The levels the take charges: `AnvilMenu.cost` as `onTake` reads it before zeroing it. It is
+    /// the raw cost, also for a player with infinite materials, whom `onTake` does not charge.
+    pub xp_cost: i32,
 }
 
 /// One of a menu's containers: the key a `menu_slot_rules` ask names its slot's container by

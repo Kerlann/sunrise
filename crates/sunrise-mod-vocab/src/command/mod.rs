@@ -122,6 +122,25 @@ pub enum CommandArgumentValue {
     },
     /// A `resource:<registry>` argument: an id present in that registry (static or data pack).
     Id(Identifier),
+    /// A `resource_or_tag:<registry>` argument (`ResourceOrTagKeyArgument.Result`): `tag` true
+    /// for `#namespace:path`, a tag key of that registry, false for a resource key. `id` is the
+    /// identifier without the `#`. Neither is checked against the registry when parsed, as in
+    /// vanilla: look it up when the command runs.
+    ResourceOrTag {
+        /// Whether the text named a tag (`#minecraft:is_ocean`).
+        tag: bool,
+        /// The resource or tag identifier, without the `#`.
+        id: Identifier,
+    },
+    /// A `game_profile` argument: UUID and account name for each result, in selector order.
+    /// A plain name can also select an offline player whose profile is still in the user cache.
+    /// Never asks the profile service. Side: server.
+    GameProfiles(Vec<(u128, String)>),
+    /// A `vec2` or `vec2_uncentered` argument resolved against the source: `~` offsets applied
+    /// to its `x` and `z` position, narrowed to `f32` as vanilla's `Vec2Argument.getVec2` does.
+    /// `vec2` centres whole numbers on their block (`5` is `5.5`); `vec2_uncentered` keeps them
+    /// as written. Local `^` coordinates are refused. Resolution does not load chunks.
+    Vec2([f32; 2]),
 }
 
 /// An argument's registered name and its validated value.
@@ -142,7 +161,7 @@ impl CommandArgument {
     }
 }
 
-/// Validated input borrowed by a registered server command's executor, never a raw line.
+/// Validated input borrowed by a registered server or client command's executor, never a raw line.
 ///
 /// Missing optional arguments are absent. Selectors are permission-checked and resolved
 /// by the current server dispatcher before the executor runs. `entity` and `player` select exactly one;
@@ -281,6 +300,19 @@ impl CommandInvocation {
     }
 }
 
+/// One structured message delivered to the native console's command source.
+// no wire: these messages travel through an in-process command output sink.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum CommandFeedback {
+    /// Feedback sent by `CommandSourceStack.sendSuccess`.
+    Success(crate::Text),
+    /// Feedback sent by `CommandSourceStack.sendFailure`, including its error style.
+    Failure(crate::Text),
+    /// A direct `CommandSourceStack.sendSystemMessage`, not gated as success feedback.
+    System(crate::Text),
+}
+
 /// A command's outcome and the messages received by its source.
 ///
 /// The default is an unsuccessful run with no feedback, including when a handle
@@ -306,7 +338,7 @@ impl CommandResult {
 pub(crate) mod command_argument;
 pub(crate) mod entity_selector;
 pub(crate) mod suggestion;
-pub(crate) mod suggestion_provider;
+pub(crate) mod tree_filter;
 pub(crate) mod types;
 
 #[cfg(test)]

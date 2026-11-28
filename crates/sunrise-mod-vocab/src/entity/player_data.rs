@@ -1,16 +1,16 @@
 //! Refusals when a mod writes a player's inventory, ender chest or saved data.
 
-/// Why a write to an online player's inventory, ender chest or hands was
-/// refused. Nothing was written when one comes back.
+/// Why giving a stack or writing a player's inventory or ender chest was refused.
+/// Nothing was written when one comes back.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 #[derive(sunrise_mod_api_macros::Wire)]
 pub enum PlayerDataRefusal {
-    /// The handle no longer identifies an online player: it is stale, or the player has left.
+    /// The handle is stale or the server player's record is unavailable.
     Stale,
     /// The call was made on a client; these writes are the server's.
     Client,
-    /// The player is dead; the new player a respawn makes is the one to write to.
+    /// Giving a stack requires a living player. Direct slot setters don't use this refusal.
     Dead,
     /// The slot is past the last one of that container.
     SlotOutOfRange {
@@ -33,6 +33,10 @@ impl From<crate::StackWriteError> for PlayerDataRefusal {
 impl crate::NoBackend for PlayerDataRefusal {
     fn no_backend() -> Self {
         Self::Stale
+    }
+
+    fn wrong_side() -> Self {
+        Self::Client
     }
 }
 
@@ -58,5 +62,9 @@ pub enum PlayerPersistentDataError {
 impl crate::NoBackend for PlayerPersistentDataError {
     fn no_backend() -> Self {
         Self::Stale
+    }
+
+    fn wrong_side() -> Self {
+        Self::Client
     }
 }

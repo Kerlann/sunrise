@@ -1,10 +1,9 @@
 //! The `brewing_start` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0184
 
 pub trait Hooks {
     /// A brewing stand at `pos` began brewing `ingredient`, after fuel and the timer were set. Server-side.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_brewing_start",
+        target = "sunrise_gameplay::game::native_hooks::base::ServerGame<'_>::native_brewing_start",
         dispatch = "flat",
         side = "server",
         contract = "listen",

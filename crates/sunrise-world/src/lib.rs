@@ -108,6 +108,7 @@ pub mod movement_properties;
 pub mod movement_restitution;
 pub mod movement_statistics;
 pub mod movement_support;
+pub mod moving_colliders;
 pub mod native_load_context;
 pub mod native_load_hooks;
 pub mod native_worldgen_hooks;
@@ -150,6 +151,10 @@ pub mod water_splash;
 pub mod world_movement;
 pub mod world_ray;
 pub mod worldgen;
+
+#[cfg(test)]
+#[path = "../../sunrise-core/src/prepared_test_root.rs"]
+pub(crate) mod prepared_test_root;
 
 pub const DATA_VERSION: i32 = sunrise_core::version::DATA_VERSION;
 

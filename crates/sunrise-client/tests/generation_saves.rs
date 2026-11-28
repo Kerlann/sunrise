@@ -12,12 +12,16 @@ use sunrise_client::{
     light::LightTables,
     mesher::MeshTables,
     models,
-    streaming::{ChunkGenerator, Proto, Streaming, WorkerContext},
+    streaming::{
+        ChunkGenerator, ChunkWorkerContext, MeshStreamer, MeshWorkerContext, Proto, WorkerContext,
+    },
     world::World,
 };
+use sunrise_core::prepared_test_support::{STREAMING_INPUTS, WORLDGEN_INPUTS};
+use sunrise_sim::test_resources::item_data;
 use sunrise_world::{native_load_context::DataLoadOrigin, registry::BlockStateId};
-#[path = "../src/test_resources.rs"]
-mod test_resources;
+#[path = "../../sunrise-core/src/prepared_test_root.rs"]
+mod prepared_test_root;
 use std::{
     collections::HashMap,
     path::Path,
@@ -25,13 +29,6 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-
-fn resources() -> Option<std::path::PathBuf> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../.local/sunrise-client")
-        .join(sunrise_core::VANILLA_VERSION);
-    root.join("items.json").exists().then_some(root)
-}
 
 /// A proto chunk that records the decorations that wrote to it.
 #[derive(Clone)]
@@ -68,14 +65,14 @@ impl ChunkGenerator for Recorder {
     fn load(&self, x: i32, z: i32) -> Option<Chunk> {
         self.chunks.lock().unwrap().get(&(x, z)).cloned()
     }
-    fn proto(&self, _: &mut (), x: i32, z: i32) -> Proto {
+    fn proto(&self, _: &mut (), x: i32, z: i32) -> std::result::Result<Proto, String> {
         let saved = self.protos.lock().unwrap().get(&(x, z)).cloned();
-        Box::new(saved.unwrap_or(Recorded {
+        Ok(Box::new(saved.unwrap_or(Recorded {
             x,
             z,
             decorated: false,
             writes: Vec::new(),
-        }))
+        })))
     }
     fn decorates(&self) -> bool {
         true
@@ -126,13 +123,13 @@ impl ChunkGenerator for Recorder {
 
 /// The game's part: columns saved when they unload and when the world saves.
 struct Session {
-    streaming: Streaming,
+    streaming: MeshStreamer,
     world: World,
     generator: Arc<Recorder>,
 }
 impl Session {
     fn new(generator: Arc<Recorder>, context: Arc<WorkerContext>) -> Self {
-        let mut streaming = Streaming::new(generator.clone(), context, 3);
+        let mut streaming = MeshStreamer::new(generator.clone(), context, 3);
         streaming.radius = 4;
         Self {
             streaming,
@@ -202,37 +199,40 @@ impl Session {
 fn worker_context(root: &Path) -> Arc<WorkerContext> {
     let assets = Arc::new(Assets::load(root).unwrap());
     let render = Arc::new(
-        assets
-            .reload(&sunrise_assets::resource_source::ResourceRoot::directory(
-                root.to_path_buf(),
-            ))
-            .unwrap(),
+        sunrise_client::assets::RenderAssets::load(
+            &sunrise_assets::resource_source::ResourceRoot::directory(root.to_path_buf()),
+            &assets,
+        )
+        .unwrap(),
     );
     let facts = BlockFacts::load(root, assets.registry).unwrap();
     let visibility = models::load_visibility(root, assets.registry).unwrap();
     Arc::new(WorkerContext {
-        tables: Arc::new(MeshTables::new(&assets, &render, &facts, visibility, None).unwrap()),
-        light: Arc::new(LightTables::load(root, assets.registry, &facts).unwrap()),
-        biomes: Arc::new(
-            Biomes::load(&sunrise_assets::resource_source::ResourceRoot::directory(
-                root.to_path_buf(),
-            ))
-            .unwrap(),
-        ),
-        assets,
-        render: render.clone(),
-        hidden_states: Arc::from([]),
-        part_tables: Default::default(),
+        chunk: ChunkWorkerContext {
+            light: Arc::new(LightTables::load(root, assets.registry, &facts).unwrap()),
+            biomes: Arc::new(
+                Biomes::load(&sunrise_assets::resource_source::ResourceRoot::directory(
+                    root.to_path_buf(),
+                ))
+                .unwrap(),
+            ),
+            assets: assets.clone(),
+        },
+        mesh: MeshWorkerContext {
+            tables: Arc::new(MeshTables::new(&assets, &render, &facts, visibility, None).unwrap()),
+            render: render.clone(),
+            hidden_states: Arc::from([]),
+            part_tables: Default::default(),
+        },
     })
 }
 
 /// What native mods hear (`native_chunk_load`): a column just generated is
 /// new, one read back from the save isn't, and each arrival is told once.
 #[test]
+#[ignore = "daily"]
 fn a_new_column_is_told_apart_from_a_saved_one() {
-    let Some(root) = resources() else {
-        return;
-    };
+    let root = prepared_test_root::prepared_root(&[STREAMING_INPUTS]);
     let context = worker_context(&root);
     let generator = Arc::new(Recorder::default());
     let mut session = Session::new(generator.clone(), context.clone());
@@ -251,10 +251,9 @@ fn a_new_column_is_told_apart_from_a_saved_one() {
 }
 
 #[test]
+#[ignore = "daily"]
 fn chunks_left_behind_keep_their_decoration() {
-    let Some(root) = resources() else {
-        return;
-    };
+    let root = prepared_test_root::prepared_root(&[STREAMING_INPUTS]);
     let context = worker_context(&root);
     let generator = Arc::new(Recorder::default());
     let mut session = Session::new(generator.clone(), context.clone());
@@ -311,33 +310,36 @@ fn chunks_left_behind_keep_their_decoration() {
 /// the area; each such proto chunk is turned into a view once while it stays
 /// as it is, however many columns it neighbours or light jobs wait on it.
 #[test]
+#[ignore = "daily"]
 fn proto_chunks_are_viewed_once_per_state() {
-    let Some(root) = resources() else {
-        return;
-    };
+    let root = prepared_test_root::prepared_root(&[STREAMING_INPUTS]);
     let assets = Arc::new(Assets::load(&root).unwrap());
     let render = Arc::new(
-        assets
-            .reload(&sunrise_assets::resource_source::ResourceRoot::directory(
-                root.to_path_buf(),
-            ))
-            .unwrap(),
+        sunrise_client::assets::RenderAssets::load(
+            &sunrise_assets::resource_source::ResourceRoot::directory(root.to_path_buf()),
+            &assets,
+        )
+        .unwrap(),
     );
     let facts = BlockFacts::load(&root, assets.registry).unwrap();
     let visibility = models::load_visibility(&root, assets.registry).unwrap();
     let context = Arc::new(WorkerContext {
-        tables: Arc::new(MeshTables::new(&assets, &render, &facts, visibility, None).unwrap()),
-        light: Arc::new(LightTables::load(&root, assets.registry, &facts).unwrap()),
-        biomes: Arc::new(
-            Biomes::load(&sunrise_assets::resource_source::ResourceRoot::directory(
-                root.to_path_buf(),
-            ))
-            .unwrap(),
-        ),
-        assets,
-        render: render.clone(),
-        hidden_states: Arc::from([]),
-        part_tables: Default::default(),
+        chunk: ChunkWorkerContext {
+            light: Arc::new(LightTables::load(&root, assets.registry, &facts).unwrap()),
+            biomes: Arc::new(
+                Biomes::load(&sunrise_assets::resource_source::ResourceRoot::directory(
+                    root.to_path_buf(),
+                ))
+                .unwrap(),
+            ),
+            assets: assets.clone(),
+        },
+        mesh: MeshWorkerContext {
+            tables: Arc::new(MeshTables::new(&assets, &render, &facts, visibility, None).unwrap()),
+            render: render.clone(),
+            hidden_states: Arc::from([]),
+            part_tables: Default::default(),
+        },
     });
     let generator = Arc::new(Recorder::default());
     let mut session = Session::new(generator.clone(), context);
@@ -364,14 +366,13 @@ fn proto_chunks_are_viewed_once_per_state() {
 /// centre decorated (writing into all nine chunks), saved and restored onto
 /// chunks generated again finishes into the same columns.
 #[test]
+#[ignore = "daily"]
 fn saved_proto_chunks_restore_exactly() {
     use sunrise_client::{
         save::{Persistent, SaveDir},
         vanillagen::VanillaTerrain,
     };
-    let Some(root) = resources() else {
-        return;
-    };
+    let root = prepared_test_root::prepared_root(&[WORLDGEN_INPUTS]);
     let assets = Arc::new(Assets::load(&root).unwrap());
     let biomes = Arc::new(
         Biomes::load(&sunrise_assets::resource_source::ResourceRoot::directory(
@@ -379,7 +380,7 @@ fn saved_proto_chunks_restore_exactly() {
         ))
         .unwrap(),
     );
-    let item_data = test_resources::item_data(&root, DataLoadOrigin::ServerDataLoad).unwrap();
+    let item_data = item_data(&root, DataLoadOrigin::ServerDataLoad).unwrap();
     let terrain = VanillaTerrain::for_dimension(
         sunrise_client::vanillagen::TerrainResources {
             data: None,
@@ -408,7 +409,7 @@ fn saved_proto_chunks_restore_exactly() {
     let mut worker = generator.worker();
     let keys: Vec<(i32, i32)> = (0..9).map(|i| (3 + i % 3 - 1, 7 + i / 3 - 1)).collect();
     let mut region: [Proto; 9] =
-        std::array::from_fn(|i| generator.proto(&mut worker, keys[i].0, keys[i].1));
+        std::array::from_fn(|i| generator.proto(&mut worker, keys[i].0, keys[i].1).unwrap());
     generator.decorate(&mut worker, &mut region);
     assert!(generator.is_decorated(&region[4]));
     generator.save_protos(&region.iter().collect::<Vec<_>>());
@@ -429,7 +430,7 @@ fn saved_proto_chunks_restore_exactly() {
     save.flush().unwrap();
     let mut restored: [Proto; 9] = std::array::from_fn(|i| {
         let (x, z) = keys[i];
-        generator.proto(&mut worker, x, z)
+        generator.proto(&mut worker, x, z).unwrap()
     });
     // Decoration mutates the checked-out region after the unknown key is restored.
     generator.decorate(&mut worker, &mut region);
@@ -450,7 +451,14 @@ fn saved_proto_chunks_restore_exactly() {
         Some(&sunrise_core::nbt::Tag::Int(42))
     );
     assert_eq!(
-        proto.column.saved.as_ref().unwrap().attachments.to_nbt(),
+        proto
+            .column
+            .saved
+            .as_ref()
+            .unwrap()
+            .attachments
+            .try_to_nbt()
+            .unwrap(),
         attachment
     );
     for (i, (original, restored)) in region.into_iter().zip(restored).enumerate() {
@@ -466,7 +474,7 @@ fn saved_proto_chunks_restore_exactly() {
                 extras.root.get(&"example:unknown".into()),
                 Some(&sunrise_core::nbt::Tag::Int(42))
             );
-            assert_eq!(extras.attachments.to_nbt(), attachment);
+            assert_eq!(extras.attachments.try_to_nbt().unwrap(), attachment);
         }
         for y in sunrise_client::chunk::MIN_Y..sunrise_client::chunk::MIN_Y + 384 {
             for lz in 0..16 {
@@ -502,6 +510,7 @@ fn saved_proto_chunks_restore_exactly() {
 }
 
 #[test]
+#[ignore = "daily"]
 fn saved_proto_block_entities_keep_their_id() {
     use sunrise_client::{
         save::{Persistent, SaveDir},
@@ -511,9 +520,7 @@ fn saved_proto_block_entities_keep_their_id() {
         sunrise_core::nbt::{Limits, Tag},
         sunrise_world::region::RegionFile,
     };
-    let Some(root) = resources() else {
-        return;
-    };
+    let root = prepared_test_root::prepared_root(&[WORLDGEN_INPUTS]);
     let assets = Arc::new(Assets::load(&root).unwrap());
     let biomes = Arc::new(
         Biomes::load(&sunrise_assets::resource_source::ResourceRoot::directory(
@@ -521,7 +528,7 @@ fn saved_proto_block_entities_keep_their_id() {
         ))
         .unwrap(),
     );
-    let item_data = test_resources::item_data(&root, DataLoadOrigin::ServerDataLoad).unwrap();
+    let item_data = item_data(&root, DataLoadOrigin::ServerDataLoad).unwrap();
     let terrain = VanillaTerrain::for_dimension(
         sunrise_client::vanillagen::TerrainResources {
             data: None,
@@ -552,7 +559,7 @@ fn saved_proto_block_entities_keep_their_id() {
     // loot table and no type.
     let keys: Vec<(i32, i32)> = (0..9).map(|i| (43 + i % 3 - 1, 21 + i / 3 - 1)).collect();
     let mut region: [Proto; 9] =
-        std::array::from_fn(|i| generator.proto(&mut worker, keys[i].0, keys[i].1));
+        std::array::from_fn(|i| generator.proto(&mut worker, keys[i].0, keys[i].1).unwrap());
     generator.decorate(&mut worker, &mut region);
     generator.save_protos(&region.iter().collect::<Vec<_>>());
     save.flush().unwrap();
@@ -586,6 +593,7 @@ fn saved_proto_block_entities_keep_their_id() {
 /// entities a decoration made in a chunk saved by an older version reach `World` only if
 /// `Persistent` forwards `final_block_entities` (the trait default is none).
 #[test]
+#[ignore = "daily"]
 fn persistent_forwards_the_block_entities_decoration_made_in_a_final_chunk() {
     use sunrise_client::{
         chunk::block_entity::BlockEntity,
@@ -595,8 +603,8 @@ fn persistent_forwards_the_block_entities_decoration_made_in_a_final_chunk() {
     impl ChunkGenerator for Marked {
         type Worker = ();
         fn worker(&self) {}
-        fn proto(&self, _: &mut (), _: i32, _: i32) -> Proto {
-            Box::new(())
+        fn proto(&self, _: &mut (), _: i32, _: i32) -> std::result::Result<Proto, String> {
+            Ok(Box::new(()))
         }
         fn finish(&self, _: Proto) -> Chunk {
             Chunk::empty(0, 0)
@@ -612,9 +620,7 @@ fn persistent_forwards_the_block_entities_decoration_made_in_a_final_chunk() {
                 .collect()
         }
     }
-    let Some(root) = resources() else {
-        return;
-    };
+    let root = prepared_test_root::prepared_root(&[WORLDGEN_INPUTS]);
     let assets = Arc::new(Assets::load(&root).unwrap());
     let biomes = Arc::new(
         Biomes::load(&sunrise_assets::resource_source::ResourceRoot::directory(
@@ -645,11 +651,10 @@ fn persistent_forwards_the_block_entities_decoration_made_in_a_final_chunk() {
 /// `spawnOriginalMobs` gate from the shipped presets: the End asks for no
 /// creature packs at generation and the overworld and nether ask for them.
 #[test]
+#[ignore = "daily"]
 fn the_end_asks_for_no_creature_packs_and_the_overworld_does() {
     use sunrise_client::{assets::Assets, biome::Biomes, vanillagen::VanillaTerrain};
-    let Some(root) = resources() else {
-        return;
-    };
+    let root = prepared_test_root::prepared_root(&[WORLDGEN_INPUTS]);
     let assets = Arc::new(Assets::load(&root).unwrap());
     let biomes = Arc::new(
         Biomes::load(&sunrise_assets::resource_source::ResourceRoot::directory(
@@ -657,7 +662,7 @@ fn the_end_asks_for_no_creature_packs_and_the_overworld_does() {
         ))
         .unwrap(),
     );
-    let item_data = test_resources::item_data(&root, DataLoadOrigin::ServerDataLoad).unwrap();
+    let item_data = item_data(&root, DataLoadOrigin::ServerDataLoad).unwrap();
     for (dimension, want) in [
         ("minecraft:overworld", false),
         ("minecraft:the_nether", false),

@@ -1,5 +1,4 @@
 //! The `block_form` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0177
 
 pub trait Hooks {
     /// Precipitation is about to form ice or place or thicken snow at `pos`.
@@ -13,7 +12,7 @@ pub trait Hooks {
         out = "cancel",
         neoforge = "none (NeoForge has no such event)",
         cancellable = true,
-        target = "sunrise_client::game::native_hooks::base::GameLevel<'_>::native_block_form"
+        target = "sunrise_gameplay_common::game::native_hooks::base::GameLevel<'_>::native_block_form"
     )]
     fn block_form(
         dimension: LevelDimension,

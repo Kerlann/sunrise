@@ -36,11 +36,14 @@ is `/setworldspawn`'s own write in the handle's level: the yaw wraps and the pit
 `spawn_change` fires. The world has one world spawn, so any level's handle reads the same one,
 and writing through a level moves it there.
 
-`map_data(host, id)` is a map's saved data (`MapItemSavedData`): centre, scale, dimension, the
-locked, tracking and unlimited flags and its 128 by 128 colour ids, from memory or from its
-`.dat` without loading it for good. `set_map_data(host, id, colors)` repaints it pixel by pixel as
-`setColor` does, so the map saves, redraws and reaches the players carrying or framing it. Maps
-belong to the world: any current level handle reaches them. Markers are not part of either.
+`level.visit_map_data(host, id, &mut visit)` lends a map's saved data (`MapItemSavedData`):
+centre, scale, dimension, locked, tracking and unlimited flags, and its 128 by 128 colour IDs.
+It reads from memory or opens the saved data for the visit. Copy the dimension or pixels only
+to retain them. A found map calls the visitor once and returns `Ok(Some(()))`; a missing map
+returns `Ok(None)`. A stale level or unavailable world access gives `LevelReadError`. Maps are
+world-wide: any current server level handle reaches them. `set_map_data(host, id, colors)`
+repaints it pixel by pixel as `setColor` does, so the map saves, redraws and reaches players
+carrying or framing it. Markers are not part of either call.
 
 `block_tick(host, pos)` runs the block's scheduled tick now through the path a due tick from the
 queue takes (the block's part first, then `BlockState.tick`), and `block_random_tick(host, pos)`
@@ -48,8 +51,27 @@ random-ticks the position as `tickChunk` does, lava's fluid tick included. Both 
 level random and send their level events exactly as the normal ticks do; neither reads or changes
 the tick queue, which `schedule_block_tick` fills.
 
-`can_see_sky(host, pos)` is `canSeeSky`: full sky light. `line_of_sight(host, from, to)` is the
-clip `LivingEntity.hasLineOfSight` makes between two eyes, collider shapes and no fluids.
+`schedule_block_tick(host, pos, block, delay, priority)` and `schedule_fluid_tick(host, pos,
+fluid, delay, priority)` queue a tick from any server hook, as `ScheduledTickAccess.scheduleTick`
+(which `LevelAccessor` inherits) does: the queue `update_shape` writes, saved with its chunk. A
+chunk's own queue runs by trigger tick, then priority, then the order scheduled; across chunks
+there is no single order, as each chunk with a due tick competes by its next tick's priority,
+then the order scheduled, not by trigger tick (`LevelTicks.collectTicks`). So ticks due on the
+same game tick run by priority, then the order scheduled, in every chunk, but an overdue `Low`
+tick in one chunk can run after a newer `High` tick in another. A block tick is
+ignored when the block at `pos` is no longer `block` as it comes due. The queue keeps one tick per
+type and position: a repeat with another delay or priority is dropped, and the first keeps its
+deadline and priority. Inside a transaction the tick is queued at commit, its delay counted from
+there. `Ok(false)` is a chunk with no tick container (unloaded, or loaded with no tick list yet);
+the height is not checked, as vanilla's queue checks only the container. An in-line level writer
+(`neighbor_changed`, `tick_block`, `update_shape`) has the same call as
+`LevelTicksHost::schedule_block_tick_with_priority(pos, block, delay, priority)` and
+`schedule_fluid_tick_with_priority`: one engine call, one queue, one `TickPriority`.
+
+`can_see_sky(host, pos)` is `canSeeSky`: full sky light. `line_of_sight(host, from, to)` delegates
+to `clip` with `ClipBlock::Collider` and `ClipFluid::None` (with no 128-block entity distance
+check) and reports whether the segment misses; it returns `None` when the segment enters an
+unloaded column or `clip` errors.
 `lightning_target(host, pos)` is `findLightningTargetAround`: a rod, else a living entity under
 open sky near the column picked with the level random, else the column's top. It strikes nothing.
 Environment attributes are not here: Sunrise has no general server-side attribute table to read."#]
@@ -72,8 +94,19 @@ machine that turns an input into a table's roll. The context is the one `/loot â
 
 `fluid_shape(host, pos)` is `FluidState.getShape`: no box for no fluid, else one block-local box
 up to the fluid's height, a full block under the same fluid. `has_collisions(host, aabb)` asks
-whether any block collision shape is in a box, with `collision_boxes`'s walk and limits and
+whether any block collision shape is in a box, with `visit_block_collisions`'s walk and
 without building the list; entities and the world border are not part of it.
+
+`is_unobstructed(host, pos, state)` is `CollisionGetter.isUnobstructed(state, pos, CollisionContext.empty())`:
+whether no entity that blocks building (`Entity.blocksBuilding`: a player who is not a spectator, a
+mob, a minecart, a boat, an armor stand that is not a marker, an end crystal, primed TNT, a falling
+block) is in the state's collision shape at `pos`, for a mod that writes a block from its own
+placement code and must not place a cable or a machine inside a mob. It is the empty-context form
+of the test `BlockItem.canPlace` makes: `canPlace` passes `CollisionContext.placementContext(player)`,
+and a player context is not exposed, so a shape that depends on the entity context is its
+empty-context shape. The state need not be the block at `pos`, and no entity is excepted
+(`EntityGetter.isUnobstructed(null, shape)`). A server read of open levels, active or parked;
+`Err(Unavailable)` when the shape cannot be evaluated.
 
 Use `ray_trace_nearest_entity(host, from, to, margin, exclude, &mut accept)` if you
 only need one hit. Matching `ProjectileUtil.getEntityHitResult`, it passes each
@@ -141,13 +174,19 @@ or the tracked players and the window's own non-spectator player on a client.
 `ServerLevel.findNearestMapStructure` without skipping known starts, the search `/locate
 structure` runs in the level's generator. `structure` is an id or `#tag`; the result names the
 structure and the position `/locate` reports. `radius` counts rings of placement cells for
-random-spread sets, from 0 to `StructureSearch::MAX_RADIUS` (100, `/locate`'s); strongholds' rings
-are all checked whatever it is. The search builds structure starts but neither loads nor generates
-chunks; a world without structures, a structure this level cannot generate, an origin past the
-world's 30,000,000-block edge and a radius out of range give `None`.
+random-spread sets (nonnegative; `/locate` uses 100); strongholds' rings are all checked whatever
+it is. The search builds structure starts but neither loads nor generates chunks; a world without
+structures, a structure this level cannot generate, an origin past the world's 30,000,000-block
+edge (`Level.isInWorldBoundsHorizontal`) and a negative radius give `None`.
 
-`ChunkRef::watchers(host)` is `ChunkMap.getPlayers(pos, false)`: the players the chunk was sent to
-and is inside the view of, from their `chunk_watch` until they move away from it. Fake players
-watch nothing."#]
+`structures_with_piece_at(host, pos, structure)` and `structures_at(host, pos, structure)` say
+which of the structures `structure` names lie at `pos`: inside one of a start's pieces
+(`StructureManager.getStructureWithPieceAt`) or inside its whole bounding box (`getStructureAt`).
+They read the loaded chunk's structure references and never load or generate a chunk.
+
+`chunk.visit_watchers(host, &mut visit)` visits `ChunkMap.getPlayers(pos, false)`: the players
+the chunk was sent to and is inside the view of, from their `chunk_watch` until they move away.
+Fake players watch nothing. Return `ControlFlow::Break(())` to stop. An empty walk completes
+without a callback; a stale level or unavailable side or phase returns `LevelReadError`."#]
     fn level_reads_note5();
 }

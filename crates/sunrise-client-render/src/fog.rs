@@ -15,7 +15,7 @@ use sunrise_core::{
     jmath,
     random::{LegacyRandom, RandomSource},
 };
-use sunrise_world::registry::BlockStateId;
+use sunrise_world::{dimension_type::Skybox, registry::BlockStateId};
 
 /// Per-biome water fog end multipliers (`visual/water_fog_end_distance`).
 #[derive(Default)]
@@ -197,8 +197,6 @@ pub struct FogInputs<'a> {
     pub water_fog_color: [f32; 3],
     pub biome: u16,
     pub render_distance_chunks: i32,
-    /// Extend ordinary Overworld atmosphere for terrain beyond vanilla's range (Sunrise Extras).
-    pub distant_terrain: bool,
     /// The Cloud Distance option, in chunks.
     pub cloud_range_chunks: i32,
     pub camera_y: f64,
@@ -219,10 +217,9 @@ pub struct FogInputs<'a> {
     pub boss_world_fog: bool,
     /// The camera entity is a spectator (`LavaFogEnvironment`).
     pub spectator: bool,
-    /// The camera entity has Fire Resistance (`LavaFogEnvironment`), or PvP & HUD's clear lava
-    /// asks for its fog.
+    /// The camera entity has Fire Resistance (`LavaFogEnvironment`).
     pub fire_resistance: bool,
-    /// PvP & HUD's clear water: the water vision `FogState` reaches after 600 ticks under water.
+    /// A camera following another entity uses full water vision instead of the local player's ramp.
     pub full_water_vision: bool,
     /// `GameRenderer.nightVisionScale` while Night Vision is on without
     /// Darkness, else 0 (`FogRenderer.computeFogColor`'s brightenFactor).
@@ -419,17 +416,6 @@ pub fn setup_fog(tables: &FogTables, state: &FogState, input: &FogInputs) -> Fog
     let span = (rd / 10.0).clamp(4.0, 64.0);
     fog.render_distance_start = rd - span;
     fog.render_distance_end = rd;
-    if input.distant_terrain
-        && input.fog_type == FogType::Atmospheric
-        && input.blindness.is_none()
-        && input.darkness.is_none()
-        && !input.boss_world_fog
-        && sky.fog_end >= 1024.0
-    {
-        let scale = (rd / 1024.0).max(1.0);
-        fog.environmental_start *= scale;
-        fog.environmental_end *= scale;
-    }
     fog
 }
 /// Sunrise's Fog option turned off (`sunrise-graphics.txt` `fog:false`):
@@ -454,12 +440,20 @@ pub fn rain_fog_target(rain: f32, sky_light: u8, biome_rains: bool) -> f32 {
     let sky = ((f32::from(sky_light) - 8.0) / 7.0).clamp(0.0, 1.0);
     rain * sky * if biome_rains { 1.0 } else { 0.5 }
 }
-/// Whether the frame draws no sky, only the clear to the fog colour: `LevelRenderer.addSkyPass`
-/// leaves the sky out in lava and powder snow and while blindness or darkness is on (`Camera`'s
-/// `doesMobEffectBlockSky`), and `GameRenderer.renderLevel` gives `LevelRenderer.render`
-/// `shouldRenderSky` false while a boss bar makes world fog (the Ender Dragon's).
+/// `LevelRenderer.addSkyPass`: the logical sky pass, before drawing policy such as boss fog
+/// or Sunrise's sky setting. NeoForge posts `RenderLevelStageEvent.AfterSky` inside this pass.
+pub fn sky_pass_present(fog_type: FogType, effect_blocks_sky: bool, skybox: Skybox) -> bool {
+    skybox != Skybox::None && !camera_blocks_sky(fog_type, effect_blocks_sky)
+}
+
+fn camera_blocks_sky(fog_type: FogType, effect_blocks_sky: bool) -> bool {
+    matches!(fog_type, FogType::Lava | FogType::PowderSnow) || effect_blocks_sky
+}
+
+/// Whether to suppress the engine's sky drawing: the camera can block it, and
+/// `GameRenderer.renderLevel` also suppresses it under a boss bar's world fog.
 pub fn sky_pass_skipped(fog_type: FogType, effect_blocks_sky: bool, boss_world_fog: bool) -> bool {
-    matches!(fog_type, FogType::Lava | FogType::PowderSnow) || effect_blocks_sky || boss_world_fog
+    camera_blocks_sky(fog_type, effect_blocks_sky) || boss_world_fog
 }
 /// `AtmosphericFogEnvironment.updateRainFogState`.
 pub fn update_rain_fog(
@@ -495,7 +489,6 @@ mod tests {
             water_fog_color: [0.0, 0.0, 0.2],
             biome: 0,
             render_distance_chunks: 12,
-            distant_terrain: false,
             cloud_range_chunks: 128,
             camera_y: 70.0,
             min_y: -64,
@@ -544,6 +537,20 @@ mod tests {
         assert_eq!(fog(surface + 0.05, 0.0), FogType::Atmospheric);
         // The eye itself is not tested: looking up, the whole plane is above it.
         assert_eq!(fog(surface - 0.01, -90.0), FogType::Atmospheric);
+    }
+    #[test]
+    fn logical_sky_pass_matches_the_camera_and_dimension_gate() {
+        use FogType::*;
+        for (fog, effect_blocks_sky, skybox, pass) in [
+            (Atmospheric, false, Skybox::Overworld, true),
+            (Water, false, Skybox::End, true),
+            (Atmospheric, false, Skybox::None, false),
+            (Lava, false, Skybox::Overworld, false),
+            (PowderSnow, false, Skybox::End, false),
+            (Atmospheric, true, Skybox::Overworld, false),
+        ] {
+            assert_eq!(sky_pass_present(fog, effect_blocks_sky, skybox), pass);
+        }
     }
     #[test]
     fn the_dragon_fights_world_fog_leaves_out_the_sky() {
@@ -773,7 +780,7 @@ mod tests {
         assert_eq!(fog.sky_end, 192.0);
     }
     #[test]
-    fn distant_atmosphere_extends_without_extending_environmental_overrides() {
+    fn long_render_distance_keeps_environmental_fog_overrides() {
         let sky = Sky {
             fog_end: 1024.,
             ..Sky::default()
@@ -783,9 +790,6 @@ mod tests {
         };
         let mut input = inputs(&sky);
         input.render_distance_chunks = 1024;
-        input.distant_terrain = true;
-        let fog = setup_fog(&tables, &FogState::default(), &input);
-        assert_eq!(fog.environmental_end, 16384.);
         input.fog_type = FogType::Water;
         assert_eq!(
             setup_fog(&tables, &FogState::default(), &input).environmental_end,
@@ -841,7 +845,7 @@ mod tests {
         assert_eq!(s.water_vision(false), 0.0);
     }
     #[test]
-    fn clear_water_sees_as_far_as_after_thirty_seconds_under_water() {
+    fn nonlocal_camera_uses_full_water_vision() {
         let sky = Sky::default();
         let tables = FogTables {
             water_fog_end: vec![1.0],

@@ -49,6 +49,10 @@ pub struct Renderer {
     /// Set by the device's lost callback. wgpu reports nothing else when an
     /// operation fails on a lost device (no error scope sees it).
     pub(crate) device_lost: Arc<std::sync::atomic::AtomicBool>,
+    /// Which opened device this renderer draws on ([`Self::device_id`]): a renderer made on the
+    /// previous one's device (`RendererDevice::Reuse`) keeps its number, one on a newly opened
+    /// device takes the next.
+    pub(crate) device_id: u64,
     pub config: wgpu::SurfaceConfiguration,
     pub(crate) solid: SolidPipeline,
     /// `solid` split in two passes for the world pass (terrain.wgsl's `opaque_quad`).
@@ -81,12 +85,6 @@ pub struct Renderer {
     /// for the settings in `graphics::gpu_culling_offer`), and whether the last frame drew
     /// them so (`gpu_frame`).
     pub(crate) gpu_culling: Option<gpu_culling::GpuCulling>,
-    /// Sourced geometry's residency beside them (`sourced_geometry::gpu::Sourced`): its
-    /// record table, made with the first recorded mesh and dropped with the last, each
-    /// mesh's record in it, and the meshes a GPU frame still lists the CPU. Whether the
-    /// last frame drew them so is `gpu_sourced_frame`.
-    pub(crate) sourced: sourced_geometry::gpu::Sourced,
-    pub(crate) gpu_sourced_frame: bool,
     pub(crate) gpu_culling_offer: crate::graphics::GpuCullingOffer,
     pub(crate) gpu_frame: bool,
     /// GPU frames since GPU culling was switched on: the first and every 64th after it
@@ -137,12 +135,6 @@ pub struct Renderer {
     /// (`crosshair_globals`).
     pub(crate) crosshair_group: wgpu::BindGroup,
     pub(crate) crosshair_globals: wgpu::Buffer,
-    /// The water mirror: its solid terrain pipeline, its camera's globals and their group,
-    /// and its targets once drawn.
-    pub(crate) solid_mirror: wgpu::RenderPipeline,
-    pub(crate) mirror_globals: wgpu::Buffer,
-    pub(crate) mirror_group: wgpu::BindGroup,
-    pub(crate) mirror: Option<MirrorTarget>,
     /// Native mods' world views' targets and pipelines, and the largest side the device gives one.
     pub(crate) world_views: world_views::Kept,
     pub(crate) world_view_side: u32,
@@ -154,6 +146,7 @@ pub struct Renderer {
     pub(super) particle_pipelines: particle_draws::ParticlePipelines,
     pub(super) explicit_opaque_particles: particle_draws::ParticleDraws,
     pub(super) explicit_translucent_particles: particle_draws::ParticleDraws,
+    pub(super) explicit_additive_particles: particle_draws::ParticleDraws,
     pub(crate) static_entity_pipeline: wgpu::RenderPipeline,
     pub(crate) static_entity_group: wgpu::BindGroup,
     pub(crate) static_entity_transform: wgpu::Buffer,
@@ -185,8 +178,12 @@ pub struct Renderer {
     pub(crate) lightning_pipeline: wgpu::RenderPipeline,
     pub(crate) lightning: lightning::Renderer,
     pub(crate) see_through_pipeline: wgpu::RenderPipeline,
-    /// Native mods' world primitives (`Frame::world_primitives`).
-    pub(crate) world_primitives: world_primitives::WorldPrimitives,
+    /// Native mods' world primitives (`Frame::world_primitives`), taken briefly during OIT pass.
+    pub(crate) world_primitives: Option<world_primitives::WorldPrimitives>,
+    /// Device handles and the mod mesh, buffer and render target tables, shared with `Game`.
+    pub(crate) mod_gpu: mod_gpu::ModGpuResources,
+    /// Cross-frame pool of transient GPU render targets for `Hooks::frame_graph_setup`.
+    pub(crate) transient_targets: std::sync::Mutex<mod_frame_graph::TransientTargetPool>,
     pub(crate) text_polygon_offset_pipeline: wgpu::RenderPipeline,
     pub(crate) world_text_pipeline: wgpu::RenderPipeline,
     pub(crate) text_mark_pipelines: [wgpu::RenderPipeline; 2],
@@ -199,6 +196,14 @@ pub struct Renderer {
     /// Custom sky layers (`crate::custom_sky`), and the frame's from the game.
     pub(crate) custom_sky: custom_sky::CustomSky,
     pub(crate) custom_sky_draws: Vec<crate::custom_sky::Draw>,
+    /// The pack's custom lightmaps (`crate::custom_lightmap::load`), and the world and weather
+    /// the next frame's light texture is for.
+    /// None when the pack has none.
+    pub(crate) custom_lightmap: Option<std::sync::Arc<dyn crate::custom_lightmap::Lightmaps>>,
+    /// Set by the game for one frame, taken by the frame's `update_lightmap`.
+    pub(crate) lightmap_weather: Option<crate::custom_lightmap::Weather>,
+    /// What drew the last frame's light texture, for F3's chart while a custom lightmap may.
+    pub(crate) lightmap_drawn: core_lightmap::Drawn,
     /// The glowing entities' outline (`LevelRenderer.entityOutlineTarget`).
     pub(crate) entity_outline: entity_outline::EntityOutline,
     pub(crate) panorama: panorama::Panorama,
@@ -210,10 +215,11 @@ pub struct Renderer {
     /// Screen effects: alpha-blended, then vignette (`dst * (1 - src)`)
     /// pipelines, each for every sampling (index `blend * 4 + sampling`).
     pub(crate) screen_pipelines: [wgpu::RenderPipeline; 16],
+    pub(crate) screen_page_groups: Vec<Option<wgpu::BindGroup>>,
     pub(crate) screen_buffer: wgpu::Buffer,
     pub(crate) screen_capacity: u64,
     pub(crate) entity_group: wgpu::BindGroup,
-    /// The layout of `entity_group`, for the native shadow pass.
+    /// The layout of `entity_group`.
     pub(crate) entity_bindings: wgpu::BindGroupLayout,
     /// Generation-owned prepared model geometry. World block entities instance it
     /// when the draw is not kept, spinning, or claimed by a shader pack.
@@ -234,6 +240,8 @@ pub struct Renderer {
     pub(crate) static_entity_indices: wgpu::Buffer,
     pub(crate) static_entity_index_quads: u32,
     pub(crate) entity_batch: EntityBatch,
+    /// Quads of client mods' dynamic textures (`BlockEntityDrawContext::textured_quad`).
+    pub(super) dynamic_entity: dynamic_entity::DynamicEntity,
     pub(crate) entity_order: entity_skin::OrdinaryOrder,
     /// Ordinary entity models posed on the GPU; `None` without compute shaders.
     pub(crate) entity_skin: Option<entity_skin::EntitySkin>,
@@ -273,7 +281,8 @@ pub struct Renderer {
     pub(crate) lightmap_view: wgpu::TextureView,
     pub(crate) lightmap_sampler: wgpu::Sampler,
     pub(crate) animations: animate::SpriteAnimator,
-    pub(crate) material_animations: Vec<SpriteAnimation>,
+    /// The animations with LabPBR maps, and which of their frames `pbr_maps` holds.
+    pub(crate) material_animations: material_animation::MaterialAnimations,
     pub(crate) active_animated_layers: Vec<u64>,
     pub(crate) uploads: upload::Uploads,
     /// Section meshes are staged through their own belt into
@@ -299,32 +308,7 @@ pub struct Renderer {
     pub(crate) outline: wgpu::Buffer,
     pub(crate) depth: wgpu::TextureView,
     pub(crate) sections: resident::Resident<SectionGpu>,
-    pub(crate) lods: FxHashMap<crate::lod::TileKey, lod::Tile>,
-    /// Vertex bytes of the current tile meshes (not their fading stand-ins).
-    pub(crate) lod_vertex_bytes: u64,
-    /// The same tiles by cell (`lod::TileGrid`), to test them a handful of
-    /// boxes at a time (`draw_frame`).
-    pub(crate) lod_cells: lod::TileGrid,
-    /// Far tiles' occlusion culling slots (`lod::Tile::cull_slot`): those
-    /// free, and the next never used.
-    pub(crate) lod_cull_free: Vec<u32>,
-    pub(crate) lod_cull_next: u32,
-    /// The chunk columns the resident tiles leave out (`Lod::take_cutout`):
-    /// their sections are drawn even past the render distance, so terrain
-    /// leaving it never opens a hole before the tiles fill it in.
-    pub(crate) lod_cutout: crate::fast_hash::FxHashSet<(i32, i32)>,
-    /// Removed sections of `lod_cutout` columns, released once tiles cover them.
-    pub(crate) lod_retiring: crate::fast_hash::FxHashSet<SectionKey>,
-    /// Removed sections fading out over far terrain (`leave_section`).
-    pub(crate) lod_leaving: Vec<(SectionKey, std::time::Instant)>,
-    /// Finished tile meshes `upload_lods` has yet to upload.
-    pub(crate) lod_pending: Option<lod::Pending>,
-    /// When the fades the last tile job began are over (`upload_lods`): until
-    /// then tiles may be dying or standing in for their replacements.
-    pub(crate) lod_settled: Option<std::time::Instant>,
     pub(crate) detail_columns: FxHashMap<(i32, i32), SectionMask>,
-    /// Bumped whenever a column becomes or stops being complete.
-    pub(crate) detail_revision: u64,
     pub(crate) arena: arena::Arena,
     /// Translucent quads' own arena, with large pages, while the layout is split
     /// (`translucent_split`): the back-to-front list then stays in one page (and
@@ -334,7 +318,7 @@ pub struct Renderer {
     /// Translucent Batching (`Graphics::translucent_batching`, read when a renderer
     /// is made), where it is offered (`graphics::offer_translucent_batching`).
     pub(crate) translucent_batching: bool,
-    /// Every section and far tile was dropped to change the layout since the game
+    /// Every section was dropped to change the layout since the game
     /// last asked (`take_dropped_sections`).
     pub(crate) sections_dropped: bool,
     pub(crate) sorted_indices: arena::Arena,
@@ -349,11 +333,13 @@ pub struct Renderer {
     pub multi_draw: bool,
     /// Per-frame scratch, kept to avoid allocating every frame.
     pub(crate) visible: Vec<resident::Visible>,
-    pub(crate) visible_lods: Vec<lod::Visible>,
-    /// Every far tile in view, whether the GPU's solid draws own it or not: the water's
-    /// re-sort walks it (`draw_frame`), so its budget and rotation do not follow which
-    /// solid draws the sourced-geometry pass took over.
-    pub(crate) translucent_lods: Vec<lod::Visible>,
+    /// Canonical primary-camera visible sections exposed to `FrameHooks` (reused across frames).
+    pub(crate) visible_renderable_sections: Vec<mod_api::RenderableSection>,
+    pub(crate) visible_renderable_scratch: Vec<(u64, SectionKey, Option<u32>)>,
+    /// Reusable submission and merge buffers for `FrameHooks`' CPU models and name tags.
+    pub(crate) hook_geometry: world_primitives::PreparedHookGeometry,
+    pub(crate) hook_entities_scratch: Vec<Vertex>,
+    pub(crate) hook_see_through_scratch: Vec<Vertex>,
     /// The sections a shader pack's shadow camera sees (`external::ShadowView`).
     pub(crate) shadow_visible: Vec<resident::Visible>,
     /// The external shader pipeline world frames call (`external`); `None` draws vanilla's way.
@@ -394,19 +380,13 @@ pub struct Renderer {
     /// the static cache can remove deleted models without a global flush.
     pub(crate) block_entity_membership_revisions: FxHashMap<SectionKey, u64>,
     /// When each section was first uploaded (`RenderSection.uploadedTime`): kept across meshing
-    /// it again, gone with its column. Sections that fade in over far terrain are not in it.
+    /// it again, gone with its column.
     pub(crate) section_uploaded: FxHashMap<SectionKey, std::time::Instant>,
     /// When `section_uploaded` last gained a section: once the fade time has passed since,
     /// every section is whole and frames skip the per-section lookups.
     pub(crate) newest_upload: Option<std::time::Instant>,
-    /// When a section last began to fade in over far terrain (`SectionGpu::fading`), for the
-    /// same shortcut.
-    pub(crate) newest_lod_fade: Option<std::time::Instant>,
     /// Changes whenever `block_entities` does (unique across renderers).
     pub(crate) block_entity_revision: u64,
-    /// The light sources of each section and their revision, for `block_light`.
-    pub(crate) light_blocks: super::census::SectionLists,
-    pub(crate) light_revision: u64,
     /// VisGraph face connectivity per meshed section (cave culling).
     pub(crate) occlusion: occlusion::Occlusion,
     /// The column `occlusion`, `sections` and `detail_columns` count in: the
@@ -435,9 +415,6 @@ pub struct Renderer {
     /// `LINEAR_FRAME` (`frame_format`). A 16-bit frame with HDR off since reaches the
     /// swapchain through `readback`.
     pub(crate) output: output::EffectiveOutput,
-    /// Whether a pack picked or dropped since the renderer was made has been told it runs on
-    /// the frame that exists (`set_native_shader_pack`).
-    pub(crate) frame_kept_logged: bool,
     /// The marker file of an HDR output that has not presented a frame yet
     /// (`graphics::HDR_MARKER`).
     pub(crate) hdr_marker: Option<std::path::PathBuf>,
@@ -449,8 +426,10 @@ pub struct Renderer {
     pub(crate) pack_post: Option<(i32, Option<pack_post::PackPost>)>,
     /// A `shaders/` pack whose pipelines build on a thread of their own (`load_shader_pack`).
     pub(crate) pack_loading: Option<PackLoading>,
-    /// The post passes of one of Sunrise's own shader packs; never beside `pack_post`'s.
-    pub(crate) native: Option<native_pack::NativePack>,
+    /// Pack builds dropped before they ended, joined before the renderer goes.
+    pub(crate) retired_pack_builds: super::RetiredPackBuilds,
+    /// Counts shader packs loaded, switched or turned off (`ShaderPackState::generation`).
+    pub(crate) pack_generation: u32,
     /// Time the shader pack's passes on the GPU (F3, or a capture made with `--gpu`).
     pub(crate) pass_timing: bool,
     /// Times the parts of passes too (`set_pass_detail`).
@@ -461,6 +440,9 @@ pub struct Renderer {
     pub(crate) keep_timed_frames: bool,
     /// Times Sunrise's own passes on the GPU, as `pass_timing` does (`own_pass_times`).
     pub(crate) own_timing: Option<pack_timing::PassTiming>,
+    /// What tests read from and set on this renderer (`test_hooks`).
+    #[cfg(feature = "test-support")]
+    pub test_hooks: super::test_hooks::TestHooks,
     /// The entity vertices Sunrise draws itself while a shader pack draws the others.
     pub(crate) pack_entity_rest: Vec<Vertex>,
     /// Set 1 of the cloud pipeline, for a shader pack's `gbuffers_clouds`.
@@ -475,17 +457,29 @@ pub struct Renderer {
     pub(crate) shared_material_maps: [Option<wgpu::Texture>; 2],
     /// The pack's terrain program reads flat draws' vertices (`pack_terrain_inputs`).
     pub(crate) pack_terrain_flat: bool,
-    /// Vertex shaders read the section arena's pages (`flat::pages_readable`): a pack's terrain
+    /// Vertex shaders read the section arena's pages (`flat::pages_readable`, and
+    /// `pack_post::Gpu::vertex_reads`): a pack's terrain
     /// program can read its quad's corners there in per-section draws too (`pack_terrain_draws`).
     pub(crate) terrain_pages: bool,
     /// The pack's terrain programs read their pages in per-section draws: decided as
     /// `pack_terrain_inputs` last took them, from `pack_terrain_bindings`.
     pub(crate) pack_terrain_pages: bool,
+    /// The pack's terrain programs read the normal stream in per-section draws that read no
+    /// pages: decided as `pack_terrain_inputs` last took them, from `pack_terrain_bindings`.
+    pub(crate) pack_terrain_normals: bool,
     /// What the pack being loaded binds in its terrain programs' vertex stage
     /// (`set_pack_terrain_bindings`).
     pub(crate) pack_terrain_bindings: pack_atlas::TerrainBindings,
-    /// The section arena's pages are storage too (`arena_storage`, `follow_arena_storage`).
+    /// The section arena's pages are storage too (`arena_storage`, `follow_arena_layout`).
     pub(crate) arena_storage: bool,
+    /// The running `shaders/` pack's block ids, two a state (`set_shader_pack`'s `block_ids`):
+    /// the normal stream holds each quad's id under them (`terrain_normals`). None without any:
+    /// no pack, or one that lists no block.
+    /// Boxed: `Game` holds the `Renderer` inline, and its tests that build a `Game` on their
+    /// thread's stack have little room left.
+    pub(crate) pack_block_ids: Option<Box<PackBlockIds>>,
+    /// The game's meshes carry a `shaders/` pack's quad sources (`keep_pack_sources`).
+    pub(crate) pack_sources_on: bool,
     /// OptiFine/Iris separate ambient occlusion: pass vertex alpha to hz_Color.a.
     pub separate_ao: bool,
     /// Shader-pack terrain pages used by post processing, retained between frames.
@@ -498,8 +492,6 @@ pub struct Renderer {
     pub(crate) debug_lines_scratch: Vec<[f32; 8]>,
     /// Screen effect vertices, retained between frames.
     pub(crate) screen_vertices_scratch: Vec<crate::screen_effects::ScreenVertex>,
-    /// LOD leaving chunk columns, retained between frames.
-    pub(crate) lod_leaving_scratch: crate::fast_hash::FxHashSet<(i32, i32)>,
     /// Shadow visible boxed sections, retained between frames.
     pub(crate) shadow_boxed_scratch: Vec<resident::Visible>,
     /// Shadow visible seen section keys, retained between frames.
@@ -536,15 +528,20 @@ pub struct Renderer {
     /// `draw_frame`'s frames past its early returns, and the one whose statistics are shown.
     pub(crate) frame_serial: u64,
     pub(crate) stats_frame: u64,
-    /// The readback halves a GPU frame's statistics wait for (`in_flight::collect_stats`):
-    /// a half alone undercounts the frame.
-    pub(crate) stats_halves: in_flight::StatsHalves,
     pub uploaded_bytes: u64,
     pub(crate) started: Instant,
     /// The next frame to write to a PNG path (control socket, F2, world icon).
     pub screenshot: Option<ScreenshotRequest>,
     /// Readback outcome: CPU pixels for the game to approve before writing, or an error.
     pub screenshot_result: Option<std::result::Result<PendingScreenshot, String>>,
+    /// The shader pack's `sunrise.hdr` request this renderer's frame was made for (the game's
+    /// pick, before any program was read): a later read of the pack is checked against it.
+    pub pack_hdr: Option<sunrise_shaders::Tonemap>,
+    /// The pick (`picked_pack`) `pack_hdr` was made for: the loader serves it to that pick only.
+    pub pack_hdr_pick: String,
+    /// Sunrise's HDR as the shader pack set (`pack_post`) was served it (`Post::hdr`): a pack
+    /// built for another answer is loaded again (`shader_pack_loaded_for`).
+    pub(crate) pack_served: Option<sunrise_shaders::Tonemap>,
     pub(crate) screenshot_readbacks: screenshot_readback::Readbacks,
     /// Screenshot Quality (Sunrise setting): a `scaled` screenshot's frame is this many
     /// times the game's resolution (1, 2, 4 or 8).
@@ -554,8 +551,6 @@ pub struct Renderer {
     pub(crate) screenshot_halvings: u32,
     /// Brightness option (lightmap gamma), 0..1.
     pub gamma: f32,
-    /// Optional full-light lightmap (Sunrise Extras).
-    pub fullbright: bool,
     /// The Improved transparency option (`GameRenderer.useImprovedTransparency`).
     pub improved_transparency: bool,
     /// Its passes and targets, made when first drawn with.
@@ -563,7 +558,7 @@ pub struct Renderer {
     /// Advance animated block textures (Sunrise setting; vanilla always does).
     pub animated_textures: bool,
     pub(crate) present_modes: Vec<wgpu::PresentMode>,
-    /// CPU copies of the section and far tile meshes uploaded while `render-capture` is on
+    /// CPU copies of the section meshes uploaded while `render-capture` is on
     /// (`keep_capture_copies`, or `SUNRISE_RENDER_CAPTURE` at creation); `None` otherwise.
     pub(crate) capture_copies: Option<capture::Copies>,
     /// A scene to write from the next frame (`sunrise-ctl render-capture DIR`).
@@ -576,7 +571,16 @@ impl Drop for Renderer {
     /// Once the device is lost, the window's surfaces are left alive: wgpu refuses to present
     /// or discard a frame on a lost device and keeps that frame acquired, and destroying the
     /// swapchain under an acquired frame panics (while a panic unwinds, an abort).
+    ///
+    /// A shader pack still building (the one loading, cancelled here, and any cancelled before)
+    /// is waited for first: its thread holds the device and may be inside the driver's compiler,
+    /// which must not still run once the device goes or the process exits (#6721). The wait is for
+    /// the programs being compiled then (`RetiredPackBuilds`). Builds on a lost device are not
+    /// waited for: dropping a lost renderer, as graphics device recovery does, never waits on its
+    /// driver.
     fn drop(&mut self) {
+        self.pack_loading = None;
+        self.retired_pack_builds.join_all();
         if !self.device_lost() {
             return;
         }

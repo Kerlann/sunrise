@@ -53,7 +53,6 @@ fn judged_with(
     data: Option<&Path>,
 ) -> Verdict {
     let bundle = crate::bundle_in(dir).unwrap().unwrap();
-    let target = Rc::new(target.clone());
     let mut read = table(&bundle.dir);
     judge(
         &bundle.manifest,
@@ -63,7 +62,7 @@ fn judged_with(
             mixins_rev: crate::MIXINS_REV,
         },
         || read.as_mut().map_err(|why| *why),
-        &mut || Ok::<_, String>(target.clone()),
+        &mut || Ok::<_, String>(target),
         &mut || match data {
             Some(data) => game_uses::entries(&bundle.manifest, data, build),
             None => Err("no game code declared: never read".to_owned()),
@@ -184,7 +183,7 @@ fn an_older_list_is_completed_by_the_build_it_was_made_for_and_its_unchecked_ent
     // `made_for_surface` gives the build it was made for's surface, or why it cannot.
     let judge_with = |target: &serde_json::Value, made_for_surface: Result<String, String>| {
         let bundle = crate::bundle_in(&dir).unwrap().unwrap();
-        let target = Rc::new(serde_json::from_value(target.clone()).unwrap());
+        let target = serde_json::from_value(target.clone()).unwrap();
         let mut read = table(&bundle.dir);
         judge(
             &bundle.manifest,
@@ -194,9 +193,14 @@ fn an_older_list_is_completed_by_the_build_it_was_made_for_and_its_unchecked_ent
                 mixins_rev: crate::MIXINS_REV,
             },
             || read.as_mut().map_err(|why| *why),
-            &mut || Ok::<_, String>(Rc::clone(&target)),
+            &mut || Ok::<_, String>(&target),
             &mut || Err("no game code declared: never read".to_owned()),
-            Some(&mut || made_for_surface.clone().map(String::into_bytes)),
+            Some(&mut || {
+                made_for_surface
+                    .as_deref()
+                    .map(str::as_bytes)
+                    .map_err(Clone::clone)
+            }),
         )
     };
     let unread = || Err("unread".to_owned());
@@ -376,10 +380,14 @@ fn refused_run_with(name: &str, build: &str) -> (PathBuf, PathBuf) {
         );
     std::fs::write(&manifest, text).unwrap();
     std::fs::write(dir.join("src/m.rs"), "{}").unwrap();
-    let data = dir.join(".sunrise/build-data");
-    std::fs::create_dir_all(&data).unwrap();
+    let data = build_data(
+        &format!("{name}-data"),
+        build,
+        serde_json::json!({}),
+        serde_json::json!([]),
+    );
     let file = serde_json::json!({
-        "schema": 1, "build": {"commit": build}, "crates": {}, "functions": {},
+        "schema": 1, "build": {"commit": build}, "crates": index_crates(), "functions": {},
         "refused": { RUN_WITH: { "code": "E_MIXIN_NOT_REPLACEABLE", "why": INDEX_REASON } },
     });
     std::fs::write(data.join("functions.json"), file.to_string()).unwrap();
@@ -399,7 +407,7 @@ fn native_check_needs_the_index_and_names_the_refused_same_build_target() {
     let needs = check(&plan).unwrap();
     assert_eq!(needs.mods[0].needs, Some("build-data"));
     assert_eq!(needs.route, None);
-    plan.build_data = Some(data);
+    plan.build_data = Some(data.clone());
     let checked = check(&plan).unwrap();
     assert_eq!(checked.route, None);
     assert_eq!(checked.mods[0].verdict, None);
@@ -412,6 +420,7 @@ fn native_check_needs_the_index_and_names_the_refused_same_build_target() {
     assert!(refusal.contains(RUN_WITH), "{refusal}");
     assert!(refusal.contains(INDEX_REASON), "{refusal}");
     std::fs::remove_dir_all(dir).unwrap();
+    std::fs::remove_dir_all(data).unwrap();
 }
 
 #[test]
@@ -430,6 +439,7 @@ fn cross_build_fit_distinguishes_a_refused_target_from_a_removed_one() {
             }],
         },
     );
+    std::fs::create_dir(dir.join(".sunrise")).unwrap();
     let surface_file = dir.join(".sunrise/surface.json");
     std::fs::write(&surface_file, serde_json::to_vec(&surface(&[])).unwrap()).unwrap();
     let checked = check(&Plan {
@@ -437,7 +447,7 @@ fn cross_build_fit_distinguishes_a_refused_target_from_a_removed_one() {
         mods: dir.clone(),
         build: OTHER_BUILD.into(),
         surface: Some(surface_file),
-        build_data: Some(data),
+        build_data: Some(data.clone()),
     })
     .unwrap();
     let reply = serde_json::to_value(checked).unwrap();
@@ -465,6 +475,7 @@ fn cross_build_fit_distinguishes_a_refused_target_from_a_removed_one() {
         "{diagnostic}"
     );
     std::fs::remove_dir_all(dir).unwrap();
+    std::fs::remove_dir_all(data).unwrap();
 }
 
 #[test]
@@ -488,19 +499,20 @@ fn a_mod_with_a_mixin_fits_while_its_target_is_what_its_list_records() {
         std::fs::write(dir.join(uses::USES_FILE), table.to_string()).unwrap();
     };
     // The installed build's function index: the target with this body, or without the target.
-    let data = crate::tests::dir("fit-mixin-data");
-    std::fs::create_dir_all(&data).unwrap();
+    let data = build_data(
+        "fit-mixin-data",
+        OTHER_BUILD,
+        serde_json::json!({}),
+        serde_json::json!([]),
+    );
     let index = |body: Option<&str>| {
         let functions = match body {
-            Some(body) => serde_json::json!({TARGET: {
-                "module": "sunrise_client::game", "file": "crates/sunrise-client/src/game.rs",
-                "span": [0, 1], "signature_hash": "sig", "sha256": body,
-            }}),
+            Some(body) => serde_json::json!({TARGET: function(body)}),
             None => serde_json::json!({}),
         };
         let file = serde_json::json!({
             "schema": 1, "build": {"commit": OTHER_BUILD},
-            "crates": {}, "functions": functions, "refused": {},
+            "crates": index_crates(), "functions": functions, "refused": {},
         });
         std::fs::write(data.join("functions.json"), file.to_string()).unwrap();
     };
@@ -560,7 +572,13 @@ fn a_mod_with_a_mixin_fits_while_its_target_is_what_its_list_records() {
     std::fs::remove_dir_all(data).unwrap();
 }
 
-/// Build data for `build` in a fresh folder: the function index and the internals given.
+fn index_crates() -> serde_json::Value {
+    serde_json::json!({
+        "sunrise_client": {"library": "sunrise_client", "modules": {"sunrise_client::game": []}},
+    })
+}
+
+/// Build data for `build` in a fresh folder: the given functions and internals, and no loops.
 fn build_data(
     name: &str,
     build: &str,
@@ -580,12 +598,13 @@ fn build_data(
     };
     write(
         "functions.json",
-        serde_json::json!({"crates": {}, "functions": functions, "refused": {}}),
+        serde_json::json!({"crates": index_crates(), "functions": functions, "refused": {}}),
     );
     write(
         "internals.json",
         serde_json::json!({"internals": internals}),
     );
+    write("loops.json", serde_json::json!({"loops": []}));
     data
 }
 
@@ -779,31 +798,19 @@ fn an_internal_declared_without_a_kind_is_named_when_it_becomes_another_kind() {
 fn generated_loops_compare_each_function_and_keep_the_slot_contract() {
     use sunrise_platform::mod_build::api_gen::{functions, internals, loops};
     const GAME: &str = r#"
-struct Game;
+struct ServerGame;
 trait Slot { fn update(&mut self); }
-impl Game {
+impl ServerGame {
     #[sunrise_mod_api_macros::sunrise_loop(name = "ticks", side = "server")]
     fn tick(&mut self) { self.tick_with(&mut ()) }
     fn tick_with<S: Slot>(&mut self, slot: &mut S) { slot.update(); }
 }
 fn inspect() -> u32 { 1 }
 "#;
-    const INTERNAL: &str = "sunrise_client::game::inspect";
-    const GENERIC: &str = "sunrise_client::game::Game::tick_with";
+    const INTERNAL: &str = "sunrise_gameplay::game::inspect";
+    const GENERIC: &str = "sunrise_gameplay::game::ServerGame::tick_with";
     let source = tempfile::tempdir().unwrap();
-    for (path, text) in [
-        (
-            "crates/sunrise-client/Cargo.toml",
-            "[package]\nname='sunrise-client'\n",
-        ),
-        ("crates/sunrise-client/src/lib.rs", "pub mod game;"),
-        ("crates/sunrise-client/src/entry.rs", ""),
-        ("crates/sunrise-mod-api-gen/internals.txt", ""),
-    ] {
-        let path = source.path().join(path);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, text).unwrap();
-    }
+    let game = crate::tests::split_source(source.path()).join("game.rs");
     let dir = project_dir("fit-generated-loop", None, None);
     let manifest = dir.join(crate::NATIVE_MANIFEST);
     let text = std::fs::read_to_string(&manifest).unwrap()
@@ -817,7 +824,7 @@ fn inspect() -> u32 { 1 }
     let data = tempfile::tempdir().unwrap();
     let generate = |text| {
         let source = source.path();
-        std::fs::write(source.join("crates/sunrise-client/src/game.rs"), text).unwrap();
+        std::fs::write(&game, text).unwrap();
         let loops = loops::collect(source).unwrap();
         let generic = loops
             .iter()
@@ -894,21 +901,23 @@ fn a_loop_whose_entry_is_no_path_is_refused_by_name() {
         serde_json::json!({}),
         serde_json::json!([]),
     );
-    std::fs::write(
-        data.join("loops.json"),
-        serde_json::json!({
-            "schema": 1, "build": {"commit": OTHER_BUILD},
-            "loops": [{"name": "ticks", "entry": "tick", "generic": "tick_with", "slot": "Slot", "side": "server"}],
-        })
-        .to_string(),
-    )
-    .unwrap();
     let bundle = crate::bundle_in(&dir).unwrap().unwrap();
-    let error = game_uses::entries(&bundle.manifest, &data, OTHER_BUILD).unwrap_err();
-    assert!(
-        error.contains("`ticks`") && error.contains("`tick`"),
-        "{error}"
-    );
+    for entry in ["tick", "sunrise_client::not a Rust path!"] {
+        std::fs::write(
+            data.join("loops.json"),
+            serde_json::json!({
+                "schema": 1, "build": {"commit": OTHER_BUILD},
+                "loops": [{"name": "ticks", "entry": entry, "generic": "tick_with", "slot": "Slot", "side": "server"}],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let error = game_uses::entries(&bundle.manifest, &data, OTHER_BUILD).unwrap_err();
+        assert!(
+            error.contains("`ticks`") && error.contains(entry),
+            "{error}"
+        );
+    }
     for folder in [dir, data] {
         std::fs::remove_dir_all(folder).unwrap();
     }
@@ -976,6 +985,141 @@ fn build_data_of_another_build_is_refused_by_the_check() {
 }
 
 #[test]
+fn native_check_reports_missing_loops_even_for_a_known_api_misfit() {
+    let dir = project_dir(
+        "fit-misfit-missing-loops",
+        Some(&[("fn:give", "old")]),
+        None,
+    );
+    let manifest = dir.join(crate::NATIVE_MANIFEST);
+    let text = std::fs::read_to_string(&manifest).unwrap()
+        + "[[native.loop]]\nid = 'l'\nloop = 'ticks'\nhelper = 'src/l.rs'\nwith = 'Slot'\n";
+    std::fs::write(&manifest, text).unwrap();
+    std::fs::write(dir.join("src/l.rs"), "pub struct Slot;").unwrap();
+    let surface_file = dir.join("target-surface.json");
+    std::fs::write(
+        &surface_file,
+        serde_json::to_vec(&surface(&[("fn:give", "new")])).unwrap(),
+    )
+    .unwrap();
+    let mut plan = Plan {
+        contract: crate::contract::CONTRACT,
+        mods: dir.clone(),
+        build: OTHER_BUILD.into(),
+        surface: Some(surface_file),
+        build_data: None,
+    };
+    assert_eq!(
+        check(&plan).unwrap().mods[0].verdict,
+        Some(Verdict::DoesNotFit {
+            made_for: pin(&dir),
+            misfits: vec![Misfit {
+                id: "fn:give".into(),
+                change: Change::Changed
+            }],
+        }),
+    );
+
+    let data = build_data(
+        "fit-misfit-missing-loops-data",
+        OTHER_BUILD,
+        serde_json::json!({}),
+        serde_json::json!([]),
+    );
+    std::fs::remove_file(data.join("loops.json")).unwrap();
+    plan.build_data = Some(data.clone());
+    let error = check(&plan).unwrap_err();
+    assert!(
+        error.contains("loops.json") && error.contains("fetch the SDK again"),
+        "{error}"
+    );
+    for folder in [dir, data] {
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+}
+
+#[test]
+fn native_check_needs_same_build_loop_data_and_refuses_unknown_or_foreign_loops() {
+    let dir = project_dir("fit-same-build-loop", None, None);
+    let manifest = dir.join(crate::NATIVE_MANIFEST);
+    let text = std::fs::read_to_string(&manifest).unwrap()
+        + "[[native.loop]]\nid = 'l'\nloop = 'ticks'\nhelper = 'src/l.rs'\nwith = 'Slot'\n";
+    std::fs::write(&manifest, text).unwrap();
+    std::fs::write(dir.join("src/l.rs"), "pub struct Slot;").unwrap();
+    let build = pin(&dir);
+    let mut plan = Plan {
+        contract: crate::contract::CONTRACT,
+        mods: dir.clone(),
+        build: build.clone(),
+        surface: None,
+        build_data: None,
+    };
+    assert_eq!(check(&plan).unwrap().mods[0].needs, Some("build-data"));
+    let data = build_data(
+        "fit-same-build-loop-data",
+        &build,
+        serde_json::json!({}),
+        serde_json::json!([]),
+    );
+    plan.build_data = Some(data.clone());
+    let checked = check(&plan).unwrap();
+    assert_eq!(checked.route, None);
+    assert_eq!(checked.mods[0].verdict, None);
+    assert_eq!(checked.mods[0].needs, None);
+    assert_eq!(
+        checked.mods[0].refusal.as_deref(),
+        Some("E_LOOP_UNKNOWN: greeter:l: the game publishes no loop `ticks`; its loops: none"),
+    );
+    let write_loops = |commit: &str| {
+        std::fs::write(
+            data.join("loops.json"),
+            serde_json::json!({
+                "schema": 1, "build": {"commit": commit},
+                "loops": [{"name": "ticks", "entry": "sunrise_client::game::Game<'_>::tick", "generic": "tick_with", "slot": "Slot", "side": "server"}],
+            })
+            .to_string(),
+        ).unwrap();
+    };
+    write_loops(OTHER_BUILD);
+    let error = check(&plan).unwrap_err();
+    assert!(
+        error.contains("loops.json") && error.contains(OTHER_BUILD) && error.contains(&build),
+        "{error}"
+    );
+    write_loops(&build);
+    assert_eq!(
+        check(&plan).unwrap().mods[0].verdict,
+        Some(Verdict::MadeFor)
+    );
+    for folder in [dir, data] {
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+}
+
+#[test]
+fn fit_refuses_a_function_index_with_an_unlisted_module() {
+    let (dir, data) = refused_run_with("fit-invalid-index", OTHER_BUILD);
+    let mut function = function("body");
+    function["module"] = "sunrise_client::unlisted".into();
+    let index = serde_json::json!({
+        "schema": 1, "build": {"commit": OTHER_BUILD}, "crates": index_crates(),
+        "functions": { RUN_WITH: function }, "refused": {},
+    });
+    std::fs::write(data.join("functions.json"), index.to_string()).unwrap();
+    let bundle = crate::bundle_in(&dir).unwrap().unwrap();
+    let error = game_uses::entries(&bundle.manifest, &data, OTHER_BUILD).unwrap_err();
+    assert!(
+        error.contains("functions.json")
+            && error.contains(RUN_WITH)
+            && error.contains("sunrise_client::unlisted"),
+        "{error}"
+    );
+    for folder in [dir, data] {
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+}
+
+#[test]
 fn a_mod_with_rows_no_list_can_judge_is_exact_whatever_its_list_says() {
     let dir = project_dir("fit-exact", Some(&[("fn:give", "h1")]), None);
     let manifest = dir.join(crate::NATIVE_MANIFEST);
@@ -1027,7 +1171,8 @@ fn hook_versions_from_the_build_it_was_made_for_count_whatever_the_game_code_sho
     let judge_with = |manifest_text: String| {
         std::fs::write(&manifest, manifest_text).unwrap();
         let bundle = crate::bundle_in(&dir).unwrap().unwrap();
-        let target = Rc::new(serde_json::from_value(hook(2)).unwrap());
+        let target = serde_json::from_value(hook(2)).unwrap();
+        let made_for_surface = hook(1).to_string();
         let mut read = table(&bundle.dir);
         judge(
             &bundle.manifest,
@@ -1037,9 +1182,9 @@ fn hook_versions_from_the_build_it_was_made_for_count_whatever_the_game_code_sho
                 mixins_rev: crate::MIXINS_REV,
             },
             || read.as_mut().map_err(|why| *why),
-            &mut || Ok::<_, String>(Rc::clone(&target)),
+            &mut || Ok::<_, String>(&target),
             &mut || Err("no build data".to_owned()),
-            Some(&mut || Ok(hook(1).to_string().into_bytes())),
+            Some(&mut || Ok(made_for_surface.as_bytes())),
         )
         .unwrap()
     };

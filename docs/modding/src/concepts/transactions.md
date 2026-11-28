@@ -59,8 +59,11 @@ notices. Mod-owned memory, live level random draws, and direct operations such a
 [capabilities](capabilities.md) instead when an operation must be reversible.
 
 Ordinary block and fluid writes expose tentative states before publishing replacement effects.
-Bulk block edits have their own publication rules; `destroy_block` refuses inside an open
-transaction rather than promising to undo loot and break effects. See [Block Parts](parts/block-parts.md)
+Bulk block edits have their own publication rules; `destroy_block` prepares loot and experience
+against the still-standing block, and its item entities, experience, break effects and game event
+publish only on commit. `drop_resources` drops what `destroy_block` would without breaking the block
+(no break effect, removal or game event, for a mod that breaks many blocks and sends the effect once);
+in a transaction its loot is rolled at once and its item entities and experience wait for commit. See [Block Parts](parts/block-parts.md)
 and [World fluid](capabilities/block-fluids.md#world-fluid) for examples.
 
 ## Deferred level, entity, and player effects

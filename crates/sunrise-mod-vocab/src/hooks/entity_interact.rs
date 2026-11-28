@@ -1,5 +1,4 @@
 //! The `entity_interact` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0057
 
 pub trait Hooks {
     /// A player right-clicks the entity `entity` (`Entity.getId`) of type
@@ -14,7 +13,7 @@ pub trait Hooks {
     /// ClientHost permits reads and local effects, not authoritative writes.
     /// A client without this mod predicts vanilla here; the server corrects it.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_entity_interact",
+        target = "sunrise_gameplay_common::game::native_hooks::base::GameHooks::native_entity_interact",
         dispatch = "flat",
         side = "both",
         version = 2,

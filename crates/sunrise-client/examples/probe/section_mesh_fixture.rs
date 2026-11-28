@@ -142,6 +142,7 @@ fn scene(
         cutout_leaves,
         opaque_ice: false,
         translucent_layers: &[],
+        layer_overrides: &[],
         leaf_culling: LeafCullingMode::Off,
         hidden_states: &[],
         part_tables: Default::default(),
@@ -195,9 +196,10 @@ pub fn main() -> Result<()> {
     }
     let root = PathBuf::from(&args[0]);
     let assets = Assets::load(&root)?;
-    let render = assets.reload(&sunrise_assets::resource_source::ResourceRoot::directory(
-        root.to_path_buf(),
-    ))?;
+    let render = sunrise_client::assets::RenderAssets::load(
+        &sunrise_assets::resource_source::ResourceRoot::directory(root.to_path_buf()),
+        &assets,
+    )?;
     let facts = BlockFacts::load(&root, assets.registry)?;
     let mut biomes = Biomes::load(&sunrise_assets::resource_source::ResourceRoot::directory(
         root.to_path_buf(),

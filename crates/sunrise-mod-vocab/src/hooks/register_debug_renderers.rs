@@ -27,10 +27,12 @@ registration order, with no ID-based filtering or deduplication.
 
 For each world view, the client calls the installed callbacks in registration order,
 under their registering mods' identities, after `submit_custom_geometry`. It passes the current
-`ClientHost`, `WorldRenderView` and the same `WorldDrawContext`, so
-[its limits and rules](#custom-world-geometry) apply and are shared. Output clears every view,
-and callbacks don't run on the title or connect screens."#]
+`ClientHost`, `WorldRenderView` (lending the frame's `Camera`, world partial tick, game time,
+improved-transparency state, and visible `RenderableSection` slice) and the same
+`WorldDrawContext`, so [its submission rules](#custom-world-geometry) apply and are shared.
+Output clears every view, and callbacks don't run on the title or connect screens."#]
     #[hook(
+        target = "sunrise_gameplay_common::game::native_hooks::register_debug_renderers::native_register_debug_renderers",
         receiver = "associated",
         dispatch = "flat",
         side = "client",
@@ -39,7 +41,7 @@ and callbacks don't run on the title or connect screens."#]
         context = "registration",
         answered_by = "mod",
         neoforge = "RegisterDebugRenderersEvent",
-        version = 3
+        version = 4
     )]
     fn register_debug_renderers(
         entries: &dyn mod_api::__private::DebugEntryStates,

@@ -152,43 +152,6 @@ fn object_skin_revision_tracks_changes_and_capacity_clear() {
     assert!(atlas.object_skins.is_empty());
 }
 
-/// The pool of dynamic texture slots is paid only by a game with a client mod loaded: with
-/// none, the atlas packs no slot and does not grow. The slots' names leave the sprites, so
-/// no mod draws a slot another mod's image holds.
-#[test]
-fn the_dynamic_texture_pool_exists_only_when_a_mod_is_loaded() {
-    let root = sunrise_assets::resource_source::ResourceSource::directory(
-        Path::new("/nonexistent/sunrise-test-assets").to_path_buf(),
-    );
-    let plain = HudAtlas::build(&root).unwrap();
-    let without = HudAtlas::build_over_with_dynamic_textures(&root, &root, &root, false).unwrap();
-    assert!(plain.dynamic_texture_pool.is_none() && without.dynamic_texture_pool.is_none());
-    assert_eq!((without.width, without.height), (plain.width, plain.height));
-    let with = HudAtlas::build_over_with_dynamic_textures(&root, &root, &root, true).unwrap();
-    let pool = with.dynamic_texture_pool.as_ref().expect("the pool");
-    assert_eq!(pool.slots(), dynamic_textures::DYNAMIC_TEXTURE_SLOTS);
-    assert!(
-        !with
-            .sprites
-            .keys()
-            .any(|name| name.starts_with("sunrise/dynamic-texture/"))
-    );
-    // Every slot lies whole in the atlas, apart from every other slot.
-    let mut slots = Vec::new();
-    for (class, side) in mod_api::DYNAMIC_TEXTURE_CLASSES.into_iter().enumerate() {
-        for slot in 0..pool.slots()[class] {
-            let [x, y] = pool.origin(class, slot);
-            assert!(x + side <= with.width && y + side <= with.height);
-            slots.push([x, y, x + side, y + side]);
-        }
-    }
-    for (i, a) in slots.iter().enumerate() {
-        for b in &slots[i + 1..] {
-            assert!(a[2] <= b[0] || b[2] <= a[0] || a[3] <= b[1] || b[3] <= a[1]);
-        }
-    }
-}
-
 /// The GUI atlas's final list decides its sprites, under the names the GUI is looked up by
 /// (vanilla's definition: the folder `gui/sprites` with no prefix): a mod's pixels replace a
 /// walked sprite, an alias takes its texture's pixels and flags under the mod's plain id, a
@@ -457,6 +420,14 @@ fn two_gui_ids_of_one_walked_name_and_a_model_only_id_keep_their_own_results() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
+fn page_texel(page: &RegisteredAtlasPage, rect: Rect) -> [u8; 4] {
+    let [width, height] = page.size;
+    let x = (rect.u0 * width as f32).round() as usize;
+    let y = (rect.v0 * height as f32).round() as usize;
+    let at = (y * width as usize + x) * 4;
+    page.pixels[at..at + 4].try_into().unwrap()
+}
+
 /// A file another owner packed under a name that is also a GUI id (a registered atlas's
 /// projection is `mymod:gui/atlases/...`) is not erased by a GUI filter of that id: it stays
 /// in the packed table, while the GUI lane's answer for the id is its removal.
@@ -480,7 +451,8 @@ fn a_gui_filter_never_erases_a_registered_atlas_sprite_of_its_name() {
         .registered
         .get(name)
         .expect("the projection stays packed");
-    assert_eq!(texel_at(&atlas, packed, 0, 0), [0, 200, 0, 255]);
+    let page = &atlas.registered_pages[atlas.texture_atlas_page(name).unwrap()];
+    assert_eq!(page_texel(page, packed), [0, 200, 0, 255]);
     // The GUI list removed the id: the GUI lane says so, whatever else is packed under the name.
     assert!(matches!(atlas.gui_lookup(name), Some(GuiSprite::Missing)));
     std::fs::remove_dir_all(&root).unwrap();
@@ -525,18 +497,19 @@ fn a_registered_atlas_sprite_and_a_model_of_one_name_both_survive() {
     let atlas = HudAtlas::build(&ResourceSource::directory(root.clone())).unwrap();
     std::fs::remove_dir_all(&root).unwrap();
     let registered = *atlas.gui_rect(name).expect("the registered sprite");
+    let page = &atlas.registered_pages[atlas.gui_atlas_page(name).unwrap()];
     assert_eq!(
-        texel_at(&atlas, registered, 0, 0),
+        page_texel(page, registered),
         [0, 0, 200, 255],
         "the first frame of the staged file's animation"
     );
-    let (_, animation) = atlas
-        .sprite_animations
+    let (_, animation) = page
+        .animations
         .iter()
-        .find(|(rect, _)| rect.u0 == registered.u0 && rect.v0 == registered.v0)
+        .find(|(rect, _)| *rect == registered)
         .expect("the registered sprite animates");
     assert_eq!(
-        animation.resized_pixels(0, 1, 1),
+        animation.resized_pixels(0, 1, 1).unwrap(),
         [0, 200, 0, 255],
         "a later frame"
     );
@@ -544,7 +517,8 @@ fn a_registered_atlas_sprite_and_a_model_of_one_name_both_survive() {
     let model = *atlas.sprites.get(name).expect("the model's sprite");
     assert_eq!(texel_at(&atlas, model, 0, 0), [255, 0, 0, 255]);
     let raw = atlas.texture_rect(raw_name).expect("the exact raw name");
-    assert_eq!(texel_at(&atlas, *raw, 0, 0), [200, 100, 0, 255]);
+    let raw_page = &atlas.registered_pages[atlas.texture_atlas_page(raw_name).unwrap()];
+    assert_eq!(page_texel(raw_page, *raw), [200, 100, 0, 255]);
     assert_eq!(
         atlas.flags[raw_name],
         TextureFlags {
@@ -553,7 +527,12 @@ fn a_registered_atlas_sprite_and_a_model_of_one_name_both_survive() {
         }
     );
     let prefixed = format!("minecraft:{raw_name}");
-    assert!(atlas.texture_rect(&prefixed).is_none());
+    // A sprite name a hook resolved with its namespace draws as the raw texture too.
+    assert_eq!(atlas.texture_rect(&prefixed), Some(raw));
+    assert_eq!(
+        atlas.texture_atlas_page(&prefixed),
+        atlas.texture_atlas_page(raw_name)
+    );
     assert_eq!(atlas.gui_rect(&prefixed), Some(raw));
     assert!(
         atlas
@@ -666,9 +645,9 @@ fn a_gui_alias_animates_through_its_sources_frames() {
         .iter()
         .find(|(r, _)| r.u0 == rect.u0 && r.v0 == rect.v0)
         .expect("the alias animates");
-    assert_eq!(animation.resized_pixels(0, 1, 1), [255, 0, 0, 255]);
+    assert_eq!(animation.resized_pixels(0, 1, 1).unwrap(), [255, 0, 0, 255]);
     assert_eq!(
-        animation.resized_pixels(1, 1, 1),
+        animation.resized_pixels(1, 1, 1).unwrap(),
         [0, 255, 0, 0],
         "the strip's second frame"
     );
@@ -1049,7 +1028,7 @@ fn content_mod_effect_icons_pack_under_their_namespace() {
         root.to_path_buf(),
     ))
     .unwrap();
-    let rect = atlas.sprites[sunrise_client_core::potions::sprite("gems:glow").as_str()];
+    let rect = atlas.sprites[sunrise_game_data::potions::sprite("gems:glow").as_str()];
     assert_eq!(texel_at(&atlas, rect, 0, 0), [0, 0, 200, 255]);
     // The HUD and the inventory draw it from the effect's id, as vanilla's.
     let effect = crate::effects::EffectInstance::new("gems:glow", 600, 0);
@@ -1885,7 +1864,7 @@ fn a_wrapped_border_repeats_the_opposite_edges() {
             .flat_map(|&v| [v, 0, 0, 255])
             .collect(),
     );
-    let (_, w, h, data) = wrap_border(&image);
+    let (_, w, h, data) = wrap_border(&image).unwrap();
     assert_eq!((w, h), (4, 4));
     let red: Vec<u8> = data.chunks(4).map(|t| t[0]).collect();
     #[rustfmt::skip]
@@ -2090,4 +2069,49 @@ fn animation_upload_region_preserves_unpadded_and_blurred_borders() {
     assert_eq!((cx, cy, cw, ch), (9, 19, 4, 4));
     assert_eq!(px(&cbuf, 0, 1), &[255, 0, 0, 255]);
     assert_eq!(px(&cbuf, 3, 1), &[0, 0, 255, 255]);
+}
+
+/// One `minecraft:` rule for both raw texture lookups (#6012): a packed sprite and a registered
+/// atlas's sprite answer to their bare name and to `minecraft:` before it, and a sprite of
+/// another namespace keeps its own.
+#[test]
+fn a_raw_texture_answers_to_its_name_with_or_without_minecraft() {
+    let mut atlas = HudAtlas::build(&ResourceSource::directory(
+        "/nonexistent/sunrise-test-assets".into(),
+    ))
+    .unwrap();
+    let rect = |w| Rect {
+        u0: 0.0,
+        v0: 0.0,
+        u1: 1.0,
+        v1: 1.0,
+        w,
+        h: 1,
+    };
+    atlas.sprites.insert("textures/gui/packed".into(), rect(1));
+    atlas
+        .registered
+        .insert("gui/atlases/icons/heart".into(), rect(2));
+    atlas
+        .registered_owners
+        .insert("gui/atlases/icons/heart".into(), 3);
+    atlas
+        .sprites
+        .insert("mymod:textures/gui/own".into(), rect(4));
+    for name in ["textures/gui/packed", "minecraft:textures/gui/packed"] {
+        assert_eq!(atlas.texture_rect(name).map(|r| r.w), Some(1), "{name}");
+        assert_eq!(atlas.texture_atlas_page(name), None, "{name}");
+    }
+    for name in [
+        "gui/atlases/icons/heart",
+        "minecraft:gui/atlases/icons/heart",
+    ] {
+        assert_eq!(atlas.texture_rect(name).map(|r| r.w), Some(2), "{name}");
+        assert_eq!(atlas.texture_atlas_page(name), Some(3), "{name}");
+    }
+    assert_eq!(
+        atlas.texture_rect("mymod:textures/gui/own").map(|r| r.w),
+        Some(4)
+    );
+    assert_eq!(atlas.texture_rect("textures/gui/own"), None);
 }

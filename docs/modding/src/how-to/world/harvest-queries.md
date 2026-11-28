@@ -8,8 +8,13 @@ Queries answer whether a tool harvests a block, and how fast a tick removes a su
 `ItemStack.isCorrectToolForDrops(state)`. It reads the stack's `minecraft:tool` component: the first rule
 that sets `correct_for_drops` and names the state's block decides, and a stack with no component or no such
 rule is not the correct tool. A rule that sets only a speed is skipped. It ignores whether the block needs a
-tool at all, the player, the position and every hook, so dirt answers `false` for a pickaxe. It returns `None`
-for an unknown state.
+tool at all, the player, the position and every hook, so dirt answers `false` for a pickaxe. It returns
+`None` for an unknown state.
+
+A rule's block tags (`#minecraft:mineable/pickaxe`) are, on the server, the open world's as its data packs
+bind them, the ones the game's own harvest reads, whether you ask through a host or inside a block
+callback's level. A friction part's level reads the game's built-in tags.
+On the client they are the game's built-in tags until the client receives the world's tables.
 
 ## What the game uses for a player
 
@@ -50,6 +55,30 @@ effects, block-break speed, submerged mining and the on-ground penalty, then the
 `player_harvest_check` and `player_break_speed` listeners. It returns the share one tick removes (`0.0` for
 an unbreakable state), so a value of `1.0` or more breaks the block at once. Nothing requires `pos` to hold
 `state`. On a server it answers for a connected or fake player; on a client, for its local player.
+
+A block Part's `destroy_progress` answer for `state` replaces all of that, as a block overriding
+`getDestroyProgress` does in vanilla; the query returns the Part's answer. From inside such an answer the
+query gives the game's math for the state and asks no Part, which is how a block mines as another:
+
+```rust,ignore
+impl BlockPart for MinesAsPedestal {
+    fn destroy_progress(&self, host: HostSide<'_>, event: &mut DestroyProgressEvent) -> Option<f32> {
+        // The query takes a server host.
+        let HostSide::Server(host) = host else {
+            return None;
+        };
+        let level = event.player.level(host)?;
+        let below = [event.pos[0], event.pos[1] - 1, event.pos[2]];
+        let pedestal = level.block_state(host, below)?;
+        event.player.destroy_progress(host, level, below, pedestal)
+    }
+}
+```
+
+`PlayerRef::destroy_progress` takes a server host, so on a client this Part answers `None` and the
+client predicts the block's own progress; the server's dig decides when it breaks. A Part whose
+answer needs no query (a fixed share, or one worked out from the state) answers the same on both
+sides, and the client predicts it.
 
 It runs those three hooks, so it answers `None` from inside any of them, even for a different state. It also
 answers `None` for a stale handle, an unknown state, a dead server player and a level other than the one in

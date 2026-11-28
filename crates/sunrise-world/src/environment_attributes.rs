@@ -77,8 +77,8 @@ fn ambient_cross_fade(
     }
 }
 
-/// `AttributeTypes`. The types without a ported codec are `Other`: their values are kept as
-/// JSON and can only be overridden.
+/// `AttributeTypes`. Complex values (`Other`) use the shared persistent codecs and
+/// retain their JSON representation for consumers that interpret them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Boolean,
@@ -375,6 +375,21 @@ fn channels(color: i32) -> [f32; 4] {
 }
 
 impl Attribute {
+    /// `EnvironmentAttributes`: all visual and audio attributes are syncable;
+    /// the gameplay attributes opt in individually.
+    pub(crate) fn is_syncable(&self) -> bool {
+        self.id.starts_with("visual/")
+            || self.id.starts_with("audio/")
+            || matches!(
+                self.id,
+                "gameplay/sky_light_level"
+                    | "gameplay/water_evaporates"
+                    | "gameplay/fast_lava"
+                    | "gameplay/piglins_zombify"
+                    | "gameplay/creaking_active"
+            )
+    }
+
     /// `EnvironmentAttribute.defaultValue`; `None` for the types not ported yet.
     pub fn default_value(&self) -> Option<Value> {
         Some(match self.default {
@@ -412,11 +427,11 @@ impl Attribute {
             Kind::RgbColor => Value::Rgb(rgb(json)?),
             Kind::ArgbColor => Value::Argb(argb(json)?),
             Kind::AmbientParticles => Value::AmbientParticles(AmbientParticle::parse_list(json)?),
-            // These types' modifiers (`append`, `overlay`) aren't ported yet.
-            Kind::Other if json.get("modifier").is_some() => {
-                return Err("modifiers on this attribute are not ported".into());
+            Kind::Other => {
+                crate::loot::types::validate_environment_value(self, json)
+                    .map_err(|error| error.to_string())?;
+                Value::Other(json.clone())
             }
-            Kind::Other => Value::Other(json.clone()),
         };
         if let (Range::Float(min, max), Value::Float(v)) = (self.range, &value)
             && !(*v >= min && *v <= max)
@@ -475,6 +490,23 @@ fn vector<const N: usize>(json: &Json) -> Option<[f32; N]> {
     Some(out)
 }
 
+/// `ExtraCodecs.STRING_RGB_COLOR`: `#rrggbb`, an int, or three float channels.
+pub(crate) fn packed_rgb(json: &Json) -> Option<u32> {
+    hex(json, 6)
+        .or_else(|| int(json))
+        .or_else(|| {
+            let [r, g, b] = json.as_array()?.as_slice() else {
+                return None;
+            };
+            Some(sunrise_core::color::opaque_rgb_from_floats([
+                r.as_f64()? as f32,
+                g.as_f64()? as f32,
+                b.as_f64()? as f32,
+            ]))
+        })
+        .map(|rgb| rgb as u32 & 0xff_ffff)
+}
+
 /// `ExtraCodecs.STRING_RGB_VEC3_COLOR`: `#rrggbb`, else `[r, g, b]`, else an int.
 fn rgb(json: &Json) -> Result<[f32; 3], String> {
     let from_int = |c: i32| {
@@ -521,8 +553,7 @@ pub enum Entry {
         factor: f32,
     },
     Boolean(BoolOp, bool),
-    /// A modifier of a type not ported yet (`ListModifier.append`, `MobSpawnSettingsModifier`
-    /// `overlay`): kept, and applying it leaves the value as it was.
+    /// `MobSpawnSettingsModifier.overlay`: kept, and applying it leaves the value as it was.
     Unported(Json),
     /// An entry computed when it applies, from the value so far (not vanilla: a resource pack's
     /// expression). `None` leaves the value as it was.
@@ -577,9 +608,6 @@ impl Entry {
         let Some(object) = json.as_object() else {
             return Err(value_error);
         };
-        if attribute.kind == Kind::Other && object.contains_key("modifier") {
-            return Ok(Self::Unported(json.clone()));
-        }
         let op = object
             .get("modifier")
             .and_then(Json::as_str)
@@ -611,8 +639,15 @@ impl Entry {
         };
         Ok(match op {
             "override" => Self::Override(attribute.value(argument)?),
+            // The argument codecs of ListModifier.append and
+            // MobSpawnSettingsModifier.overlay are their attribute's value codec.
             "append" if kind == Kind::AmbientParticles => {
                 Self::AppendAmbientParticles(AmbientParticle::parse_list(argument)?)
+            }
+            "overlay" if attribute.id == "gameplay/natural_mob_spawns" => {
+                crate::loot::types::validate_environment_value(attribute, argument)
+                    .map_err(|error| error.to_string())?;
+                Self::Unported(serde_json::json!({"modifier": op, "argument": argument}))
             }
             "add" => Self::Add(simple(argument)?),
             "subtract" => Self::Subtract(simple(argument)?),
@@ -869,8 +904,13 @@ impl std::fmt::Debug for AttributeMap {
 }
 
 impl AttributeMap {
-    /// `EnvironmentAttributeMap.CODEC`: a JSON object from attribute id to entry.
+    /// `EnvironmentAttributeMap.CODEC`: a JSON object from attribute id to entry. Biomes and
+    /// dimension types read their `attributes` with `optionalFieldOf("attributes", EMPTY)`, so
+    /// an absent field (`null`) is the empty map.
     pub fn parse(json: &Json) -> Result<Self, String> {
+        if json.is_null() {
+            return Ok(Self::default());
+        }
         let map = json.as_object().ok_or("attributes are not an object")?;
         map.iter()
             .map(|(id, entry)| {
@@ -882,9 +922,14 @@ impl AttributeMap {
             .map(Self)
     }
 
-    /// Encode entries read by `parse` for a dimension registry definition. Unported
-    /// attribute values remain opaque, as in the reader. Code-only expressions
-    /// cannot be sent as registry data.
+    /// `EnvironmentAttributeMap.NETWORK_CODEC` omits non-syncable entries.
+    pub(crate) fn into_network_nbt(mut self) -> Result<sunrise_core::nbt::Compound, String> {
+        self.0.retain(|(attribute, _)| attribute.is_syncable());
+        self.into_nbt()
+    }
+
+    /// Encode entries read by `parse`. Code-only expressions cannot be sent
+    /// as registry data.
     pub(crate) fn into_nbt(self) -> Result<sunrise_core::nbt::Compound, String> {
         use sunrise_core::{json_nbt, nbt::Tag};
         fn value(value: Value) -> Result<Tag, String> {
@@ -1072,6 +1117,37 @@ mod finite_tests {
         assert!(refused.unwrap_err().contains("not a finite float"));
         assert!(AttributeMap::parse(&json!({"minecraft:visual/cloud_height": 192.5})).is_ok());
     }
+
+    #[test]
+    fn a_biome_without_attributes_has_the_empty_map() {
+        // A biome as a LimboAPI lobby sends it (#3388): the 1.18 layout, no `attributes`.
+        let biome = json!({
+            "category": "plains",
+            "depth": 0.125,
+            "downfall": 0.4,
+            "effects": {
+                "fog_color": 12638463,
+                "mood_sound": {
+                    "block_search_extent": 8,
+                    "offset": 2.0,
+                    "sound": "minecraft:ambient.cave",
+                    "tick_delay": 6000
+                },
+                "sky_color": 7907327,
+                "water_color": 415920,
+                "water_fog_color": 415920
+            },
+            "has_precipitation": true,
+            "scale": 0.05,
+            "temperature": 0.8
+        });
+        assert!(
+            AttributeMap::parse(&biome["attributes"])
+                .unwrap()
+                .is_empty()
+        );
+        assert!(AttributeMap::parse(&json!([])).is_err());
+    }
 }
 
 #[cfg(test)]
@@ -1139,6 +1215,22 @@ mod ambient_particle_tests {
             json!({"particle": {"type":"minecraft:block"}, "probability":0.5}),
         ] {
             assert!(attribute.value(&json!([invalid])).is_err(), "{invalid}");
+        }
+    }
+
+    /// `Item.CODEC` refuses air while the biome file is decoded, in either form of the item.
+    #[test]
+    fn an_air_item_particle_is_refused_while_decoding() {
+        let attribute = attribute(AMBIENT_PARTICLES).unwrap();
+        let entry =
+            |item| json!([{"particle": {"type":"minecraft:item", "item":item}, "probability":0.5}]);
+        assert!(attribute.value(&entry(json!("minecraft:apple"))).is_ok());
+        for air in [
+            json!("minecraft:air"),
+            json!("air"),
+            json!({"id":"minecraft:air"}),
+        ] {
+            assert!(attribute.value(&entry(air.clone())).is_err(), "{air}");
         }
     }
 

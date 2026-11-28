@@ -178,9 +178,8 @@ fn encode(draws: &[GuiDraw]) -> Vec<Value> {
                 out.push(json!({"type": "item", "slot": slot, "x": x, "y": y, "seed": seed, "matrix": m}));
                 continue;
             }
-            GuiDraw::PlayerFace { .. } => unreachable!("the HUD layout draws no player face op"),
         };
-        if pose != IDENTITY {
+        if !hud_layout::is_identity(&pose) {
             v["matrix"] = json!(pose);
         }
         out.push(v);

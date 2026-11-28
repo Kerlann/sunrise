@@ -218,9 +218,9 @@ impl World {
         let assets = Assets::load(&root).unwrap();
         let facts = BlockFacts::load(&root, assets.registry).unwrap();
         let biomes = Biomes::load(&ResourceRoot::directory(root.clone())).unwrap();
-        let render = assets
-            .reload(&ResourceRoot::directory(root.clone()))
-            .unwrap();
+        let render =
+            crate::assets::RenderAssets::load(&ResourceRoot::directory(root.clone()), &assets)
+                .unwrap();
         Some(Self {
             assets,
             render,
@@ -268,6 +268,7 @@ impl World {
             cutout_leaves: true,
             opaque_ice: false,
             translucent_layers: &[],
+            layer_overrides: &[],
             leaf_culling: LeafCullingMode::Off,
             hidden_states: &[],
             part_tables: Default::default(),

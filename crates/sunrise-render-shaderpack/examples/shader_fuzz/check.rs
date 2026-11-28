@@ -6,7 +6,7 @@ use std::hash::Hasher;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 
-use sunrise_render_shaderpack::pack_atlas::{PackAtlas, TerrainDraws, game_inputs};
+use sunrise_render_shaderpack::pack_atlas::{TerrainDraws, deviceless_game_inputs};
 use sunrise_shaders::{Macros, Pack, Post, PostProgram, Properties};
 
 use crate::cases::{self, DIMENSIONS};
@@ -84,22 +84,10 @@ pub fn load(dir: &Path, request: &Request) -> Post {
     sunrise_shaders::load_post(&pack, &folder, &properties, &macros, &inputs)
 }
 
-/// The game's inputs with a terrain atlas of 1024 x 1024 pixels in 16-pixel sprites: the
-/// atlas's size only reaches the GLSL as constants. `flat` picks the game's flat draws; the
-/// pack's `separateAo` sets the terrain colour's alpha, as the game sets it.
+/// The game's inputs without a device ([`deviceless_game_inputs`]): `flat` picks the game's flat
+/// draws, the others per-section ones as attributes alone.
 pub fn inputs(properties: &Properties, flat: bool) -> sunrise_shaders::GameInputs {
-    let terrain = PackAtlas::terrain_inputs_sized(
-        [1024, 1024],
-        64,
-        16,
-        properties.separate_ao(),
-        TerrainDraws::flat(flat),
-    );
-    sunrise_shaders::GameInputs {
-        // No device: the largest stage interface limits real devices have, not wgpu's defaults.
-        interface_limits: sunrise_shaders::DEVICELESS_INTERFACE_LIMITS,
-        ..game_inputs(Some(terrain), flat, &[3, 4])
-    }
+    deviceless_game_inputs(properties.separate_ao(), TerrainDraws::flat(flat))
 }
 
 /// Every program of `post` with a slot, by slot.
@@ -364,7 +352,7 @@ pub fn oversized(dir: &Path, request: &Request) -> Vec<Failure> {
         .map(|f| cases::in_folder(&folder, &f))
         .filter_map(|f| {
             let pp = sunrise_shaders::preprocess(&pack, &f, &macros);
-            (pp.code.len() > request.size_limit).then(|| {
+            (pp.code().len() > request.size_limit).then(|| {
                 let file = f.rsplit('/').next().unwrap_or(&f).to_owned();
                 Failure::new("size", format!("{file}: preprocessed past the limit"))
             })

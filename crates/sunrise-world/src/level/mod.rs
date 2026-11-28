@@ -180,21 +180,6 @@ pub use fluids::{
     fluid_randomly_ticks, fluid_tick_delay,
 };
 
-/// A write a block's part asks for when an entity is inside it (`Block.entityInside`'s
-/// own `setBlockAndUpdate` or `destroyBlock`), at the block the entity touched. The
-/// level applies each once the entity's batch has ticked, in the order asked, if the
-/// block is still the state the entity touched: the same contract as [`LandingWrite`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum InsideWrite {
-    /// `Level.setBlockAndUpdate(pos, state)`: a pressure plate a part pressed.
-    SetBlock(BlockStateId),
-    /// `Level.destroyBlock(pos, drop)`: the block gone, with its drops or without.
-    DestroyBlock {
-        /// Whether the block drops its resources.
-        drop: bool,
-    },
-}
 /// A write a block's part asks for when an entity lands on it (`Block.fallOn`'s own
 /// `setBlockAndUpdate` or `destroyBlock`), at the block the entity landed on. The level
 /// applies each once the entity's batch has ticked, in the order asked.
@@ -250,15 +235,40 @@ pub fn vanilla_sea_level(level: LevelKey) -> i32 {
     }
 }
 
+#[derive(Default)]
+struct SeaLevels(HashMap<LevelKey, i32>);
+
+impl SeaLevels {
+    fn set(&mut self, levels: Vec<(LevelKey, i32)>) {
+        self.0 = levels.into_iter().collect();
+    }
+
+    fn register(&mut self, level: LevelKey, sea_level: i32) {
+        self.0.insert(level, sea_level);
+    }
+
+    fn registered(&self, level: LevelKey) -> Option<i32> {
+        self.0.get(&level).copied()
+    }
+
+    fn sea_level_of(&self, level: LevelKey) -> i32 {
+        self.registered(level)
+            .unwrap_or_else(|| vanilla_sea_level(level))
+    }
+}
+
 /// The sea level each level's generator builds with (`ChunkGenerator.getSeaLevel`), by level key.
 /// Filled when a world opens from the noise settings its data packs replace (`set_sea_levels`),
 /// and by each level's generator as it opens (`register_sea_level`).
-static SEA_LEVELS: std::sync::LazyLock<RwLock<HashMap<LevelKey, i32>>> =
+static SEA_LEVELS: std::sync::LazyLock<RwLock<SeaLevels>> =
     std::sync::LazyLock::new(Default::default);
 
 /// Replaces every registered sea level, as a world opens.
 pub fn set_sea_levels(levels: Vec<(LevelKey, i32)>) {
-    *SEA_LEVELS.write().unwrap_or_else(|e| e.into_inner()) = levels.into_iter().collect();
+    SEA_LEVELS
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .set(levels);
 }
 
 /// Registers one level's sea level: its generator's, or the one a server sent
@@ -267,7 +277,7 @@ pub fn register_sea_level(level: LevelKey, sea_level: i32) {
     SEA_LEVELS
         .write()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(level, sea_level);
+        .register(level, sea_level);
 }
 
 /// The sea level a mod's level was registered with, if it has one.
@@ -275,14 +285,16 @@ pub fn registered_sea_level(level: LevelKey) -> Option<i32> {
     SEA_LEVELS
         .read()
         .unwrap_or_else(|e| e.into_inner())
-        .get(&level)
-        .copied()
+        .registered(level)
 }
 
 /// A level's sea level: the one its noise settings give (`registered_sea_level`), else the
 /// built-in level's (`vanilla_sea_level`).
 pub fn sea_level_of(level: LevelKey) -> i32 {
-    registered_sea_level(level).unwrap_or_else(|| vanilla_sea_level(level))
+    SEA_LEVELS
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .sea_level_of(level)
 }
 
 /// Game rules consulted by block behaviour (vanilla defaults).
@@ -339,6 +351,10 @@ pub struct LevelEventPlayer(pub u128);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LevelSoundSource {
     Blocks,
+    /// `BlockItem.place`: blocks source, excluding the player predicting the placement.
+    BlockPlacement {
+        except: Option<u32>,
+    },
 }
 
 /// Side effects reported to the caller, in vanilla call order.
@@ -510,6 +526,27 @@ pub trait LevelAccess: BlockEntityNeighbors {
     ) -> Option<bool> {
         None
     }
+    /// NeoForge's `HasFluidInteraction.test` of the native interaction the engine registered as
+    /// `handler`, for the liquid at `pos` against its neighbour `relative`. The default has none.
+    fn fluid_interaction_test(
+        &self,
+        _handler: u32,
+        _pos: BlockPos,
+        _relative: BlockPos,
+        _fluid: FluidState,
+    ) -> bool {
+        false
+    }
+    /// NeoForge's `FluidInteraction.interact` of that handler, which writes the level itself.
+    fn fluid_interaction_interact(
+        &mut self,
+        _ticks: &mut Ticks,
+        _handler: u32,
+        _pos: BlockPos,
+        _relative: BlockPos,
+        _fluid: FluidState,
+    ) {
+    }
     /// Returns the state to place for a liquid conversion, or None to cancel.
     fn fluid_place_block(
         &self,
@@ -548,6 +585,23 @@ pub trait LevelAccess: BlockEntityNeighbors {
         registered: crate::fluid::ModFluidRules,
     ) -> crate::fluid::ModFluidRules {
         registered
+    }
+    /// Whether `fluid` (`water`, `lava` or a mod fluid's id) may flow from `from` one step toward
+    /// `direction`, into `to`, where `FlowingFluid.canMaybePassThrough` is asked: the downward
+    /// step of `spread`, `getSpread`'s side choice and every step of the slope search. Asked only
+    /// after the game's own answer was true, so it can close a side and never open a wall; its
+    /// answer is not cached. The default leaves the side open.
+    #[allow(clippy::too_many_arguments)]
+    fn fluid_passage(
+        &self,
+        _fluid: &'static str,
+        _from: BlockPos,
+        _from_state: BlockStateId,
+        _direction: Direction,
+        _to: BlockPos,
+        _to_state: BlockStateId,
+    ) -> bool {
+        true
     }
     fn allow_block_ignite(&self, _pos: BlockPos, _cause: &'static str) -> bool {
         true
@@ -626,17 +680,15 @@ pub trait LevelAccess: BlockEntityNeighbors {
     fn allow_bell_ring(&self, _pos: BlockPos) -> bool {
         true
     }
-    /// The sound type `state`, just placed at `pos`, plays its place sound from
-    /// (`IBlockExtension.getSoundType`): `sounds`, its own, unless a mod's block part answers
-    /// another (`BlockItem.place`, asked with the placing player, or none when nothing places
-    /// it, such as a dispenser). The default keeps the block's own.
-    fn place_sound_type(
+    /// The contextual placement event and base levels, if a block part changes them
+    /// (`BlockItem.place`, asked with the placer or with no entity for a dispenser).
+    fn override_place_sound(
         &self,
         _pos: BlockPos,
         _state: BlockStateId,
-        sounds: Arc<data::Sounds>,
-    ) -> Arc<data::Sounds> {
-        sounds
+        _placer: Option<u32>,
+    ) -> Option<data::BlockSound> {
+        None
     }
     fn allow_cauldron_level_change(
         &self,
@@ -732,6 +784,19 @@ pub trait LevelAccess: BlockEntityNeighbors {
         _pos: BlockPos,
         _state: BlockStateId,
         _changed: BlockId,
+        _moved: bool,
+    ) {
+    }
+    /// Observe `BlockBehaviour.onPlace` (from `LevelChunk.setBlockState`) before the
+    /// block's own `onPlace` handling, with the level's `ticks`: a write goes through
+    /// `Behaviours::set_block` with them, so its neighbour updates run as vanilla's do.
+    /// `state` is the new state and `old` the one it replaced. The default does nothing.
+    fn observe_on_place(
+        &mut self,
+        _ticks: &mut Ticks,
+        _pos: BlockPos,
+        _state: BlockStateId,
+        _old: BlockStateId,
         _moved: bool,
     ) {
     }
@@ -1069,6 +1134,11 @@ pub trait LevelAccess: BlockEntityNeighbors {
     }
     /// `DimensionType.infiniburn` resolved once for this level; None lets the fire tick resolve the tag from the bundle.
     fn infiniburn(&self) -> Option<&data::BlockSet> {
+        None
+    }
+    /// The blocks of `sunrise:golem_heads`, resolved once for this level with the mods' and data packs'
+    /// members; None is an empty tag, so only `CarvedPumpkinBlock`'s own class completes a golem on place.
+    fn golem_heads(&self) -> Option<&data::BlockSet> {
         None
     }
     /// The level's dimension type.
@@ -1459,8 +1529,12 @@ pub trait GameplayStateSource {
     fn unsigned(&self, name: &str) -> u64;
     fn number(&self, name: &str) -> f64;
     fn text(&self, name: &str) -> &str;
-    fn sound_number(&self, name: &str) -> f64;
-    fn sound_id(&self, name: &str) -> &str;
+    /// The state's placement sound. Raw JSON resolves its event at load; the
+    /// typed gameplay projection already holds the resolved event.
+    fn placement_sound(
+        &self,
+        resolve: &mut dyn FnMut(&str) -> std::io::Result<mod_api::SoundEventKey>,
+    ) -> std::io::Result<data::BlockSound>;
 }
 
 /// Immutable vanilla block-behaviour tables. Build once with [`Behaviours::load`].
@@ -1532,6 +1606,37 @@ impl Behaviours {
     }
     pub fn data(&self, state: BlockStateId) -> &BlockData {
         self.block_data(self.table.block(state))
+    }
+    /// The four physical properties (`Solid`, `Replaceable`, `Liquid`, `SolidRender`) in
+    /// `BlockProperty` order, bound from the loaded behaviour tables.
+    pub fn bound_physical_properties(&self) -> [crate::block_properties::BoundBlockProperty; 4] {
+        use crate::block_properties::{BlockProperty, BoundBlockProperty};
+        let states: Arc<[u8]> = self
+            .facts
+            .iter()
+            .map(|fact| {
+                let mut mask = 0u8;
+                if fact.flags & data::state_flags::SOLID != 0 {
+                    mask |= 1;
+                }
+                if fact.flags & data::state_flags::REPLACEABLE != 0 {
+                    mask |= 2;
+                }
+                if fact.flags & data::state_flags::LIQUID != 0 {
+                    mask |= 4;
+                }
+                if fact.flags & data::state_flags::SOLID_RENDER != 0 {
+                    mask |= 8;
+                }
+                mask
+            })
+            .collect();
+        [
+            BoundBlockProperty::from_flags(states.clone(), BlockProperty::Solid),
+            BoundBlockProperty::from_flags(states.clone(), BlockProperty::Replaceable),
+            BoundBlockProperty::from_flags(states.clone(), BlockProperty::Liquid),
+            BoundBlockProperty::from_flags(states, BlockProperty::SolidRender),
+        ]
     }
     pub fn block(&self, state: BlockStateId) -> BlockId {
         self.table.block(state)
@@ -1648,16 +1753,22 @@ impl Behaviours {
     }
 
     /// Finish the paused write. If the host ran block-entity removal, pass its number of
-    /// jukebox neighbor updates; otherwise the ordinary removal runs here.
+    /// jukebox neighbor updates; otherwise the ordinary removal runs here. `ensure_entity`
+    /// runs at the end of `LevelChunk.setBlockState`, after `onPlace`, before notifications.
     pub fn finish_block_write<L: LevelAccess + ?Sized>(
         &self,
         level: &mut L,
         ticks: &mut Ticks,
         write: BlockWrite,
         removal_updates: Option<u8>,
+        ensure_entity: impl FnOnce(&mut L, BlockPos, BlockStateId),
     ) -> bool {
-        self.sim(level, ticks)
-            .finish_block_write(write, removal_updates, flags::UPDATE_LIMIT)
+        self.sim(level, ticks).finish_block_write(
+            write,
+            removal_updates,
+            flags::UPDATE_LIMIT,
+            ensure_entity,
+        )
     }
     /// `CopperChestBlock.getFromCopperBlock(copperBlock, facing, level, pos)`.
     pub fn copper_chest_from_block<L: LevelAccess + ?Sized>(
@@ -1680,6 +1791,20 @@ impl Behaviours {
         moved_by_piston: bool,
     ) -> bool {
         self.sim(level, ticks).remove_block(pos, moved_by_piston)
+    }
+    /// `Block.spawnDestroyParticles`: fire has no event and straw beds use their own.
+    pub fn destroy_particle_event(&self, state: BlockStateId) -> Option<i32> {
+        let data = self.data(state);
+        if data.is(classes::Class::StrawBed) {
+            Some(2014)
+        } else if data.is(classes::Class::BaseFire)
+            || data.is(classes::Class::Fire)
+            || data.is(classes::Class::SoulFire)
+        {
+            None
+        } else {
+            Some(2001)
+        }
     }
     /// `Level.destroyBlock(pos, dropResources)`: destroy particles (2001),
     /// optional drops, and replacement by the block's fluid.
@@ -1806,6 +1931,36 @@ impl Behaviours {
         state: BlockStateId,
     ) -> bool {
         self.sim(level, ticks).can_survive(state, pos)
+    }
+    /// Read `BlockState.canSurvive` without retaining any tick or wire-cache changes. The live
+    /// signal inputs are read from `signal_reads`; effects requested by the evaluator stay in a
+    /// fresh scratch queue that is dropped before returning.
+    pub fn can_survive_read_only<L: LevelAccess + ?Sized>(
+        &self,
+        level: &mut L,
+        signal_reads: &Ticks,
+        pos: BlockPos,
+        state: BlockStateId,
+    ) -> bool {
+        let mut ticks = Ticks::default();
+        let mut sim = self.sim(level, &mut ticks);
+        sim.signal_reads = Some(signal_reads);
+        sim.can_survive(state, pos)
+    }
+    /// `FireBlock.getIgniteOdds` and `getBurnOdds` of `state` at `pos`, asked from its side
+    /// `face`, as fire itself reads them: `(ignite, burn)`.
+    pub fn fire_odds_read_only<L: LevelAccess + ?Sized>(
+        &self,
+        level: &mut L,
+        signal_reads: &Ticks,
+        pos: BlockPos,
+        state: BlockStateId,
+        face: Direction,
+    ) -> (i32, i32) {
+        let mut ticks = Ticks::default();
+        let mut sim = self.sim(level, &mut ticks);
+        sim.signal_reads = Some(signal_reads);
+        sim.fire_odds(state, pos, face)
     }
     /// `BlockState.updateShape(level, ticks, pos, direction, neighbourPos,
     /// neighbourState, random)`: the state `state` at `pos` would take after its
@@ -2240,59 +2395,31 @@ impl Behaviours {
 mod dimension_key_tests {
     use super::*;
 
-    static SEA_LEVEL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    struct SeaLevelTestGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
-        previous: HashMap<LevelKey, i32>,
-    }
-
-    impl SeaLevelTestGuard {
-        fn new() -> Self {
-            let lock = SEA_LEVEL_TEST_LOCK
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            let previous =
-                std::mem::take(&mut *SEA_LEVELS.write().unwrap_or_else(|e| e.into_inner()));
-            Self {
-                _lock: lock,
-                previous,
-            }
-        }
-    }
-
-    impl Drop for SeaLevelTestGuard {
-        fn drop(&mut self) {
-            *SEA_LEVELS.write().unwrap_or_else(|e| e.into_inner()) =
-                std::mem::take(&mut self.previous);
-        }
-    }
-
     /// A registered level has its own sea level; any other has its built-in level's, and the
     /// table clears.
     #[test]
     fn a_registered_level_has_its_own_sea_level() {
-        let _guard = SeaLevelTestGuard::new();
+        let mut levels = SeaLevels::default();
         let pocket = LevelKey::parse("test:sea_pocket").unwrap();
-        assert_eq!(sea_level_of(pocket), 63);
-        assert_eq!(registered_sea_level(pocket), None);
-        set_sea_levels(vec![(pocket, 120)]);
-        assert_eq!(sea_level_of(pocket), 120);
-        assert_eq!(registered_sea_level(pocket), Some(120));
-        assert_eq!(sea_level_of(LevelKey::NETHER), 32);
-        set_sea_levels(Vec::new());
-        assert_eq!(sea_level_of(pocket), 63);
+        assert_eq!(levels.sea_level_of(pocket), 63);
+        assert_eq!(levels.registered(pocket), None);
+        levels.set(vec![(pocket, 120)]);
+        assert_eq!(levels.sea_level_of(pocket), 120);
+        assert_eq!(levels.registered(pocket), Some(120));
+        assert_eq!(levels.sea_level_of(LevelKey::NETHER), 32);
+        levels.set(Vec::new());
+        assert_eq!(levels.sea_level_of(pocket), 63);
     }
 
     #[test]
     fn a_built_in_level_keeps_the_sea_level_its_generator_registered() {
-        let _guard = SeaLevelTestGuard::new();
+        let mut levels = SeaLevels::default();
         // A superflat Overworld builds with -63, not the Overworld's 63.
-        register_sea_level(LevelKey::OVERWORLD, -63);
-        assert_eq!(sea_level_of(LevelKey::OVERWORLD), -63);
-        assert_eq!(sea_level_of(LevelKey::NETHER), 32);
-        set_sea_levels(Vec::new());
-        assert_eq!(sea_level_of(LevelKey::OVERWORLD), 63);
+        levels.register(LevelKey::OVERWORLD, -63);
+        assert_eq!(levels.sea_level_of(LevelKey::OVERWORLD), -63);
+        assert_eq!(levels.sea_level_of(LevelKey::NETHER), 32);
+        levels.set(Vec::new());
+        assert_eq!(levels.sea_level_of(LevelKey::OVERWORLD), 63);
     }
 
     #[test]

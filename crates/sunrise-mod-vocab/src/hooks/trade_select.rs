@@ -1,10 +1,9 @@
 //! The `trade_select` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0337
 
 pub trait Hooks {
     /// A server player selected trade `index` from `villager` in the trading menu.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_trade_select",
+        target = "sunrise_gameplay::game::native_hooks::base::ServerGame<'_>::native_trade_select",
         dispatch = "flat",
         side = "server",
         contract = "listen",

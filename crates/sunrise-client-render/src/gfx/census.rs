@@ -1,10 +1,10 @@
 //! What the renderer holds, for status, soak tests and memory reports (`sunrise-ctl memory`,
-//! `scene_replay --memory`): resident sections and far tiles, and the bytes of its largest
+//! `scene_replay --memory`): resident sections, and the bytes of its largest
 //! GPU resources and of its per-section bookkeeping.
 
 use std::{collections::HashMap, mem::size_of, ops::Deref};
 
-use super::{Renderer, SectionKey, arena, flat, lod, texture_bytes, visbuffer};
+use super::{Renderer, SectionKey, arena, flat, texture_bytes, visbuffer};
 use crate::fast_hash::FxHashMap;
 
 type SectionBlock = ([i32; 3], u32);
@@ -81,7 +81,7 @@ impl Deref for SectionLists {
 pub struct RendererMemorySnapshot {
     device: wgpu::Device,
     vertices: [u64; 2],
-    cpu: [(&'static str, usize); 4],
+    cpu: [(&'static str, usize); 2],
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -91,13 +91,13 @@ const _: fn() = || {
 };
 
 impl RendererMemorySnapshot {
-    /// Vertex arena allocation and vertex bytes in the current near/far meshes.
+    /// Vertex arena allocation and vertex bytes in the resident meshes.
     pub fn section_vertex_bytes(&self) -> [u64; 2] {
         self.vertices
     }
 
     /// Heap bytes of renderer per-section bookkeeping, by name.
-    pub fn cpu_census(&self) -> [(&'static str, usize); 4] {
+    pub fn cpu_census(&self) -> [(&'static str, usize); 2] {
         self.cpu
     }
 
@@ -138,62 +138,45 @@ impl Renderer {
     pub fn resident_sections(&self) -> usize {
         self.sections.len()
     }
-    /// Quads of the far terrain tiles with GPU buffers.
-    pub fn lod_quads(&self) -> u64 {
-        self.lods
-            .values()
-            .map(|tile| u64::from(tile.mesh.solid + tile.mesh.translucent))
-            .sum()
+    /// Whether solid quads go to the arena in the compact layout.
+    pub fn packed_layout(&self) -> bool {
+        self.packed_quads
     }
-    /// Tiles and quads of the far terrain tiles with GPU buffers, by level.
-    pub fn lod_levels(&self) -> Vec<[u64; 2]> {
-        let mut levels = Vec::new();
-        for (key, tile) in &self.lods {
-            let level = usize::from(key.level);
-            if levels.len() <= level {
-                levels.resize(level + 1, [0, 0]);
-            }
-            levels[level][0] += 1;
-            levels[level][1] += u64::from(tile.mesh.solid + tile.mesh.translucent);
-        }
-        levels
-    }
-    /// Whether solid quads go to the arena in the compact layout
-    /// (`packed_quads`), and whether far tiles' own records are on
-    /// (`lod::packed::far_packing`).
-    pub fn packed_layout(&self) -> [bool; 2] {
-        [self.packed_quads, crate::lod::packed::far_packing()]
-    }
-    /// Whether the section arena's pages are storage too (`follow_arena_storage`), and the
+    /// Whether the section arena's pages are storage too (`follow_arena_layout`), and the
     /// vertices a page of it holds (`Arena::page_limit`).
     pub fn section_arena_pages(&self) -> (bool, u64) {
         (self.arena_storage, self.arena.page_vertices())
     }
-    /// Whether the section arena keeps its quads' sources for a `shaders/` pack's flat terrain
-    /// (`keep_pack_sources`): with none, its pages have no sidecars.
+    /// Whether translucent quads have an arena of their own (`follow_translucent_layout`).
+    pub fn translucent_split(&self) -> bool {
+        self.translucent_arena.is_some()
+    }
+    /// Whether the section arena's pages, and the translucent arena's where it has one, have a
+    /// normal stream (`follow_arena_layout`), and the bytes of the section arena's pages.
+    pub fn section_arena_normals(&self) -> (bool, bool, u64) {
+        let translucent = self.translucent_arena.as_ref();
+        (
+            self.arena.has_normals(),
+            translucent.is_some_and(|a| a.has_normals()),
+            self.arena.bytes(),
+        )
+    }
+    /// Whether the section arena keeps its quads' sources for a `shaders/` pack's terrain drawn
+    /// flat or per section reading the pages (`keep_pack_sources`): with none, its pages have no
+    /// sidecars.
     pub fn keeps_pack_sources(&self) -> bool {
         self.arena.sources_read()
     }
-    /// Bytes of the arena the resident chunk sections hold, and of the one far
-    /// tiles hold: the same split `gpu_census` reports, for `status`, so the
-    /// compact layouts can be seen working.
-    pub fn vertex_bytes_split(&self) -> [u64; 2] {
-        [self.sections.vertex_bytes(), self.lod_vertex_bytes]
-    }
-    /// Bytes of the section vertex arenas' buffers, and of the vertices held
-    /// by resident sections and current far tiles.
+    /// Bytes allocated for section vertex arenas and used by resident sections.
     pub fn section_vertex_bytes(&self) -> [u64; 2] {
-        let [near, far] = self.vertex_bytes_split();
         let translucent = self.translucent_arena.as_ref();
         let arenas = self.arena.bytes() + translucent.map_or(0, arena::Arena::bytes);
-        [arenas, near + far]
+        [arenas, self.sections.vertex_bytes()]
     }
     /// Bytes of the renderer's largest GPU resources, by name (`scene_replay --memory`):
-    /// the terrain arenas (their pages, and what resident sections and far tiles use of
-    /// them), the quad indices, the block sprites with their mips, the LabPBR maps, flat
-    /// draws' buffers and the visibility buffer's.
+    /// the terrain arenas, the quad indices, the block sprites with their mips, the LabPBR maps, a shader
+    /// pack's material atlases, flat draws' buffers and the visibility buffer's.
     pub fn gpu_census(&self) -> Vec<(&'static str, u64)> {
-        let [near, far] = self.vertex_bytes_split();
         let textures = |t: &[wgpu::Texture]| t.iter().map(texture_bytes).sum::<u64>();
         let translucent = self.translucent_arena.as_ref();
         vec![
@@ -203,8 +186,7 @@ impl Renderer {
                 translucent.map_or(0, arena::Arena::bytes),
             ),
             ("sorted_index_pages", self.sorted_indices.bytes()),
-            ("near_section_vertices", near),
-            ("far_tile_vertices", far),
+            ("section_vertices", self.sections.vertex_bytes()),
             ("quad_indices", self.indices.size()),
             ("block_sprites", textures(&self.sprite_textures)),
             (
@@ -212,6 +194,12 @@ impl Renderer {
                 self.pbr_maps
                     .as_ref()
                     .map_or(0, |maps| maps.iter().flatten().map(texture_bytes).sum()),
+            ),
+            (
+                "pack_material_atlases",
+                self.pack_material_atlases.as_ref().map_or(0, |atlases| {
+                    atlases.iter().map(|a| texture_bytes(a.texture())).sum()
+                }),
             ),
             (
                 "flat_draws",
@@ -230,17 +218,11 @@ impl Renderer {
         allocator_memory(&self.device)
     }
     /// Heap bytes of the renderer's per-section bookkeeping (`sunrise-ctl memory`):
-    /// resident sections, far tiles, block entities and light sources by section.
-    pub fn cpu_census(&self) -> [(&'static str, usize); 4] {
+    /// resident sections and block entities by section.
+    pub fn cpu_census(&self) -> [(&'static str, usize); 2] {
         [
             ("resident_sections", self.sections.heap_bytes()),
-            (
-                "far_tiles",
-                self.lods.capacity()
-                    * (size_of::<crate::lod::TileKey>() + size_of::<lod::Tile>() + 1),
-            ),
             ("block_entities", self.block_entities.heap_bytes()),
-            ("light_sources", self.light_blocks.heap_bytes()),
         ]
     }
 }

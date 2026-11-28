@@ -1,5 +1,4 @@
 //! The `map_decorations` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0146
 
 pub trait Hooks {
     /// Icons a mod puts on map `map` each time it is drawn: held, in an
@@ -15,7 +14,7 @@ pub trait Hooks {
     /// The client half of `MapDecorationType` and `addDecoration`: a type
     /// registered on the server and saved in the map's data is not here.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_map_decorations",
+        target = "sunrise_client_gameplay::game::native_hooks::base::ClientGame<'_>::native_map_decorations",
         receiver = "read",
         dispatch = "flat",
         side = "client",

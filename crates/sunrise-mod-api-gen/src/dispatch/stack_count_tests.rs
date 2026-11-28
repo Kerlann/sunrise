@@ -44,8 +44,10 @@ fn only_container_loot_filled_changes_when_stack_count_marker_is_removed() {
                     .collect::<Vec<_>>()
             };
             assert_eq!(fills(&marked), fills(&ordinary));
-            let marked_lines: Vec<_> = marked.fire.lines().collect();
-            let ordinary_lines: Vec<_> = ordinary.fire.lines().collect();
+            let marked = render_fire(&marked.fire);
+            let ordinary = render_fire(&ordinary.fire);
+            let marked_lines: Vec<_> = marked.lines().collect();
+            let ordinary_lines: Vec<_> = ordinary.lines().collect();
             assert_eq!(marked_lines.len(), ordinary_lines.len());
             let mut changes = 0;
             for (marked, ordinary) in marked_lines.iter().zip(&ordinary_lines) {
@@ -57,7 +59,7 @@ fn only_container_loot_filled_changes_when_stack_count_marker_is_removed() {
                 }
             }
             assert_eq!(changes, 1);
-            assert!(!marked.fire.contains("native_hooks::container_loot_filled"));
+            assert!(!marked.contains("native_hooks::container_loot_filled"));
         })
         .unwrap()
         .join()
@@ -72,6 +74,7 @@ fn count_policy_applies_only_to_the_named_output() {
         &[("extra".into(), &stacks)],
         Some(&output),
         true,
+        false,
         "AnyCollector",
         false,
         None,
@@ -82,11 +85,11 @@ fn count_policy_applies_only_to_the_named_output() {
     .unwrap();
     let (extra, drops) = crossing
         .before
-        .split_once("let mut __accepted_drops")
+        .split_once("let mut __journal_drops")
         .unwrap();
-    assert!(extra.contains("value.try_into_engine(&**items)?"));
+    assert!(extra.contains("value.try_into_engine(&**items)"));
     assert!(!extra.contains("value.try_into_engine_preserving_count"));
-    assert!(drops.contains("value.try_into_engine_preserving_count(&**items)?"));
+    assert!(drops.contains("value.try_into_engine_preserving_count(&**items)"));
 }
 
 #[test]
@@ -103,11 +106,8 @@ fn declared_stack_collectors_use_the_same_count_conversion() {
         )
     };
     let sources = emit(std::iter::once(&hook), &[], true).unwrap();
-    assert!(sources.fire.contains("try_into_engine_preserving_count"));
-    assert!(
-        sources
-            .fire
-            .contains("let AnyCollectorCall { drops } = call;")
-    );
-    syn::parse_file(&sources.fire).unwrap();
+    let fire = render_fire(&sources.fire);
+    assert!(fire.contains("try_into_engine_preserving_count"));
+    assert!(fire.contains("let AnyCollectorCall { drops } = call;"));
+    syn::parse_file(&fire).unwrap();
 }

@@ -22,7 +22,7 @@ pub use crate::pack_post::construction::{
 pub use crate::pack_weather::Weather;
 
 /// The texture behind a pack sampler name.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Source {
     Color(usize),
     Depth,
@@ -57,6 +57,10 @@ pub enum Source {
     ShadowColor(usize),
     /// The boats' water patches' depth (`sunrise_shaders::WATER_MASK`), for translucent terrain.
     WaterMask,
+    /// A mod-declared auxiliary full depth target (index into `PackPost::mod_depth_decls`).
+    ModDepth(usize),
+    /// A mod-declared auxiliary opaque-depth snapshot (index into `PackPost::mod_depth_decls`).
+    ModOpaqueDepth(usize),
 }
 
 #[derive(Clone)]
@@ -96,7 +100,9 @@ impl SamplerKind {
             | Source::Depth1
             | Source::Depth2
             | Source::ShadowDepth(_, false)
-            | Source::WaterMask => Self::Nearest,
+            | Source::WaterMask
+            | Source::ModDepth(_)
+            | Source::ModOpaqueDepth(_) => Self::Nearest,
             Source::Noise => Self::Repeat,
             Source::Shadow | Source::ShadowDepth(_, true) => Self::Comparison,
             // Blocks look as the game draws them: nearest texels. Between levels, Iris 1.11.7
@@ -367,10 +373,13 @@ pub enum Pipeline {
     Render(Slot<wgpu::RenderPipeline>),
     Compute {
         pipeline: Slot<wgpu::ComputePipeline>,
-        /// `workGroups`, else `workGroupsRender` and the local size.
-        groups: Option<[u32; 3]>,
-        render: [f32; 2],
-        local: [u32; 3],
+        dispatch: Dispatch,
+    },
+    /// A composite-style program whose fragment stage writes no buffer and no image: it draws
+    /// nothing, and only its compute stages (2.6) and forced flips (6.1.6) run at its place in
+    /// the chain. `storage`: its fragment stage binds storage buffers, and so is left out.
+    NoDraw {
+        storage: bool,
     },
 }
 
@@ -393,8 +402,12 @@ pub struct Pass {
     pub block: Vec<u8>,
     /// Shader-declared defaults must survive a reset of the mutable upload block.
     pub initial_block: Vec<u8>,
-    /// (index into `pack_uniforms::NAMES`, declared type, offset).
+    /// `(index into FrameUniforms::values if the name has one, declared type, offset)` for
+    /// built-in and custom pack uniforms. A slot a mod uniform handles, bound or type-mismatched
+    /// (a mismatch stays zero), is in neither this list nor `mod_uniforms`' upload.
     pub uniforms: Vec<(Option<usize>, String, u32)>,
+    /// Mod-declared frame uniforms bound to this pass: `(table_index, is_previous, std140_offset)`.
+    pub mod_uniforms: Vec<(usize, bool, u32)>,
     pub samplers: Vec<Binding>,
     /// (location, buffer) of each output that reaches a buffer.
     pub writes: Vec<(u32, usize)>,
@@ -425,6 +438,12 @@ pub struct Pass {
     pub groups: HashMap<u64, wgpu::BindGroup>,
     /// The same for End portal draws, with `end_portal.png` bound as the atlas.
     pub portal_groups: HashMap<u64, wgpu::BindGroup>,
+    /// The same for a mod's dynamic textures (`Draw::texture`), by texture handle: the revision
+    /// of the texture the groups were made for, and the groups.
+    pub dynamic_groups: HashMap<u64, (u64, HashMap<u64, wgpu::BindGroup>)>,
+    /// The same for native terrain quads (`Draw::block_atlas`), with the block atlas bound as
+    /// the atlas (`PackPost::block_atlas_group`).
+    pub block_atlas_groups: HashMap<u64, wgpu::BindGroup>,
     /// (binding, target) of each image: for a buffer, the side its sampler reads.
     pub images: Vec<(u32, Image)>,
     /// Binds the pack's storage buffers in set 4.
@@ -454,19 +473,63 @@ impl Pass {
     /// Back to the uniform values the pass was made with, and no bind groups.
     pub fn reset_history(&mut self) {
         self.block.clone_from(&self.initial_block);
-        self.groups.clear();
-        self.portal_groups.clear();
+        self.forget_groups();
         for compute in &mut self.compute {
             compute.reset_history();
         }
+    }
+
+    /// Drops every cached bind group of the pass: the plain ones, the End portal ones, the
+    /// dynamic texture ones and the block atlas ones, which all name the same buffers.
+    pub fn forget_groups(&mut self) {
+        self.groups.clear();
+        self.portal_groups.clear();
+        self.dynamic_groups.clear();
+        self.block_atlas_groups.clear();
+        if let Pipeline::Compute {
+            dispatch: Dispatch::Indirect(indirect),
+            ..
+        } = &mut self.pipeline
+        {
+            indirect.forget_group();
+        }
+    }
+
+    /// Whether what the pass does depends on the pack's storage buffers: it binds them, or
+    /// reads its work-group counts from one (`indirect.<pass>`).
+    pub fn reads_buffers(&self) -> bool {
+        self.buffers
+            || matches!(
+                self.pipeline,
+                Pipeline::Compute {
+                    dispatch: Dispatch::Indirect(_),
+                    ..
+                }
+            )
     }
 
     pub fn render(&self) -> &wgpu::RenderPipeline {
         match &self.pipeline {
             Pipeline::Render(p) => p.get().expect("compiled with its pack"),
             Pipeline::Compute { .. } => unreachable!("a compute pass draws nothing"),
+            Pipeline::NoDraw { .. } => {
+                unreachable!("a pass of compute stages and flips draws nothing")
+            }
         }
     }
+}
+
+/// How many work groups a compute pass runs, decided once when it is built.
+#[derive(Clone)]
+pub enum Dispatch {
+    /// `workGroups`, else `workGroupsRender` and the local size.
+    Direct {
+        groups: Option<[u32; 3]>,
+        render: [f32; 2],
+        local: [u32; 3],
+    },
+    /// `indirect.<pass>`: the counts are read from a storage buffer.
+    Indirect(Box<crate::pack_post::indirect::IndirectDispatch>),
 }
 
 /// One side of a buffer with mipmaps.
@@ -497,6 +560,10 @@ pub struct Targets {
     pub depth2: Option<(wgpu::Texture, wgpu::TextureView)>,
     /// The boats' water patches' depth, when translucent terrain reads it (`Source::WaterMask`).
     pub water_mask: Option<(wgpu::Texture, wgpu::TextureView)>,
+    /// Mod-declared auxiliary full depth targets, allocated lazily only when sampled by the pack.
+    pub mod_depth: Vec<Option<(wgpu::Texture, wgpu::TextureView)>>,
+    /// Mod-declared auxiliary opaque-depth copies, allocated lazily only when sampled by the pack.
+    pub mod_opaque_depth: Vec<Option<(wgpu::Texture, wgpu::TextureView)>>,
     /// Both sides' mip chains of the buffers with mipmaps (`color` is their first level).
     pub mips: [Option<[Mips; 2]>; BUFFERS],
     /// Where a pass that both samples and stores a buffer samples it from.
@@ -512,8 +579,9 @@ pub struct Targets {
 pub struct World<'a> {
     /// The block atlas and its size.
     pub atlas: Option<(wgpu::TextureView, [u32; 2])>,
-    /// Of a stitched block atlas, each sprite layer's place (`PackAtlas::rects_table`); empty
-    /// for a grid.
+    /// Each sprite layer's place in the block atlas (`PackAtlas::rects_table`), stitched or a
+    /// grid: flat terrain reads it, and native terrain quads are placed by it
+    /// (`pack_entities::BlockAtlas`).
     pub sprite_rects: &'a [u32],
     pub material_maps: Option<[wgpu::TextureView; 2]>,
     pub lightmap: wgpu::TextureView,
@@ -550,9 +618,11 @@ pub struct Clouds {
     pub quads: u32,
 }
 
-/// Shadow cache: the key of the shadow map the shadow targets hold. Only the
-/// shadow passes write those targets, so while the key matches they still hold
-/// it and the pass is skipped.
+/// Shadow cache: the key of the shadow map the shadow targets hold. Matching the key is necessary
+/// to skip redrawing the shadow passes; reuse is still disabled by shadow entities, shadow-slot
+/// mod draws, pack custom images, shadowcolor image bindings outside the shadow stage,
+/// shadow-stage use of storage buffers (including indirect dispatch), or shadow-stage writes to a
+/// kept (non-cleared) shadowcolor buffer.
 #[derive(Default)]
 pub struct ShadowCache {
     pub key: Option<ShadowCacheKey>,
@@ -569,5 +639,7 @@ pub struct ShadowCacheKey {
     pub shadow_scene_revision: (u64, u64),
     pub ticks: u64,
     pub day_time: i64,
+    /// Hash of `pass.uniforms` (from `FrameUniforms::values`) and active `pass.mod_uniforms`
+    /// values across the shadow passes and their attached compute stages.
     pub shadow_uniforms_hash: u64,
 }

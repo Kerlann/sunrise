@@ -3,8 +3,8 @@
 //! `Capabilities.Item.ENTITY`). A player's inventory is the game's own answer for a player.
 use crate::{
     Capability, ComponentId, Direction, EnergyHandler, EntityRef, EquipmentSlot, FluidResource,
-    Host, ItemPlace, ItemResource, Overanswered, PREVENT_ARMOR_CHANGE, ProvidedBy, ResourceHandler,
-    ServerHost, Tag, TransactionContext, TransactionError, backend_of,
+    Host, ItemPlace, ItemResource, Overanswered, PREVENT_ARMOR_CHANGE, ResourceHandler, ServerHost,
+    Tag, TransactionContext, TransactionError, backend_of,
 };
 use std::marker::PhantomData;
 
@@ -35,8 +35,11 @@ impl<T: ?Sized + 'static, C: 'static> EntityCapabilityKey<T, C> {
 /// An entity's items, as NeoForge 26.3's `Capabilities.Item.ENTITY`. The game answers it for a
 /// player with their inventory (`PlayerInventoryWrapper`): indices as vanilla's `Inventory`
 /// numbers them, 0..36 the main inventory (0..9 the hotbar), 36..40 the armour from feet to
-/// head, 40 the off hand. For a chest or hopper minecart, a chest boat, or a chested donkey,
-/// mule or llama, it answers with their container's slots ([`ItemPlace::EntitySlot`]).
+/// head, 40 the off hand. Extracting a stack with the [`PREVENT_ARMOR_CHANGE`] effect from a
+/// player's armour slot returns `Ok(0)` unless the player is in creative mode
+/// (`ArmorSlot.mayPickup` checks `Player.isCreative`); the infinite-materials ability does not
+/// affect it. For a chest or hopper minecart, a chest boat, or a chested donkey, mule or llama,
+/// it answers with their container's slots ([`ItemPlace::EntitySlot`]).
 pub const ENTITY_ITEMS: EntityCapabilityKey<dyn ResourceHandler<ItemResource>> =
     EntityCapabilityKey {
         name: "sunrise:entity_items",
@@ -107,23 +110,20 @@ impl EntityRef {
         if !self.level(host)?.in_place(host) {
             return None;
         }
+        let Some(providers) = crate::entity_providers(key, host, self, context) else {
+            return key.default.and_then(|default| {
+                default(host, self, context).map(|handler| Capability {
+                    handler,
+                    owner: None,
+                })
+            });
+        };
         let mut game = None;
-        let table = host.capability_providers();
-        let kind = table
-            .provided(ProvidedBy::Entity, key.name)
-            .then(|| self.kind(host)?.id(host))
-            .flatten();
-        let mut index = 0;
         crate::answered(
-            crate::ask_providers(
-                host,
-                || table.entity_provider(key.name, kind.as_deref()?, &mut index),
-                |provider, host| provider.get::<T, C>()?.provide(host, self, context),
-                |host| {
-                    game = key.default.and_then(|default| default(host, self, context));
-                    game.is_some()
-                },
-            ),
+            providers.answer(host, |host| {
+                game = key.default.and_then(|default| default(host, self, context));
+                game.is_some()
+            }),
             game,
         )
     }
@@ -467,11 +467,11 @@ impl ResourceHandler<ItemResource> for PlayerItems {
         let Some(place) = self.place(host, index) else {
             return Ok(0);
         };
-        // `ArmorSlot.mayPickup`: bound armour stays on outside creative.
+        // `ArmorSlot.mayPickup`: bound armour stays on outside creative (`Player.isCreative`).
         let bound = resource.has_enchantment_effect(host, PREVENT_ARMOR_CHANGE);
         if (MAIN..OFF_HAND).contains(&index) && bound {
             let player = host.player(self.player);
-            if player.and_then(|player| player.has_infinite_materials(host)) != Some(true) {
+            if player.and_then(|player| player.is_creative(host)) != Some(true) {
                 return Ok(0);
             }
         }

@@ -294,6 +294,63 @@ impl Clone for Box<dyn Identities> {
         (**self).clone_box()
     }
 }
+/// A catalog bound to an existing entity's supplier. Maps created from it
+/// share the immutable defaults but each owns its instances and dirty queues.
+pub struct Supplier {
+    catalog: Arc<Catalog>,
+    bases: Arc<[Option<f64>]>,
+}
+impl Supplier {
+    pub fn bind(catalog: Arc<Catalog>, entity: &str) -> Option<Self> {
+        let bases = catalog.default_bases(entity)?;
+        Some(Self { catalog, bases })
+    }
+    pub fn catalog(&self) -> &Arc<Catalog> {
+        &self.catalog
+    }
+    pub fn base(&self, id: AttributeId) -> Option<f64> {
+        self.bases[id.index()]
+    }
+    pub fn create<G: FnMut() -> i32>(&self, next_identity: G) -> LiveAttributes<G> {
+        self.create_with_hashes(AttributeId::registry_id, next_identity)
+    }
+    pub fn with_identities<G: FnMut() -> i32>(
+        &self,
+        holder_hashes: &[i32],
+        next_identity: G,
+    ) -> Result<LiveAttributes<G>, Error> {
+        if holder_hashes.len() != self.bases.len() {
+            return Err(Error::InvalidHolderHashes);
+        }
+        Ok(self.create_with_hashes(|id| holder_hashes[id.index()], next_identity))
+    }
+    fn create_with_hashes<G: FnMut() -> i32>(
+        &self,
+        hash: impl Fn(AttributeId) -> i32,
+        next_identity: G,
+    ) -> LiveAttributes<G> {
+        let keys = self
+            .catalog
+            .attributes()
+            .map(|(id, _)| Key {
+                catalog: self.catalog.clone(),
+                id,
+                hash: hash(id),
+            })
+            .collect();
+        LiveAttributes {
+            map: AttributeMap::default(),
+            data: Data {
+                catalog: self.catalog.clone(),
+                bases: self.bases.clone(),
+                keys,
+                owner: Arc::new(()),
+                nodes: Vec::new(),
+                next_identity,
+            },
+        }
+    }
+}
 /// Owns an entity's instances and pending queues. Holder hashes come from the
 /// registry runtime; instance hashes come from the supplied identity allocator.
 /// Supplying oracle hashes permits reproducible JVM-order differential checks.
@@ -309,29 +366,9 @@ impl<G: FnMut() -> i32> LiveAttributes<G> {
         holder_hashes: &[i32],
         next_identity: G,
     ) -> Result<Self, Error> {
-        let bases = catalog.default_bases(entity).ok_or(Error::UnknownEntity)?;
-        if holder_hashes.len() != bases.len() {
-            return Err(Error::InvalidHolderHashes);
-        }
-        let keys = catalog
-            .attributes()
-            .map(|(id, _)| Key {
-                catalog: catalog.clone(),
-                id,
-                hash: holder_hashes[id.index()],
-            })
-            .collect();
-        Ok(Self {
-            map: AttributeMap::default(),
-            data: Data {
-                catalog,
-                bases,
-                keys,
-                owner: Arc::new(()),
-                nodes: Vec::new(),
-                next_identity,
-            },
-        })
+        Supplier::bind(catalog, entity)
+            .ok_or(Error::UnknownEntity)?
+            .with_identities(holder_hashes, next_identity)
     }
     pub fn catalog(&self) -> &Arc<Catalog> {
         &self.data.catalog
@@ -363,6 +400,17 @@ impl<G: FnMut() -> i32> LiveAttributes<G> {
             return self.data.instance_read(&handle, kind);
         }
         self.data.supplier_read(key.as_ref(), kind)
+    }
+    /// The resident modifiers in addition order. A supported attribute without an
+    /// instance has no modifiers; an unknown or unsupported attribute has no slice.
+    pub fn modifiers(&self, name: &str) -> Option<&[Modifier]> {
+        let id = self.data.catalog.id(name)?.index();
+        let key = &self.data.keys[id];
+        if let Some(handle) = self.map.instances.get(Some(key)) {
+            return Some(self.data.nodes[handle.index].value.modifiers());
+        }
+        self.data.bases[id]?;
+        Some(&[])
     }
     /// The computed value exactly as the instance's cache holds it, without
     /// recomputing a dirty instance. An absent instance reads its supplier

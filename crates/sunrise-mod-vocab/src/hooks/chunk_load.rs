@@ -1,5 +1,4 @@
 //! The `chunk_load` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0065
 
 pub trait Hooks {
     /// Chunk `chunk` (`[x, z]`, in chunks) of `dimension` came into the world
@@ -17,7 +16,7 @@ pub trait Hooks {
     /// is not in that copy, and is dropped with the chunk.
     /// Server-side.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_chunk_load",
+        target = "sunrise_gameplay::game::native_hooks::base::ServerGame<'_>::native_chunk_load",
         dispatch = "flat",
         side = "server",
         contract = "listen",

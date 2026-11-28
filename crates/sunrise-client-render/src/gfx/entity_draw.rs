@@ -3,7 +3,10 @@ use super::*;
 /// entity.wgsl after the OverlayTexture constants and the particle overlay marker it reads.
 pub(super) fn entity_shader() -> String {
     crate::overlay::wgsl_constants()
-        + &format!("const EXPLICIT_PARTICLE_OVERLAY: u32 = {EXPLICIT_PARTICLE_OVERLAY}u;\n")
+        + &format!(
+            "const EXPLICIT_PARTICLE_OVERLAY: u32 = {EXPLICIT_PARTICLE_OVERLAY}u;\n\
+             const ARMOR_GLINT_ONLY_OVERLAY: u32 = {ARMOR_GLINT_ONLY_OVERLAY}u;\n"
+        )
         + include_str!("../hdr_light.wgsl")
         + include_str!("../entity.wgsl")
 }
@@ -95,6 +98,39 @@ pub(crate) struct EntityPipelineOptions<'a> {
     pub(super) vertex: &'a str,
     pub(super) fragment: &'a str,
     pub(super) write_mask: wgpu::ColorWrites,
+}
+
+/// The additive, depth-tested pipeline for `RenderPipelines.ENERGY_SWIRL` and foil without
+/// its armor color pass. Clipped secondary views give the foil the same bias as their entities.
+pub(super) fn energy_swirl_options(clipped: bool) -> EntityPipelineOptions<'static> {
+    let one_one = wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::One,
+        dst_factor: wgpu::BlendFactor::One,
+        operation: wgpu::BlendOperation::Add,
+    };
+    EntityPipelineOptions {
+        label: if clipped {
+            "Foil (clipped world view)"
+        } else {
+            "Energy swirls"
+        },
+        cull_mode: None,
+        depth_write: false,
+        compare: wgpu::CompareFunction::GreaterEqual,
+        bias: Default::default(),
+        blend: wgpu::BlendState {
+            color: one_one,
+            alpha: one_one,
+        },
+        clouds: false,
+        vertex: "vs_entity",
+        fragment: if clipped {
+            "fs_foil_clipped"
+        } else {
+            "fs_energy_swirl"
+        },
+        write_mask: wgpu::ColorWrites::ALL,
+    }
 }
 
 /// Constructs the entity shader pipelines shared by the renderer and its pixel tests.
@@ -222,6 +258,16 @@ impl Renderer {
             incoming,
             self.device.limits().max_buffer_size,
         )
+    }
+
+    /// Device-derived vertex and index byte capacities for the combined entity batch.
+    pub fn entity_quad_capacity(&self) -> EntityQuadCapacity {
+        EntityQuadCapacity::from_limits(&self.device.limits(), self.entity_skin.is_some())
+    }
+
+    /// Whether frame generation is enabled (duplicating first-person hand geometry in the batch).
+    pub fn frame_generation_on(&self) -> bool {
+        self.frame_gen.on
     }
 
     pub(super) fn finish_prepared_frame(&mut self) {

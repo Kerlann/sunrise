@@ -24,11 +24,7 @@ fn music_volume_attribute() -> &'static Attribute {
 }
 
 /// Static `SOUND_EVENT` registry, not the resource pack's playable sound pools.
-pub(crate) fn registered_sound(builtin: &Builtin, name: &str) -> bool {
-    builtin
-        .get("minecraft:sound_event")
-        .is_some_and(|ids| ids.ids.contains_key(name))
-}
+pub(crate) use crate::mod_content::biomes::registered_sound;
 
 /// The Music page's groups: each built-in situation's own tracks first, then
 /// every other `music.` event's tracks that no earlier group listed, under
@@ -38,7 +34,16 @@ pub(crate) fn registered_sound(builtin: &Builtin, name: &str) -> bool {
 pub fn track_groups(registry: &SoundRegistry) -> Vec<MusicGroup> {
     let mut groups: Vec<MusicGroup> = Vec::new();
     let mut listed: Vec<String> = Vec::new();
-    let builtin = Music::builtin();
+    // Built-in situations the Music settings page lists, in its order.
+    let builtin = [
+        ("sunrise.pages.music.menu", Music::menu()),
+        ("sunrise.pages.music.overworld", Music::game()),
+        ("sunrise.pages.music.creative", Music::creative()),
+        ("sunrise.pages.music.underwater", Music::under_water()),
+        ("sunrise.pages.music.end", Music::end()),
+        ("sunrise.pages.music.boss", Music::end_boss()),
+        ("sunrise.pages.music.credits", Music::credits()),
+    ];
     for (label, music) in &builtin {
         let tracks = registry.tracks(&music.sound);
         if tracks.is_empty() {
@@ -1066,6 +1071,44 @@ mod tests {
         }
         // Records and other events are not music.
         assert!(seen.iter().all(|id| !id.contains("records/")));
+    }
+
+    #[test]
+    fn track_groups_orders_all_builtin_situations() {
+        let mut registry = SoundRegistry::default();
+        registry.add_file(
+            "minecraft",
+            br#"{
+                "music.credits": {"sounds": ["music/game/end/credits"]},
+                "music.dragon": {"sounds": ["music/game/end/boss"]},
+                "music.end": {"sounds": ["music/game/end/end"]},
+                "music.under_water": {"sounds": ["music/game/water/axolotl"]},
+                "music.creative": {"sounds": ["music/game/creative/creative1"]},
+                "music.game": {"sounds": ["music/game/calm1"]},
+                "music.menu": {"sounds": ["music/menu/menu1"]}
+            }"#,
+            &|_, _| true,
+        );
+        let groups = track_groups(&registry);
+        let actual: Vec<(&str, &str)> = groups
+            .iter()
+            .map(|group| (group.label.as_str(), group.tracks[0].event.as_str()))
+            .collect();
+        assert_eq!(
+            actual,
+            [
+                ("sunrise.pages.music.menu", "minecraft:music.menu"),
+                ("sunrise.pages.music.overworld", "minecraft:music.game"),
+                ("sunrise.pages.music.creative", "minecraft:music.creative"),
+                (
+                    "sunrise.pages.music.underwater",
+                    "minecraft:music.under_water"
+                ),
+                ("sunrise.pages.music.end", "minecraft:music.end"),
+                ("sunrise.pages.music.boss", "minecraft:music.dragon"),
+                ("sunrise.pages.music.credits", "minecraft:music.credits"),
+            ]
+        );
     }
 
     /// The overworld pool, two tracks, and a menu track.

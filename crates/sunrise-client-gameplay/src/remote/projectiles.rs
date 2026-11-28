@@ -1,13 +1,13 @@
 //! The client ticks of what a server's client tracks as projectiles and area effect clouds.
-use sunrise_client::arrows::{ArrowEvent, ArrowScene};
 use sunrise_client::items::ItemStack;
 use sunrise_client::join_seq::JoinList;
-use sunrise_client::particles::{ParticleEngine, ParticleOptions, ParticleType};
+use sunrise_client::particles::{ParticleEngine, ParticleLevel, ParticleOptions, ParticleType};
 use sunrise_client::projectiles::{Hit, Projectile, ProjectileKind, ProjectileWorld};
 use sunrise_core::{
     geometry::{Vec3, trig},
     random::{LegacyRandom, RandomSource},
 };
+use sunrise_sim::entities::arrows::{ArrowEvent, ArrowScene, tick_client};
 
 /// An `AreaEffectCloud` a server tracks: what its client tick reads.
 pub struct RemoteCloud {
@@ -29,7 +29,7 @@ pub fn default_cloud_particle() -> ParticleOptions {
 /// (an entity effect stays still).
 pub fn cloud_client_tick(
     particles: &mut ParticleEngine,
-    world: &sunrise_client::world::World,
+    level: &ParticleLevel<'_>,
     at: [f64; 3],
     radius: f32,
     waiting: bool,
@@ -76,7 +76,7 @@ pub fn cloud_client_tick(
             (particle, v)
         };
         // The no-flag overload: always-show thinning, without a limiter override.
-        particles.add_always_visible_with_world(world, options, at, velocity);
+        particles.add_always_visible_with_level(level, options, at, velocity);
     }
 }
 
@@ -139,7 +139,7 @@ pub fn remote_projectile_step(
 ) {
     match p.kind {
         ProjectileKind::Arrow { .. } => {
-            let _ = sunrise_client::arrows::tick_client(p, arrow_scene);
+            let _ = tick_client(p, arrow_scene);
             if let Some(a) = p.arrow.as_mut() {
                 arrow_events.extend(
                     std::mem::take(&mut a.events)

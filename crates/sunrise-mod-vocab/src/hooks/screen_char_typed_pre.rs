@@ -1,5 +1,4 @@
 //! The `screen_char_typed_pre` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0109
 
 pub trait Hooks {
     /// A character was typed at the open screen
@@ -38,11 +37,10 @@ pub trait Hooks {
     /// backspace. Same receiving screens as the key press, including overlays;
     /// it also fires with no text box focused.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_screen_char_typed_pre",
-        receiver = "read",
+        target = "sunrise_client_gameplay::game::native_hooks::base::ClientGame<'_>::native_screen_char_typed_pre",
         dispatch = "flat",
         side = "client",
-        version = 2,
+        version = 3,
         contract = "cancel",
         out = "canceled",
         neoforge = "ScreenEvent.CharacterTyped.Pre",

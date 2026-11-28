@@ -1,10 +1,9 @@
 //! The `crafter_craft` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0189
 
 pub trait Hooks {
     /// A crafter at `pos` completed recipe `recipe`.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_crafter_craft",
+        target = "sunrise_gameplay::game::native_hooks::base::ServerGame<'_>::native_crafter_craft",
         dispatch = "flat",
         side = "server",
         contract = "listen",

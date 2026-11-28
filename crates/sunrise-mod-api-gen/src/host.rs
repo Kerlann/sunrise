@@ -3,8 +3,12 @@
 //! that name them (`Host`, `ServerHost`, `ClientHost` and the hidden backends), the handles'
 //! forwarding methods and the mob tick's goal view.
 use super::*;
+use crate::gameplay::{Borrow, GameplayAudit, GameplayPackage, HostRoute, RouteKind, Routing};
 use heck::ToUpperCamelCase;
+use std::borrow::Cow;
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
+use std::path::PathBuf;
 use syn::visit::Visit;
 
 /// Reads implemented by the scoped goal context over the active mob and its
@@ -35,15 +39,16 @@ pub(super) const GOAL_VIEW_READS: &[&str] = &[
     "entity_dismount_location",
     "entity_root_vehicle",
     "entity_is_passenger_of_same_vehicle",
-    "entity_passengers",
+    "entity_visit_passengers",
     "entity_is_vehicle",
-    "entity_indirect_passengers",
+    "entity_visit_indirect_passengers",
     "entity_controlling_passenger",
     "entity_on_block",
     "entity_entities_team_damage_allowed",
     "living_can_use_portal",
     "entity_tags",
     "entity_name",
+    "entity_custom_name",
     "entity_added_to_level",
     "entity_portal_cooldown",
     "entity_invulnerable_to_damage",
@@ -63,8 +68,8 @@ pub(super) const GOAL_VIEW_READS: &[&str] = &[
     "entity_pick",
     "living_attribute_value",
     "living_attribute_base",
-    "living_attributes",
-    "living_attribute_modifiers",
+    "living_visit_attributes",
+    "living_visit_attribute_modifiers",
     "living_used_item_hand",
     "mob_can_use_portal",
     "mob_target",
@@ -92,16 +97,17 @@ pub(super) const GOAL_VIEW_READS: &[&str] = &[
     "entity_tick_count",
     "entity_is_invisible",
     "entity_is_multipart",
-    "entity_parts",
+    "entity_visit_parts",
     "entity_dimensions",
     "living_effect",
-    "living_effects",
+    "living_visit_effects",
     "living_potion_affected",
     "living_gliding_ticks",
     "living_is_gliding",
     "living_is_sleeping",
     "living_sleeping_pos",
     "living_is_jumping",
+    "living_no_jump_delay",
     "living_baby",
     "living_equipment",
     "living_hand_item",
@@ -144,6 +150,7 @@ const GOAL_VIEW_ENTITY_ARGS: &[&str] = &[
     "MobRef",
     "PlayerRef",
     "ItemEntityRef",
+    "ExperienceOrbRef",
     "MerchantRef",
 ];
 
@@ -235,6 +242,39 @@ impl Entry {
     fn goal_view(&self) -> bool {
         self.attrs.iter().any(|a| a.path().is_ident("goal_view"))
     }
+
+    /// `#[server_only]`: a `Host` or `Backend` method that only the logical server implements;
+    /// `ClientGame` answers with its typed refusal instead of calling an inherent method.
+    fn server_only(&self) -> bool {
+        self.attrs.iter().any(|a| a.path().is_ident("server_only"))
+    }
+
+    /// The `Side: server.` / `Side: client.` / `Side: both.` marker in the method's doc comments.
+    fn doc_side(&self) -> Option<Side> {
+        for attr in &self.attrs {
+            if !attr.path().is_ident("doc") {
+                continue;
+            }
+            if let syn::Meta::NameValue(nv) = &attr.meta
+                && let syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(s),
+                    ..
+                }) = &nv.value
+            {
+                let line = s.value();
+                if line.contains("Side: server.") {
+                    return Some(Side::Server);
+                }
+                if line.contains("Side: client.") {
+                    return Some(Side::Client);
+                }
+                if line.contains("Side: both.") {
+                    return Some(Side::Both);
+                }
+            }
+        }
+        None
+    }
 }
 
 /// One area file: its traits by tier.
@@ -246,6 +286,8 @@ pub(crate) struct Area {
     /// from `Game`, declared by `#[table_backend("path")]` on the trait: the view carries the
     /// reads and implements the trait once, and `Game` forwards to it.
     tables: BTreeMap<Tier, String>,
+    /// Tiers carrying `#[server_only]` on the trait itself.
+    server_only_tiers: std::collections::BTreeSet<Tier>,
 }
 
 impl Area {
@@ -292,6 +334,12 @@ fn area_tiers(camel: &str, file: syn::File) -> Result<BTreeMap<Tier, Vec<Entry>>
                         | "BlockEntityDrawContext"
                         | "WorldDrawContext"
                         | "CameraDrawContext"
+                        | "WorldPassDrawContext"
+                        | "WorldOitPassDrawContext"
+                        | "RenderLevelStageContext"
+                        | "PrepareRenderBuffersContext"
+                        | "FrameGraphContext"
+                        | "OffscreenDrawContext"
                 ) | (
                     "Services",
                     "ClientSession"
@@ -353,27 +401,52 @@ fn table_backends(camel: &str, file: &syn::File) -> Result<BTreeMap<Tier, String
     Ok(tables)
 }
 
-/// The area files, `base` first and then by name, as the catalog's are.
+/// Tiers carrying `#[server_only]` on the trait declaration itself.
+fn server_only_tiers(camel: &str, file: &syn::File) -> std::collections::BTreeSet<Tier> {
+    let mut set = std::collections::BTreeSet::new();
+    for item in &file.items {
+        let Item::Trait(item) = item else { continue };
+        if !item.attrs.iter().any(|a| a.path().is_ident("server_only")) {
+            continue;
+        }
+        let name = item.ident.to_string();
+        if let Some(tier) = Tier::ALL
+            .into_iter()
+            .find(|tier| name == format!("{camel}{}", tier.suffix()))
+        {
+            set.insert(tier);
+        }
+    }
+    set
+}
+
+/// The area files, sorted by name, as the catalog's are.
 pub(crate) fn load(root: &Path) -> Result<Vec<Area>, String> {
+    load_tracked(root, &mut crate::Inputs::default())
+}
+
+pub(crate) fn load_tracked(root: &Path, inputs: &mut crate::Inputs) -> Result<Vec<Area>, String> {
     let dir = root.join(DIRECTORY);
     let mut areas = Vec::new();
-    for stem in catalog::Catalog::modules(&dir)? {
+    for stem in inputs.module_files(&dir)? {
         let path = dir.join(format!("{stem}.rs"));
-        crate::rerun_if_changed(&path.display());
-        let source = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let source = inputs
+            .read_to_string(&path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
         let file = syn::parse_file(&source).map_err(|e| format!("{}: {e}", path.display()))?;
         let camel = stem.to_upper_camel_case();
         let tables =
             table_backends(&camel, &file).map_err(|e| format!("{}: {e}", path.display()))?;
+        let server_only_tiers = server_only_tiers(&camel, &file);
         let tiers = area_tiers(&camel, file).map_err(|e| format!("{}: {e}", path.display()))?;
         areas.push(Area {
             stem,
             camel,
             tiers,
             tables,
+            server_only_tiers,
         });
     }
-    crate::rerun_if_changed(&dir.display());
     Ok(areas)
 }
 
@@ -381,12 +454,19 @@ pub(crate) fn load(root: &Path) -> Result<Vec<Area>, String> {
 /// them (`impl_host_areas!`, `impl_server_host_areas!`...) that implements the area traits of that
 /// union with their defaults, except the areas a double overrides: what a test double or a startup
 /// host writes instead of an `impl` for each area.
-pub(super) fn areas_source(root: &Path) -> Result<String, String> {
-    let areas = load(root)?;
+pub(super) fn areas_source_tracked(
+    root: &Path,
+    inputs: &mut crate::Inputs,
+) -> Result<String, String> {
+    let areas = load_tracked(root, inputs)?;
+    areas_source_from(root, &areas)
+}
+
+pub(super) fn areas_source_from(root: &Path, areas: &[Area]) -> Result<String, String> {
     let dir = root.join(DIRECTORY);
     let mut modules = String::new();
     let mut prelude = String::new();
-    for area in &areas {
+    for area in areas {
         let path =
             fs::canonicalize(dir.join(format!("{}.rs", area.stem))).map_err(|e| e.to_string())?;
         modules.push_str(&format!("#[path = {path:?}] pub mod {};\n", area.stem));
@@ -398,7 +478,7 @@ pub(super) fn areas_source(root: &Path) -> Result<String, String> {
     // unqualified: absolute paths to include!-expanded macro_export definitions
     // otherwise trigger macro_expanded_macro_exports_accessed_by_absolute_paths.
     let mut macros = String::new();
-    for area in &areas {
+    for area in areas {
         macros.push_str(&format!(
             "#[doc(hidden)]\n#[macro_export]\nmacro_rules! __mod_api_skip_{stem} {{ ([] $body:item) => {{ $body }}; ([{stem} $($rest:ident)*] $body:item) => {{}}; ([$other:ident $($rest:ident)*] $body:item) => {{ $crate::__skip_{stem}!([$($rest)*] $body); }}; }}\n#[doc(hidden)]\npub use __mod_api_skip_{stem} as __skip_{stem};\n",
             stem = area.stem
@@ -410,7 +490,7 @@ pub(super) fn areas_source(root: &Path) -> Result<String, String> {
     let mut choices = String::new();
     let mut partial_impls = String::new();
     let mut read_names = std::collections::BTreeSet::new();
-    for area in &areas {
+    for area in areas {
         for tier in [Tier::Backend, Tier::ClientBackend] {
             let Some(entries) = area.tiers.get(&tier) else {
                 continue;
@@ -433,7 +513,7 @@ pub(super) fn areas_source(root: &Path) -> Result<String, String> {
                 } else {
                     format!("self, {args}")
                 };
-                let value = refusal(&entry.sig, name)?;
+                let value = refusal(entry)?;
                 let refused = if args.is_empty() {
                     format!("{sig} {{ {value} }}")
                 } else {
@@ -520,163 +600,786 @@ pub(super) fn areas_source(root: &Path) -> Result<String, String> {
     ))
 }
 
+#[derive(Clone, Copy)]
+enum ForwarderTarget<'a> {
+    Table(&'a str),
+    Server,
+    Client,
+}
+
+impl<'a> ForwarderTarget<'a> {
+    fn type_name(self) -> &'a str {
+        match self {
+            Self::Table(path) => path,
+            Self::Server => "ServerGame",
+            Self::Client => "ClientGame",
+        }
+    }
+}
+
+struct ForwarderImpl<'a> {
+    trait_name: String,
+    target: ForwarderTarget<'a>,
+    methods: Vec<(&'a Entry, ForwarderCall<'a>)>,
+}
+
+enum ForwarderCall<'a> {
+    Published(syn::Path),
+    Refusal,
+    Service,
+    Table(&'a str),
+    Routed(&'a HostRoute),
+    Inherent {
+        owner: &'a str,
+        receiver: Option<ForwarderBorrow>,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum ForwarderBorrow {
+    Shared,
+    Mutable,
+}
+
+fn game_method(entry: &Entry) -> Result<Cow<'_, str>, String> {
+    match entry
+        .attrs
+        .iter()
+        .find(|attribute| attribute.path().is_ident("game_method"))
+    {
+        Some(attribute) => attribute
+            .parse_args::<syn::Ident>()
+            .map(|method| Cow::Owned(method.to_string()))
+            .map_err(|error| format!("{}: {error}", entry.name)),
+        None => Ok(Cow::Borrowed(&entry.name)),
+    }
+}
+
+fn forwarder_plan(areas: &[Area]) -> Result<Vec<ForwarderImpl<'_>>, String> {
+    let mut plan = Vec::new();
+    for area in areas {
+        for (tier, entries) in &area.tiers {
+            let table = area.tables.get(tier).map(String::as_str);
+            let tier_server_only = area.server_only_tiers.contains(tier);
+            let targets: Vec<ForwarderTarget<'_>> = match (table, tier) {
+                (Some(tbl), _) => vec![
+                    ForwarderTarget::Table(tbl),
+                    ForwarderTarget::Server,
+                    ForwarderTarget::Client,
+                ],
+                (None, Tier::ServerHost | Tier::BackendMut) => vec![ForwarderTarget::Server],
+                (None, Tier::ClientHost | Tier::ClientBackendMut) => vec![ForwarderTarget::Client],
+                (None, Tier::Host | Tier::Backend | Tier::ClientBackend) => {
+                    vec![ForwarderTarget::Server, ForwarderTarget::Client]
+                }
+            };
+            for target_kind in targets {
+                let methods = entries
+                    .iter()
+                    .map(|entry| {
+                        if let Some(published) =
+                            entry.attrs.iter().find(|a| a.path().is_ident("published"))
+                        {
+                            let path = published
+                                .parse_args::<syn::Path>()
+                                .map_err(|e| format!("{}: {e}", entry.name))?;
+                            return Ok((entry, ForwarderCall::Published(path)));
+                        }
+                        let refuse_on_this_side = match (tier, target_kind) {
+                            (Tier::ClientBackend, ForwarderTarget::Server) => true,
+                            (Tier::Host | Tier::Backend, ForwarderTarget::Client) => {
+                                tier_server_only
+                                    || entry.server_only()
+                                    || entry.doc_side() == Some(Side::Server)
+                            }
+                            (Tier::Host | Tier::Backend, ForwarderTarget::Server) => {
+                                entry.doc_side() == Some(Side::Client)
+                            }
+                            _ => false,
+                        };
+                        let call = if refuse_on_this_side {
+                            ForwarderCall::Refusal
+                        } else if entry.attrs.iter().any(|a| a.path().is_ident("service")) {
+                            ForwarderCall::Service
+                        } else if let Some(table) =
+                            table.filter(|_| !matches!(target_kind, ForwarderTarget::Table(_)))
+                        {
+                            ForwarderCall::Table(table)
+                        } else {
+                            let receiver = (!entry
+                                .attrs
+                                .iter()
+                                .any(|a| a.path().is_ident("static_call")))
+                            .then(|| match entry.sig.receiver().and_then(|r| r.mutability) {
+                                Some(_) => ForwarderBorrow::Mutable,
+                                None => ForwarderBorrow::Shared,
+                            });
+                            ForwarderCall::Inherent {
+                                owner: target_kind.type_name(),
+                                receiver,
+                            }
+                        };
+                        Ok((entry, call))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                plan.push(ForwarderImpl {
+                    trait_name: area.trait_name(*tier),
+                    target: target_kind,
+                    methods,
+                });
+            }
+        }
+    }
+    Ok(plan)
+}
+
 /// Generate every area impl explicitly. Full-path calls plus a hard recursion lint
 /// refuse a missing inherent implementation instead of inheriting a trait default.
 pub(super) fn game_forwarders(root: &Path) -> Result<String, String> {
+    let areas = load(root)?;
+    render_forwarders(&forwarder_plan(&areas)?, None)
+}
+
+fn render_forwarders(
+    plan: &[ForwarderImpl<'_>],
+    split: Option<(&Routing, GameplayPackage)>,
+) -> Result<String, String> {
     let mut code = String::from(
-        "use crate::game::Game;\nuse crate::game::api_values::{call_stack_write, call_state_write, call_write, TryIntoApi, TryIntoEngine};\nuse mod_api::*;\n",
+        "#[cfg(feature = \"client\")]\nuse crate::game::ClientGame;\nuse crate::game::ServerGame;\nuse crate::game::api_values::{call_stack_write, call_state_write, call_write, TryIntoApi, TryIntoEngine};\nuse mod_api::*;\n",
     );
-    for area in load(root)? {
-        for (tier, entries) in &area.tiers {
-            let table = area.tables.get(tier).map(String::as_str);
-            // A table-backed area is implemented by its view, and by `Game`, which hands the
-            // view out: both forward the same reads, so neither keeps a copy of them.
-            let targets: &[&str] = match table {
-                Some(table) => &[table, "Game"],
-                None => &["Game"],
-            };
-            for &target in targets {
-                let via_game = table.is_some() && target == "Game";
-                code.push_str(&format!(
-                "#[deny(unconditional_recursion)]\nimpl mod_api::prelude::{} for {target}<'_> {{\n",
-                area.trait_name(*tier)
-            ));
-                for entry in entries {
-                    let name = &entry.name;
-                    // A shared published read bypasses Game's conversions and uses the same
-                    // non-unwinding answer as the area trait default.
-                    if let Some(published) =
-                        entry.attrs.iter().find(|a| a.path().is_ident("published"))
-                    {
-                        let read = published
-                            .parse_args::<syn::Path>()
-                            .map_err(|e| format!("{name}: {e}"))?;
-                        let sig = entry.sig.to_token_stream();
-                        let args = signature_args(&entry.sig, name)?;
-                        code.push_str(&format!(
-                            "{sig} {{ mod_api::__private::{}({args}) }}\n",
-                            read.to_token_stream()
-                        ));
-                        continue;
-                    }
-                    let keeps_api_inputs = entry
-                        .attrs
-                        .iter()
-                        .any(|a| a.path().is_ident("forward_api_inputs"));
-                    let (setup, args, checked_write) = if keeps_api_inputs {
-                        (String::new(), signature_args(&entry.sig, name)?, false)
+    if split.is_some() {
+        code.clear();
+    }
+    for ForwarderImpl {
+        trait_name,
+        target,
+        methods,
+    } in plan
+    {
+        if split.is_none() && matches!(target, ForwarderTarget::Client) {
+            code.push_str("#[cfg(feature = \"client\")]\n");
+        }
+        let target = match (split, target) {
+            (Some(_), ForwarderTarget::Server | ForwarderTarget::Client) => {
+                Cow::Owned(format!("crate::game::{}", target.type_name()))
+            }
+            _ => Cow::Borrowed(target.type_name()),
+        };
+        writeln!(code, "#[deny(unconditional_recursion)]\nimpl mod_api::prelude::{trait_name} for {target}<'_> {{").unwrap();
+        for (entry, route) in methods {
+            let name = &entry.name;
+            let sig = entry.sig.to_token_stream();
+            match route {
+                ForwarderCall::Published(read) => {
+                    let args = signature_args(&entry.sig, name)?;
+                    writeln!(
+                        code,
+                        "{sig} {{ mod_api::__private::{}({args}) }}",
+                        read.to_token_stream()
+                    )
+                    .unwrap();
+                    continue;
+                }
+                ForwarderCall::Refusal => {
+                    let args = signature_args(&entry.sig, name)?;
+                    let value = side_refusal(entry)?;
+                    if args.is_empty() {
+                        writeln!(code, "{sig} {{ {value} }}").unwrap();
                     } else {
-                        let read_stack =
-                            entry.attrs.iter().any(|a| a.path().is_ident("read_stack"));
-                        let serialize_text = entry
-                            .attrs
-                            .iter()
-                            .any(|a| a.path().is_ident("serialize_text"));
-                        boundary_arguments(&entry.sig, name, read_stack, serialize_text)?
+                        writeln!(code, "{sig} {{ let _ = ({args},); {value} }}").unwrap();
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+            let keeps_api_inputs = entry
+                .attrs
+                .iter()
+                .any(|a| a.path().is_ident("forward_api_inputs"));
+            let (setup, args, checked_write) = if keeps_api_inputs {
+                (String::new(), signature_args(&entry.sig, name)?, false)
+            } else {
+                let read_stack = entry.attrs.iter().any(|a| a.path().is_ident("read_stack"));
+                let serialize_text = entry
+                    .attrs
+                    .iter()
+                    .any(|a| a.path().is_ident("serialize_text"));
+                let items = if let Some((routing, package)) = split
+                    && package != GameplayPackage::Common
+                {
+                    routing
+                        .items
+                        .get(&package)
+                        .map(|route| route.call(package, "items", ""))
+                        .transpose()?
+                        .map(Cow::Owned)
+                } else {
+                    Some(Cow::Borrowed("Self::items(self)"))
+                };
+                let common = split.map_or("crate", |(_, package)| package.common());
+                boundary_arguments_with(
+                    &entry.sig,
+                    name,
+                    read_stack,
+                    serialize_text.then_some(if split.is_some() {
+                        "sunrise_sim::api_text::to_serialized_engine"
+                    } else {
+                        "sunrise_client_lib::api_text::to_serialized_engine"
+                    }),
+                    common,
+                    items.as_deref(),
+                )?
+            };
+            let method = game_method(entry)?;
+            let call = match route {
+                ForwarderCall::Service => "self".into(),
+                ForwarderCall::Table(table) => {
+                    if let Some((_, package)) = split {
+                        let table = split_table(package, table)?;
+                        let args = if args.is_empty() {
+                            String::new()
+                        } else {
+                            format!(", {args}")
+                        };
+                        format!("{table}::{name}(&{table}::of(&self.common){args})")
+                    } else {
+                        format!("{table}::of(self).{name}({args})")
+                    }
+                }
+                ForwarderCall::Routed(route) => {
+                    route.call(split.expect("routed layout").1, &method, &args)?
+                }
+                ForwarderCall::Inherent { owner, receiver } => {
+                    let owner = if split.is_some() && !owner.contains("::") {
+                        Cow::Owned(format!("crate::game::{owner}"))
+                    } else {
+                        Cow::Borrowed(*owner)
                     };
-                    let static_call = entry.attrs.iter().any(|a| a.path().is_ident("static_call"));
-                    let view_args = args.clone();
-                    let args = if static_call {
+                    let args = if receiver.is_none() {
                         args
                     } else if args.is_empty() {
                         "self".into()
                     } else {
                         format!("self, {args}")
                     };
-                    let sig = entry.sig.to_token_stream();
-                    let call = if entry.attrs.iter().any(|a| a.path().is_ident("service")) {
-                        "self".into()
-                    } else if via_game {
-                        let table = table.unwrap_or_default();
-                        format!("{table}::of(self).{name}({view_args})")
+                    let method = if matches!(
+                        owner.as_ref(),
+                        "ServerGame"
+                            | "ClientGame"
+                            | "crate::game::ServerGame"
+                            | "crate::game::ClientGame"
+                    ) {
+                        &*method
                     } else {
-                        format!("{target}::{name}({args})")
+                        name
                     };
-                    let keeps_api_output = entry
+                    format!("{owner}::{method}({args})")
+                }
+                ForwarderCall::Published(_) | ForwarderCall::Refusal => unreachable!(),
+            };
+            let keeps_api_output = entry
+                .attrs
+                .iter()
+                .any(|a| a.path().is_ident("forward_api_output"));
+            let converted_output = match &entry.sig.output {
+                syn::ReturnType::Type(_, ty) if !keeps_api_output => Some(ty.as_ref()),
+                _ => None,
+            };
+            let crosses_output = converted_output.is_some_and(boundary_value);
+            let text_output = converted_output.is_some_and(text_value);
+            let text_result = result_error(&entry.sig.output)
+                .is_some_and(|error| outer_type(error, "TextFormError"));
+            let call = if text_output {
+                if text_result {
+                    format!("{call}.try_into_api()")
+                } else {
+                    format!("{call}.try_into_api().unwrap_or_else(|error| Err(error.into()))")
+                }
+            } else if text_result {
+                // Writes with converted Text arguments call an infallible engine
+                // body. Read backends return Result so converting API-owned
+                // aggregate fields can refuse without losing a boundary error.
+                let text_input =
+                    !keeps_api_inputs
+                        && entry.sig.inputs.iter().any(
+                            |arg| matches!(arg, syn::FnArg::Typed(arg) if text_value(&arg.ty)),
+                        );
+                let read = entry
+                    .sig
+                    .receiver()
+                    .is_some_and(|receiver| receiver.mutability.is_none());
+                if text_input && !read {
+                    if matches!(result_types(&entry.sig.output), Some((Type::Tuple(unit), _)) if unit.elems.is_empty())
+                    {
+                        format!("{{ {call}; Ok(()) }}")
+                    } else {
+                        format!("Ok({call})")
+                    }
+                } else {
+                    call
+                }
+            } else if checked_write {
+                if converted_output.is_some_and(|ty| contains_value(ty, &["BlockState"]))
+                    && result_error(&entry.sig.output)
+                        .is_some_and(|error| outer_type(error, "LevelWriteError"))
+                {
+                    format!("call_state_write(|| {call})")
+                } else if crosses_output {
+                    format!("call_stack_write(|| {call})")
+                } else {
+                    format!("call_write(|| {call})")
+                }
+            } else if crosses_output {
+                match result_error(&entry.sig.output) {
+                    Some(error) if outer_type(error, "LevelReadError") => format!(
+                        "{call}.try_into_api().unwrap_or(Err(mod_api::LevelReadError::Unavailable))"
+                    ),
+                    // The placement-state read refuses an unrepresentable state as
+                    // other level reads do.
+                    Some(error) if outer_type(error, "PlacementStateError") => format!(
+                        "{call}.try_into_api().unwrap_or(Err(mod_api::PlacementStateError::Unavailable))"
+                    ),
+                    Some(error) if outer_type(error, "GameRuleReadError") => format!(
+                        "{call}.try_into_api().expect(\"game rule values convert infallibly\")"
+                    ),
+                    Some(_) if split.is_some() => format!("call_stack_write(|| {call})"),
+                    Some(_) => format!(
+                        "{call}.try_into_api().unwrap_or_else(|error| Err(error.into_write_error().into()))"
+                    ),
+                    None => format!("{call}.try_into_api().unwrap_or_default()"),
+                }
+            } else {
+                call
+            };
+            let call = match name.as_str() {
+                "schedule_task" | "cancel_task" => call,
+                _ if matches!(route, ForwarderCall::Service)
+                    || borrows_caller_callback(&entry.sig) =>
+                {
+                    call
+                }
+                _ => format!(
+                    "mod_api::__private::game::CallbackOwner::call_host(move || {{ {call} }})"
+                ),
+            };
+            code.push_str(&format!("#[inline]\n{sig} {{ {setup} {call} }}\n"));
+        }
+        code.push_str("}\n");
+    }
+    let parsed = syn::parse_file(&code).map_err(|e| e.to_string())?;
+    let mut imports = standard_imports(&parsed);
+    if let Some((_, package)) = split {
+        let names = [
+            "call_stack_write",
+            "call_state_write",
+            "call_write",
+            "TryIntoApi",
+            "TryIntoEngine",
+        ];
+        let mut tokens = std::collections::BTreeSet::new();
+        fn identifiers(
+            stream: proc_macro2::TokenStream,
+            tokens: &mut std::collections::BTreeSet<String>,
+        ) {
+            for token in stream {
+                match token {
+                    proc_macro2::TokenTree::Group(group) => identifiers(group.stream(), tokens),
+                    proc_macro2::TokenTree::Ident(ident) => {
+                        tokens.insert(ident.to_string());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        identifiers(parsed.to_token_stream(), &mut tokens);
+        let imports_used = names
+            .into_iter()
+            .filter(|name| {
+                let expression = match *name {
+                    "TryIntoApi" => "try_into_api",
+                    "TryIntoEngine" => "try_into_engine",
+                    name => name,
+                };
+                tokens.contains(expression)
+            })
+            .collect::<Vec<_>>();
+        if !imports_used.is_empty() {
+            writeln!(
+                imports,
+                "use {}::game::api_values::{{{}}};",
+                package.common(),
+                imports_used.join(", ")
+            )
+            .unwrap();
+        }
+        if uses_vocab(&parsed) {
+            imports.push_str("use mod_api::*;\n");
+        }
+    }
+    let parsed = syn::parse_file(&(imports + &code)).map_err(|e| e.to_string())?;
+    Ok(prettyplease::unparse(&parsed))
+}
+
+fn uses_vocab(file: &syn::File) -> bool {
+    struct Types(bool);
+    impl<'ast> Visit<'ast> for Types {
+        fn visit_type_path(&mut self, node: &'ast syn::TypePath) {
+            if let Some(ident) = node.path.get_ident() {
+                self.0 |= !matches!(
+                    ident.to_string().as_str(),
+                    "Self"
+                        | "bool"
+                        | "char"
+                        | "str"
+                        | "String"
+                        | "Vec"
+                        | "Option"
+                        | "Result"
+                        | "Arc"
+                        | "PathBuf"
+                ) && !crate::PRIMITIVE_SCALARS.contains(&ident.to_string().as_str());
+            }
+            syn::visit::visit_type_path(self, node);
+        }
+
+        fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+            self.0 |= node
+                .path
+                .segments
+                .first()
+                .is_some_and(|segment| segment.ident == "NoBackend");
+        }
+    }
+    let mut types = Types(false);
+    types.visit_file(file);
+    types.0
+}
+
+fn split_table(package: GameplayPackage, table: &str) -> Result<String, String> {
+    let relative = table
+        .strip_prefix("crate::")
+        .ok_or_else(|| format!("table path is not relative to common gameplay: {table}"))?;
+    Ok(format!("{}::{relative}", package.common()))
+}
+
+/// The forwarder call of a host route whose callee borrows as the host signature does, and the
+/// kind the audit counts it as.
+fn routed_call<'a>(
+    route: &'a HostRoute,
+    borrow: Borrow,
+    package: GameplayPackage,
+    method: &str,
+) -> Result<(ForwarderCall<'a>, &'static str), String> {
+    if route.borrow != borrow {
+        return Err("declared callee borrows differently from the host signature".into());
+    }
+    route.call(package, method, "")?;
+    let kind = match route.kind {
+        RouteKind::Local => "local",
+        RouteKind::Common => "common_inherent",
+        RouteKind::SharedTrait => "shared_trait",
+        RouteKind::SideOperation => "side_operation",
+        RouteKind::Static => "static",
+    };
+    Ok((ForwarderCall::Routed(route), kind))
+}
+
+pub(crate) fn gameplay_forwarders(
+    areas: &[Area],
+    package: GameplayPackage,
+    routing: &Routing,
+    audit: &mut GameplayAudit,
+) -> Result<String, String> {
+    render_forwarders(
+        &gameplay_forwarder_plan(areas, package, routing, audit)?,
+        Some((routing, package)),
+    )
+}
+
+fn gameplay_forwarder_plan<'a>(
+    areas: &'a [Area],
+    package: GameplayPackage,
+    routing: &'a Routing,
+    audit: &mut GameplayAudit,
+) -> Result<Vec<ForwarderImpl<'a>>, String> {
+    let mut plan = forwarder_plan(areas)?;
+    plan.retain(|implementation| match implementation.target {
+        ForwarderTarget::Table(_) => package == GameplayPackage::Common,
+        ForwarderTarget::Server => package == GameplayPackage::Server,
+        ForwarderTarget::Client => package == GameplayPackage::Client,
+    });
+    for implementation in &mut plan {
+        let trait_name = &implementation.trait_name;
+        let target = implementation.target;
+        let mut methods = Vec::new();
+        for (entry, call) in std::mem::take(&mut implementation.methods) {
+            let key = format!("{trait_name}::{}", entry.name);
+            let selected = (|| {
+                let (call, kind) = match call {
+                    ForwarderCall::Published(_) => (call, "published"),
+                    ForwarderCall::Refusal => (call, "refusal"),
+                    ForwarderCall::Service => (call, "service"),
+                    ForwarderCall::Table(table) => {
+                        split_table(package, table)?;
+                        // A read of tables a world's data packs change, which each side's state
+                        // owns, has a side row naming the callee that reads them; the others read
+                        // the common state's view.
+                        match routing.host_route(package, &key) {
+                            Some(route) => {
+                                let borrow = match entry.sig.receiver().and_then(|r| r.mutability) {
+                                    Some(_) => Borrow::Mutable,
+                                    None => Borrow::Shared,
+                                };
+                                routed_call(route, borrow, package, &game_method(entry)?)?
+                            }
+                            None => (call, "table"),
+                        }
+                    }
+                    ForwarderCall::Inherent { receiver, .. } => {
+                        if let ForwarderTarget::Table(table) = target {
+                            split_table(package, table)?;
+                            (call, "table")
+                        } else if let Some(route) = routing.host_route(package, &key) {
+                            let borrow = match receiver {
+                                None => Borrow::None,
+                                Some(ForwarderBorrow::Shared) => Borrow::Shared,
+                                Some(ForwarderBorrow::Mutable) => Borrow::Mutable,
+                            };
+                            routed_call(route, borrow, package, &game_method(entry)?)?
+                        } else if receiver.is_some() {
+                            (call, "local_default")
+                        } else {
+                            return Err("static call requires an explicit owner".into());
+                        }
+                    }
+                    ForwarderCall::Routed(_) => unreachable!(),
+                };
+                if !matches!(call, ForwarderCall::Published(_) | ForwarderCall::Refusal)
+                    && !entry
                         .attrs
                         .iter()
-                        .any(|a| a.path().is_ident("forward_api_output"));
-                    let converted_output = match &entry.sig.output {
-                        syn::ReturnType::Type(_, ty) if !keeps_api_output => Some(ty.as_ref()),
-                        _ => None,
-                    };
-                    let crosses_output = converted_output.is_some_and(boundary_value);
-                    let text_output = converted_output.is_some_and(text_value);
-                    let text_result = result_error(&entry.sig.output)
-                        .is_some_and(|error| outer_type(error, "TextFormError"));
-                    let call = if text_output {
-                        if text_result {
-                            format!("{call}.try_into_api().map_err(Into::into)")
+                        .any(|attr| attr.path().is_ident("forward_api_inputs"))
+                {
+                    let context = routing
+                        .items
+                        .get(&package)
+                        .map(|route| route.call(package, "items", ""))
+                        .transpose()?;
+                    boundary_arguments_with(
+                        &entry.sig,
+                        &entry.name,
+                        entry
+                            .attrs
+                            .iter()
+                            .any(|attr| attr.path().is_ident("read_stack")),
+                        entry
+                            .attrs
+                            .iter()
+                            .any(|attr| attr.path().is_ident("serialize_text"))
+                            .then_some("sunrise_sim::api_text::to_serialized_engine"),
+                        package.common(),
+                        if package == GameplayPackage::Common {
+                            Some("Self::items(self)")
                         } else {
-                            format!(
-                                "{call}.try_into_api().unwrap_or_else(|error| Err(error.into()))"
-                            )
-                        }
-                    } else if text_result {
-                        // Writes with converted Text arguments call an infallible engine
-                        // body. Read backends return Result so converting API-owned
-                        // aggregate fields can refuse without losing a boundary error.
-                        let text_input = !keeps_api_inputs
-                            && entry.sig.inputs.iter().any(
-                                |arg| matches!(arg, syn::FnArg::Typed(arg) if text_value(&arg.ty)),
-                            );
-                        let read = entry
-                            .sig
-                            .receiver()
-                            .is_some_and(|receiver| receiver.mutability.is_none());
-                        if text_input && !read {
-                            format!("Ok({call})")
-                        } else {
-                            call
-                        }
-                    } else if checked_write {
-                        if crosses_output
-                            && result_error(&entry.sig.output)
-                                .is_some_and(|error| outer_type(error, "LevelWriteError"))
-                        {
-                            format!("call_state_write(|| {call})")
-                        } else if crosses_output {
-                            format!("call_stack_write(|| {call})")
-                        } else {
-                            format!("call_write(|| {call})")
-                        }
-                    } else if crosses_output {
-                        match result_error(&entry.sig.output) {
-                            Some(error) if outer_type(error, "LevelReadError") => format!(
-                                "{call}.try_into_api().unwrap_or(Err(mod_api::LevelReadError::Unavailable))"
-                            ),
-                            // The placement-state read refuses an unrepresentable state as
-                            // other level reads do.
-                            Some(error) if outer_type(error, "PlacementStateError") => format!(
-                                "{call}.try_into_api().unwrap_or(Err(mod_api::PlacementStateError::Unavailable))"
-                            ),
-                            Some(error) if outer_type(error, "GameRuleReadError") => format!(
-                                "{call}.try_into_api().expect(\"game rule values convert infallibly\")"
-                            ),
-                            Some(_) => format!(
-                                "{call}.try_into_api().unwrap_or_else(|error| Err(error.into_write_error().into()))"
-                            ),
-                            None => format!("{call}.try_into_api().unwrap_or_default()"),
-                        }
-                    } else {
-                        call
-                    };
-                    code.push_str(&format!("{sig} {{ {setup} {call} }}\n"));
+                            context.as_deref()
+                        },
+                    )?;
                 }
-                code.push_str("}\n");
+                Ok((call, kind))
+            })();
+            match selected {
+                Ok((call, kind)) => {
+                    audit.count(package, &key, kind);
+                    methods.push((entry, call));
+                }
+                Err(reason) => audit.issue(package, &key, "host", reason),
+            }
+        }
+        implementation.methods = methods;
+    }
+    Ok(plan)
+}
+
+pub(crate) struct HostCallee {
+    pub label: String,
+    pub owner: String,
+    pub method: String,
+    pub kind: RouteKind,
+    pub borrow: Borrow,
+    pub arity: usize,
+}
+
+pub(crate) fn host_callees(
+    areas: &[Area],
+    package: GameplayPackage,
+    routing: &Routing,
+) -> Result<Vec<HostCallee>, String> {
+    let mut audit = GameplayAudit::default();
+    let plan = gameplay_forwarder_plan(areas, package, routing, &mut audit)?;
+    if !audit.issues.is_empty() {
+        return Err(audit
+            .issues
+            .iter()
+            .map(|issue| format!("{}: {}", issue.entry, issue.reason))
+            .collect::<Vec<_>>()
+            .join("\n"));
+    }
+    let mut used = BTreeSet::new();
+    let mut checks = Vec::new();
+    let mut items_used = false;
+    for implementation in plan {
+        for (entry, call) in implementation.methods {
+            let method = game_method(entry)?;
+            let label = format!("{}::{}", implementation.trait_name, entry.name);
+            let arity = entry
+                .sig
+                .inputs
+                .iter()
+                .filter(|arg| matches!(arg, FnArg::Typed(_)))
+                .count();
+            let mut note = |owner: String, method: &str, kind, borrow, arity| {
+                checks.push(HostCallee {
+                    label: label.clone(),
+                    owner,
+                    method: method.into(),
+                    kind,
+                    borrow,
+                    arity,
+                });
+            };
+            match call {
+                ForwarderCall::Routed(route) => {
+                    used.insert(label.clone());
+                    note(
+                        route.owner.clone(),
+                        &method,
+                        route.kind,
+                        route.borrow,
+                        arity,
+                    );
+                }
+                ForwarderCall::Inherent { owner, receiver } => {
+                    let owner = if owner.contains("::") {
+                        owner.to_owned()
+                    } else {
+                        format!("crate::game::{owner}")
+                    };
+                    let borrow = match receiver {
+                        None => Borrow::None,
+                        Some(ForwarderBorrow::Shared) => Borrow::Shared,
+                        Some(ForwarderBorrow::Mutable) => Borrow::Mutable,
+                    };
+                    note(owner, &method, RouteKind::Local, borrow, arity);
+                }
+                ForwarderCall::Table(owner) => {
+                    let owner = split_table(package, owner)?;
+                    note(owner.clone(), "of", RouteKind::Static, Borrow::None, 1);
+                    note(owner, &entry.name, RouteKind::Local, Borrow::Shared, arity);
+                }
+                ForwarderCall::Service | ForwarderCall::Published(_) | ForwarderCall::Refusal => {
+                    continue;
+                }
+            }
+            if !entry
+                .attrs
+                .iter()
+                .any(|attr| attr.path().is_ident("forward_api_inputs"))
+            {
+                let (setup, _, _) = boundary_arguments_with(
+                    &entry.sig,
+                    &entry.name,
+                    entry
+                        .attrs
+                        .iter()
+                        .any(|attr| attr.path().is_ident("read_stack")),
+                    entry
+                        .attrs
+                        .iter()
+                        .any(|attr| attr.path().is_ident("serialize_text"))
+                        .then_some("sunrise_sim::api_text::to_serialized_engine"),
+                    package.common(),
+                    Some("__ITEMS_ROUTE_WITNESS__"),
+                )?;
+                items_used |= setup.contains("__ITEMS_ROUTE_WITNESS__");
+                if package == GameplayPackage::Common
+                    && let ForwarderTarget::Table(owner) = implementation.target
+                    && setup.contains("__ITEMS_ROUTE_WITNESS__")
+                {
+                    note(owner.into(), "items", RouteKind::Local, Borrow::Shared, 0);
+                }
             }
         }
     }
-    let parsed = syn::parse_file(&code).map_err(|e| e.to_string())?;
-    let imports = standard_imports(&parsed);
-    let parsed = syn::parse_file(&(imports + &code)).map_err(|e| e.to_string())?;
-    Ok(prettyplease::unparse(&parsed))
+    if let Some(rows) = routing.host.get(&package) {
+        for label in rows.keys() {
+            if !used.contains(label) {
+                return Err(format!("{label}: unused host route"));
+            }
+        }
+    }
+    if let Some(items) = routing.items.get(&package) {
+        if !items_used || package == GameplayPackage::Common {
+            return Err("items: unused conversion receiver route".into());
+        }
+        checks.push(HostCallee {
+            label: "items".into(),
+            method: "items".into(),
+            owner: items.owner.clone(),
+            kind: items.kind,
+            borrow: items.borrow,
+            arity: 0,
+        });
+    }
+    Ok(checks)
+}
+
+/// API records whose game representation is owned by another crate. Conversions are
+/// implemented once by the game; this rule only selects the boundary, never its behaviour.
+/// Whether `sig` takes a borrowed callable the engine invokes synchronously on the caller's
+/// behalf. Those methods stay inside the caller's retained panic scope so a panic in the
+/// caller's closure still blames that caller.
+fn borrows_caller_callback(sig: &syn::Signature) -> bool {
+    sig.inputs.iter().any(|input| {
+        let FnArg::Typed(arg) = input else {
+            return false;
+        };
+        is_borrowed_callable(&arg.ty)
+    })
+}
+
+fn is_borrowed_callable(mut ty: &Type) -> bool {
+    while let Type::Paren(paren) = ty {
+        ty = &paren.elem;
+    }
+    let Type::Reference(reference) = ty else {
+        return false;
+    };
+    let mut elem = &*reference.elem;
+    while let Type::Paren(paren) = elem {
+        elem = &paren.elem;
+    }
+    matches!(
+        elem,
+        Type::TraitObject(object)
+            if object.bounds.iter().any(|bound| {
+                matches!(
+                    bound,
+                    syn::TypeParamBound::Trait(trait_bound)
+                        if trait_bound.path.segments.last().is_some_and(|segment| {
+                            matches!(
+                                segment.ident.to_string().as_str(),
+                                "Fn" | "FnMut" | "FnOnce"
+                            )
+                        })
+                )
+            })
+    )
 }
 
 /// API records whose game representation is owned by another crate. Conversions are
 /// implemented once by the game; this rule only selects the boundary, never its behaviour.
 fn text_value(ty: &Type) -> bool {
-    contains_value(ty, &["Text", "GuiDraw"])
+    contains_value(ty, &["Text"])
 }
 
 fn boundary_value(ty: &Type) -> bool {
@@ -728,6 +1431,10 @@ fn contains_value(ty: &Type, names: &[&str]) -> bool {
 }
 
 fn result_error(output: &syn::ReturnType) -> Option<&Type> {
+    result_types(output).map(|(_, error)| error)
+}
+
+fn result_types(output: &syn::ReturnType) -> Option<(&Type, &Type)> {
     let syn::ReturnType::Type(_, ty) = output else {
         return None;
     };
@@ -739,10 +1446,12 @@ fn result_error(output: &syn::ReturnType) -> Option<&Type> {
     let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
         return None;
     };
-    let syn::GenericArgument::Type(error) = args.args.last()? else {
+    let (Some(syn::GenericArgument::Type(value)), Some(syn::GenericArgument::Type(error))) =
+        (args.args.first(), args.args.last())
+    else {
         return None;
     };
-    Some(error)
+    Some((value, error))
 }
 
 fn outer_type(ty: &Type, expected: &str) -> bool {
@@ -753,11 +1462,30 @@ fn outer_type(ty: &Type, expected: &str) -> bool {
 /// whether it is a checked write (`&mut self`, a `Result`, a converted value). A checked write
 /// refuses an invalid value with its error; a read or comparison converts a borrowed stack
 /// without write limits, and any other refused value makes the method return its default.
+#[cfg(test)]
 fn boundary_arguments(
     sig: &syn::Signature,
     method: &str,
     read_stack: bool,
     serialize_text: bool,
+) -> Result<(String, String, bool), String> {
+    boundary_arguments_with(
+        sig,
+        method,
+        read_stack,
+        serialize_text.then_some("sunrise_client_lib::api_text::to_serialized_engine"),
+        "crate",
+        Some("Self::items(self)"),
+    )
+}
+
+fn boundary_arguments_with(
+    sig: &syn::Signature,
+    method: &str,
+    read_stack: bool,
+    text_serializer: Option<&str>,
+    common: &str,
+    items: Option<&str>,
 ) -> Result<(String, String, bool), String> {
     let mutable = sig
         .receiver()
@@ -793,30 +1521,36 @@ fn boundary_arguments(
             if outer_type(&arg.ty, "Option") && path.path.segments.last().is_some_and(|segment|
                 matches!(&segment.arguments, syn::PathArguments::AngleBracketed(args)
                     if matches!(args.args.first(), Some(syn::GenericArgument::Type(ty)) if is_borrowed_stack(ty)))));
-        let conversion = if text && serialize_text {
+        let item_context = || {
+            items.ok_or_else(|| {
+                format!("{method}: boundary conversion needs an explicit items receiver route")
+            })
+        };
+        let conversion = if let Some(serializer) = text_serializer.filter(|_| text) {
             let reference = if matches!(&*arg.ty, Type::Reference(_)) {
                 ""
             } else {
                 "&"
             };
-            format!("sunrise_client_lib::api_text::to_serialized_engine({reference}{name})")
+            format!("{serializer}({reference}{name})")
         } else if text {
             format!("{name}.try_into_engine(&())")
         } else if optional_read_stack {
-            format!("{name}.map(crate::game::api_values::stack_value).transpose()")
+            format!("{name}.map({common}::game::api_values::stack_value).transpose()")
         } else if (!checked_write || read_stack) && is_borrowed_stack(&arg.ty) {
             // A detached stack used as input need not fit a resident slot.
-            format!("crate::game::api_values::stack_value({name})")
+            format!("{common}::game::api_values::stack_value({name})")
         } else if read_stack
             && matches!(&*arg.ty, Type::Reference(reference) if outer_type(&reference.elem, "ItemResource"))
         {
-            format!("crate::game::api_values::stack_value({name}.as_stack())")
+            format!("{common}::game::api_values::stack_value({name}.as_stack())")
         } else {
-            format!("{name}.try_into_engine(self.items())")
+            format!("{name}.try_into_engine({})", item_context()?)
         };
         let value = if contains_value(&arg.ty, &["ParticleOptions"]) {
             format!(
-                "match {name}.try_into_engine(self.items()) {{ Ok(value) => value, Err(_) => return Default::default() }}"
+                "match {name}.try_into_engine({}) {{ Ok(value) => value, Err(_) => return Default::default() }}",
+                item_context()?
             )
         } else if text || checked_write {
             format!("{conversion}?")
@@ -890,8 +1624,24 @@ fn signature_args(sig: &syn::Signature, name: &str) -> Result<String, String> {
 }
 
 /// A backend read's typed answer where there is no backend to ask.
-fn refusal(sig: &syn::Signature, name: &str) -> Result<&'static str, String> {
-    let syn::ReturnType::Type(_, ty) = &sig.output else {
+fn refusal(entry: &Entry) -> Result<&'static str, String> {
+    refusal_with(entry, "Err(NoBackend::no_backend())")
+}
+
+fn side_refusal(entry: &Entry) -> Result<&'static str, String> {
+    refusal_with(entry, "Err(NoBackend::wrong_side())")
+}
+
+fn refusal_with(entry: &Entry, result_err: &'static str) -> Result<&'static str, String> {
+    let name = &entry.name;
+    let syn::ReturnType::Type(_, ty) = &entry.sig.output else {
+        if entry
+            .attrs
+            .iter()
+            .any(|attr| attr.path().is_ident("decline_unavailable"))
+        {
+            return Ok("");
+        }
         return Err(format!("{name}: a backend read returns a value"));
     };
     let syn::Type::Path(path) = &**ty else {
@@ -901,7 +1651,8 @@ fn refusal(sig: &syn::Signature, name: &str) -> Result<&'static str, String> {
     match last.as_deref() {
         Some("Option") => Ok("None"),
         Some("bool") => Ok("false"),
-        Some("Result") => Ok("Err(NoBackend::no_backend())"),
+        Some("EntityResidency") => Ok("EntityResidency::Gone"),
+        Some("Result") => Ok(result_err),
         Some("u64" | "u32" | "i32" | "u16" | "u8" | "usize") => Ok("0"),
         _ => Err(format!("{name}: cannot refuse its backend return type")),
     }
@@ -1016,8 +1767,8 @@ fn handle_method(
         format!("{backend}(host)?.{call}")
     } else if returns("bool") {
         format!("{backend}(host).map(|backend| backend.{call}).unwrap_or(false)")
-    } else if returns("CommandResult") {
-        // An unresolved command source has neither a successful run nor feedback.
+    } else if returns("CommandResult") || returns("EntityResidency") {
+        // Without a backend, a command fails with no feedback and an entity is gone.
         format!("{backend}(host).map(|backend| backend.{call}).unwrap_or_default()")
     } else if returns("Result") {
         format!(
@@ -1025,7 +1776,7 @@ fn handle_method(
         )
     } else {
         return Err(format!(
-            "{name}: a {receiver} helper returns Option, bool, CommandResult or Result, the value a host without a backend refuses"
+            "{name}: a {receiver} helper returns Option, bool, CommandResult, EntityResidency or Result, the value a host without a backend refuses"
         ));
     };
     Ok(Some((
@@ -1037,26 +1788,91 @@ fn handle_method(
     )))
 }
 
+/// Domain `*/types.rs` (or `*/types/mod.rs`) files imported at the API root, in deterministic order.
+fn domain_type_files(src_root: &Path, api_source: &str) -> Result<Vec<PathBuf>, String> {
+    fn collect_types_domains(tree: &syn::UseTree, domains: &mut BTreeSet<String>) {
+        let mut tree = tree;
+        if let syn::UseTree::Path(path) = tree
+            && matches!(path.ident.to_string().as_str(), "crate" | "self")
+        {
+            tree = &path.tree;
+        }
+        let syn::UseTree::Path(domain) = tree else {
+            return;
+        };
+        let names_types = |node: &syn::UseTree| match node {
+            syn::UseTree::Path(path) => path.ident == "types",
+            syn::UseTree::Name(name) => name.ident == "types",
+            syn::UseTree::Rename(rename) => rename.ident == "types",
+            syn::UseTree::Group(group) => group.items.iter().any(|item| match item {
+                syn::UseTree::Path(path) => path.ident == "types",
+                syn::UseTree::Name(name) => name.ident == "types",
+                syn::UseTree::Rename(rename) => rename.ident == "types",
+                _ => false,
+            }),
+            syn::UseTree::Glob(_) => false,
+        };
+        if names_types(&domain.tree) {
+            domains.insert(domain.ident.to_string());
+        }
+    }
+
+    let parsed = syn::parse_file(api_source).map_err(|e| e.to_string())?;
+    let mut domains = BTreeSet::new();
+    for item in &parsed.items {
+        if let Item::Use(use_item) = item {
+            collect_types_domains(&use_item.tree, &mut domains);
+        }
+    }
+    let mut files = Vec::new();
+    for domain in domains {
+        let dir = src_root.join(domain);
+        let file = dir.join("types.rs");
+        if file.is_file() {
+            files.push(file);
+        } else {
+            let dir_mod = dir.join("types/mod.rs");
+            if dir_mod.is_file() {
+                files.push(dir_mod);
+            }
+        }
+    }
+    Ok(files)
+}
+
 /// The unions, the handles' methods and the hidden backends' side of the host.
-pub(super) fn generate(root: &Path) -> Result<String, String> {
-    let areas = load(root)?;
-    let api_source = fs::read_to_string(root.join("crates/sunrise-mod-vocab/src/lib.rs"))
+pub(super) fn generate_with(
+    root: &Path,
+    areas: &[Area],
+    exports_map: Option<&BTreeMap<String, String>>,
+) -> Result<String, String> {
+    generate_tracked(root, areas, exports_map, &mut crate::Inputs::default())
+}
+
+pub(super) fn generate_tracked(
+    root: &Path,
+    areas: &[Area],
+    exports_map: Option<&BTreeMap<String, String>>,
+    inputs: &mut crate::Inputs,
+) -> Result<String, String> {
+    let src_root = root.join("crates/sunrise-mod-vocab/src");
+    let lib_path = src_root.join("lib.rs");
+    let api_source = inputs
+        .read_to_string(&lib_path)
         .map_err(|e| e.to_string())?;
-    let api_source = super::exports::expand(root, &api_source)?;
+    let api_source = match exports_map {
+        Some(generated) => super::exports::expand_with(&api_source, generated)?,
+        None => super::exports::expand(root, &api_source)?,
+    };
     let mut types = api_types(&api_source)?;
     // Parse domain files separately: their inner docs and attributes belong to
     // that file, not to the middle of a concatenated API root.
-    for entry in
-        fs::read_dir(root.join("crates/sunrise-mod-vocab/src")).map_err(|e| e.to_string())?
-    {
-        let path = entry.map_err(|e| e.to_string())?.path().join("types.rs");
-        if path.is_file() {
-            let source = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-            let domain = api_types(&source).map_err(|e| format!("{}: {e}", path.display()))?;
-            for (receiver, name) in domain.handles {
-                if types.handles.insert(receiver.clone(), name).is_some() {
-                    return Err(format!("duplicate handle receiver {receiver}"));
-                }
+    for path in domain_type_files(&src_root, &api_source)? {
+        let source = inputs.read_to_string(&path).map_err(|e| e.to_string())?;
+        let domain = api_types(&source).map_err(|e| format!("{}: {e}", path.display()))?;
+        for (receiver, name) in domain.handles {
+            if types.handles.insert(receiver.clone(), name).is_some() {
+                return Err(format!("duplicate handle receiver {receiver}"));
             }
         }
     }
@@ -1074,7 +1890,7 @@ pub(super) fn generate(root: &Path) -> Result<String, String> {
     };
     let mut methods = String::new();
     let mut by_handle = BTreeMap::<String, String>::new();
-    for area in &areas {
+    for area in areas {
         for (tier, entries) in &area.tiers {
             for entry in entries {
                 if tier.backend()
@@ -1125,11 +1941,14 @@ pub(super) fn generate(root: &Path) -> Result<String, String> {
     Ok(host)
 }
 
-pub(super) fn generate_goal_view(root: &Path) -> Result<String, String> {
-    let areas = load(root)?;
+pub(crate) fn generate_gameplay_goal_view(areas: &[Area]) -> Result<String, String> {
+    goal_view_for(areas, true)
+}
+
+fn goal_view_for(areas: &[Area], split: bool) -> Result<String, String> {
     let mut reads = Vec::new();
     let mut host_methods = Vec::new();
-    for area in &areas {
+    for area in areas {
         for (tier, entries) in &area.tiers {
             if matches!(tier, Tier::Backend | Tier::ClientBackend) {
                 reads.extend(entries.iter().map(|entry| (area, *tier, entry)));
@@ -1138,7 +1957,7 @@ pub(super) fn generate_goal_view(root: &Path) -> Result<String, String> {
             }
         }
     }
-    goal_view(&areas, &reads, &host_methods)
+    goal_view(areas, &reads, &host_methods, split)
 }
 
 /// The goal view's generated impls (#1077): the backend ones forward the snapshot-backed
@@ -1152,34 +1971,37 @@ fn goal_view(
     areas: &[Area],
     reads: &[(&Area, Tier, &Entry)],
     host_methods: &[(&Area, &Entry)],
+    split: bool,
 ) -> Result<String, String> {
     let mut impls = Impls::default();
     let mut code = String::from(
-        "// @generated by cargo run -p xtask -- mod-api; do not edit.\nuse mod_api::{prelude::*, *};\nuse std::path::PathBuf;\nuse std::sync::Arc;\n/// The mob tick's read view (#1077), as the game generates it: the snapshot-backed\n/// reads forward to the engine context's own methods, entity data the view does\n/// not carry answers its typed refusal, and every other backend read forwards\n/// to the real backend of the game host the view carries.\nimpl Backend for super::GoalCx<'_, '_> {}\n",
+        "// @generated by cargo run -p xtask -- mod-api; do not edit.\nuse mod_api::{prelude::*, *};\n/// The mob tick's read view (#1077), as the game generates it: the snapshot-backed\n/// reads forward to the engine context's own methods, entity data the view does\n/// not carry answers its typed refusal, and every other backend read forwards\n/// to the real backend of the game host the view carries.\nimpl Backend for super::GoalCx<'_, '_> {}\n",
     );
     for (area, tier, entry) in reads {
         let (name, args) = (
             entry.name.as_str(),
             signature_args(&entry.sig, &entry.name)?,
         );
-        let refusal = refusal(&entry.sig, name)?;
+        let refusal = refusal(entry)?;
         let mut sig = entry.sig.clone();
         sig.ident = syn::parse_str(name).map_err(|e| format!("{name}: {e}"))?;
-        // Entity data answers the tick's view; everything else forwards to the real backend the
-        // view carries.
-        let entity_data = matches!(
-            entry.sig.inputs.iter().skip(1).find_map(|arg| match arg {
-                FnArg::Typed(arg) => Some(&*arg.ty),
-                FnArg::Receiver(_) => None,
-            }),
-            Some(syn::Type::Path(ty))
-                if ty.path.segments.len() == 1
-                    && GOAL_VIEW_ENTITY_ARGS
-                        .contains(&ty.path.segments[0].ident.to_string().as_str())
-        );
+        // Entity data answers the tick's view; residency and non-entity reads forward to the real
+        // backend the view carries (a lent mob is `EntityResidency::Busy`, not `Gone`).
+        let entity_data = name != "entity_residency"
+            && matches!(
+                entry.sig.inputs.iter().skip(1).find_map(|arg| match arg {
+                    FnArg::Typed(arg) => Some(&*arg.ty),
+                    FnArg::Receiver(_) => None,
+                }),
+                Some(syn::Type::Path(ty))
+                    if ty.path.segments.len() == 1
+                        && GOAL_VIEW_ENTITY_ARGS
+                            .contains(&ty.path.segments[0].ident.to_string().as_str())
+            );
         // How a forwarded read answers a host without a backend: its typed refusal.
         let forwarded = match refusal {
             "None" => ".flatten()".to_string(),
+            "" => ".unwrap_or_default()".to_string(),
             // A `Result` read's no-backend answer is its error type's own `NoBackend` value,
             // wrapped back in the `Err`.
             refusal if refusal.starts_with("Err(") => {
@@ -1224,9 +2046,8 @@ fn goal_view(
                 let name = pat.ident.to_string();
                 match ty.as_str() {
                     "EntityRef" => Some(name),
-                    "LivingRef" | "PlayerRef" | "MobRef" | "ItemEntityRef" | "MerchantRef" => {
-                        Some(format!("{name}.entity()"))
-                    }
+                    "LivingRef" | "PlayerRef" | "MobRef" | "ItemEntityRef" | "ExperienceOrbRef"
+                    | "MerchantRef" => Some(format!("{name}.entity()")),
                     _ => None,
                 }
             })
@@ -1245,12 +2066,12 @@ fn goal_view(
         };
         impls.add(
             area.trait_name(*tier),
-            format!("{} {{ {body} }}\n", sig.to_token_stream()),
+            format!("#[inline]\n{} {{ {body} }}\n", sig.to_token_stream()),
         );
     }
     code.push_str(&impls.take());
     code.push_str(
-        "/// The same view as a host: the entity lookups answer the tick's own rules\n/// (the ticking mob, the player it sees, the snapshot, else None), the mutable\n/// methods stay out of reach of the shared host the view holds, and everything\n/// else - the level, its blocks, tags, recipes and settings - forwards to the\n/// game host the view carries.\nimpl Host for super::GoalCx<'_, '_> {\n#[doc(hidden)]\nfn backend(&self) -> Option<BackendRef<'_>> { Some(mod_api::__private::backend_ref(self)) }\n}\n",
+        "/// The same view as a host: the entity lookups answer the tick's own rules\n/// (the ticking mob, the player it sees, the snapshot, else None), the mutable\n/// methods stay out of reach of the shared host the view holds, and everything\n/// else - the level, its blocks, tags, recipes and settings - forwards to the\n/// game host the view carries.\nimpl Host for super::GoalCx<'_, '_> {\n#[doc(hidden)]\n#[inline]\nfn backend(&self) -> Option<BackendRef<'_>> { Some(mod_api::__private::backend_ref(self)) }\n}\n",
     );
     // An area whose host methods all write has nothing to forward, but the view still implements it.
     for area in areas
@@ -1277,10 +2098,19 @@ fn goal_view(
         };
         impls.add(
             area.trait_name(Tier::Host),
-            format!("{} {{ {body} }}\n", sig.to_token_stream()),
+            format!("#[inline]\n{} {{ {body} }}\n", sig.to_token_stream()),
         );
     }
     code.push_str(&impls.take());
+    let standard = if split {
+        standard_imports(&syn::parse_file(&code).map_err(|e| e.to_string())?)
+    } else {
+        "use std::path::PathBuf;\nuse std::sync::Arc;\n".into()
+    };
+    let index = code
+        .find("/// The mob")
+        .expect("generated goal documentation");
+    code.insert_str(index, &standard);
     Ok(code)
 }
 
@@ -1312,6 +2142,73 @@ mod state_write_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_backend_can_forward_to_a_distinct_game_method() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let areas = load(&root).unwrap();
+        let routing = Routing::load(&root).unwrap();
+        for package in [GameplayPackage::Server, GameplayPackage::Client] {
+            let callees = host_callees(&areas, package, &routing).unwrap();
+            assert!(callees.iter().any(|callee| {
+                callee.label == "LevelBlocksBackend::level_can_survive"
+                    && callee.method == "native_level_can_survive"
+                    && callee.kind == RouteKind::SharedTrait
+                    && callee
+                        .owner
+                        .ends_with("::native_survive::NativeSurviveGameExt<'_>")
+            }));
+            let generated = crate::gameplay::host_source(&root, package).unwrap();
+            let generated: String = generated.chars().filter(|ch| !ch.is_whitespace()).collect();
+            assert!(generated.contains("::native_level_can_survive(self,level,pos,state)"));
+        }
+    }
+
+    /// The block-state reads of tables a world's data packs change forward to the side's own
+    /// tables on both sides; the other table reads keep the common state's view.
+    #[test]
+    fn data_pack_table_reads_forward_to_the_sides_tables() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let areas = load(&root).unwrap();
+        let routing = Routing::load(&root).unwrap();
+        let side = "::native_block_tables::SideBlockTables<'_>";
+        let common = "::sunrise_gameplay_common::game::native_block_tables::BlockTables";
+        for package in [GameplayPackage::Server, GameplayPackage::Client] {
+            let callees = host_callees(&areas, package, &routing).unwrap();
+            for read in [
+                "block_state_is_suffocating",
+                "block_state_correct_tool_for_drops",
+            ] {
+                assert!(
+                    callees.iter().any(|callee| {
+                        callee.label == format!("BlockStatesBackend::{read}")
+                            && callee.method == read
+                            && callee.kind == RouteKind::SharedTrait
+                            && callee.borrow == Borrow::Shared
+                            && callee.owner.ends_with(side)
+                    }),
+                    "{package:?}: {read}"
+                );
+            }
+            let generated = crate::gameplay::host_source(&root, package).unwrap();
+            // The source is formatted: drop whitespace and the trailing commas the formatter
+            // puts before a closing `>` or `)` when it breaks a list over lines.
+            let generated: String = generated.chars().filter(|ch| !ch.is_whitespace()).collect();
+            let generated = generated.replace(",>", ">").replace(",)", ")");
+            assert!(
+                generated.contains(&format!("{side}>::block_state_is_suffocating(self,state)"))
+            );
+            assert!(generated.contains(&format!(
+                "{side}>::block_state_correct_tool_for_drops(self,"
+            )));
+            assert!(!generated.contains(&format!("{common}::block_state_is_suffocating(")));
+            assert!(!generated.contains(&format!("{common}::block_state_correct_tool_for_drops(")));
+            // A read of the game's own tables is unchanged.
+            assert!(generated.contains(&format!(
+                "{common}::block_state_is_solid(&{common}::of(&self.common),state)"
+            )));
+        }
+    }
 
     fn entry(source: &str) -> Entry {
         let method: syn::TraitItemFn = syn::parse_str(source).unwrap();
@@ -1365,10 +2262,10 @@ mod tests {
         let (setup, _, checked_write) =
             boundary_arguments(&write.sig, "write", false, false).unwrap();
         assert!(checked_write);
-        assert!(setup.contains("stack.try_into_engine(self.items())?"));
+        assert!(setup.contains("stack.try_into_engine(Self::items(self))?"));
         let owned = entry("fn drop_at(&mut self, stack: ItemStack) -> bool;");
         let (setup, _, _) = boundary_arguments(&owned.sig, "owned", false, false).unwrap();
-        assert!(setup.contains("stack.try_into_engine(self.items())"));
+        assert!(setup.contains("stack.try_into_engine(Self::items(self))"));
     }
 
     #[test]
@@ -1413,6 +2310,16 @@ mod tests {
         assert!(code.contains(
             "backend_mut_of(host).map(|backend| backend.entity_run_command_with_output(self, line, level, suppress_output)).unwrap_or_default()"
         ));
+        // A residency read defaults to `EntityResidency::Gone` without a backend.
+        let residency = entry("fn entity_residency(&self, entity: EntityRef) -> EntityResidency;");
+        let (handle, code) = handle_method(&residency, Tier::Backend, &handles)
+            .unwrap()
+            .unwrap();
+        assert_eq!(handle, "EntityRef");
+        assert!(code.contains("pub fn residency (self , host : & dyn Host) -> EntityResidency"));
+        assert!(code.contains(
+            "backend_of(host).map(|backend| backend.entity_residency(self)).unwrap_or_default()"
+        ));
         // A `Result` method refuses with its error's `NoBackend` value on a host without a game.
         let tried = entry("fn level_attempt(&mut self, level: LevelRef) -> Result<u8, Refused>;");
         let (_, code) = handle_method(&tried, Tier::BackendMut, &handles)
@@ -1443,9 +2350,10 @@ mod tests {
             camel: "Keys".into(),
             tiers: BTreeMap::new(),
             tables: BTreeMap::new(),
+            server_only_tiers: std::collections::BTreeSet::new(),
         };
         assert_eq!(
-            goal_view(&[], &[(&area, Tier::Backend, &method)], &[]),
+            goal_view(&[], &[(&area, Tier::Backend, &method)], &[], false),
             Err("block_key_id: cannot refuse its backend return type".into())
         );
     }
@@ -1476,7 +2384,7 @@ mod tests {
             (
                 "fn entity_x(&self, entity: EntityRef);",
                 Tier::Backend,
-                "returns Option, bool, CommandResult or Result",
+                "returns Option, bool, CommandResult, EntityResidency or Result",
             ),
             (
                 "fn entity_x(&mut self, entity: EntityRef) -> bool;",
@@ -1541,7 +2449,7 @@ mod tests {
         let (setup, args, checked) =
             boundary_arguments(&mixed.sig, "update", false, false).unwrap();
         assert!(checked);
-        assert!(setup.contains("stack.try_into_engine(self.items())?"));
+        assert!(setup.contains("stack.try_into_engine(Self::items(self))?"));
         assert!(setup.contains("text.try_into_engine(&())?"));
         assert_eq!(args, "stack, text.as_ref()");
         let syn::ReturnType::Type(_, output) = &mixed.sig.output else {
@@ -1549,6 +2457,136 @@ mod tests {
         };
         assert!(text_value(output));
         assert!(!boundary_value(output));
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn forwarder_routes_compile_without_recursing_on_either_side() {
+        let area = Area {
+            stem: "fixture".into(),
+            camel: "Fixture".into(),
+            tiers: BTreeMap::from([
+                (
+                    Tier::Host,
+                    vec![
+                        entry("fn local(&self) -> u32;"),
+                        entry("#[static_call] fn fixed(&self) -> u32;"),
+                        entry("#[published(shared)] fn published(&self) -> u32;"),
+                        entry("#[service] fn service(&self) -> &dyn Service;"),
+                    ],
+                ),
+                (Tier::Backend, vec![entry("fn table(&self) -> u32;")]),
+                (
+                    Tier::BackendMut,
+                    vec![entry("fn update(&mut self, value: u32);")],
+                ),
+                (
+                    Tier::ClientBackend,
+                    vec![entry("fn desktop(&self) -> Option<u32>;")],
+                ),
+            ]),
+            tables: BTreeMap::from([(Tier::Backend, "crate::game::Tables".into())]),
+            server_only_tiers: Default::default(),
+        };
+        let forwards = render_forwarders(&forwarder_plan(&[area]).unwrap(), None).unwrap();
+        let fixture = tempfile::tempdir().unwrap();
+        let input = fixture.path().join("forwarders.rs");
+        fs::write(
+            &input,
+            format!(
+                r#"
+extern crate self as mod_api;
+pub trait Service {{}}
+pub mod __private {{
+    pub fn shared() -> u32 {{ 3 }}
+    pub mod game {{
+        pub struct CallbackOwner;
+        impl CallbackOwner {{
+            pub fn call_host<T>(call: impl FnOnce() -> T) -> T {{ call() }}
+        }}
+    }}
+}}
+pub mod prelude {{
+    pub trait FixtureHost {{
+        fn local(&self) -> u32;
+        fn fixed(&self) -> u32;
+        fn published(&self) -> u32;
+        fn service(&self) -> &dyn crate::Service;
+    }}
+    pub trait FixtureBackend {{ fn table(&self) -> u32; }}
+    pub trait FixtureBackendMut {{ fn update(&mut self, value: u32); }}
+    pub trait FixtureClientBackend {{ fn desktop(&self) -> Option<u32>; }}
+}}
+mod game {{
+    pub(crate) mod api_values {{
+        pub fn call_stack_write() {{}}
+        pub fn call_state_write() {{}}
+        pub fn call_write() {{}}
+        pub trait TryIntoApi {{}}
+        pub trait TryIntoEngine {{}}
+    }}
+    pub struct ServerGame<'a>(pub &'a mut u32);
+    pub struct ClientGame<'a>(pub &'a mut u32);
+    pub struct Tables<'a>(&'a u32);
+    impl crate::Service for ServerGame<'_> {{}}
+    impl crate::Service for ClientGame<'_> {{}}
+    impl ServerGame<'_> {{
+        fn local(&self) -> u32 {{ *self.0 }}
+        fn fixed() -> u32 {{ 2 }}
+        fn update(&mut self, value: u32) {{ *self.0 = value; }}
+    }}
+    impl ClientGame<'_> {{
+        fn local(&self) -> u32 {{ *self.0 }}
+        fn fixed() -> u32 {{ 2 }}
+        fn desktop(&self) -> Option<u32> {{ Some(*self.0) }}
+    }}
+    trait State {{ fn state(&self) -> &u32; }}
+    impl State for ServerGame<'_> {{ fn state(&self) -> &u32 {{ self.0 }} }}
+    impl State for ClientGame<'_> {{ fn state(&self) -> &u32 {{ self.0 }} }}
+    impl<'a> Tables<'a> {{
+        fn of(game: &'a impl State) -> Self {{ Self(game.state()) }}
+        fn table(&self) -> u32 {{ *self.0 + 1 }}
+    }}
+    mod generated {{ {forwards} }}
+}}
+fn main() {{
+    use prelude::*;
+    fn check(game: &(impl FixtureHost + FixtureBackend), value: u32) {{
+        assert_eq!(game.local(), value);
+        assert_eq!(game.table(), value + 1);
+        assert_eq!(game.fixed(), 2);
+        assert_eq!(game.published(), 3);
+        let _ = game.service();
+    }}
+    let mut value = 4;
+    let mut server = game::ServerGame(&mut value);
+    assert_eq!(server.desktop(), None);
+    check(&server, 4);
+    server.update(7);
+    let client = game::ClientGame(&mut value);
+    check(&client, 7);
+    assert_eq!(FixtureClientBackend::desktop(&client), Some(7));
+}}
+"#
+            ),
+        )
+        .unwrap();
+        let binary = fixture
+            .path()
+            .join(format!("forwarders{}", std::env::consts::EXE_SUFFIX));
+        let compile = Command::new("rustc")
+            .args(["--edition=2024", "--cfg", "feature=\"client\""])
+            .arg(&input)
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .unwrap();
+        assert!(
+            compile.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        assert!(Command::new(binary).status().unwrap().success());
     }
 
     #[test]
@@ -1561,9 +2599,20 @@ mod tests {
             .flat_map(|area| {
                 area.tiers.into_iter().flat_map(move |(tier, entries)| {
                     let owner = format!("{}{}", area.camel, tier.suffix());
-                    entries
-                        .into_iter()
-                        .map(move |entry| (owner.clone(), entry.name))
+                    let sides: &[&str] = match tier {
+                        Tier::ServerHost | Tier::BackendMut => &["ServerGame"],
+                        Tier::ClientHost | Tier::ClientBackendMut => &["ClientGame"],
+                        Tier::Host | Tier::Backend | Tier::ClientBackend => {
+                            &["ServerGame", "ClientGame"]
+                        }
+                    };
+                    entries.into_iter().flat_map(move |entry| {
+                        let owner = owner.clone();
+                        let name = entry.name;
+                        sides
+                            .iter()
+                            .map(move |&side| (side.to_owned(), owner.clone(), name.clone()))
+                    })
                 })
             })
             .collect();
@@ -1579,11 +2628,12 @@ mod tests {
                             .is_ok_and(|lint| lint == "unconditional_recursion")
                 }));
                 // The generator also emits table-backed view implementations.
-                // This assertion covers Game's complete backend surface.
+                // This assertion covers ServerGame and ClientGame's complete backend surface.
                 let syn::Type::Path(receiver) = &*item.self_ty else {
                     panic!("expected named host")
                 };
-                if receiver.path.segments.last().unwrap().ident != "Game" {
+                let side = receiver.path.segments.last().unwrap().ident.to_string();
+                if side != "ServerGame" && side != "ClientGame" {
                     continue;
                 }
                 let owner = item
@@ -1600,7 +2650,7 @@ mod tests {
                         panic!("non-method in Game impl")
                     };
                     let name = method.sig.ident.to_string();
-                    assert!(actual.insert((owner.clone(), name)));
+                    assert!(actual.insert((side.clone(), owner.clone(), name)));
                 }
             }
         }
@@ -1687,6 +2737,23 @@ mod tests {
     }
 
     #[test]
+    fn goal_view_forwards_entity_residency_to_the_host_backend() {
+        let method = entry("fn entity_residency(&self, entity: EntityRef) -> EntityResidency;");
+        let area = Area {
+            stem: "entities".into(),
+            camel: "Entities".into(),
+            tiers: BTreeMap::new(),
+            tables: BTreeMap::new(),
+            server_only_tiers: BTreeSet::new(),
+        };
+        let code = goal_view(&[], &[(&area, Tier::Backend, &method)], &[], true).unwrap();
+        assert!(code.contains(
+            "mod_api::__private::backend_read(self.host, |backend| backend.entity_residency(entity)).unwrap_or(EntityResidency::Gone)"
+        ));
+        assert!(!code.contains("is_game_entity"));
+    }
+
+    #[test]
     fn every_area_file_of_the_checkout_loads() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let areas = load(&root).unwrap();
@@ -1697,5 +2764,21 @@ mod tests {
                 .filter(|area| area.tiers.is_empty())
                 .all(|area| matches!(area.stem.as_str(), "draw" | "services"))
         );
+    }
+
+    #[test]
+    fn only_synchronous_borrowed_callbacks_stay_in_caller_scope() {
+        assert!(!borrows_caller_callback(
+            &entry("fn living_heal(&mut self, living: LivingRef, amount: f32) -> bool;").sig
+        ));
+        assert!(!borrows_caller_callback(
+            &entry("fn schedule_task(&mut self, delay: u32, task: Box<dyn FnOnce(&mut dyn ServerHost)>) -> Result<TaskId, ScheduleError>;").sig
+        ));
+        assert!(borrows_caller_callback(
+            &entry("fn level_visit_all_entities(&self, level: LevelRef, visit: &mut dyn FnMut(EntityRef) -> core::ops::ControlFlow<()>) -> Result<core::ops::ControlFlow<()>, LevelReadError>;").sig
+        ));
+        assert!(borrows_caller_callback(
+            &entry("fn player_read_inventory(&self, player: PlayerRef, read: &mut dyn for<'a> FnMut(InventoryView<'a>)) -> Option<()>;").sig
+        ));
     }
 }

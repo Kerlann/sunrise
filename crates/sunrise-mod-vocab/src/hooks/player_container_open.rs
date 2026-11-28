@@ -1,5 +1,4 @@
 //! The `player_container_open` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0163
 
 pub trait Hooks {
     /// `player` (`name`) opened a menu (NeoForge's `PlayerContainerEvent.Open`,
@@ -20,7 +19,7 @@ pub trait Hooks {
     /// its slot methods still refuse those indices.
     /// The player's state is swapped in. Server-side.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_player_container_open",
+        target = "sunrise_gameplay::game::native_hooks::base::ServerGame<'_>::native_player_container_open",
         dispatch = "flat",
         side = "server",
         version = 2,

@@ -61,7 +61,7 @@ build pins. Where no prebuilt exists for your platform or pin, the build compile
 
 Read the build log, whose path `cargo sunrise-mod build` prints, for the number of patched functions and
 mixin rows. A player reads the same log through the launcher's **Build log**
-([build log](../how-to/native-mods/05-build-log.md)).
+([build log](../how-to/native-mods/04-what-the-launcher-does.md#build-log)).
 
 How the build works is on [How the native route works](native-route/7-how-it-works.md).
 

@@ -3,7 +3,7 @@
 
 use super::{Found, Item, Source, Visit};
 use crate::source::unraw;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use syn::{Attribute, ItemUse, UseTree, Visibility};
 
@@ -13,6 +13,90 @@ pub(super) type Scopes = HashMap<String, Rc<Scope>>;
 enum Namespace {
     Type,
     Value,
+}
+
+/// The namespaces an item declares its name in.
+fn declared(item: &Item) -> &'static [Namespace] {
+    match item {
+        Item::Fn(_) | Item::Const(_) | Item::Static(_) => &[Namespace::Value],
+        // A tuple or unit struct has a constructor in the value namespace too.
+        Item::Struct(item) if !matches!(item.fields, syn::Fields::Named(_)) => {
+            &[Namespace::Type, Namespace::Value]
+        }
+        _ => &[Namespace::Type],
+    }
+}
+
+/// Whether an item declares its name in the value namespace: a function, a constant, a static or a
+/// tuple or unit struct's constructor.
+pub(super) fn declares_value(item: &Item) -> bool {
+    declared(item).contains(&Namespace::Value)
+}
+
+/// One name an import binds, and what its path resolves to in the original source.
+pub(super) struct Imported {
+    pub(super) name: String,
+    pub(super) path: Vec<String>,
+    /// Whether the name is bound in the type namespace, where a module is: `None` when the source
+    /// alone can't tell (an external crate, a glob or a cfg-gated declaration).
+    pub(super) types: Option<bool>,
+    /// The same for the value namespace, where a function is.
+    pub(super) values: Option<bool>,
+    /// Whether the path starts at a name the module itself binds, so that from a module inside it
+    /// the path starts with `super::`. A relative `self` or `super` path does too; an external
+    /// crate, `crate` and a leading `::` do not.
+    pub(super) local: bool,
+}
+
+/// The names `item`, written in `module`, binds one by one: a mirror module decides for each of
+/// them whether another binding of its name in the same namespace is already there.
+pub(super) fn imported(source: &mut Source, module: &str, item: &ItemUse) -> Vec<Imported> {
+    let mut leaves = Vec::new();
+    imports(item, |name, path| {
+        leaves.extend(name.map(|name| (name, path)))
+    });
+    let mut walk = Walk {
+        source,
+        origin: module,
+        active: HashSet::new(),
+    };
+    leaves
+        .into_iter()
+        .map(|(name, path)| {
+            // A leading `::` names an external crate, which the source alone can't read.
+            let import = Import {
+                path,
+                external: item.leading_colon.is_some(),
+                conditional: false,
+                limit: None,
+            };
+            let mut lookup = |space| {
+                walk.import_path(module, &import, space)
+                    .ok()
+                    .map(|binding| binding.is_some())
+            };
+            let (types, values) = (lookup(Namespace::Type), lookup(Namespace::Value));
+            let path = import.path;
+            let local = item.leading_colon.is_none()
+                && path.first().is_some_and(|head| {
+                    !matches!(head.as_str(), "crate" | "self" | "super")
+                        && (walk.scope(module).is_some_and(|scope| {
+                            scope.items[Namespace::Type as usize].contains_key(head)
+                                || scope.imports.contains_key(head)
+                        }) || matches!(
+                            walk.binding(module, head, Namespace::Type),
+                            Ok(Some(_))
+                        ))
+                });
+            Imported {
+                name,
+                path,
+                types,
+                values,
+                local,
+            }
+        })
+        .collect()
 }
 
 #[derive(Default)]
@@ -45,6 +129,29 @@ enum Blocked {
     Import(String),
     // The mirror cannot re-export a non-public crate-root function.
     RootFunction(String),
+}
+
+/// A lower crate's unlisted modules may carry imports the mirror cannot access.
+pub(super) struct Narrowing<'a> {
+    /// The names the copies and the rows' helpers use: the imports a mirror keeps.
+    pub(super) used: &'a BTreeSet<String>,
+    /// Linked externs can supply traits a copy uses through method syntax.
+    linked: &'a BTreeSet<String>,
+}
+
+impl<'a> Narrowing<'a> {
+    pub(super) fn new(used: &'a BTreeSet<String>, linked: &'a BTreeSet<String>) -> Self {
+        Self { used, linked }
+    }
+
+    /// The patch crate's extern prelude includes the linked crates, std and core.
+    pub(super) fn resolves(&self, root: &syn::Ident) -> bool {
+        root == "std" || root == "core" || self.linked.contains(&root.to_string())
+    }
+}
+
+pub(super) fn preserve_owner_features(layout: crate::source::SourceLayout, module: &str) -> bool {
+    !layout.owns(module)
 }
 
 fn within(module: &str, ancestor: &str) -> bool {
@@ -191,14 +298,6 @@ impl Scope {
             };
             if !mod_source::modules::test_only(attrs) {
                 let name = unraw(ident);
-                let spaces: &[_] = match item {
-                    Item::Fn(_) | Item::Const(_) | Item::Static(_) => &[Namespace::Value],
-                    // A tuple or unit struct has a constructor in the value namespace too.
-                    Item::Struct(item) if !matches!(item.fields, syn::Fields::Named(_)) => {
-                        &[Namespace::Type, Namespace::Value]
-                    }
-                    _ => &[Namespace::Type],
-                };
                 let binding = (!conditional(attrs)).then(|| Binding {
                     module: matches!(item, Item::Mod(_)).then(|| format!("{module}::{name}")),
                     limit: limit(module, vis),
@@ -207,7 +306,7 @@ impl Scope {
                         && !matches!(vis, Visibility::Public(_)))
                     .then(|| Blocked::RootFunction(name.clone())),
                 });
-                for &space in spaces {
+                for &space in declared(item) {
                     let names = &mut scope.items[space as usize];
                     if let Some(binding) = &binding {
                         names

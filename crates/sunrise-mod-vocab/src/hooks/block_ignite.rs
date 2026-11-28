@@ -1,5 +1,4 @@
 //! The `block_ignite` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0178
 
 pub trait Hooks {
     /// On an authoritative server, fire is about to be placed at `pos` by
@@ -14,7 +13,7 @@ pub trait Hooks {
         out = "cancel",
         neoforge = "none (NeoForge has no such event; Bukkit's BlockIgniteEvent)",
         cancellable = true,
-        target = "sunrise_client::game::native_hooks::base::GameLevel<'_>::native_block_ignite"
+        target = "sunrise_gameplay_common::game::native_hooks::base::GameLevel<'_>::native_block_ignite"
     )]
     fn block_ignite(
         dimension: LevelDimension,

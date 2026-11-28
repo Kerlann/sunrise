@@ -1,5 +1,4 @@
 //! The `smoke_source` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0216
 
 pub trait Hooks {
     /// `CampfireBlock.isSmokeSource` on both sides for the
@@ -17,7 +16,7 @@ pub trait Hooks {
         out = "smoke",
         scope = "block",
         key = "state",
-        target = "sunrise_client::game::native_hooks::base::GameLevel<'_>::native_smoke_source",
+        target = "sunrise_gameplay_common::game::native_hooks::base::GameLevel<'_>::native_smoke_source",
         neoforge = "none (vanilla CampfireBlock.isSmokeSource; NeoForge adds no event or extension for it)"
     )]
     fn smoke_source(dimension: LevelDimension, state: BlockState, smoke: &mut Option<bool>);

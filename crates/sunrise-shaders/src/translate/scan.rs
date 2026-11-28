@@ -1,7 +1,7 @@
 //! The first pass over a stage's tokens: what it declares at global scope, which of its
 //! functions take samplers, which outputs and built-ins it uses.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write;
 
 use naga::ShaderStage;
@@ -61,6 +61,9 @@ pub(super) struct Stage<'p> {
     pub(super) frag_outs: Vec<(u32, String)>,
     /// Narrow outputs copied into their vec4 after the pack's `main`.
     pub(super) out_copies: Vec<String>,
+    /// The pack's own fragment outputs declared as they are (not widened): at each location,
+    /// what our `main` names it by (`c`, `c[0]` for an array) and its type.
+    pub(super) named_outs: BTreeMap<u32, (String, String)>,
     /// Locations whose `hz_outN` is ours, filled from the pack's outputs: its vector type and
     /// the components written so far (a bit each).
     pub(super) wide_outs: HashMap<u32, (&'static str, u8)>,
@@ -149,6 +152,8 @@ const IMAGE_FORMATS: [&str; 39] = [
 ];
 
 pub(super) const STORAGE: [&str; 5] = ["uniform", "in", "out", "attribute", "varying"];
+pub(super) const MEMORY_QUALIFIERS: [&str; 5] =
+    ["readonly", "writeonly", "coherent", "volatile", "restrict"];
 pub(super) const QUALIFIERS: [&str; 11] = [
     "flat",
     "smooth",
@@ -162,6 +167,47 @@ pub(super) const QUALIFIERS: [&str; 11] = [
     "sample",
     "const",
 ];
+
+/// Steps past a declaration's leading qualifiers (`layout(...)`, storage including `buffer`,
+/// memory, interpolation, precision and `const`), stopping at the first non-qualifier token
+/// (type, block name, `{`, `;`, or end). Never enters a block body or parameter list.
+/// Returns `(storage, next)`.
+pub(super) fn declaration_prefix(words: &[&str]) -> (Option<&'static str>, usize) {
+    let mut storage = None;
+    let mut k = 0;
+    while let Some(&w) = words.get(k) {
+        if w == "layout" {
+            let mut j = k + 1;
+            if words.get(j) == Some(&"(") {
+                let mut depth = 0usize;
+                while let Some(&t) = words.get(j) {
+                    j += 1;
+                    match t {
+                        "(" => depth += 1,
+                        ")" => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            k = j;
+            continue;
+        }
+        if let Some(&s) = STORAGE.iter().find(|&&s| s == w) {
+            storage = Some(s);
+        } else if w == "buffer" {
+            storage = Some("buffer");
+        } else if !QUALIFIERS.contains(&w) && !MEMORY_QUALIFIERS.contains(&w) {
+            break;
+        }
+        k += 1;
+    }
+    (storage, k)
+}
 /// The compatibility profile's uniform state (with its `Inverse`/`Transpose` forms).
 pub(super) const UNIFORM_STATE: [&str; 5] = [
     "gl_ModelViewMatrix",
@@ -244,6 +290,21 @@ const VULKAN_TYPES: [(&str, &str); 9] = [
 
 pub(super) fn significant(t: &str) -> bool {
     !t.trim().is_empty()
+}
+
+/// An error at token `at` of `tokens`, the lexed `pp.code()`: the output line is the number of line
+/// breaks before it, and [`Preprocessed::error_at_line`] names where that line came from.
+pub(super) fn error_at_token(
+    pp: &Preprocessed,
+    tokens: &[&str],
+    at: usize,
+    message: impl Into<String>,
+) -> Error {
+    let line: usize = tokens[..at.min(tokens.len())]
+        .iter()
+        .map(|t| t.matches('\n').count())
+        .sum();
+    pp.error_at_line(line, message)
 }
 
 /// A layout qualifier's value as `Stage::layout_value` reads it.
@@ -438,7 +499,7 @@ impl<'p> Stage<'p> {
         let mut s = Stage {
             kind,
             pp,
-            tokens: lex(&pp.code),
+            tokens: lex(pp.code()),
             removed: Vec::new(),
             uniforms: Vec::new(),
             defaults: Vec::new(),
@@ -450,6 +511,7 @@ impl<'p> Stage<'p> {
             attributes: Vec::new(),
             frag_outs: Vec::new(),
             out_copies: Vec::new(),
+            named_outs: BTreeMap::new(),
             wide_outs: HashMap::new(),
             inverse: false,
             gather_offsets: false,
@@ -636,21 +698,7 @@ impl<'p> Stage<'p> {
     }
 
     pub(super) fn error(&self, token: usize, message: &str) -> Error {
-        let line: usize = self.tokens[..token.min(self.tokens.len())]
-            .iter()
-            .map(|t| t.matches('\n').count())
-            .sum();
-        let o = self.pp.lines.get(line).copied().unwrap_or_default();
-        Error {
-            file: self
-                .pp
-                .files
-                .get(o.file as usize)
-                .cloned()
-                .unwrap_or_default(),
-            line: o.line,
-            message: message.to_owned(),
-        }
+        error_at_token(self.pp, &self.tokens, token, message)
     }
 
     /// Core names share the compatibility state for geometry, including shadow transforms.
@@ -956,9 +1004,15 @@ impl<'p> Stage<'p> {
                             let width = output_kind(&ty).map_or(4, |(_, width, _)| width);
                             self.wide_outs.insert(n, (wide, (1 << width) - 1));
                         }
-                        None => self
-                            .frag_outs
-                            .push((n, format!("layout(location = {n}) out {ty} {name}{array};"))),
+                        None => {
+                            let element = if array.is_empty() { "" } else { "[0]" };
+                            self.named_outs
+                                .insert(n, (format!("{name}{element}"), ty.clone()));
+                            self.frag_outs.push((
+                                n,
+                                format!("layout(location = {n}) out {ty} {name}{array};"),
+                            ));
+                        }
                     }
                 }
                 _ => self.outs.push(Var {
@@ -968,6 +1022,23 @@ impl<'p> Stage<'p> {
                     at: ty_at,
                 }),
             }
+        }
+    }
+
+    /// What our `main` names output `n` by when it holds a colour, a `vec4` of floats:
+    /// `gl_FragColor`'s and `gl_FragData[n]`'s `hz_outN`, a widened or assembled float output's
+    /// `hz_outN`, or the pack's own `vec4` (its first element for an array). Nothing when no
+    /// output is at `n`, or it holds integers.
+    pub(super) fn color_output(&self, n: u32) -> Option<String> {
+        if !self.outputs.contains(&n) {
+            return None;
+        }
+        if let Some((wide, _)) = self.wide_outs.get(&n) {
+            return (*wide == "vec4").then(|| format!("hz_out{n}"));
+        }
+        match self.named_outs.get(&n) {
+            Some((name, ty)) => (ty == "vec4").then(|| name.clone()),
+            None => Some(format!("hz_out{n}")),
         }
     }
 
@@ -1300,9 +1371,28 @@ impl<'p> Stage<'p> {
 
     /// `layout(std430, binding = n) buffer Name {`: an SSBO, in set 4 at its binding. Its
     /// access qualifiers go, so that every stage binds it alike (read and write).
+    ///
+    /// A `set` in its layout is refused with an error naming the block: packs are GLSL written
+    /// for OpenGL (spec rev 1, line 810), and GLSL 4.60.8, 4.4.5 makes `set` a compile-time
+    /// error when not targeting an API that supports descriptor sets (asked in
+    /// `docs/cleanroom/questions/Q-002.md`).
     fn buffer_block(&mut self, words: &[usize]) {
         let mut binding = None;
+        // The depth of the parentheses of a `layout(..)` group the word is in, 0 outside one.
+        let mut layout = 0usize;
+        let mut set = None;
         for (k, &i) in words.iter().enumerate() {
+            match self.tokens[i] {
+                "(" if layout > 0
+                    || k.checked_sub(1)
+                        .is_some_and(|p| self.tokens[words[p]] == "layout") =>
+                {
+                    layout += 1
+                }
+                ")" if layout > 0 => layout -= 1,
+                "set" if layout > 0 => _ = set.get_or_insert(i),
+                _ => {}
+            }
             match self.tokens[i] {
                 // An extension adds real buffer syntax even in a GLSL 1.x stage.
                 // It must not take the legacy identifier rename for `buffer`.
@@ -1320,6 +1410,17 @@ impl<'p> Stage<'p> {
                 }
                 _ => {}
             }
+        }
+        if let Some(at) = set {
+            let name = (words.iter())
+                .skip_while(|&&i| self.tokens[i] != "buffer")
+                .nth(1)
+                .map_or("", |&i| self.tokens[i]);
+            let message = format!(
+                "buffer block `{name}` names a descriptor `set` in its layout, which GLSL 4.60 \
+                 (4.4.5) allows only when targeting Vulkan; shader packs target OpenGL"
+            );
+            self.errors.push(self.error(at, &message));
         }
         match binding {
             Some(b) => _ = self.buffers.insert(b),

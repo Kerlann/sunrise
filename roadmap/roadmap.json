@@ -87,7 +87,7 @@
    "status": "now",
    "area": "performance",
    "plain": "Making Sunrise faster than vanilla on every computer, with smooth camera movement even at 32 chunks, by spreading the work better over the processor's cores.",
-   "dev": "Frame pacing at render distance 32 (#678): long frames come from work competing with the render thread. In review: no main-thread tick stutter at high render distances (#3827), each proto chunk's light view built once (#3815), video memory handed back by the vertex arena (#3466), chunk batches assembled on helper threads (#3036), free structure starts in the generation workers (#1760). Still open: far terrain at 48 to 64 chunks (#718) and CPU-bound fields of block entities (#717). Every change shows before and after numbers from `tools/perf_bench.py` against vanilla 26.3 (docs/benchmark.md).",
+   "dev": "Frame pacing at render distance 32 (#678): long frames come from work competing with the render thread. In review: no main-thread tick stutter at high render distances (#3827), each proto chunk's light view built once (#3815), video memory handed back by the vertex arena (#3466), chunk batches assembled on helper threads (#3036), free structure starts in the generation workers (#1760). Still open: CPU-bound fields of block entities (#717). Every change shows before and after numbers from `tools/perf_bench.py` against vanilla 26.3 (docs/benchmark.md).",
    "links": [
     "#3827",
     "#3815",
@@ -95,7 +95,6 @@
     "#3036",
     "#1760",
     "#678",
-    "#718",
     "#717",
     "docs/benchmark.md"
    ],
@@ -381,24 +380,6 @@
    "shipped_in": "v0.2.67"
   },
   {
-   "id": "native-shaders",
-   "title": "Sunrise's own shader format and kit",
-   "status": "shipped",
-   "area": "rendering",
-   "plain": "Sunrise's own way to make shader packs, with tools to write and test them. Every pack is checked before it runs, and the registry will list them.",
-   "dev": "`sunrise-shader-api` (API 0.1, experimental): WGSL stages with typed inputs inside the renderer's passes, options as WGSL override constants, and the `sunrise-shader new|check|pack` tool with templates and the example pack Golden Hour. Merged: the check every pack passes (#1820) and the tool, templates and guide (#1822). In review: the post stage running in the game with hot reload (#1861), the sky stage (#1863) and registry checks that use the game's own check (#1855). Left: the material, lighting and shadow stages, a last-good fallback on reload, a GPU-time overlay per stage and budgets (docs/shaders.md, docs/api/shaders.md). The Iris/OptiFine loader is a separate item, 'Shader packs, written again from scratch'.",
-   "links": [
-    "#1820",
-    "#1822",
-    "#1861",
-    "#1863",
-    "#1855",
-    "docs/shaders.md",
-    "docs/api/shaders.md"
-   ],
-   "shipped_in": "v0.2.70"
-  },
-  {
    "id": "server-dialogs",
    "title": "Server dialogs and login screens",
    "status": "shipped",
@@ -458,7 +439,7 @@
    "status": "next",
    "area": "performance",
    "plain": "Sunrise should run well on small machines: integrated graphics, the Steam Deck, older Macs and 8 GB of memory, with a battery mode that saves power on laptops.",
-   "dev": "Partly done: an opt-in 60 FPS cap with fewer workers on battery, Far Detail Reduced for integrated GPUs and animated textures on the GPU (both shipped). Left: measured targets and fixes per class of machine (memory use, worker counts, startup) on a Steam Deck, old Intel and Apple Silicon Macs and 8 GB computers, reported on the Benchmarks page.",
+   "dev": "Partly done: an opt-in 60 FPS cap with fewer workers on battery, and animated textures on the GPU. Left: measured targets and fixes per class of machine (memory use, worker counts, startup) on a Steam Deck, old Intel and Apple Silicon Macs and 8 GB computers, reported on the Benchmarks page.",
    "links": [
     "docs/benchmark.md",
     "https://playsunrise.net/docs/performance"
@@ -650,18 +631,6 @@
    ]
   },
   {
-   "id": "exact-far-terrain",
-   "title": "Exact far terrain from real chunks",
-   "status": "later",
-   "area": "performance",
-   "plain": "Far terrain drawn from the world you really built and explored, caves and builds included, not only a preview from the seed.",
-   "dev": "Keep a 3D mip store on disk built from real chunks, drawn by the GPU beside the seed preview for areas nobody has visited. Written from scratch and measured before it is kept. Builds on Far Detail and the far-terrain levels of detail already shipped; the open work on them is #718.",
-   "links": [
-    "#718",
-    "#4678"
-   ]
-  },
-  {
    "id": "older-jars",
    "title": "Older Fabric and Forge mods",
    "status": "later",
@@ -821,18 +790,6 @@
    "dev": "Not implemented (docs/graphics.md). Anisotropic filtering needs linear magnification in wgpu, which blurs close blocks, so close-up sharpness has to be kept first; MSAA would sit beside FXAA, and SMAA or TAA are asked for too; exclusive fullscreen where the backend supports it.",
    "links": [
     "docs/graphics.md"
-   ]
-  },
-  {
-   "id": "video-studio",
-   "title": "A complete video studio inside the game",
-   "status": "later",
-   "area": "extras",
-   "plain": "Record, replay and edit videos without leaving the game: record in a keypress, replay a session, cut and finish the video. One of Sunrise's original goals.",
-   "dev": "Three stages. Recording: capture gameplay in a keypress with an encoder thread and little frame-time cost. Replay: a replay mode for recorded sessions. Editing: cuts, camera paths, titles and export. None of it exists yet; the agent-control socket (docs/agent-control.md) already lets tools drive the game for scripted shots.",
-   "links": [
-    "docs/agent-control.md",
-    "#10025"
    ]
   },
   {
@@ -1086,10 +1043,10 @@
    "status": "later",
    "area": "gameplay",
    "plain": "Villages and fights behaving as in vanilla: iron golems defending villages, villagers remembering their homes, mace smashes and knockback.",
-   "dev": "Villages: iron golem village goals, villager memories across saves, villager age, job-site claiming on dedicated servers, flower offers (#1639 is one report). Combat: the mobs' `attack_knockback` attribute, mace smash logic, the hit knockback source on the host, the fire burnout biome tag. Each is checked against vanilla by a harness (docs/rust-parity.md).",
+   "dev": "Villages: iron golem village goals, villager memories across saves, villager age, job-site claiming on dedicated servers, flower offers (#1639 is one report). Combat: the mobs' `attack_knockback` attribute, mace smash logic, the hit knockback source on the host, the fire burnout biome tag. Each is checked against vanilla by a harness (docs/status.md).",
    "links": [
     "#1639",
-    "docs/rust-parity.md"
+    "docs/status.md"
    ]
   },
   {
@@ -1108,11 +1065,10 @@
    "title": "Well-known shader looks, rewritten for Sunrise",
    "status": "later",
    "area": "rendering",
-   "plain": "Popular shader packs rewritten in Sunrise's format, so good packs exist from the start. Only packs whose licence is open source and compatible with ours are rewritten, never anything else.",
-   "dev": "The first candidates are Photon, Chocapic13 and MakeUp Ultra Fast, each only after its licence is read and recorded: a pack is rewritten only if it is open source and compatible with Sunrise's licence, and the rewrite is written from the shader format's documentation and the look on screen, not from anyone's code. Today only the Golden Hour example exists (`crates/sunrise-shader-api/packs/golden_hour`).",
+   "plain": "Popular shader packs rewritten as Iris/OptiFine-format packs, so good packs exist from the start. Only packs whose licence is open source and compatible with ours are rewritten, never anything else.",
+   "dev": "The first candidates are Photon, Chocapic13 and MakeUp Ultra Fast, each only after its licence is read and recorded: a pack is rewritten only if it is open source and compatible with Sunrise's licence, and the rewrite is written from the shader format's documentation and the look on screen, not from anyone's code.",
    "links": [
-    "docs/shaders.md",
-    "crates/sunrise-shader-api/packs/golden_hour"
+    "docs/shaders.md"
    ]
   },
   {
@@ -1278,19 +1234,6 @@
    "dev": "Frames uploaded once, no per-tick CPU blend or copy (#1239).",
    "links": [
     "#1239"
-   ],
-   "shipped_in": "v0.2.5"
-  },
-  {
-   "id": "far-detail",
-   "title": "Far Detail for integrated graphics",
-   "status": "shipped",
-   "area": "performance",
-   "plain": "An optional Reduced setting for far terrain, suggested on integrated graphics, that saves 2 to 4 ms of GPU time per frame.",
-   "dev": "Opt-in reduced far terrain (#1199), on far-terrain chunk summaries built on the workers (#1029).",
-   "links": [
-    "#1199",
-    "#1029"
    ],
    "shipped_in": "v0.2.5"
   },

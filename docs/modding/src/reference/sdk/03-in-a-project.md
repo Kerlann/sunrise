@@ -22,6 +22,24 @@ with the line to write instead:
 | `registry`, `registry-index`, `branch`, `tag`, `rev` or `workspace` | It does not name the SDK. |
 | `{ path = "…" }` anywhere else | The path must be the pinned SDK the tool fetches. |
 
+## Cargo dependencies in a native build
+
+A registry build checks the staged mod's `Cargo.toml` and each local crate it reaches, including
+build, dev and target-specific dependencies. Keep authored path dependencies inside the mod and
+under its packaged source tree, and use `package = "…"` if the dependency's alias differs from
+its package name. The generated `sunrise-internals` facade uses the alias `internals` unless you
+name it differently. If the alias is already used in `[dependencies]`, the registry build reports
+the conflict. Give one dependency a different alias with `package = "…"` and use that alias in Rust
+imports. To link another mod, declare it in `sunrise-mod.toml`; the builder adds the Cargo path to
+its staged library. Don't put that path in your own `Cargo.toml`.
+
+The builder takes the API and internals from the pinned SDK, not from crates.io. For other registry
+crates, use crates.io and keep the mod's `Cargo.lock` up to date with
+[`native-lock`](08-native-build.md#native-discover-and-native-lock). Only the SDK may supply patches.
+Mod crates cannot declare `[patch]`, `[replace]` or `[workspace]`. The build and lock commands
+run Cargo from their own staging workspace without using your project's Cargo configuration
+or rewriting your `Cargo.toml` files.
+
 ## The pin
 
 The build a native mod is made for is its pin, a full commit SHA in `[native] sunrise` in
@@ -38,9 +56,8 @@ revision disagrees, remove it to use the SDK's revision.
 
 A native build writes the revision into the package, not the project. For a mod that doesn't use mixins, the
 package keeps an explicit revision or records the SDK's revision if none was written, without requiring a match.
-A project in a game checkout uses the checkout's API surface instead of fetching one into the project, but its
-native compile and package revision still come from the pinned SDK. `cargo sunrise-mod pin` moves the Sunrise
-build pin after checking the destination SDK; it leaves any explicit mixins revision alone.
+`cargo sunrise-mod pin` moves the Sunrise build pin after checking the destination SDK; it leaves any explicit
+mixins revision alone.
 
 ### Build names
 
@@ -61,11 +78,13 @@ can't put another build under its name. A release whose build has no SDK says so
 
 ## `.sunrise/sdk/`
 
-In a code mod, commands such as `new`, `build`, `check` and `hooks` fetch the pinned build's SDK
+In a code mod, commands such as `new`, `build` and `check` fetch the pinned build's SDK
 into `.sunrise/sdk/` after the [checks](01-release.md#how-a-download-is-checked). It holds `sdk.json`,
 `surface.json`, the unpacked API source under `api/`, and `build`, a stamp written only after the fetch finishes.
 The tool fetches again if the stamp is missing or if the pinned build or trusted SDK keys have changed.
 Run `check` without `--build` after a fresh clone to fetch the SDK before Cargo or an editor reads the API path.
+`hooks` only reads: it searches the SDK already in `.sunrise/sdk/` once its stamp and signed files verify,
+and otherwise refuses, telling you to run `check`, without fetching, creating, removing or repairing anything.
 
 `sdk diff`, `check --build` and `pin` read other builds' small files (`sdk.json` and `surface.json`) into
 `.sunrise/cache/<build id>/`, with the same checks. A fit report needs no SDK for a mod made
@@ -87,7 +106,7 @@ A Stable or Dev tag's folder also holds that release's `SHA256SUMS` and its sign
 Every SDK base is checked the same way, against Sunrise's signature. For a [local SDK built from a
 checkout](../../how-to/native-mods/07-local-developer-builds.md), a debug build of the mod tool can also check
 against the public key set in `SUNRISE_SDK_TRUSTED_KEY`. The launcher's own copies are described in
-[Cache and disk](../../how-to/native-mods/10-cache-and-disk.md).
+[Cache and disk](../../how-to/native-mods/04-what-the-launcher-does.md#cache-and-disk).
 
 `internals add` and pin changes that need catalogs read `internals.json` from the pinned build's signed SDK.
 The tool unpacks `build-data.tar.xz` into `.sunrise/cache/<build id>/build-data/`. `internals sync` checks

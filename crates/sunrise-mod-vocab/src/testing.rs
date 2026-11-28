@@ -26,6 +26,26 @@
 //! let into = host.level.block_entity_at([1, 64, 0]).unwrap().items.as_ref().unwrap();
 //! assert_eq!(into.count("minecraft:stone"), 3);
 //! ```
+/// Build the command for one exact ignored test in a fresh copy of this test binary.
+/// The caller supplies scratch resources and verifies the fixture's completion.
+pub fn fresh_case_command(name: &str, flag: &str, case: &str) -> std::process::Command {
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--ignored",
+            "--exact",
+            name,
+            "--nocapture",
+            "--test-threads=4",
+        ])
+        .env(flag, case);
+    command
+}
+
+// hidden: only the engine's test platform installs these fixture callbacks.
+#[doc(hidden)]
+#[path = "testing/engine_platform.rs"]
+pub mod engine_platform;
 #[path = "testing/journal.rs"]
 mod journal;
 #[path = "testing/level.rs"]
@@ -58,8 +78,7 @@ use crate::{
     Backend, BackendMut, BackendMutRef, BackendRef, BlockEntityRef, BlockEntityTypeKey, BlockSide,
     ClientHost, Commands, EntityRef, FluidStack, Host, InventoryView, ItemComponentEditor, ItemKey,
     ItemPlace, ItemPlaceEditError, ItemStack, ItemStackView, LevelRef, Messages, Mods, PlayerRef,
-    Players, ScratchSlot, ServerHost, StackWriteError, TEST_MODS, Tag, Text, TicketController,
-    WorldEpoch,
+    Players, ScratchSlot, ServerHost, StackWriteError, TEST_MODS, Tag, Text, WorldEpoch,
 };
 
 /// The world epoch of every fake's handles.
@@ -213,11 +232,6 @@ pub fn inherit_mods<A, R, F: FnOnce(&A) -> R + Send>(f: F) -> impl FnOnce(&A) ->
     }
 }
 
-/// The ticket controller with this id that the mods of the enclosing `with_mods` registered.
-pub fn ticket_controller(id: &str) -> Option<TicketController> {
-    TicketController::from_id(id)
-}
-
 struct RestoreControllers(Option<&'static [ControllerInfo]>);
 impl Drop for RestoreControllers {
     fn drop(&mut self) {
@@ -316,7 +330,10 @@ impl FakeHost {
 
     /// A queued bucket sound and game event, as the game plays them at the outermost commit.
     fn play_fluid_effects(&mut self, queued: level::QueuedFluidEffects) {
-        if let Some(sound) = self.registries.fluid_sound(queued.fluid, queued.pickup) {
+        if let Some(sound) = self
+            .registries
+            .fluid_sound_named(queued.fluid, queued.pickup)
+        {
             self.sounds.push(FakeSound {
                 sound: sound.to_owned(),
                 at: queued.at,
@@ -337,6 +354,10 @@ impl FakeHost {
                 affected_state: None,
             },
         });
+    }
+    fn container_slot(&self, at: BlockSide, slot: usize) -> Option<&ItemStack> {
+        let items = self.level.standing(at.level, at.pos)?.items.as_ref()?;
+        items.slots.get(slot)?.as_ref()
     }
     fn max_stack(&self, resource: &crate::ItemResource) -> u32 {
         match resource.value_id(self, "minecraft:max_stack_size") {
@@ -408,7 +429,9 @@ impl FakeHost {
                 )
             },
             |host, (players, level, attachments)| {
-                (host.players, host.level, host.attachments) = (players, level, attachments);
+                host.players = players;
+                host.level.restore_snapshot(level);
+                host.attachments = attachments;
             },
             |host, tx| run(host, tx, slot),
         )?;
@@ -481,11 +504,11 @@ impl Host for FakeHost {
 }
 impl crate::prelude::BlockEntitiesHost for FakeHost {
     fn block_entity(&self, level: LevelRef, pos: [i32; 3]) -> Option<BlockEntityRef> {
-        self.level.standing(level, pos)?;
+        let (generation, _) = self.level.standing_entry(level, pos)?;
         Some(BlockEntityRef {
             level,
             position: pos,
-            generation: 0,
+            generation,
         })
     }
 }
@@ -535,18 +558,6 @@ impl crate::prelude::TagsHost for FakeHost {
     fn tags(&self) -> &dyn crate::Tags {
         &self.registries
     }
-    fn fluid_bucket(&self, fluid: &str) -> Option<crate::ItemKey> {
-        self.registries.bucket_of(fluid)
-    }
-    fn bucket_fluid(&self, bucket: crate::ItemKey) -> Option<crate::FluidKey> {
-        self.registries.fluid_of(bucket)
-    }
-    fn fluid_pickup_sound(&self, fluid: &str) -> Option<&'static str> {
-        self.registries.fluid_sound(fluid, true)
-    }
-    fn fluid_empty_sound(&self, fluid: &str) -> Option<&'static str> {
-        self.registries.fluid_sound(fluid, false)
-    }
 }
 impl crate::prelude::BlockStatesHost for FakeHost {
     fn fluid_key(&self, id: &str) -> Option<crate::FluidKey> {
@@ -554,9 +565,6 @@ impl crate::prelude::BlockStatesHost for FakeHost {
     }
 }
 impl crate::prelude::LevelsHost for FakeHost {
-    fn lit_block_name(&self, _: [i32; 3]) -> Option<crate::BlockKey> {
-        None
-    }
     fn is_loaded(&self, id: &str) -> bool {
         self.registries.is_loaded(id)
     }
@@ -761,8 +769,11 @@ impl crate::prelude::LevelTickingBackend for FakeHost {
 }
 impl crate::prelude::BlockEntitiesBackend for FakeHost {
     fn block_entity_kind(&self, entity: BlockEntityRef) -> Option<BlockEntityTypeKey> {
-        let standing = self.level.standing(entity.level, entity.position)?;
-        standing.kind().cloned()
+        let (generation, resident) = self.level.standing_entry(entity.level, entity.position)?;
+        if generation != entity.generation {
+            return None;
+        }
+        resident.kind().copied()
     }
 }
 impl crate::prelude::ItemsBackend for FakeHost {
@@ -824,9 +835,23 @@ impl crate::prelude::ItemsBackend for FakeHost {
         let items = self.level.standing(at.level, at.pos)?.items.as_ref()?;
         Some(items.slots.len())
     }
-    fn container_stack(&self, at: BlockSide, slot: usize) -> Option<ItemStack> {
+    fn lend_container_stack(
+        &self,
+        at: BlockSide,
+        slot: usize,
+        read: &mut dyn for<'a> FnMut(ItemStackView<'a>),
+    ) {
+        if let Some(stack) = self.container_slot(at, slot) {
+            read(ItemStackView::from_stack(stack));
+        }
+    }
+    fn container_slot_backing(&self, at: BlockSide, slot: usize) -> Option<crate::StorageSlot> {
         let items = self.level.standing(at.level, at.pos)?.items.as_ref()?;
-        items.slots.get(slot)?.clone()
+        (slot < items.slots.len()).then_some(crate::StorageSlot {
+            level: at.level,
+            pos: at.pos,
+            slot,
+        })
     }
     fn container_capacity(&self, at: BlockSide, slot: usize, stack: Option<&ItemStack>) -> u32 {
         let items = self
@@ -961,10 +986,37 @@ impl crate::prelude::PlayerWorldBackend for FakeHost {
         crate::Identifier::parse(level.dimension_id()).ok()
     }
 }
+crate::block::block_states::impl_block_states_without_tables!(FakeHost {
+    fn fluid_bucket(
+        &self,
+        fluid: crate::FluidKey,
+    ) -> Result<Option<crate::ItemKey>, crate::LevelReadError> {
+        Ok(self.registries.bucket_of(fluid))
+    }
+    fn bucket_fluid(
+        &self,
+        bucket: crate::ItemKey,
+    ) -> Result<Option<crate::FluidKey>, crate::LevelReadError> {
+        Ok(self.registries.fluid_of(bucket))
+    }
+    fn fluid_pickup_sound(
+        &self,
+        fluid: crate::FluidKey,
+    ) -> Result<Option<&'static str>, crate::LevelReadError> {
+        Ok(self.registries.fluid_sound(fluid, true))
+    }
+    fn fluid_empty_sound(
+        &self,
+        fluid: crate::FluidKey,
+    ) -> Result<Option<&'static str>, crate::LevelReadError> {
+        Ok(self.registries.fluid_sound(fluid, false))
+    }
+});
 crate::impl_backend_areas!(
     FakeHost,
     except(
         block_entities,
+        block_states,
         entity_identity,
         fluids_energy,
         items,
@@ -1036,8 +1088,7 @@ impl crate::prelude::ItemsBackendMut for FakeHost {
                 if left == 0 {
                     break;
                 }
-                let held = self.container_stack(at, slot);
-                let pick = match &held {
+                let pick = match self.container_slot(at, slot) {
                     Some(held) => holding && resource.matches(held),
                     None => !holding,
                 };
@@ -1072,8 +1123,8 @@ impl crate::prelude::ItemsBackendMut for FakeHost {
                 break;
             }
             if self
-                .container_stack(at, slot)
-                .is_some_and(|held| resource.matches(&held))
+                .container_slot(at, slot)
+                .is_some_and(|held| resource.matches(held))
             {
                 let ask = left.min(u32::MAX as u64) as u32;
                 left -= self
@@ -1356,6 +1407,15 @@ crate::impl_backend_mut_areas!(
     )
 );
 
+/// Use the game fixture's completed Parts registration in place of its earlier probe.
+// hidden: only the game test fixture scopes the controller table after loading Parts.
+#[doc(hidden)]
+pub fn with_installed_ticket_controllers<R>(f: impl FnOnce() -> R) -> R {
+    let _controllers =
+        RestoreControllers(TEST_CONTROLLERS.replace(Some(crate::parts::installed_controllers())));
+    f()
+}
+
 /// Scope the controller lookup rows prepared by the API-owned registration fixture.
 // hidden: API-owned test setup uses this vocabulary fixture, not mod authoring code.
 #[doc(hidden)]
@@ -1366,7 +1426,7 @@ pub fn with_controller_tables<R>(
 ) -> R {
     let controllers: Vec<ControllerInfo> = controllers.into_iter().map(Into::into).collect();
     let controllers: &'static [_] = Box::leak(controllers.into_boxed_slice());
-    let _poses = crate::client::arm_pose::test_table(poses.into_iter().map(Into::into).collect());
+    let _poses = crate::content::arm_pose::test_table(poses.into_iter().map(Into::into).collect());
     let _controllers = RestoreControllers(TEST_CONTROLLERS.replace(Some(controllers)));
     f()
 }
@@ -1409,6 +1469,40 @@ impl crate::__private::WorldgenReader for TestReader {
     fn setting(&self, _: &str, _: &str) -> Option<&str> {
         None
     }
+}
+
+/// Build a `(RegisteredAttachment, AttachmentKey<T>)` pair for tests without running full
+/// mod registration.
+// hidden: API-owned test setup uses this vocabulary fixture, not mod authoring code.
+#[doc(hidden)]
+pub fn registered_attachment_fixture<T: Send + Sync + 'static>(
+    owner: &'static str,
+    descriptor: crate::AttachmentDescriptor<T>,
+) -> (crate::RegisteredAttachment, crate::AttachmentKey<T>) {
+    crate::parts::registered_attachment_fixture(owner, descriptor)
+}
+
+/// Install a single attachment descriptor in the test thread's Parts table and return its live
+/// [`AttachmentKey<T>`](crate::AttachmentKey).
+// hidden: API-owned test setup uses this vocabulary fixture, not mod authoring code.
+#[doc(hidden)]
+pub fn install_attachment_fixture<T: Send + Sync + 'static>(
+    owner: &'static str,
+    descriptor: crate::AttachmentDescriptor<T>,
+) -> crate::AttachmentKey<T> {
+    crate::parts::install_attachment_fixture(owner, descriptor)
+}
+
+/// Retrieve the key issued by this test thread's registration fixture.
+// hidden: API-owned test setup uses this vocabulary fixture, not mod authoring code.
+#[doc(hidden)]
+pub fn attachment_key<T: Send + Sync + 'static>(
+    namespace: &str,
+    name: &str,
+) -> crate::AttachmentKey<T> {
+    crate::parts::installed().unwrap().attachment_types[namespace][name]
+        .downcast_key()
+        .unwrap()
 }
 
 #[cfg(test)]
