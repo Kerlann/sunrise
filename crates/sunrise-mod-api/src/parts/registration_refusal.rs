@@ -26,6 +26,8 @@ impl PartRegistrar {
         let block_entity_transforms = self.block_entity_transforms.clone();
         let type_identities = self.type_identities.clone();
         let custom_registry_count = self.custom_registries.len();
+        let data_map_count = self.data_maps.len();
+        let load_condition_count = self.load_conditions.len();
         let custom_registry_entry_counts: Vec<usize> = self
             .custom_registries
             .iter()
@@ -59,6 +61,9 @@ impl PartRegistrar {
                     registrar.type_identities = type_identities;
                     let rejected_custom_registries =
                         registrar.custom_registries.split_off(custom_registry_count);
+                    let rejected_data_maps = registrar.data_maps.split_off(data_map_count);
+                    let rejected_load_conditions =
+                        registrar.load_conditions.split_off(load_condition_count);
                     let mut rejected_custom_entries = Vec::new();
                     for (registry, old_len) in registrar
                         .custom_registries
@@ -81,6 +86,8 @@ impl PartRegistrar {
                         );
                     }
                     discard_startup_registrations(owner, rejected_custom_entries);
+                    discard_data_maps(rejected_data_maps);
+                    discard_load_conditions(rejected_load_conditions);
                     discard_startup_registrations(owner, rejected_tags.blocks);
                     discard_startup_registrations(owner, rejected_tags.items);
                     discard_startup_registrations(owner, rejected_transforms.into_values());
@@ -130,6 +137,29 @@ impl PartRegistrar {
             biome_sources,
             refused
         )
+    }
+}
+
+/// Drop each data map's mod-owned callbacks (`network_value`, `merge`, `remove_partial`)
+/// in separate startup panic fences under the map's owner.
+pub(crate) fn discard_data_maps(maps: Vec<Arc<mod_vocab::__private::RegisteredDataMap>>) {
+    for map in maps {
+        let owner = map.owner_mod();
+        match Arc::try_unwrap(map) {
+            Ok(owned) => owned.discard_callbacks(|mod_id, callback| {
+                discard_startup_registrations(mod_id, [callback]);
+            }),
+            Err(shared) => discard_startup_registrations(owner, [shared]),
+        }
+    }
+}
+
+/// Drop each load condition handler in its own startup panic fence under its owner.
+pub(crate) fn discard_load_conditions(
+    conditions: Vec<mod_vocab::__private::RegisteredLoadCondition>,
+) {
+    for entry in conditions {
+        discard_startup_registrations(entry.owner_mod, [entry.condition]);
     }
 }
 
@@ -584,6 +614,131 @@ mod tests {
                 }]
             );
         });
+    }
+
+    #[test]
+    fn data_map_and_load_condition_destructor_panics_are_fenced_on_rollback_and_late_refusal() {
+        crate::__private::initialize().expect("test registration requires the mod API runtime");
+        struct PanickingGuard(Arc<AtomicUsize>);
+        impl Drop for PanickingGuard {
+            fn drop(&mut self) {
+                if !std::thread::panicking() {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                    panic!("rejected callback destructor panicked");
+                }
+            }
+        }
+        struct PanickingCondition(PanickingGuard);
+        impl crate::LoadCondition for PanickingCondition {
+            fn test(&self, _: &serde_json::Value) -> Result<bool, crate::ConditionError> {
+                let _ = &self.0;
+                Ok(true)
+            }
+        }
+
+        // 1. Rollback: a single RawDataMap with 3 independent panicking callbacks must run
+        // all 3 destructors independently and keep the original refusal.
+        struct RollbackMod(Arc<AtomicUsize>);
+        impl Hooks for RollbackMod {
+            fn subscribed(&self) -> &'static [Option<crate::HookId>] {
+                &[]
+            }
+            fn register(&self, r: &mut dyn Registrar, _: &RegistrationContext) {
+                let g1 = PanickingGuard(self.0.clone());
+                let g2 = PanickingGuard(self.0.clone());
+                let g3 = PanickingGuard(self.0.clone());
+                r.register_data_map_by_name(
+                    crate::RawDataMap::new("minecraft:item", "rollback:map")
+                        .network_value(move |tag| {
+                            let _ = &g1;
+                            Some(tag.clone())
+                        })
+                        .merge(move |_, _, incoming| {
+                            let _ = &g2;
+                            Ok(incoming.clone())
+                        })
+                        .remove_partial(move |_, existing, _| {
+                            let _ = &g3;
+                            Ok(Some(existing.clone()))
+                        }),
+                );
+                r.refuse("rollback reason");
+            }
+        }
+        let rollback_drops = Arc::new(AtomicUsize::new(0));
+        let mods = vec![ModEntry::new(
+            "rollback",
+            Box::new(RollbackMod(rollback_drops.clone())),
+        )];
+        crate::testing::with_dispatch(mods.into(), || {
+            let registrar = super::super::register_all(mod_vocab::__private::mods(), |_| false);
+            assert_eq!(rollback_drops.load(Ordering::Relaxed), 3);
+            assert_eq!(
+                registrar.refused,
+                ["mod rollback refused registration: rollback reason"]
+            );
+            let _ = mod_vocab::__private::take_hook_panics();
+        });
+
+        // 2. Late admission refusal: a synced map on a ServerOnly datapack registry triggers
+        // validate_data_maps refusal after registration; every pending callback destructor must
+        // run independently and the refusal error must survive.
+        struct LateRefusalMod(Arc<AtomicUsize>);
+        impl Hooks for LateRefusalMod {
+            fn subscribed(&self) -> &'static [Option<crate::HookId>] {
+                &[]
+            }
+            fn register(&self, r: &mut dyn Registrar, _: &RegistrationContext) {
+                r.declare_datapack_registry(
+                    "spell",
+                    crate::DatapackRegistrySync::ServerOnly,
+                    vec![crate::DatapackField::required(
+                        "power",
+                        crate::DatapackFieldKind::Int { min: 0, max: 10 },
+                    )],
+                )
+                .unwrap();
+                r.register_load_condition(
+                    "late_refusal:cond",
+                    PanickingCondition(PanickingGuard(self.0.clone())),
+                );
+                let g1 = PanickingGuard(self.0.clone());
+                let g2 = PanickingGuard(self.0.clone());
+                let g3 = PanickingGuard(self.0.clone());
+                r.register_data_map_by_name(
+                    crate::RawDataMap::new("late_refusal:spell", "late_refusal:weights")
+                        .sync(crate::DataMapSync::Optional)
+                        .network_value(move |tag| {
+                            let _ = &g1;
+                            Some(tag.clone())
+                        })
+                        .merge(move |_, _, incoming| {
+                            let _ = &g2;
+                            Ok(incoming.clone())
+                        })
+                        .remove_partial(move |_, existing, _| {
+                            let _ = &g3;
+                            Ok(Some(existing.clone()))
+                        }),
+                );
+            }
+        }
+        let late_drops = Arc::new(AtomicUsize::new(0));
+        let err = crate::parts::install_parts(
+            &[ModEntry::new(
+                "late_refusal",
+                Box::new(LateRefusalMod(late_drops.clone())),
+            )],
+            &crate::parts::tests::rule_schema(),
+            |_| false,
+        )
+        .unwrap_err();
+        assert_eq!(late_drops.load(Ordering::Relaxed), 4);
+        assert!(
+            err.iter()
+                .any(|msg| msg.contains("late_refusal") && msg.contains("late_refusal:spell")),
+            "expected late refusal to survive panicking destructors, got: {err:?}"
+        );
     }
 
     #[test]

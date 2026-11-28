@@ -31,7 +31,7 @@ except ImportError:
 NAME = 'dragon-spawn-parity'
 SEEDS = list(range(200)) + [123456789, -7, 2**62]
 ORACLE = 'VanillaFinalizeSpawnOracle'
-FIXTURE = 'game::dragon::tests::dragon_spawn_parity_fixture'
+FIXTURE = 'game::server_side::dragon::tests::dragon_spawn_parity_fixture'
 
 
 def cases():
@@ -93,7 +93,7 @@ def main():
     rust_out = build / 'rust.txt'
     rust_out.unlink(missing_ok=True)
     harness.run_logged(
-        [lab.parity_fixtures(), FIXTURE, '--exact'],
+        ['cargo', 'test', '--locked', '-p', 'sunrise-gameplay', '--lib', '--', '--ignored', '--exact', FIXTURE],
         build, 'rust',
         env=dict(os.environ,
                  SUNRISE_DRAGON_SPAWN_CASES=str(inputs),

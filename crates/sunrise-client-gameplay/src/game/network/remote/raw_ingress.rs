@@ -93,3 +93,17 @@ impl std::fmt::Display for PacketError {
 }
 
 impl std::error::Error for PacketError {}
+
+/// Protocol error with a dynamic diagnostic message (for example naming an invalid synced
+/// registry and data map) handled through the same `record_packet_error` / `close_after_pending`
+/// path as [`PacketError`].
+#[derive(Debug)]
+pub struct DetailedPacketError(pub(in crate::game) String);
+
+impl std::fmt::Display for DetailedPacketError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for DetailedPacketError {}

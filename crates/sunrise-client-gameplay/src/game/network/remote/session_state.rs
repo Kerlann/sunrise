@@ -307,6 +307,13 @@ pub struct Remote {
     pub datapacks: sunrise_sim::datapack_net::Receiver,
     /// Server-ordered entry IDs for `sync(true)` mod-declared static custom registries.
     pub custom_registries: sunrise_sim::custom_registry_net::SyncedCustomRegistries,
+    /// Synced data maps received from the server in play (`sunrise:data_map_sync`).
+    pub client_data_maps: sunrise_gameplay_common::game::native_data_maps_common::DataMaps,
+    /// Whether this connection has received at least one `sunrise:data_map_sync` payload.
+    pub client_data_maps_received: bool,
+    /// Generation-bound biome keys built from the server's synchronized `minecraft:worldgen/biome`
+    /// registry so typed `BiomeKey` / `BiomeView` / `ReloadContext::data_map` reads work on clients.
+    pub biome_keys: Option<Arc<mod_api::__private::BiomeKeys>>,
     /// Decoded vanilla codec values for [`Self::datapacks`], swapped on join and reload.
     pub datapack_vanilla_values:
         Option<Arc<sunrise_gameplay_common::game::native_datapack_values::DatapackVanillaValues>>,

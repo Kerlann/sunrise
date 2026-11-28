@@ -5,11 +5,11 @@ use crate::*;
 /// and reached through [`Host`].
 #[sunrise_mod_api_macros::host_area]
 pub trait KeysHost {
-    /// Side: server. Resolve a biome by canonical namespaced id (`minecraft:plains`) in the
-    /// installed world-data generation as a scoped [`BiomeView`]. Returns
-    /// [`BiomeKeyError::Unavailable`] on a client or before world data is installed,
-    /// [`BiomeKeyError::InvalidIdentifier`] for an invalid id, and
-    /// [`BiomeKeyError::UnknownBiome`] for an id absent from the installed generation.
+    /// Side: both. Resolve a biome by canonical namespaced id (`minecraft:plains`) in the
+    /// installed world-data generation (server) or synced biome registry (client) as a scoped
+    /// [`BiomeView`]. Returns [`BiomeKeyError::Unavailable`] before world data or a client's
+    /// synced biome registry is installed, [`BiomeKeyError::InvalidIdentifier`] for an invalid
+    /// id, and [`BiomeKeyError::UnknownBiome`] for an id absent from the installed generation.
     fn biome(&self, id: &str) -> Result<BiomeView<'_>, BiomeKeyError>;
 
     /// Side: both. Exact startup game-event id; None before registry completion or for an unknown id.
@@ -91,11 +91,11 @@ pub trait KeysHost {
 #[doc(hidden)]
 #[sunrise_mod_api_macros::host_area]
 pub trait KeysBackend {
-    /// Side: server. Resolve a persistent [`BiomeKey`] in the installed world-data generation
-    /// as a scoped [`BiomeView`].
+    /// Side: both. Resolve a persistent [`BiomeKey`] in the installed world-data generation
+    /// (server) or synced biome registry (client) as a scoped [`BiomeView`].
     fn biome_view(&self, key: &BiomeKey) -> Result<BiomeView<'_>, BiomeKeyError>;
-    /// Side: server. Validate a scoped [`BiomeView`] against this host's installed world-data
-    /// generation and borrow its canonical id.
+    /// Side: both. Validate a scoped [`BiomeView`] against this host's installed world-data
+    /// generation (server) or synced biome registry (client) and borrow its canonical id.
     fn biome_view_id(&self, view: BiomeView<'_>) -> Result<&str, BiomeKeyError>;
 
     /// Side: both.

@@ -50,7 +50,7 @@ pub fn load_resources_for_role(
     let prepared = root.prepared();
     let inventory = sunrise_mod_package::enabled::EnabledMods::read(prepared)?;
     let conditions =
-        sunrise_gameplay_common::game::load_conditions::conditions_for_mods(mods, &inventory)?;
+        sunrise_gameplay_common::game::load_conditions::conditions_for_mods(mods, &inventory);
     let captured =
         mods::item_data_load::capture_load_settings(prepared, role.execution, role.owning)?;
     let (core, ()) = startup::time("core", || {
