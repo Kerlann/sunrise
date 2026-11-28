@@ -1403,6 +1403,48 @@ pub mod tests {
         assert_eq!(game.dim, Dim::Overworld);
     }
 
+    /// `LivingEntity.getKillCredit` resolves the remembered player. The mod
+    /// handle must preserve all of that player's entity ID bits.
+    #[cfg(test)]
+    #[test]
+    #[ignore = "daily"]
+    fn kill_credit_keeps_a_high_bit_player_id() {
+        use crate::game::native_guest_turn_tests::with_guests_at;
+        use sunrise_core::prepared_test_support::{SERVER_INPUTS, WORLDGEN_INPUTS};
+        use sunrise_gameplay_common::game::{
+            combat_common::PlayerCredit, in_own_process, test_fixtures::fixture_resident_column,
+        };
+
+        const NAME: &str =
+            "game::server_side::native_living_refs::tests::kill_credit_keeps_a_high_bit_player_id";
+        in_own_process(NAME, || {
+            let root = crate::prepared_test_root::prepared_root(&[
+                WORLDGEN_INPUTS,
+                SERVER_INPUTS,
+                &["movement-properties.nbt"],
+            ]);
+            with_guests_at(root, |game| {
+                game.server
+                    .lan
+                    .as_mut()
+                    .unwrap()
+                    .hub
+                    .guests
+                    .update(0, |guest| {
+                        guest.entity_id = -2_147_483_647;
+                    });
+                fixture_resident_column(&mut game.world, (0, 0));
+                let pig = summon_mob(game, "minecraft:pig", "{NoAI:1b}");
+                let living = game.living(game.entity(pig).unwrap()).unwrap();
+                // `with_guests_at` puts the guest with UUID 12 in the first row.
+                game.server
+                    .last_hurt_by_player
+                    .insert(pig, PlayerCredit(12));
+                assert_eq!(living.kill_credit(game).map(|e| e.id()), Some(0x8000_0001));
+            });
+        });
+    }
+
     #[cfg(test)]
     #[test]
     fn alive_is_health_above_zero_as_in_vanilla() {
