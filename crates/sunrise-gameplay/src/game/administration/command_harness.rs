@@ -253,34 +253,32 @@ impl ServerGame<'_> {
         let mut out = String::new();
         #[cfg(feature = "state-digest")]
         let mut transcript: Option<super::state_transcript::TranscriptWriter> = None;
+        #[cfg(feature = "state-digest")]
+        let mut script_line = 0usize;
         let script_text = std::fs::read_to_string(script)?;
-        for (line_idx, line) in script_text.lines().enumerate() {
+        for line in script_text.lines() {
             #[cfg(feature = "state-digest")]
-            let script_line = line_idx + 1;
-            #[cfg(not(feature = "state-digest"))]
-            let _ = line_idx;
+            {
+                script_line += 1;
+            }
             if line.trim().is_empty() {
                 continue;
             }
             let op: Value = serde_json::from_str(line)?;
             match op["op"].as_str().unwrap_or("") {
+                #[cfg(feature = "state-digest")]
                 "state_transcript" => {
-                    #[cfg(feature = "state-digest")]
-                    {
-                        let enabled = op["on"]
-                            .as_bool()
-                            .ok_or("state_transcript: missing boolean `on`")?;
-                        if enabled && transcript.is_none() {
-                            transcript =
-                                Some(super::state_transcript::TranscriptWriter::open(script)?);
-                        }
-                        if let Some(writer) = transcript.as_mut() {
-                            writer.set_enabled(enabled);
-                        }
+                    let enabled = op["on"]
+                        .as_bool()
+                        .ok_or("state_transcript: missing boolean `on`")?;
+                    if enabled && transcript.is_none() {
+                        transcript = Some(super::state_transcript::TranscriptWriter::open(
+                            self,
+                            script_text.as_bytes(),
+                        )?);
                     }
-                    #[cfg(not(feature = "state-digest"))]
-                    {
-                        return Err("state_transcript requires the `state-digest` feature".into());
+                    if let Some(writer) = transcript.as_mut() {
+                        writer.set_enabled(enabled)?;
                     }
                 }
                 "cmd" => {
@@ -523,8 +521,17 @@ impl ServerGame<'_> {
                 "chunk_ready" => {
                     let [x, z] =
                         std::array::from_fn(|i| op["chunk"][i].as_i64().unwrap_or(0) as i32);
+                    #[cfg(feature = "state-digest")]
+                    let check_entity_ticking = op["entity_ticking"].as_bool() == Some(true);
+                    #[cfg(feature = "state-digest")]
+                    let mut entity_ticking = false;
                     let state = self.harness_owner(|g| {
                         let resident = g.world.chunks.contains_key(&(x, z));
+                        #[cfg(feature = "state-digest")]
+                        if check_entity_ticking {
+                            entity_ticking =
+                                resident && g.server.tickets.0.levels().entity_ticking(x, z);
+                        }
                         Ok([
                             resident,
                             g.server.streaming.is_lit(x, z),
@@ -536,9 +543,24 @@ impl ServerGame<'_> {
                                     .any(|(key, _)| *key == (x, z)),
                         ])
                     })?;
+                    #[cfg(feature = "state-digest")]
+                    let results: Vec<Value> = if check_entity_ticking {
+                        state
+                            .into_iter()
+                            .chain(std::iter::once(entity_ticking))
+                            .map(|ready| json!([true, i32::from(ready)]))
+                            .collect()
+                    } else {
+                        state
+                            .map(|ready| json!([true, i32::from(ready)]))
+                            .into_iter()
+                            .collect()
+                    };
+                    #[cfg(not(feature = "state-digest"))]
+                    let results = state.map(|ready| json!([true, i32::from(ready)]));
                     out.push_str(
                         &json!({"cmd": format!("#chunk_ready {x} {z}"), "messages": [],
-                        "results": state.map(|ready| json!([true, i32::from(ready)]))})
+                        "results": results})
                         .to_string(),
                     );
                     out.push('\n');
@@ -611,6 +633,15 @@ impl ServerGame<'_> {
                     out.push('\n');
                 }
                 "player_loop" => {
+                    #[cfg(feature = "state-digest")]
+                    if transcript
+                        .as_ref()
+                        .is_some_and(super::state_transcript::TranscriptWriter::is_enabled)
+                    {
+                        return Err(
+                            "player_loop is not permitted while state_transcript is enabled".into(),
+                        );
+                    }
                     let ticks = op["n"].as_u64().unwrap_or(1);
                     let count = |g: &mut Self| {
                         Ok(g.stats
@@ -653,6 +684,16 @@ impl ServerGame<'_> {
                     out.push('\n');
                 }
                 "align_game_time" => {
+                    #[cfg(feature = "state-digest")]
+                    if transcript
+                        .as_ref()
+                        .is_some_and(super::state_transcript::TranscriptWriter::is_enabled)
+                    {
+                        return Err(
+                            "align_game_time is not permitted while state_transcript is enabled"
+                                .into(),
+                        );
+                    }
                     let target = op["target"]
                         .as_i64()
                         .ok_or("align_game_time: missing target")?;
@@ -1349,15 +1390,32 @@ impl ServerGame<'_> {
                         field("level_seed")?,
                     );
                     #[cfg(feature = "state-digest")]
-                    let rand_value = op
-                        .get("rand_value")
-                        .and_then(Value::as_i64)
-                        .map(i32::try_from)
-                        .transpose()?;
+                    let rand_value = match op.get("rand_value") {
+                        None => None,
+                        Some(v) => {
+                            let n = v
+                                .as_i64()
+                                .ok_or("sync_randoms: `rand_value` must be an integer")?;
+                            Some(
+                                i32::try_from(n)
+                                    .map_err(|_| "sync_randoms: `rand_value` out of i32 range")?,
+                            )
+                        }
+                    };
                     #[cfg(feature = "state-digest")]
-                    let player_seed = op.get("player_seed").and_then(Value::as_i64);
+                    let player_seed = match op.get("player_seed") {
+                        None => None,
+                        Some(v) => Some(
+                            v.as_i64()
+                                .ok_or("sync_randoms: `player_seed` must be an integer")?,
+                        ),
+                    };
                     sunrise_level::random_source::set_thread_uniquifier(uniquifier)?;
                     self.harness_owner(|g| {
+                        #[cfg(feature = "state-digest")]
+                        if player_seed.is_some() && g.common.player.is_none() {
+                            return Err("sync_randoms: player_seed requested with no player".into());
+                        }
                         g.server.next_entity = u32::try_from(entity_id)?;
                         sunrise_core::random::RandomSource::set_seed(
                             &mut g.world.random,

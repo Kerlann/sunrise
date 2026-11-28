@@ -5,15 +5,15 @@ use std::{
     fmt::Write as _,
     fs::File,
     io::{BufWriter, Write as _},
-    path::Path,
 };
 use sunrise_core::{geometry::Vec3, nbt::Tag, random::LegacyRandom, version::VANILLA_VERSION};
 use sunrise_gameplay_common::game::{
-    Dim, commands_common::Target, entity::Entity as _, frames_common, native_hooks::mob_kind,
+    Dim, commands_common::Target, entity::Entity as _, entity_memory::OffLevel, frames_common,
+    native_hooks::mob_kind,
 };
 use sunrise_sim::{
     join_seq::{JoinSeq, Joined as _},
-    lan::playerdata::ints_uuid,
+    lan::playerdata::{ints_uuid, uuid_ints},
     mobs::leash,
 };
 
@@ -49,6 +49,7 @@ impl Buffer {
 
 thread_local! {
     static RECORDING: Cell<bool> = const { Cell::new(false) };
+    static REASON_OVERRIDE: Cell<Option<&'static str>> = const { Cell::new(None) };
     static BUFFER: RefCell<Buffer> = const { RefCell::new(Buffer::new()) };
 }
 
@@ -77,15 +78,10 @@ pub(in crate::game) fn record_departure(
     ty: impl AsRef<str>,
     reason: Option<&'static str>,
 ) {
+    let reason = REASON_OVERRIDE.with(|cell| cell.get()).or(reason);
     BUFFER.with(|cell| {
         let mut buf = cell.borrow_mut();
         if buf.target_dim != dim {
-            return;
-        }
-        if let Some(existing) = buf.departures.iter_mut().find(|d| d.id == id) {
-            if existing.reason.is_none() {
-                existing.reason = reason;
-            }
             return;
         }
         buf.departures.push(DepartureRecord {
@@ -94,6 +90,61 @@ pub(in crate::game) fn record_departure(
             reason,
         });
     });
+}
+
+pub(in crate::game) struct ReasonOverride {
+    previous: Option<&'static str>,
+}
+
+impl Drop for ReasonOverride {
+    fn drop(&mut self) {
+        REASON_OVERRIDE.with(|cell| cell.set(self.previous));
+    }
+}
+
+pub(in crate::game) fn override_departure_reason(reason: &'static str) -> ReasonOverride {
+    let previous = REASON_OVERRIDE.with(|cell| cell.replace(Some(reason)));
+    ReasonOverride { previous }
+}
+
+pub(in crate::game) fn record_vehicle_tree_departures(
+    game: &ServerGame<'_>,
+    ids: &[u32],
+    reason: Option<&'static str>,
+) {
+    if !is_recording() {
+        return;
+    }
+    let dim = game.common.dim;
+    for &id in ids {
+        if let Some(m) = game.common.mobs.iter().find(|m| m.id == id) {
+            record_departure(dim, id, mob_kind(m), reason);
+        } else if let Some(b) = game.common.boats.iter().find(|b| b.id == id) {
+            record_departure(dim, id, b.native_type().as_ref(), reason);
+        } else if let Some(c) = game.common.carts.iter().find(|c| c.id == id) {
+            record_departure(dim, id, c.kind.id(), reason);
+        } else if game.common.armor_stands.iter().any(|a| a.id == id) {
+            record_departure(dim, id, "minecraft:armor_stand", reason);
+        } else if let Some(o) = game.server.others.0.iter().find(|o| o.id == id) {
+            record_departure(dim, id, o.kind.as_str(), reason);
+        } else if let Some(r) = game
+            .common
+            .resident_entities
+            .general
+            .rows
+            .iter()
+            .find(|r| r.id == id)
+        {
+            record_departure(dim, id, r.native_type().as_ref(), reason);
+        } else if let Some(off) = game.common.persist.off_level.get(&id) {
+            let ty = match off {
+                OffLevel::Mob(m) => mob_kind(m),
+                OffLevel::Boat(b) => b.native_type().into_owned(),
+                OffLevel::Cart(c) => c.kind.id().to_owned(),
+            };
+            record_departure(dim, id, ty, reason);
+        }
+    }
 }
 
 pub(in crate::game) struct TickGuard;
@@ -107,6 +158,8 @@ impl Drop for TickGuard {
 pub(in crate::game) struct TranscriptWriter {
     out: BufWriter<File>,
     enabled: bool,
+    closed_by_script: bool,
+    tick_dim: Option<Dim>,
     step: u64,
     ordinal: u32,
     points: u64,
@@ -114,11 +167,13 @@ pub(in crate::game) struct TranscriptWriter {
 }
 
 impl TranscriptWriter {
-    pub(in crate::game) fn open(script: &Path) -> sunrise_game_data::Result<Self> {
+    pub(in crate::game) fn open(
+        game: &ServerGame<'_>,
+        script_bytes: &[u8],
+    ) -> sunrise_game_data::Result<Self> {
         let path = std::env::var_os("SUNRISE_STATE_TRANSCRIPT")
             .ok_or("state_transcript: SUNRISE_STATE_TRANSCRIPT is not set")?;
-        let script_bytes = std::fs::read(script)?;
-        let script_sha = sha256_hex(&script_bytes);
+        let script_sha = sha256_hex(script_bytes);
         let fixture_sha = match std::env::var("SUNRISE_STATE_TRANSCRIPT_FIXTURE_SHA256") {
             Ok(value) => {
                 if !is_sha256_hex(&value) {
@@ -137,15 +192,29 @@ impl TranscriptWriter {
             }
             Err(_) => "sunrise-state-digest".to_owned(),
         };
+        let (view_distance, simulation_distance) = game.server.lan.as_ref().map_or(
+            (
+                game.server.settings.render_distance.max(2),
+                game.server.settings.simulation_distance.max(2),
+            ),
+            |host| {
+                (
+                    host.hub.config.view_distance,
+                    host.hub.config.simulation_distance,
+                )
+            },
+        );
         let file = File::create(path)?;
         let mut out = BufWriter::new(file);
         writeln!(
             out,
-            "H\tformat=sunrise-state-transcript\tversion=1\tengine=sunrise\tscript_sha256={script_sha}\tfixture_sha256={fixture_sha}\tbuild={build}\tgame_version={VANILLA_VERSION}"
+            "H\tformat=sunrise-state-transcript\tversion=1\tengine=sunrise\tscript_sha256={script_sha}\tfixture_sha256={fixture_sha}\tbuild={build}\tgame_version={VANILLA_VERSION}\tview_distance={view_distance}\tsimulation_distance={simulation_distance}"
         )?;
         Ok(Self {
             out,
             enabled: true,
+            closed_by_script: false,
+            tick_dim: None,
             step: 0,
             ordinal: 0,
             points: 0,
@@ -153,8 +222,19 @@ impl TranscriptWriter {
         })
     }
 
-    pub(in crate::game) fn set_enabled(&mut self, enabled: bool) {
+    pub(in crate::game) fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub(in crate::game) fn set_enabled(&mut self, enabled: bool) -> sunrise_game_data::Result<()> {
+        if enabled && self.closed_by_script {
+            return Err("state_transcript: cannot re-enable after turning recording off".into());
+        }
+        if !enabled {
+            self.closed_by_script = true;
+        }
         self.enabled = enabled;
+        Ok(())
     }
 
     pub(in crate::game) fn begin_tick(&mut self, game: &ServerGame<'_>) -> Option<TickGuard> {
@@ -162,6 +242,7 @@ impl TranscriptWriter {
             return None;
         }
         let target_dim = owner_dim(game).unwrap_or(game.common.dim);
+        self.tick_dim = Some(target_dim);
         self.step += 1;
         self.ordinal = 0;
         BUFFER.with(|cell| {
@@ -184,10 +265,13 @@ impl TranscriptWriter {
             return Ok(());
         }
         let expected_dim = owner_dim(game).unwrap_or(game.common.dim);
+        if is_tick && self.tick_dim != Some(expected_dim) {
+            return Err("state_transcript: player level changed during recorded tick".into());
+        }
         if game.common.dim != expected_dim {
             return Err("state_transcript: active level does not match player level".into());
         }
-        let members = collect_members(game);
+        let members = collect_members(game)?;
         let phase = if is_tick { "after_tick" } else { "after_op" };
         let ord = self.ordinal;
         self.ordinal += 1;
@@ -424,23 +508,85 @@ fn local_player_here(game: &ServerGame<'_>) -> bool {
         .is_some_and(|location| location.owner.dimension == game.common.dim.key())
 }
 
-fn passengers_of(game: &ServerGame<'_>, id: u32) -> Vec<u32> {
-    game.seated_passengers(id)
-        .into_iter()
-        .map(|(_, rider, _)| rider)
-        .collect()
+// Pure seat walk over shared stores; avoids replaceable game methods and vehicle rider caches.
+fn passive_passengers(game: &ServerGame<'_>, vehicle: u32) -> Vec<u32> {
+    let mut seats: Vec<(i64, u32)> = Vec::new();
+    let dim_id = game.common.dim.id();
+    let acting = game
+        .server
+        .lan_acting
+        .filter(|_| game.common.player.is_some());
+    let mut acting_listed = false;
+    if let Some(host) = game.server.lan.as_ref() {
+        for g in host
+            .hub
+            .guests
+            .iter()
+            .filter(|g| g.placed && g.dimension == dim_id)
+        {
+            let rides = if acting == Some(g.conn) {
+                acting_listed = true;
+                game.common.riding
+            } else {
+                g.vehicle
+            };
+            if rides == Some(vehicle) {
+                seats.push((g.vehicle_order, g.entity_id as u32));
+            }
+        }
+    }
+    if !acting_listed && game.common.player.is_some() && game.common.riding == Some(vehicle) {
+        let riding_player = match (game.server.lan_acting_entity, game.server.lan_acting) {
+            (Some(id), _) if game.server.lan_acting_uuid.is_some() => Some((id, i64::MIN)),
+            (_, None) => game
+                .common
+                .player
+                .as_ref()
+                .map(|p| (p.entity_id as u32, game.server.riding_order)),
+            _ => None,
+        };
+        if let Some((me, place)) = riding_player {
+            seats.push((place, me));
+        }
+    }
+    for m in game.common.mobs.iter().chain(
+        game.common
+            .persist
+            .off_level
+            .values()
+            .filter_map(OffLevel::as_mob),
+    ) {
+        if !m.removed && m.extra.mount == Some(vehicle) {
+            seats.push((m.extra.vehicle_order, m.id));
+        }
+    }
+    for r in game.common.resident_entities.general.rows.iter() {
+        if r.mount == Some(vehicle) {
+            seats.push((r.vehicle_order, r.id));
+        }
+    }
+    for b in game.common.bolts.iter() {
+        if b.mount == Some(vehicle) {
+            seats.push((b.vehicle_order, b.id));
+        }
+    }
+    seats.sort_by_key(|&(place, _)| place);
+    seats.into_iter().map(|(_, id)| id).collect()
 }
 
-fn passive_uuid(
-    game: &ServerGame<'_>,
-    id: u32,
-    target: Option<Target>,
-    live: Option<[i32; 4]>,
-) -> Option<u128> {
+fn passive_player_uuid(game: &ServerGame<'_>) -> Option<u128> {
+    game.server
+        .lan_acting_uuid
+        .map(uuid_ints)
+        .or(game.common.level.player_uuid)
+        .map(ints_uuid)
+}
+
+fn passive_uuid(game: &ServerGame<'_>, id: u32, live: Option<[i32; 4]>) -> Option<u128> {
     let words = live
         .or_else(|| game.common.persist.uuid_of(id))
         .or_else(|| {
-            let Tag::IntArray(words) = game.saved_entity_compound(target?)?.get("UUID")? else {
+            let Tag::IntArray(words) = game.common.persist.raw.get(&id)?.get("UUID")? else {
                 return None;
             };
             words.as_slice().try_into().ok()
@@ -448,12 +594,25 @@ fn passive_uuid(
     Some(ints_uuid(words))
 }
 
+fn passive_saved_invulnerable_time(game: &ServerGame<'_>, id: u32) -> i32 {
+    match game.common.persist.raw.get(&id) {
+        Some(Tag::Compound(map)) => match map.get(&"invulnerable_time".into()) {
+            Some(Tag::Int(ticks)) => *ticks,
+            _ => 0,
+        },
+        _ => 0,
+    }
+}
+
 fn random_pair(r: &LegacyRandom) -> (u64, Option<f64>) {
     (r.state(), r.cached_gaussian())
 }
 
-fn is_known_nonliving_other(kind: &str) -> bool {
-    matches!(
+fn classify_health(game: &ServerGame<'_>, kind: &str) -> Health {
+    if game.common.res.mob_types().contains_key(kind) {
+        return Health::Unmodeled;
+    }
+    if matches!(
         kind,
         "minecraft:leash_knot"
             | "minecraft:eye_of_ender"
@@ -462,7 +621,48 @@ fn is_known_nonliving_other(kind: &str) -> bool {
             | "minecraft:text_display"
             | "minecraft:marker"
             | "minecraft:interaction"
-    )
+            | "minecraft:area_effect_cloud"
+            | "minecraft:end_crystal"
+            | "minecraft:evoker_fangs"
+            | "minecraft:experience_orb"
+            | "minecraft:falling_block"
+            | "minecraft:firework_rocket"
+            | "minecraft:fishing_bobber"
+            | "minecraft:glow_item_frame"
+            | "minecraft:item"
+            | "minecraft:item_frame"
+            | "minecraft:lightning_bolt"
+            | "minecraft:ominous_item_spawner"
+            | "minecraft:painting"
+            | "minecraft:tnt"
+            | "minecraft:cushion"
+            | "minecraft:arrow"
+            | "minecraft:spectral_arrow"
+            | "minecraft:trident"
+            | "minecraft:snowball"
+            | "minecraft:egg"
+            | "minecraft:ender_pearl"
+            | "minecraft:llama_spit"
+            | "minecraft:shulker_bullet"
+            | "minecraft:fireball"
+            | "minecraft:small_fireball"
+            | "minecraft:dragon_fireball"
+            | "minecraft:wither_skull"
+            | "minecraft:wind_charge"
+            | "minecraft:breeze_wind_charge"
+            | "minecraft:splash_potion"
+            | "minecraft:lingering_potion"
+            | "minecraft:experience_bottle"
+    ) || kind.ends_with("_boat")
+        || kind.ends_with("_chest_boat")
+        || kind.ends_with("_raft")
+        || kind.ends_with("_chest_raft")
+        || kind.ends_with("minecart")
+    {
+        Health::NotLiving
+    } else {
+        Health::Unmodeled
+    }
 }
 
 pub(in crate::game) fn thrown_potion_type(item: &str) -> &'static str {
@@ -473,13 +673,18 @@ pub(in crate::game) fn thrown_potion_type(item: &str) -> &'static str {
     }
 }
 
-fn collect_members(game: &ServerGame<'_>) -> Vec<Member> {
-    let ticking_area = game.entity_ticking_area();
-    let in_ticking = |pos: Vec3| ticking_area(pos.x.floor() as i32, pos.z.floor() as i32);
+fn collect_members(game: &ServerGame<'_>) -> sunrise_game_data::Result<Vec<Member>> {
+    let levels = game.server.tickets.0.levels();
+    let in_ticking = |pos: Vec3| {
+        let bx = pos.x.floor() as i32;
+        let bz = pos.z.floor() as i32;
+        levels.entity_ticking_at(bx, bz)
+            && game.common.world.chunks.contains_key(&(bx >> 4, bz >> 4))
+    };
     let removals = &game.common.persist.removals;
     let mut members = Vec::new();
 
-    // Players (always ticking; placed before joined entities in membership order).
+    // Players always tick and sort ahead of joined entities; local/guest alias shares one id.
     let mut local_player_id = None;
     if let Some(p) = game
         .common
@@ -504,10 +709,10 @@ fn collect_members(game: &ServerGame<'_>) -> Vec<Member> {
             invulnerable_time: Some(p.health.invulnerable_time),
             no_gravity: None,
             vehicle: game.common.riding,
-            passengers: passengers_of(game, id),
+            passengers: passive_passengers(game, id),
             random: Some(random_pair(&p.random)),
             health: Health::Living(p.health.health()),
-            uuid: game.saved_player_uuid().map(ints_uuid),
+            uuid: passive_player_uuid(game),
         });
     }
     let dim_id = game.common.dim.id();
@@ -523,33 +728,24 @@ fn collect_members(game: &ServerGame<'_>) -> Vec<Member> {
                 continue;
             }
             let motion_ref = g.motion.as_deref();
-            let loaded = g.loaded_body;
             members.push(Member {
                 order: (0, 0, id),
                 id,
                 ty: "minecraft:player".to_owned(),
                 pos: Vec3::new(g.position[0], g.position[1], g.position[2]),
-                motion: motion_ref.map(|m| m.velocity).or_else(|| {
-                    loaded.map(|b| Vec3::new(b.velocity[0], b.velocity[1], b.velocity[2]))
-                }),
+                motion: motion_ref.map(|m| m.velocity),
                 rot: Some([g.yaw, g.pitch]),
-                ground: Some(motion_ref.map_or(g.on_ground, |m| m.ground.on_ground)),
+                ground: Some(g.on_ground),
                 tick_count: motion_ref
                     .map(|m| m.health.tick_count)
                     .or(g.carried_tick_count),
-                fall_distance: motion_ref
-                    .map(|m| m.fall_distance)
-                    .or_else(|| loaded.map(|b| b.fall_distance)),
-                fire: motion_ref
-                    .map(|m| m.fire_ticks)
-                    .or_else(|| loaded.map(|b| b.fire_ticks)),
-                air: motion_ref.map(|m| m.air).or_else(|| loaded.map(|b| b.air)),
-                invulnerable_time: motion_ref
-                    .map(|m| m.health.invulnerable_time)
-                    .or_else(|| loaded.map(|b| b.invulnerable_time)),
+                fall_distance: motion_ref.map(|m| m.fall_distance),
+                fire: motion_ref.map(|m| m.fire_ticks),
+                air: motion_ref.map(|m| m.air),
+                invulnerable_time: motion_ref.map(|m| m.health.invulnerable_time),
                 no_gravity: None,
                 vehicle: g.vehicle,
-                passengers: passengers_of(game, id),
+                passengers: passive_passengers(game, id),
                 random: motion_ref.map(|m| random_pair(&m.random)),
                 health: Health::Living(motion_ref.map_or(g.health, |m| m.health.health())),
                 uuid: Some(g.uuid),
@@ -557,7 +753,6 @@ fn collect_members(game: &ServerGame<'_>) -> Vec<Member> {
         }
     }
 
-    // 1. Mobs
     for e in game.common.mobs.iter() {
         if e.removed || removals.contains(&Target::Mob(e.id)) || !in_ticking(e.position) {
             continue;
@@ -577,14 +772,13 @@ fn collect_members(game: &ServerGame<'_>) -> Vec<Member> {
             invulnerable_time: Some(e.invulnerable_time),
             no_gravity: Some(e.no_gravity),
             vehicle: e.extra.mount,
-            passengers: passengers_of(game, e.id),
+            passengers: passive_passengers(game, e.id),
             random: Some(random_pair(&e.random)),
             health: Health::Living(e.health),
-            uuid: passive_uuid(game, e.id, Some(Target::Mob(e.id)), None),
+            uuid: passive_uuid(game, e.id, None),
         });
     }
 
-    // 2. Dropped items
     for e in game.common.dropped.iter() {
         if removals.contains(&Target::Item(e.id)) || !in_ticking(e.position) {
             continue;
@@ -601,17 +795,16 @@ fn collect_members(game: &ServerGame<'_>) -> Vec<Member> {
             fall_distance: Some(e.fall_distance),
             fire: Some(e.fire_ticks),
             air: None,
-            invulnerable_time: None,
+            invulnerable_time: Some(passive_saved_invulnerable_time(game, e.id)),
             no_gravity: Some(e.no_gravity),
             vehicle: None,
-            passengers: passengers_of(game, e.id),
+            passengers: passive_passengers(game, e.id),
             random: Some(random_pair(&e.random)),
             health: Health::NotLiving,
-            uuid: passive_uuid(game, e.id, Some(Target::Item(e.id)), None),
+            uuid: passive_uuid(game, e.id, None),
         });
     }
 
-    // 3. Boats
     for e in game.common.boats.iter() {
         if removals.contains(&Target::Boat(e.id)) || !in_ticking(e.position) {
             continue;
@@ -631,14 +824,13 @@ fn collect_members(game: &ServerGame<'_>) -> Vec<Member> {
             invulnerable_time: None,
             no_gravity: Some(e.no_gravity),
             vehicle: None,
-            passengers: passengers_of(game, e.id),
+            passengers: passive_passengers(game, e.id),
             random: Some(random_pair(&e.random)),
             health: Health::NotLiving,
-            uuid: passive_uuid(game, e.id, Some(Target::Boat(e.id)), None),
+            uuid: passive_uuid(game, e.id, None),
         });
     }
 
-    // 4. Minecarts
     for e in game.common.carts.iter() {
         if removals.contains(&Target::Cart(e.id)) || !in_ticking(e.position) {
             continue;
@@ -658,14 +850,13 @@ fn collect_members(game: &ServerGame<'_>) -> Vec<Member> {
             invulnerable_time: None,
             no_gravity: Some(e.no_gravity),
             vehicle: None,
-            passengers: passengers_of(game, e.id),
+            passengers: passive_passengers(game, e.id),
             random: Some(random_pair(&e.random)),
             health: Health::NotLiving,
-            uuid: passive_uuid(game, e.id, Some(Target::Cart(e.id)), None),
+            uuid: passive_uuid(game, e.id, None),
         });
     }
 
-    // 5. Armor stands
     for e in game.common.armor_stands.iter() {
         if removals.contains(&Target::Stand(e.id)) || !in_ticking(e.position) {
             continue;
@@ -682,17 +873,16 @@ fn collect_members(game: &ServerGame<'_>) -> Vec<Member> {
             fall_distance: Some(e.enchantment_fall_distance),
             fire: Some(e.fire_ticks),
             air: Some(e.air),
-            invulnerable_time: None,
+            invulnerable_time: Some(passive_saved_invulnerable_time(game, e.id)),
             no_gravity: Some(e.no_gravity),
             vehicle: e.vehicle,
-            passengers: passengers_of(game, e.id),
+            passengers: passive_passengers(game, e.id),
             random: Some(random_pair(&e.random)),
             health: Health::Living(e.health),
-            uuid: passive_uuid(game, e.id, Some(Target::Stand(e.id)), None),
+            uuid: passive_uuid(game, e.id, None),
         });
     }
 
-    // 6. Primed TNT
     for e in game.common.tnts.iter() {
         if removals.contains(&Target::Tnt(e.id)) || !in_ticking(e.position) {
             continue;
@@ -712,14 +902,13 @@ fn collect_members(game: &ServerGame<'_>) -> Vec<Member> {
             invulnerable_time: None,
             no_gravity: Some(e.no_gravity),
             vehicle: None,
-            passengers: passengers_of(game, e.id),
+            passengers: passive_passengers(game, e.id),
             random: None,
             health: Health::NotLiving,
-            uuid: passive_uuid(game, e.id, Some(Target::Tnt(e.id)), None),
+            uuid: passive_uuid(game, e.id, None),
         });
     }
 
-    // 7. Falling blocks
     for e in game.common.falling.iter() {
         if removals.contains(&Target::Falling(e.id)) || !in_ticking(e.position) {
             continue;
@@ -739,19 +928,13 @@ fn collect_members(game: &ServerGame<'_>) -> Vec<Member> {
             invulnerable_time: None,
             no_gravity: Some(e.no_gravity),
             vehicle: None,
-            passengers: passengers_of(game, e.id),
+            passengers: passive_passengers(game, e.id),
             random: None,
             health: Health::NotLiving,
-            uuid: passive_uuid(
-                game,
-                e.id,
-                Some(Target::Falling(e.id)),
-                e.saved.as_ref().map(|s| s.0),
-            ),
+            uuid: passive_uuid(game, e.id, e.saved.as_ref().map(|s| s.0)),
         });
     }
 
-    // 8. Experience orbs
     for e in game.common.orbs.iter() {
         if removals.contains(&Target::Orb(e.id)) || !in_ticking(e.position) {
             continue;
@@ -768,17 +951,16 @@ fn collect_members(game: &ServerGame<'_>) -> Vec<Member> {
             fall_distance: Some(e.fall_distance),
             fire: Some(e.fire_ticks),
             air: Some(e.air),
-            invulnerable_time: None,
+            invulnerable_time: Some(passive_saved_invulnerable_time(game, e.id)),
             no_gravity: Some(e.no_gravity),
             vehicle: None,
-            passengers: passengers_of(game, e.id),
+            passengers: passive_passengers(game, e.id),
             random: None,
             health: Health::NotLiving,
-            uuid: passive_uuid(game, e.id, Some(Target::Orb(e.id)), None),
+            uuid: passive_uuid(game, e.id, None),
         });
     }
 
-    // 9. Projectiles
     for e in game.common.creatures.projectiles.iter() {
         if removals.contains(&Target::Projectile(e.id)) || !in_ticking(e.position) {
             continue;
@@ -799,14 +981,13 @@ fn collect_members(game: &ServerGame<'_>) -> Vec<Member> {
             invulnerable_time: None,
             no_gravity: Some(e.no_gravity),
             vehicle: None,
-            passengers: passengers_of(game, e.id),
+            passengers: passive_passengers(game, e.id),
             random: Some(random_pair(&e.random.0)),
             health: Health::NotLiving,
-            uuid: passive_uuid(game, e.id, Some(Target::Projectile(e.id)), e.uuid),
+            uuid: passive_uuid(game, e.id, e.uuid),
         });
     }
 
-    // 10. Firework rockets
     for e in game.common.rockets.iter() {
         if removals.contains(&Target::Rocket(e.id)) || !in_ticking(e.position) {
             continue;
@@ -826,14 +1007,13 @@ fn collect_members(game: &ServerGame<'_>) -> Vec<Member> {
             invulnerable_time: None,
             no_gravity: None,
             vehicle: None,
-            passengers: passengers_of(game, e.id),
+            passengers: passive_passengers(game, e.id),
             random: Some(random_pair(&e.random)),
             health: Health::NotLiving,
-            uuid: passive_uuid(game, e.id, Some(Target::Rocket(e.id)), None),
+            uuid: passive_uuid(game, e.id, None),
         });
     }
 
-    // 11. Thrown tridents
     for e in game.common.tridents.iter() {
         if removals.contains(&Target::Trident(e.id)) || !in_ticking(e.position) {
             continue;
@@ -853,22 +1033,23 @@ fn collect_members(game: &ServerGame<'_>) -> Vec<Member> {
             invulnerable_time: None,
             no_gravity: Some(e.no_gravity),
             vehicle: None,
-            passengers: passengers_of(game, e.id),
+            passengers: passive_passengers(game, e.id),
             random: Some(random_pair(&e.random)),
             health: Health::NotLiving,
-            uuid: passive_uuid(game, e.id, Some(Target::Trident(e.id)), None),
+            uuid: passive_uuid(game, e.id, None),
         });
     }
 
-    // 12. General rows
     for e in game.common.resident_entities.general.rows.iter() {
         if removals.contains(&Target::General(e.id)) || !in_ticking(e.position) {
             continue;
         }
+        let ty = namespaced(&e.native_type());
+        let health = classify_health(game, &ty);
         members.push(Member {
             order: joined_order(e.join_seq(), e.id),
             id: e.id,
-            ty: namespaced(&e.native_type()),
+            ty,
             pos: e.position,
             motion: Some(e.velocity),
             rot: Some(e.rotation),
@@ -880,14 +1061,13 @@ fn collect_members(game: &ServerGame<'_>) -> Vec<Member> {
             invulnerable_time: None,
             no_gravity: Some(e.base.no_gravity),
             vehicle: e.mount,
-            passengers: passengers_of(game, e.id),
+            passengers: passive_passengers(game, e.id),
             random: None,
-            health: Health::Unmodeled,
+            health,
             uuid: Some(ints_uuid(e.uuid)),
         });
     }
 
-    // 13. Paintings
     for e in game.common.paintings.iter() {
         if removals.contains(&Target::Painting(e.id)) {
             continue;
@@ -916,14 +1096,13 @@ fn collect_members(game: &ServerGame<'_>) -> Vec<Member> {
             invulnerable_time: None,
             no_gravity: None,
             vehicle: None,
-            passengers: passengers_of(game, e.id),
+            passengers: passive_passengers(game, e.id),
             random: None,
             health: Health::NotLiving,
-            uuid: passive_uuid(game, e.id, Some(Target::Painting(e.id)), None),
+            uuid: passive_uuid(game, e.id, None),
         });
     }
 
-    // 14. Item frames and glow item frames
     for e in game.common.item_frames.iter() {
         if removals.contains(&Target::Frame(e.id)) {
             continue;
@@ -948,14 +1127,13 @@ fn collect_members(game: &ServerGame<'_>) -> Vec<Member> {
             invulnerable_time: None,
             no_gravity: None,
             vehicle: None,
-            passengers: passengers_of(game, e.id),
+            passengers: passive_passengers(game, e.id),
             random: Some(random_pair(&e.random)),
             health: Health::NotLiving,
-            uuid: passive_uuid(game, e.id, Some(Target::Frame(e.id)), None),
+            uuid: passive_uuid(game, e.id, None),
         });
     }
 
-    // 15. Cushions
     for e in game.common.cushions.iter() {
         if removals.contains(&Target::Cushion(e.id)) || !in_ticking(e.position) {
             continue;
@@ -966,7 +1144,7 @@ fn collect_members(game: &ServerGame<'_>) -> Vec<Member> {
             ty: "minecraft:cushion".to_owned(),
             pos: e.position,
             motion: None,
-            rot: None,
+            rot: Some([e.yaw, 0.0]),
             ground: None,
             tick_count: None,
             fall_distance: None,
@@ -975,14 +1153,13 @@ fn collect_members(game: &ServerGame<'_>) -> Vec<Member> {
             invulnerable_time: None,
             no_gravity: None,
             vehicle: None,
-            passengers: passengers_of(game, e.id),
+            passengers: passive_passengers(game, e.id),
             random: None,
             health: Health::NotLiving,
-            uuid: passive_uuid(game, e.id, Some(Target::Cushion(e.id)), None),
+            uuid: passive_uuid(game, e.id, None),
         });
     }
 
-    // 16. Natural leash knots
     for e in game.common.resident_entities.knots.iter() {
         if removals.contains(&Target::Knot(e.id)) {
             continue;
@@ -1006,24 +1183,19 @@ fn collect_members(game: &ServerGame<'_>) -> Vec<Member> {
             invulnerable_time: None,
             no_gravity: Some(e.no_gravity),
             vehicle: None,
-            passengers: passengers_of(game, e.id),
+            passengers: passive_passengers(game, e.id),
             random: None,
             health: Health::NotLiving,
-            uuid: passive_uuid(game, e.id, Some(Target::Knot(e.id)), None),
+            uuid: passive_uuid(game, e.id, None),
         });
     }
 
-    // 17. Other entities (displays, markers, interactions, explicit knots, summoned eyes, ...)
     for e in game.server.others.0.iter() {
         if removals.contains(&Target::Other(e.id)) || !in_ticking(e.position) {
             continue;
         }
         let ty = namespaced(&e.kind);
-        let health = if is_known_nonliving_other(&ty) {
-            Health::NotLiving
-        } else {
-            Health::Unmodeled
-        };
+        let health = classify_health(game, &ty);
         members.push(Member {
             order: joined_order(e.join, e.id),
             id: e.id,
@@ -1039,14 +1211,13 @@ fn collect_members(game: &ServerGame<'_>) -> Vec<Member> {
             invulnerable_time: None,
             no_gravity: None,
             vehicle: None,
-            passengers: passengers_of(game, e.id),
+            passengers: passive_passengers(game, e.id),
             random: None,
             health,
-            uuid: passive_uuid(game, e.id, Some(Target::Other(e.id)), None),
+            uuid: passive_uuid(game, e.id, None),
         });
     }
 
-    // 18. Evoker fangs
     for e in game.common.fangs.list.iter() {
         if removals.contains(&Target::Fangs(e.id)) {
             continue;
@@ -1070,14 +1241,13 @@ fn collect_members(game: &ServerGame<'_>) -> Vec<Member> {
             invulnerable_time: None,
             no_gravity: None,
             vehicle: None,
-            passengers: passengers_of(game, e.id),
+            passengers: passive_passengers(game, e.id),
             random: Some(random_pair(&e.random)),
             health: Health::NotLiving,
-            uuid: passive_uuid(game, e.id, Some(Target::Fangs(e.id)), None),
+            uuid: passive_uuid(game, e.id, None),
         });
     }
 
-    // 19. Lightning bolts
     for e in game.common.bolts.iter() {
         if removals.contains(&Target::Bolt(e.id)) {
             continue;
@@ -1101,14 +1271,13 @@ fn collect_members(game: &ServerGame<'_>) -> Vec<Member> {
             invulnerable_time: Some(e.invulnerable_time),
             no_gravity: Some(e.no_gravity),
             vehicle: e.mount,
-            passengers: passengers_of(game, e.id),
+            passengers: passive_passengers(game, e.id),
             random: Some(random_pair(&e.random)),
             health: Health::NotLiving,
-            uuid: passive_uuid(game, e.id, Some(Target::Bolt(e.id)), None),
+            uuid: passive_uuid(game, e.id, None),
         });
     }
 
-    // 20. Ominous item spawners
     for e in game.common.ominous_spawners.iter() {
         if removals.contains(&Target::Spawner(e.id)) {
             continue;
@@ -1132,14 +1301,13 @@ fn collect_members(game: &ServerGame<'_>) -> Vec<Member> {
             invulnerable_time: None,
             no_gravity: None,
             vehicle: None,
-            passengers: passengers_of(game, e.id),
+            passengers: passive_passengers(game, e.id),
             random: None,
             health: Health::NotLiving,
-            uuid: passive_uuid(game, e.id, Some(Target::Spawner(e.id)), Some(e.uuid)),
+            uuid: passive_uuid(game, e.id, Some(e.uuid)),
         });
     }
 
-    // 21. End crystals
     for e in game.common.crystals.iter() {
         if removals.contains(&Target::Crystal(e.id)) || !in_ticking(e.position) {
             continue;
@@ -1159,14 +1327,14 @@ fn collect_members(game: &ServerGame<'_>) -> Vec<Member> {
             invulnerable_time: None,
             no_gravity: None,
             vehicle: None,
-            passengers: passengers_of(game, e.id),
+            passengers: passive_passengers(game, e.id),
             random: None,
             health: Health::NotLiving,
-            uuid: passive_uuid(game, e.id, Some(Target::Crystal(e.id)), None),
+            uuid: passive_uuid(game, e.id, None),
         });
     }
 
-    // 22. Ender dragon (parts are children updated by the dragon body, not tick-list members).
+    // Dragon parts are children updated by the dragon body, not tick-list members.
     for e in game.common.dragon.iter() {
         if removals.contains(&Target::Dragon(e.id)) || !in_ticking(e.position) {
             continue;
@@ -1183,17 +1351,16 @@ fn collect_members(game: &ServerGame<'_>) -> Vec<Member> {
             fall_distance: None,
             fire: None,
             air: None,
-            invulnerable_time: None,
+            invulnerable_time: Some(passive_saved_invulnerable_time(game, e.id)),
             no_gravity: None,
             vehicle: None,
-            passengers: passengers_of(game, e.id),
+            passengers: passive_passengers(game, e.id),
             random: Some(random_pair(&e.random)),
             health: Health::Living(e.health),
-            uuid: passive_uuid(game, e.id, Some(Target::Dragon(e.id)), None),
+            uuid: passive_uuid(game, e.id, None),
         });
     }
 
-    // 23. Area effect clouds (dragon breath and lingering potions)
     for e in game.common.breath_clouds.iter() {
         if removals.contains(&Target::Cloud(e.id)) {
             continue;
@@ -1217,18 +1384,28 @@ fn collect_members(game: &ServerGame<'_>) -> Vec<Member> {
             invulnerable_time: None,
             no_gravity: None,
             vehicle: None,
-            passengers: passengers_of(game, e.id),
+            passengers: passive_passengers(game, e.id),
             random: None,
             health: Health::NotLiving,
-            uuid: passive_uuid(game, e.id, Some(Target::Cloud(e.id)), None),
+            uuid: passive_uuid(game, e.id, None),
         });
     }
 
-    // 24. Fishing hooks
-    for (e, owner) in game.fishing_hooks_here() {
-        if owner == Target::Player && !local_player_here(game) {
-            continue;
-        }
+    // Direct hook walk matching fishing_hooks_here without calling a replaceable method.
+    let own_hook = game.common.hook.iter().filter(|_| local_player_here(game));
+    let guest_hooks = game.server.lan.iter().flat_map(|host| {
+        host.hub
+            .guests
+            .iter()
+            .filter(|g| {
+                g.placed
+                    && g.dimension == dim_id
+                    && game.server.lan_acting != Some(g.conn)
+                    && !game.server.lan_guest_swaps.contains(&g.conn)
+            })
+            .filter_map(|g| host.play.get(&g.conn)?.hook.as_ref())
+    });
+    for e in own_hook.chain(guest_hooks) {
         if removals.contains(&Target::Hook(e.id)) || !in_ticking(e.position) {
             continue;
         }
@@ -1247,14 +1424,14 @@ fn collect_members(game: &ServerGame<'_>) -> Vec<Member> {
             invulnerable_time: None,
             no_gravity: Some(e.base.no_gravity),
             vehicle: None,
-            passengers: passengers_of(game, e.id),
+            passengers: passive_passengers(game, e.id),
             random: Some(random_pair(&e.random)),
             health: Health::NotLiving,
-            uuid: passive_uuid(game, e.id, Some(Target::Hook(e.id)), Some(e.uuid)),
+            uuid: passive_uuid(game, e.id, Some(e.uuid)),
         });
     }
 
-    // 25. Thrown potions (unjoined)
+    // Thrown potions and thrown eyes have no JoinSeq; they sort in bucket 2 by id.
     for e in game.common.potions.thrown.iter() {
         if !in_ticking(e.position) {
             continue;
@@ -1274,14 +1451,13 @@ fn collect_members(game: &ServerGame<'_>) -> Vec<Member> {
             invulnerable_time: None,
             no_gravity: None,
             vehicle: None,
-            passengers: passengers_of(game, e.id),
+            passengers: passive_passengers(game, e.id),
             random: Some(random_pair(&e.random)),
             health: Health::NotLiving,
-            uuid: passive_uuid(game, e.id, None, None),
+            uuid: passive_uuid(game, e.id, None),
         });
     }
 
-    // 26. Thrown eyes of ender (unjoined)
     for e in game.common.end.eyes.iter() {
         let pos = Vec3::new(e.position.x, e.position.y, e.position.z);
         if !in_ticking(pos) {
@@ -1302,15 +1478,21 @@ fn collect_members(game: &ServerGame<'_>) -> Vec<Member> {
             invulnerable_time: None,
             no_gravity: None,
             vehicle: None,
-            passengers: passengers_of(game, e.id),
+            passengers: passive_passengers(game, e.id),
             random: None,
             health: Health::NotLiving,
-            uuid: passive_uuid(game, e.id, None, None),
+            uuid: passive_uuid(game, e.id, None),
         });
     }
 
     members.sort_by_key(|m| m.order);
-    members
+    let mut seen_ids = std::collections::HashSet::with_capacity(members.len());
+    for m in &members {
+        if !seen_ids.insert(m.id) {
+            return Err(format!("state_transcript: duplicate member id {}", m.id).into());
+        }
+    }
+    Ok(members)
 }
 
 fn namespaced(key: &str) -> String {
@@ -1335,7 +1517,7 @@ fn fmt_uuid(u: u128) -> String {
         ((u >> 80) & 0xffff) as u16,
         ((u >> 64) & 0xffff) as u16,
         ((u >> 48) & 0xffff) as u16,
-        (u & 0xffff_ffff_ffff) as u64,
+        u & 0xffff_ffff_ffff,
     )
 }
 
@@ -1361,17 +1543,22 @@ fn sha256_hex(data: &[u8]) -> String {
         0x5be0cd19,
     ];
     let bit_len = (data.len() as u64).wrapping_mul(8);
-    let mut padded = Vec::with_capacity((data.len() + 9 + 63) & !63);
+    let mut padded = Vec::with_capacity((data.len() + 9).div_ceil(64) * 64);
     padded.extend_from_slice(data);
     padded.push(0x80);
     while padded.len() % 64 != 56 {
         padded.push(0);
     }
     padded.extend_from_slice(&bit_len.to_be_bytes());
-    for chunk in padded.chunks_exact(64) {
+    for block in padded.chunks_exact(64) {
         let mut w = [0u32; 64];
-        for (i, word) in chunk.chunks_exact(4).enumerate() {
-            w[i] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes([
+                block[i * 4],
+                block[i * 4 + 1],
+                block[i * 4 + 2],
+                block[i * 4 + 3],
+            ]);
         }
         for i in 16..64 {
             let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
@@ -1402,14 +1589,9 @@ fn sha256_hex(data: &[u8]) -> String {
             b = a;
             a = t1.wrapping_add(t2);
         }
-        h[0] = h[0].wrapping_add(a);
-        h[1] = h[1].wrapping_add(b);
-        h[2] = h[2].wrapping_add(c);
-        h[3] = h[3].wrapping_add(d);
-        h[4] = h[4].wrapping_add(e);
-        h[5] = h[5].wrapping_add(f);
-        h[6] = h[6].wrapping_add(g);
-        h[7] = h[7].wrapping_add(hh);
+        for (slot, delta) in h.iter_mut().zip([a, b, c, d, e, f, g, hh]) {
+            *slot = slot.wrapping_add(delta);
+        }
     }
     let mut out = String::with_capacity(64);
     for word in h {
@@ -1423,7 +1605,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sha256_matches_known_vectors() {
+    fn sha256_matches_standard_vectors() {
         assert_eq!(sha256_hex(b""), EMPTY_SHA256);
         assert_eq!(
             sha256_hex(b"abc"),
