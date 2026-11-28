@@ -1,6 +1,7 @@
 //! Client-side entity state reads and client fire-immunity writes.
 use super::commands_common::Target;
 use mod_api::{EntityRef, EntityTypeKey, MobCategory};
+use sunrise_gameplay_common::game::entity_ids::wire_entity_id;
 use sunrise_gameplay_common::game::entity_sizes_common::synced_pose;
 use sunrise_gameplay_common::game::game_mode_common::GameModeCommonGameExt1 as _;
 use sunrise_gameplay_common::game::general::general_type_catalog;
@@ -222,7 +223,7 @@ impl crate::game::ClientGame<'_> {
         self.client
             .remote
             .as_ref()?
-            .tracked_fire_immunity(i32::try_from(entity.id()).ok()?)
+            .tracked_fire_immunity(wire_entity_id(entity.id()))
     }
 
     pub(in crate::game) fn client_entity_is_shift_key_down(
@@ -304,11 +305,7 @@ impl crate::game::ClientGame<'_> {
                 .client
                 .remote
                 .as_ref()
-                .and_then(|r| {
-                    i32::try_from(entity.id())
-                        .ok()
-                        .and_then(|id| r.tracked_fire_immunity(id))
-                })
+                .and_then(|r| r.tracked_fire_immunity(wire_entity_id(entity.id())))
                 .is_some();
         if !tracked_player {
             return false;
@@ -406,5 +403,45 @@ fn mob_category(name: &str) -> MobCategory {
         "water_creature" => MobCategory::WaterCreature,
         "water_ambient" => MobCategory::WaterAmbient,
         _ => MobCategory::Misc,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::game::client_side::native_client_session::tests::logged_client;
+    use crate::game::native_entity_refs::tests::with_game_role_client;
+    use mod_api::EntityRef;
+    use sunrise_core::prepared_test_support::{SERVER_INPUTS, STREAMING_INPUTS};
+    use sunrise_gameplay_common::game::{execution_role::ExecutionRole, in_own_process};
+
+    #[test]
+    #[ignore = "daily"]
+    fn tracked_player_fire_immunity_keeps_a_high_bit_id() {
+        const NAME: &str = "game::client_side::native_entity_state_client::tests::tracked_player_fire_immunity_keeps_a_high_bit_id";
+        in_own_process(NAME, || {
+            let root = crate::prepared_test_root::prepared_root(&[
+                STREAMING_INPUTS,
+                SERVER_INPUTS,
+                &["entity-models.json", "gameplay-facts.json"],
+            ]);
+            with_game_role_client(root, ExecutionRole::Client, |game| {
+                let _server = logged_client(game);
+                game.spawn_entity(
+                    -2_147_483_647,
+                    "minecraft:player",
+                    [0.0, 64.0, 0.0],
+                    [0.0; 3],
+                );
+
+                let entity =
+                    EntityRef::new(game.common.native_lifecycle.epoch().unwrap(), 0x8000_0001);
+                assert_eq!(
+                    game.client_tracked_player_fire_immunity(entity),
+                    Some(false)
+                );
+                assert!(game.entity_set_client_fire_immunity(entity, true));
+                assert_eq!(game.client_tracked_player_fire_immunity(entity), Some(true));
+            });
+        });
     }
 }
