@@ -68,6 +68,22 @@ fn with_spectator(kind: &str, test: impl FnOnce(&mut Game<'_>, &Calls)) {
 #[test]
 #[ignore = "daily"]
 fn spyglass_mouse_sensitivity_only_applies_in_first_person() {
+    // In a child process running only this test: the boot fixture fills the process-wide callback
+    // tables, which no other test may inherit.
+    if std::env::var_os("SUNRISE_FOV_CAMERA_CHILD").is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "game::client_side::fov::camera_tests::spyglass_mouse_sensitivity_only_applies_in_first_person",
+                "--include-ignored",
+                "--nocapture",
+            ])
+            .env("SUNRISE_FOV_CAMERA_CHILD", "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
     with_client_game(|game| {
         game.common.using = Some((0, 0));
         game.common.use_start.item = Some(ItemStack::new("minecraft:spyglass", 1));
