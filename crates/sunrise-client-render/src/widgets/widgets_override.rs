@@ -1073,6 +1073,7 @@ mod tests {
         });
         let pending = out1.pending_tooltip.expect("tooltip elapsed after delay");
         assert_eq!(pending.tooltip.message.plain(), "Tip");
+        assert_eq!(pending.rect, [50.0, 60.0, 120.0, 20.0]);
         // Explicit `set_tooltip(id, None)` suppresses native tooltips (`active_tooltip_overridden`).
         let cleared_key = EngineWidgetKey {
             key: "menu.custom_options".into(),
