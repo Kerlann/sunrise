@@ -59,6 +59,8 @@ pub(super) struct EngineChannels {
     pub viewed_levels: super::viewed_levels::capability::Capability,
     /// Its `sunrise:menu_extra` revision answer.
     pub menu_extra_rev: super::menu_extra_rev::Capability,
+    /// Its `sunrise:data_map_known_reply` answer, if received during configuration.
+    pub known_data_maps: Option<crate::data_map_net::KnownDataMaps>,
 }
 impl EngineChannels {
     /// Whether `payload` was one of these channels' and is taken, or the reason that closes the
@@ -82,6 +84,16 @@ impl EngineChannels {
             self.menu_extra_rev
                 .receive(&payload.data)
                 .map_err(|error| error.to_string())?;
+            return Ok(true);
+        }
+        if payload.channel == crate::data_map_net::KNOWN_REPLY_CHANNEL {
+            let reply = crate::data_map_net::decode_known_reply(&payload.data)?;
+            // Freeze the first valid reply (NeoForge's `RegistryManager.handleKnownDataMapsReply`
+            // finishes the configuration task on handling so a duplicate answer cannot drop a
+            // validated required map before play).
+            if self.known_data_maps.is_none() {
+                self.known_data_maps = Some(reply);
+            }
             return Ok(true);
         }
         Ok(false)
@@ -294,5 +306,38 @@ impl Drop for ConfigIo<'_> {
                 sender.writer.shutdown();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn duplicate_known_data_maps_reply_cannot_replace_validated_answer() {
+        let mut channels = EngineChannels::default();
+        let mut first = crate::data_map_net::KnownDataMaps::new();
+        first.insert(
+            "minecraft:item".to_owned(),
+            BTreeSet::from(["chemlib:fuel".to_owned()]),
+        );
+        let first_payload = cfg::CustomPayload {
+            channel: crate::data_map_net::KNOWN_REPLY_CHANNEL.into(),
+            data: crate::data_map_net::encode_known_reply(&first).unwrap(),
+        };
+        assert_eq!(channels.receive(&first_payload), Ok(true));
+        assert_eq!(channels.known_data_maps.as_ref(), Some(&first));
+
+        // A second reply dropping the required map must not overwrite the frozen answer.
+        let second_payload = cfg::CustomPayload {
+            channel: crate::data_map_net::KNOWN_REPLY_CHANNEL.into(),
+            data: crate::data_map_net::encode_known_reply(
+                &crate::data_map_net::KnownDataMaps::new(),
+            )
+            .unwrap(),
+        };
+        assert_eq!(channels.receive(&second_payload), Ok(true));
+        assert_eq!(channels.known_data_maps.as_ref(), Some(&first));
     }
 }

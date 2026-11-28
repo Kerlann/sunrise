@@ -137,6 +137,64 @@ fn biome_key_world_install_reload_and_unavailable_sides() {
                     plains.data(game, &VillagerTypes),
                     Err(DataMapError::Unavailable)
                 );
+
+                // Once the client receives its synchronized biome registry and synced data maps,
+                // typed BiomeKey, BiomeView and ReloadContext::data_map reads resolve the same
+                // synced rows while keeping unknown and stale-generation checks.
+                game.init_remote_for_replay().unwrap();
+                let synced_value = Tag::Compound(sunrise_core::nbt::Compound::from([(
+                    "villager_type".into(),
+                    Tag::String("minecraft:savanna".into()),
+                )]));
+                let payload = sunrise_sim::data_map_net::encode_sync_payload(
+                    "minecraft:worldgen/biome",
+                    &[(
+                        "neoforge:villager_types".to_owned(),
+                        vec![("test:marsh".to_owned(), synced_value.clone())],
+                    )],
+                )
+                .unwrap();
+                {
+                    let remote = game.client.remote.as_mut().unwrap();
+                    remote.biome_keys =
+                        Some(std::sync::Arc::new(mod_api::__private::BiomeKeys::new(
+                            sunrise_gameplay_common::game::world_entry::next_biome_keys_session(),
+                            [plains.clone(), marsh.clone()],
+                        )));
+                }
+                game.apply_packet(sunrise_protocol::packets::play::Clientbound::CustomPayload(
+                    sunrise_protocol::packets::configuration::CustomPayload {
+                        channel: sunrise_sim::data_map_net::SYNC_CHANNEL.into(),
+                        data: payload,
+                    },
+                ))
+                .unwrap();
+
+                let client_marsh = game.biome("test:marsh").unwrap();
+                assert_eq!(client_marsh.key(), &marsh);
+                assert_eq!(
+                    client_marsh.data(game, &VillagerTypes),
+                    Ok(Some(synced_value.clone()))
+                );
+                assert_eq!(
+                    marsh.data(game, &VillagerTypes),
+                    Ok(Some(synced_value.clone()))
+                );
+                let reload: &dyn mod_api::ReloadContext = game;
+                assert_eq!(reload.biome_key_id(&marsh), Ok("test:marsh"));
+                assert_eq!(
+                    reload.data_map(&marsh, &VillagerTypes),
+                    Ok(Some(synced_value))
+                );
+                assert_eq!(plains.data(game, &VillagerTypes), Ok(None));
+                assert_eq!(
+                    unknown.data(game, &VillagerTypes),
+                    Err(DataMapError::InvalidKey)
+                );
+                assert_eq!(
+                    foreign_view.data(game, &VillagerTypes),
+                    Err(DataMapError::InvalidKey)
+                );
             });
 
             game.server.world_tables.0 = None;

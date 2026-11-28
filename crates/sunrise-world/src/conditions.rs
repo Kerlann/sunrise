@@ -708,25 +708,9 @@ impl<'load> DecodedFileConditions<'load> {
     }
 }
 
-/// Fabric API's built-in condition types (`DefaultResourceConditionTypes`), which
-/// `Condition::decode_fabric` maps onto the evaluator's own nodes.
-const FABRIC_BUILTINS: [&str; 10] = [
-    "true",
-    "false",
-    "not",
-    "and",
-    "or",
-    "all_mods_loaded",
-    "any_mods_loaded",
-    "tags_populated",
-    "features_enabled",
-    "registry_contains",
-];
-
 /// Does the built-in evaluator already implement this condition ID (NeoForge's or Fabric's)?
 pub fn is_builtin_condition(id: &sunrise_core::identifier::Identifier) -> bool {
-    BuiltinCondition::from_parts(id.namespace(), id.path()).is_some()
-        || (id.namespace() == "fabric" && FABRIC_BUILTINS.contains(&id.path()))
+    mod_api::__private::is_builtin_condition(id)
 }
 
 /// `FeatureFlags.REGISTRY`'s flags, which a feature condition may name.

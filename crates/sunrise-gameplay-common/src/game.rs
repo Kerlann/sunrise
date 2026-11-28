@@ -682,7 +682,6 @@ pub use api_values::{block_jump_factor, block_speed_factor, is_ladder};
 pub use held_items::interact_location;
 pub use hit::Hit;
 pub use launch_options::Options;
-pub use mod_api::game::DataMapType;
 pub use native_hooks::{PhantomSpawnResult, SleepProblem};
 #[allow(unused_imports)]
 pub use std::{
@@ -1344,6 +1343,9 @@ pub struct WorldTables {
     pub reload_sources: Option<Arc<sunrise_sim::crafting::ResolvedSources>>,
     /// The values of the data map types native mods registered (`native_data_map_types`).
     pub data_maps: native_data_maps_common::DataMaps,
+    /// NeoForge's built-in block data maps (`flammable`, `oxidizables`, `waxables`), staged
+    /// alongside `data_maps` so server behaviour and synced client rows come from the same load.
+    pub block_maps: Option<Arc<sunrise_world::level::BlockMaps>>,
     /// Pack tags used by advancement predicates, built-in data maps, and mod-declared static
     /// custom registries (`TagLoader.loadTagsForExistingRegistries`). Damage tags live in the
     /// catalog. Keyed by directory for `minecraft:` registries (`"worldgen/biome"`, ...) and

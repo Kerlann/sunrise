@@ -304,3 +304,44 @@ fn droppable_is_play_only_and_part_of_the_negotiated_version() {
     assert!(payloads.drop_counters("test:voice").is_some());
     assert!(payloads.drop_counters("test:early").is_none());
 }
+
+#[test]
+fn data_map_and_custom_registry_engine_channels_cannot_be_registered_by_mods() {
+    for channel in [
+        "sunrise:custom_registries",
+        "sunrise:data_map_known",
+        "sunrise:data_map_known_reply",
+        "sunrise:data_map_sync",
+    ] {
+        let mut typed = PartRegistrar::new("rogue");
+        (&mut typed as &mut dyn Registrar)
+            .payload_handlers()
+            .registrar("1")
+            .common_to_server(PayloadId(channel.into()), handler());
+        assert_eq!(
+            typed.refused.len(),
+            1,
+            "typed registration on {channel} must be refused: {:?}",
+            typed.refused
+        );
+        assert!(
+            typed.refused[0].contains("reserved"),
+            "expected reserved refusal for {channel}, got {:?}",
+            typed.refused
+        );
+
+        let mut raw = PartRegistrar::new("rogue");
+        declare_raw(&mut raw, "rogue", 0, channel);
+        assert_eq!(
+            raw.refused.len(),
+            1,
+            "raw registration on {channel} must be refused: {:?}",
+            raw.refused
+        );
+        assert!(
+            raw.refused[0].contains("reserved"),
+            "expected reserved refusal for {channel}, got {:?}",
+            raw.refused
+        );
+    }
+}

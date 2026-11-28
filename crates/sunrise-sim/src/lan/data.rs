@@ -138,8 +138,12 @@ pub fn registry_tag_bindings(
         // Dialog registry admission also tracks missing writable holders.
         return Ok(bind_dialog_tags(&resources.join("data/minecraft"), overlay, contains).0);
     }
-    let kind = registry.split_once(':').map_or(registry, |(_, path)| path);
-    sunrise_world::tag_layers::load(resources, kind, overlay, contains)
+    let kind: std::borrow::Cow<'_, str> = match registry.split_once(':') {
+        Some(("minecraft", path)) => std::borrow::Cow::Borrowed(path),
+        Some((namespace, path)) => std::borrow::Cow::Owned(format!("{namespace}/{path}")),
+        None => std::borrow::Cow::Borrowed(registry),
+    };
+    sunrise_world::tag_layers::load(resources, &kind, overlay, contains)
         .map(|tags| tags.into_iter().collect())
         .map_err(|error| error.to_string())
 }
@@ -262,7 +266,14 @@ enum SyncLoad {
     Reload,
 }
 
+fn next_sync_generation() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 pub struct SyncData {
+    /// Monotonic generation identifying the committed tag and data-map pair for this sync load.
+    pub generation: u64,
     pub content_identity: Option<[u8; 32]>,
     pub builtin: Builtin,
     /// Entry names per synchronized registry (for id lookups).
@@ -473,9 +484,15 @@ impl SyncData {
         (packed, admitted)
     }
 
-    /// No registries, tags or recipes: enough for tests of the login phase.
+    /// No registries, tags or recipes: enough for tests of the login and play join phases.
     pub fn empty() -> Self {
+        let mut recipes = sunrise_core::vanilla_bytes::Writer::new();
+        <sunrise_protocol::packets::recipes::UpdateRecipes as sunrise_protocol::buf::Codec<_>>::write(
+            &sunrise_protocol::packets::recipes::UpdateRecipes::default(),
+            &mut recipes,
+        );
         Self {
+            generation: next_sync_generation(),
             effect_particle_ids: Default::default(),
             builtin: Builtin::default(),
             dynamic: Dynamic::default(),
@@ -487,7 +504,7 @@ impl SyncData {
             custom_registry_tags: Vec::new(),
             features: Vec::new(),
             commands: None,
-            recipes: Vec::new(),
+            recipes: recipes.data,
             stonecutter_buttons: Arc::default(),
             advancements: super::advancements::ServerAdvancements::load(
                 Path::new(""),
@@ -922,6 +939,7 @@ impl SyncData {
             None
         };
         let mut sync = Self {
+            generation: next_sync_generation(),
             effect_particle_ids: Default::default(),
             content_identity,
             builtin,

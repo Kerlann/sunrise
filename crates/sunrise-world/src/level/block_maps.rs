@@ -131,6 +131,61 @@ impl BlockMaps {
     pub fn unwaxed(&self, block: &str) -> Option<&str> {
         self.unwaxes_to.get(block).map(String::as_str)
     }
+    /// Empty canonical entries for the three built-in block maps, used when no pack defines any
+    /// block map rows so the maps remain registered and sync as empty on reload.
+    pub fn empty_nbt_maps() -> [(&'static str, Vec<(String, sunrise_core::nbt::Tag)>); 3] {
+        [
+            ("neoforge:flammable", Vec::new()),
+            ("neoforge:oxidizables", Vec::new()),
+            ("neoforge:waxables", Vec::new()),
+        ]
+    }
+    /// Forward rows of the three built-in block maps in canonical NeoForge NBT form, sorted by
+    /// block id for publication in `DataMaps` and client synchronization.
+    pub fn nbt_maps(&self) -> [(&'static str, Vec<(String, sunrise_core::nbt::Tag)>); 3] {
+        use sunrise_core::nbt::Tag;
+        let mut flammable: Vec<(String, Tag)> = self
+            .flammable
+            .iter()
+            .map(|(block, &(ignite_odds, burn_odds))| {
+                (
+                    block.clone(),
+                    Tag::compound([
+                        ("ignite_odds", Tag::Int(ignite_odds)),
+                        ("burn_odds", Tag::Int(burn_odds)),
+                    ]),
+                )
+            })
+            .collect();
+        flammable.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut oxidizables: Vec<(String, Tag)> = self
+            .oxidizes_to
+            .iter()
+            .map(|(block, next)| {
+                (
+                    block.clone(),
+                    Tag::compound([("next_oxidation_stage", Tag::String(next.as_str().into()))]),
+                )
+            })
+            .collect();
+        oxidizables.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut waxables: Vec<(String, Tag)> = self
+            .waxes_to
+            .iter()
+            .map(|(block, waxed)| {
+                (
+                    block.clone(),
+                    Tag::compound([("waxed", Tag::String(waxed.as_str().into()))]),
+                )
+            })
+            .collect();
+        waxables.sort_by(|a, b| a.0.cmp(&b.0));
+        [
+            ("neoforge:flammable", flammable),
+            ("neoforge:oxidizables", oxidizables),
+            ("neoforge:waxables", waxables),
+        ]
+    }
 }
 
 /// The open world's maps on [`Behaviours`]: replaced whole by each data load.

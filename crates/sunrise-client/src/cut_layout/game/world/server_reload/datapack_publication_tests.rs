@@ -25,16 +25,6 @@ impl Hooks for RegistryMod {
             ),
         ]);
     }
-    fn data_map_types(
-        &self,
-        _: &mut dyn mod_api::ServerHost,
-        event: &mut mod_api::DataMapTypesEvent<'_>,
-    ) {
-        event.types.push(mod_api::game::DataMapType {
-            id: "registry_test:weights".into(),
-            registry: "registry_test:spell".into(),
-        });
-    }
     fn register(&self, r: &mut dyn Registrar, _: &RegistrationContext) {
         r.declare_datapack_registry(
             "spell",
@@ -45,6 +35,10 @@ impl Hooks for RegistryMod {
             )],
         )
         .unwrap();
+        r.register_data_map_by_name(mod_api::RawDataMap::new(
+            "registry_test:spell",
+            "registry_test:weights",
+        ));
     }
 }
 fn write(path: &Path, text: &str) {
@@ -56,6 +50,7 @@ fn write(path: &Path, text: &str) {
 fn recipe_priority_layer_is_named_and_applied_through_reload() {
     use sunrise_mod_package::content::RECIPE_PRIORITIES_PATH;
     let _publication = sunrise_sim::datapack_net::isolate_server_publication();
+    let _data_map_publication = sunrise_sim::data_map_net::isolate_server_publication();
     let scratch = tempfile::tempdir().unwrap();
     let root = scratch.path();
     let pack = root.join("datapacks/priority_fixture");
@@ -199,6 +194,7 @@ fn power(game: &sunrise_gameplay::game::ServerGame<'_>) -> DatapackValue {
 #[ignore = "daily"]
 fn datapack_game_open_reload_and_exhaustion_are_atomic() {
     let _publication = sunrise_sim::datapack_net::isolate_server_publication();
+    let _data_map_publication = sunrise_sim::data_map_net::isolate_server_publication();
     let scratch = tempfile::tempdir().unwrap();
     let root = scratch.path();
     for (name, value) in [("base", 3), ("override", 7)] {
@@ -352,7 +348,12 @@ fn datapack_game_open_reload_and_exhaustion_are_atomic() {
                 assert_eq!(power(game), DatapackValue::Int(9));
                 game.reload_datapacks(false, &features).unwrap();
                 assert_eq!(power(game), DatapackValue::Int(9));
-                game.finish_close_world_server();
+                assert!(sunrise_sim::data_map_net::served().is_some());
+                game.run_server_lifecycle(false, |_| {
+                    Ok(sunrise_gameplay::game::ServerRunOutcome::Orderly)
+                })
+                .unwrap();
+                assert!(sunrise_sim::data_map_net::served().is_none());
                 sunrise_gameplay_common::game::lan_common::sync::forget_sync_data();
                 sunrise_gameplay_common::game::lan_common::sync::forget_server_sources();
                 game.options.execution_role =
@@ -431,6 +432,7 @@ fn world_open_and_wire_use_the_pack_biome_instead_of_the_bundled_file() {
         r#"{"message_id":"fixture","scaling":"never","exhaustion":0}"#,
     );
     let _publication = sunrise_sim::datapack_net::isolate_server_publication();
+    let _data_map_publication = sunrise_sim::data_map_net::isolate_server_publication();
     with_game_at(resources, |game| {
         game.load_world(request(&world)).unwrap();
         let sync = sunrise_gameplay_common::game::lan_common::sync::cached_reload_sync().unwrap();
@@ -459,6 +461,7 @@ fn world_open_and_wire_use_the_pack_biome_instead_of_the_bundled_file() {
 #[ignore = "daily"]
 fn refused_reload_names_the_pack_and_keeps_the_old_generation() {
     let _publication = sunrise_sim::datapack_net::isolate_server_publication();
+    let _data_map_publication = sunrise_sim::data_map_net::isolate_server_publication();
     let scratch = tempfile::tempdir().unwrap();
     let root = scratch.path();
     let pack = root.join("datapacks/override");
@@ -529,6 +532,7 @@ mod datapack_game_delivery_tests;
 // Each case uses real world open/reload, not a preloaded membership predicate.
 fn with_membership_fixture(run: impl FnOnce(&mut sunrise_gameplay::game::ServerGame<'_>, &Path)) {
     let _publication = sunrise_sim::datapack_net::isolate_server_publication();
+    let _data_map_publication = sunrise_sim::data_map_net::isolate_server_publication();
     let scratch = tempfile::tempdir().unwrap();
     let root = scratch.path();
     for name in ["base", "later"] {

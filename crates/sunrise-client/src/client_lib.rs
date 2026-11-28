@@ -77,6 +77,7 @@ pub mod creative;
 pub use sunrise_sim::cushion;
 pub use sunrise_sim::custom_registry_net;
 pub use sunrise_sim::data_cmd;
+pub use sunrise_sim::data_map_net;
 pub use sunrise_sim::datapack_net;
 pub mod debug_chart;
 pub mod debug_entries;

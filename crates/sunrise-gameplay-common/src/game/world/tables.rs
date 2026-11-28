@@ -19,14 +19,6 @@ pub fn level_suffocation_of<'a>(
     world_tables.map_or_else(|| res.suffocation(), |t| &t.suffocation)
 }
 
-fn loaded_data_maps(
-    tables: Option<&WorldTables>,
-) -> std::result::Result<&native_data_maps_common::DataMaps, mod_api::DataMapError> {
-    tables
-        .map(|tables| &tables.data_maps)
-        .ok_or(mod_api::DataMapError::Unavailable)
-}
-
 pub trait GameItems<'__sg>: crate::game::SideGame<'__sg> {
     /// Server reads active station enchantments; client reads synced remote enchantments or active items.
     fn item_enchantments<'s>(&'s self) -> &'s Arc<sunrise_items::enchant::Enchantments>
@@ -241,11 +233,9 @@ pub trait WorldTablesExt<'__sg>: crate::game::SideGame<'__sg> {
     where
         '__sg: 's,
     {
-        loaded_data_maps(self.side_world_tables())?.value(
-            registry,
-            map,
-            &native_data_maps_common::full_id(entry),
-        )
+        self.side_data_maps()
+            .ok_or(mod_api::DataMapError::Unavailable)?
+            .value(registry, map, &native_data_maps_common::full_id(entry))
     }
 
     fn data_map_entries<'s>(
@@ -256,40 +246,43 @@ pub trait WorldTablesExt<'__sg>: crate::game::SideGame<'__sg> {
     where
         '__sg: 's,
     {
-        loaded_data_maps(self.side_world_tables())?.entries(registry, map)
+        self.side_data_maps()
+            .ok_or(mod_api::DataMapError::Unavailable)?
+            .entries(registry, map)
     }
 
     fn loaded_biome_keys(&self) -> Option<&mod_api::__private::BiomeKeys> {
-        loaded_data_maps(self.side_world_tables())
-            .ok()
-            .map(|maps| &*maps.biome_keys)
+        self.side_biome_keys()
     }
 
     fn biome(
         &self,
         id: &str,
     ) -> std::result::Result<mod_api::BiomeView<'_>, mod_api::BiomeKeyError> {
-        let maps = loaded_data_maps(self.side_world_tables())
-            .map_err(|_| mod_api::BiomeKeyError::Unavailable)?;
-        maps.biome_keys.view(id)
+        let keys = self
+            .side_biome_keys()
+            .ok_or(mod_api::BiomeKeyError::Unavailable)?;
+        keys.view(id)
     }
 
     fn biome_view(
         &self,
         key: &mod_api::BiomeKey,
     ) -> std::result::Result<mod_api::BiomeView<'_>, mod_api::BiomeKeyError> {
-        let maps = loaded_data_maps(self.side_world_tables())
-            .map_err(|_| mod_api::BiomeKeyError::Unavailable)?;
-        maps.biome_keys.view_key(key)
+        let keys = self
+            .side_biome_keys()
+            .ok_or(mod_api::BiomeKeyError::Unavailable)?;
+        keys.view_key(key)
     }
 
     fn biome_view_id(
         &self,
         view: mod_api::BiomeView<'_>,
     ) -> std::result::Result<&str, mod_api::BiomeKeyError> {
-        let maps = loaded_data_maps(self.side_world_tables())
-            .map_err(|_| mod_api::BiomeKeyError::Unavailable)?;
-        maps.biome_keys.id(view)
+        let keys = self
+            .side_biome_keys()
+            .ok_or(mod_api::BiomeKeyError::Unavailable)?;
+        keys.id(view)
     }
 
     fn mod_recipe_property_contains(&self, set: &str, item: mod_api::ItemKey) -> bool {
