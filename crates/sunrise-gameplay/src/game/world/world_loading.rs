@@ -569,7 +569,8 @@ fn level_shapes(
 /// `FlatLevelSource.getSeaLevel` for a flat stem: -63, unless the mod that
 /// declares the level set `DimensionSettings::sea_level`. A pack's noise
 /// settings, even ones it replaces, never apply to a flat stem. This is the
-/// value the level reports; the flat generator still builds its water at -63.
+/// value the level reports. -63 is the flat generator's sea-level value, not a
+/// water-placement rule: it fills its configured layers.
 fn flat_sea_level(explicit: Option<i32>) -> i32 {
     explicit.unwrap_or(-63)
 }
@@ -612,7 +613,7 @@ fn resolve_level_sea_levels(
         // The noise settings are what the terrain is built with; `sea_level` of the mod is for
         // a generator that has none.
         let stem = serde_json::from_str::<serde_json::Value>(stem).ok();
-        // A superflat generator builds at -63 (`FlatLevelSource.getSeaLevel`) whatever its
+        // A superflat generator's sea level is -63 (`FlatLevelSource.getSeaLevel`) whatever its
         // level's noise settings say; a mod's explicit sea level still wins for it. The stem
         // codec accepts both the canonical id and the bare `flat` alias.
         let flat = stem.as_ref().is_some_and(|stem| {
@@ -622,7 +623,7 @@ fn resolve_level_sea_levels(
             )
         });
         let sea = if flat {
-            own.or(Some(-63))
+            Some(flat_sea_level(own))
         } else {
             stem.and_then(|stem| stem_sea_level(&stem, &read)).or(own)
         };
@@ -1017,7 +1018,7 @@ pub fn make_streaming(
             *biome,
         )
         .ok_or("a runtime level's layers use a block the game lacks")?;
-        // These layers specify no sea level: they build at -63 regardless of the ID's past.
+        // These layers specify no sea level: their value is -63 regardless of the ID's past.
         register_sea_level(-63);
         generator_type = Identifier::parse("minecraft:flat").unwrap();
         ChunkStreamer::new(

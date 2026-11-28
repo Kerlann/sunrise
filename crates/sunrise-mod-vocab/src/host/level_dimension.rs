@@ -45,7 +45,8 @@ pub trait LevelDimensionBackend {
     /// `DimensionSettings::sea_level` still wins), for another level the `sea_level` its
     /// `DimensionSettings` gave, else 63. This is the value the level reports and the game uses for
     /// mob spawning and behaviour, rain and snow, and maps; terrain and aquifers use the generator's
-    /// own sea level instead, which for superflat stays -63. None for a stale handle and on a client.
+    /// own sea level instead. Superflat's value is -63, a sea-level value and not a water-placement
+    /// rule: it fills its configured layers. None for a stale handle and on a client.
     fn level_sea_level(&self, level: LevelRef) -> Option<i32>;
     /// Side: server.
     /// `ServerLevel.isVillage`: whether `pos` is within one section of a section
