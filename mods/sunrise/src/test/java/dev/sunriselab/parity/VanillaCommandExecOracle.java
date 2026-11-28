@@ -109,6 +109,7 @@ public final class VanillaCommandExecOracle {
         final Path output;
         final LocalSampleLogger sampleLogger = new LocalSampleLogger(4);
         boolean ran;
+        StateTranscript transcript;
 
         static Server create(Thread thread, LevelStorageSource.LevelStorageAccess access, PackRepository packs, long seed, Path script, Path output) throws Exception {
             packs.reload();
@@ -142,14 +143,17 @@ public final class VanillaCommandExecOracle {
 
         @Override protected boolean initServer() {
             this.setPlayerList(new PlayerList(this, this.registries(), this.playerDataStorage, new EmptyNotificationService()) {});
-            if (Boolean.getBoolean("sunrise.loadedFixture")) {
-                this.getPlayerList().setViewDistance(2);
-                this.getPlayerList().setSimulationDistance(2);
+            String configuredDistance = System.getProperty("sunrise.parity.distance");
+            int distance = configuredDistance == null ? (Boolean.getBoolean("sunrise.loadedFixture") ? 2 : 0)
+                : Integer.parseInt(configuredDistance);
+            if (distance != 0) {
+                this.getPlayerList().setViewDistance(distance);
+                this.getPlayerList().setSimulationDistance(distance);
             }
             this.loadLevel();
-            if (Boolean.getBoolean("sunrise.loadedFixture")) {
-                this.getPlayerList().setViewDistance(2);
-                this.getPlayerList().setSimulationDistance(2);
+            if (distance != 0) {
+                this.getPlayerList().setViewDistance(distance);
+                this.getPlayerList().setSimulationDistance(distance);
             }
             return true;
         }
@@ -160,7 +164,12 @@ public final class VanillaCommandExecOracle {
             }
             ran = true;
             try {
-                runScript();
+                try {
+                    runScript();
+                    if (transcript != null) transcript.complete();
+                } finally {
+                    if (transcript != null) transcript.close();
+                }
                 if (Boolean.getBoolean("sunrise.parity.flat")) saveEverything(true, true, true);
             } catch (Throwable t) {
                 t.printStackTrace();
@@ -620,12 +629,19 @@ public final class VanillaCommandExecOracle {
             try { writeFishingFallbackReference(); } catch (Exception e) { throw new IOException(e); }
             StringBuilder out = new StringBuilder();
             Gson gson = new Gson();
+            int scriptLine = 0;
             for (String line : Files.readAllLines(script, StandardCharsets.UTF_8)) {
+                scriptLine++;
                 if (line.isBlank()) {
                     continue;
                 }
                 JsonObject op = JsonParser.parseString(line).getAsJsonObject();
                 switch (op.get("op").getAsString()) {
+                    case "state_transcript" -> {
+                        boolean enabled = op.get("on").getAsBoolean();
+                        if (enabled && transcript == null) transcript = new StateTranscript(level, script);
+                        if (transcript != null) transcript.enabled = enabled;
+                    }
                     case "cmd" -> {
                         String command = op.get("cmd").getAsString();
                         messages.clear();
@@ -673,6 +689,7 @@ public final class VanillaCommandExecOracle {
                             if (op.has("trace") && op.get("trace").getAsBoolean()) System.err.println("command trace: " + gson.toJson(record));
                             if (!op.has("record") || op.get("record").getAsBoolean()) out.append(gson.toJson(record)).append('\n');
                         }
+                        if (transcript != null) transcript.point(scriptLine, false);
                     }
                     case "mob_damage_state" -> {
                         if (op.has("level_seed")) level.getRandom().setSeed(op.get("level_seed").getAsLong());
@@ -911,7 +928,13 @@ public final class VanillaCommandExecOracle {
                         }
                         long pacedStart = System.nanoTime();
                         for (int i = 0; i < n; i++) {
-                            tick(allowChunkIo);
+                            if (transcript != null) transcript.beginTick();
+                            try {
+                                tick(allowChunkIo);
+                            } finally {
+                                if (transcript != null) transcript.endTick();
+                            }
+                            if (transcript != null) transcript.point(scriptLine, true);
                             if (op.has("pace_ms")) {
                                 long left = op.get("pace_ms").getAsLong() * (i + 1) * 1_000_000L - (System.nanoTime() - pacedStart);
                                 if (left > 0) try {Thread.sleep(left / 1_000_000L, (int)(left % 1_000_000L));}
@@ -1284,6 +1307,9 @@ public final class VanillaCommandExecOracle {
                             throw new IllegalStateException(e);
                         }
                         player.level().getRandom().setSeed(op.get("level_seed").getAsLong());
+                        if (op.has("rand_value")) StateTranscript.syncRandValue(player.level(), op.get("rand_value").getAsInt());
+                        if (op.has("player_seed")) StateTranscript.syncPlayerSeed(player, op.get("player_seed").getAsLong());
+                        if (transcript != null) transcript.point(scriptLine, false);
                     }
                     case "break" -> {
                         JsonArray pos = op.getAsJsonArray("pos");
@@ -1394,11 +1420,10 @@ public final class VanillaCommandExecOracle {
             }
             drain();
             super.tickServer(() -> allowChunkIo);
-            // The player's network listener ticks it each server tick
-            // (ServerGamePacketListenerImpl.tickPlayer); this one has no
-            // listening connection. Its movement is the client's, so of
-            // that tick only apply changed attributes (waypoint range...).
-            if (player != null) {
+            if (transcript != null && transcript.enabled) {
+                player.connection.tick();
+            } else if (player != null) {
+                // The embedded player has no registered listener, so the legacy fixture refreshes only attributes.
                 try {
                     var refresh = net.minecraft.world.entity.LivingEntity.class.getDeclaredMethod("refreshDirtyAttributes");
                     refresh.setAccessible(true);
