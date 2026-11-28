@@ -442,6 +442,12 @@ mod tests {
     /// A required feature Sunrise has loads without a note, one it lacks gets a note, whatever the
     /// case it is written in; the standard and renderer sets hold no `IRIS_*` macro (the
     /// feature answers come from the pack's lists, `define_features`).
+    /// The feature flags a list of notes names, in order: tests check which flags are noted, not the
+    /// English of the note.
+    fn noted_flags(notes: &[String]) -> Vec<&str> {
+        notes.iter().filter_map(|n| n.split('`').nth(1)).collect()
+    }
+
     #[test]
     fn required_features_are_noted_and_the_standard_set_names_no_feature() {
         let properties = crate::Properties::parse(
@@ -451,8 +457,8 @@ mod tests {
             &Macros::standard(),
         );
         assert_eq!(
-            Macros::standard().feature_notes(&properties),
-            ["the pack requires `Not_A_Feature`, which is not supported yet"]
+            noted_flags(&Macros::standard().feature_notes(&properties)),
+            ["Not_A_Feature"]
         );
         let mut m = Macros::standard();
         m.define_renderer(4);
@@ -501,15 +507,15 @@ mod tests {
         able.set_per_buffer_blending(true);
         unable.set_per_buffer_blending(false);
         assert_eq!(
-            able.feature_notes(&properties),
-            ["the pack requires `NOT_A_FEATURE`, which is not supported yet"]
+            noted_flags(&able.feature_notes(&properties)),
+            ["NOT_A_FEATURE"]
         );
         assert_eq!(
-            unable.feature_notes(&properties),
+            noted_flags(&unable.feature_notes(&properties)),
             [
-                "the pack requires `PER_BUFFER_BLENDING`, which is not supported yet",
-                "the pack requires `per_Buffer_blending`, which is not supported yet",
-                "the pack requires `NOT_A_FEATURE`, which is not supported yet",
+                "PER_BUFFER_BLENDING",
+                "per_Buffer_blending",
+                "NOT_A_FEATURE"
             ]
         );
         // Without a renderer's answer the device draws none of it.

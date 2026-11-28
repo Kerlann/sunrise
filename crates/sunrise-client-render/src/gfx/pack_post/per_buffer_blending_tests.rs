@@ -216,9 +216,10 @@ fn renderer_fixture(window: std::sync::Arc<winit::window::Window>) {
     let mut macros = sunrise_shaders::Macros::standard();
     renderer.define_pack_macros(&mut macros);
     let (properties, notes) = sunrise_shaders::read_properties(&pack, &mut macros);
-    let note = "the pack requires `PER_BUFFER_BLENDING`, which is not supported yet";
-    let expected: &[&str] = if able { &[] } else { &[note] };
-    assert_eq!(notes, expected, "INDEPENDENT_BLEND {able}");
+    // Which flags are noted, not the English of the note.
+    let noted: Vec<&str> = notes.iter().filter_map(|n| n.split('`').nth(1)).collect();
+    let expected: &[&str] = if able { &[] } else { &["PER_BUFFER_BLENDING"] };
+    assert_eq!(noted, expected, "INDEPENDENT_BLEND {able}");
     // The answer is the macro too, there alone: the properties' second read sees it.
     let answer = able.then_some("1");
     assert_eq!(macros.get("IRIS_FEATURE_PER_BUFFER_BLENDING"), answer);

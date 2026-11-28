@@ -7,7 +7,12 @@ use super::read_properties;
 use super::tests::{composite_uniforms, feature_pack};
 
 const MACRO: &str = "IRIS_FEATURE_PER_BUFFER_BLENDING";
-const NOTE: &str = "the pack requires `PER_BUFFER_BLENDING`, which is not supported yet";
+
+/// The feature flags the notes name, in order: tests check which flags are noted, not the
+/// English of the note.
+fn noted_flags(notes: &[String]) -> Vec<&str> {
+    notes.iter().filter_map(|n| n.split('`').nth(1)).collect()
+}
 
 /// The standard macros with the device's answer: `Some(able)` as the renderer sets it, `None`
 /// for the standard set alone (no renderer).
@@ -70,12 +75,15 @@ fn a_required_flag_is_answered_or_noted_by_the_device() {
     let features = [("seen_pbb", "PER_BUFFER_BLENDING")];
     let text = "iris.features.required = PER_BUFFER_BLENDING NOT_A_FEATURE\n";
     let pack = feature_pack(text, &features);
-    let other = "the pack requires `NOT_A_FEATURE`, which is not supported yet";
     for (able, seen) in [(Some(true), true), (Some(false), false), (None, false)] {
         let mut m = macros(able);
         let (properties, notes) = read_properties(&pack, &mut m);
-        let expected: &[&str] = if seen { &[other] } else { &[NOTE, other] };
-        assert_eq!(notes, expected, "{able:?}");
+        let expected: &[&str] = if seen {
+            &["NOT_A_FEATURE"]
+        } else {
+            &["PER_BUFFER_BLENDING", "NOT_A_FEATURE"]
+        };
+        assert_eq!(noted_flags(&notes), expected, "{able:?}");
         assert_eq!(m.get(MACRO), seen.then_some("1"), "{able:?}");
         let uniforms: &[&str] = if seen { &["seen_pbb"] } else { &[] };
         assert_eq!(

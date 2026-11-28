@@ -294,7 +294,6 @@ the full list.
   `options::tests::a_repeated_flag_list_is_noted_as_the_lists_were_settled`,
   `options::tests::a_repeat_the_second_read_cannot_see_is_still_noted`,
   `options::tests::the_settled_lists_keep_their_place_in_the_file`,
-  `options::per_buffer_blending_tests::*`, `macros::tests::a_stale_feature_answer_leaves_the_macro_set`,
   `options::tests::an_undef_in_shaders_properties_hides_the_answer_from_conditionals_only`,
   `options::tests::a_reused_macro_set_carries_no_answer_to_the_next_pack`,
   `options::tests::block_emission_is_supported_but_not_answered`,
