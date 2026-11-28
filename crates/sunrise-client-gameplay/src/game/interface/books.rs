@@ -1067,17 +1067,54 @@ impl ClientGame<'_> {
         }
         let tr = |key: &str, fallback: &str| self.translate_with_fallback(key, fallback);
         let page_buttons = |batch: &mut HudBatch, back: bool, forward: bool| {
-            for (show, x, name) in [
-                (forward, 116.0, "page_forward"),
-                (back, 43.0, "page_backward"),
+            for (show, x, name, key) in [
+                (forward, 116.0, "page_forward", "book.page_button.next"),
+                (back, 43.0, "page_backward", "book.page_button.previous"),
             ] {
                 if show {
-                    let sprite = if hover(left + x, top + 157.0, 23.0, 13.0) {
-                        format!("widget/{name}_highlighted")
-                    } else {
-                        format!("widget/{name}")
-                    };
-                    batch.sprite(atlas, &sprite, left + x, top + 157.0);
+                    let rect = [left + x, top + 157.0, 23.0, 13.0];
+                    let is_hovered = hover(rect[0], rect[1], rect[2], rect[3]);
+                    let label = Text::translate(key, &[]);
+                    match widgets::resolve_engine_widget(widgets::EngineWidgetInput {
+                        bucket: widgets::WidgetBucket::Button,
+                        rect,
+                        label: Some(&label),
+                        explicit_key: None,
+                        active: true,
+                        hovered: is_hovered,
+                        focused: false,
+                        tab_order_group: 0,
+                    }) {
+                        widgets::ResolvedEngineWidget::Skip => {}
+                        widgets::ResolvedEngineWidget::Unchanged => {
+                            let sprite = if is_hovered {
+                                format!("widget/{name}_highlighted")
+                            } else {
+                                format!("widget/{name}")
+                            };
+                            batch.sprite(atlas, &sprite, rect[0], rect[1]);
+                        }
+                        widgets::ResolvedEngineWidget::Draw(props) => {
+                            let lit = props
+                                .override_render_highlighted_sprite
+                                .unwrap_or(props.active && props.hovered);
+                            let sprite = if lit {
+                                format!("widget/{name}_highlighted")
+                            } else {
+                                format!("widget/{name}")
+                            };
+                            let tint = widgets::white_abgr_alpha(props.alpha);
+                            batch.sprite_scaled(
+                                atlas,
+                                &sprite,
+                                props.rect[0],
+                                props.rect[1],
+                                props.rect[2],
+                                props.rect[3],
+                                tint,
+                            );
+                        }
+                    }
                 }
             }
         };
@@ -1150,15 +1187,6 @@ impl ClientGame<'_> {
                 widgets::begin_screen(|| {
                     ScreenInfo::new("book/sign", screen_info::tr("book.sign.title", &[]))
                 });
-                widgets::narratable(|| {
-                    let rect = [((w - 114.0) / 2.0).floor() - 3.0, 50.0, 114.0, 20.0];
-                    Narratable::edit_box(
-                        screen_info::tr("book.sign.titlebox", &[]),
-                        title_edit.value.clone(),
-                        rect,
-                    )
-                    .focused(title_edit.focused)
-                });
                 let edit = tr("book.editTitle", "Enter Book Title:");
                 let tw = HudBatch::text_width(atlas, &edit);
                 batch.text(
@@ -1172,34 +1200,84 @@ impl ClientGame<'_> {
                 // The title box: an unbordered, centred EditBox of 114 with
                 // black text and no shadow; the value alone is centred, the
                 // cursor follows it.
-                let value = &title_edit.value;
-                let x = left + 36.0;
-                let tx = x + ((114.0 - HudBatch::text_width(atlas, value)) / 2.0).floor();
-                batch.text(atlas, value, tx, 50.0, BLACK, false);
-                if title_edit.cursor != title_edit.highlight {
-                    let (a, b) = (
-                        title_edit.cursor.min(title_edit.highlight),
-                        title_edit.cursor.max(title_edit.highlight),
-                    );
-                    let pre: String = value.chars().take(a).collect();
-                    let sel: String = value.chars().skip(a).take(b - a).collect();
-                    let sx = tx + HudBatch::text_width(atlas, &pre);
-                    batch.text_highlight(
-                        atlas,
-                        (sx, 49.0, HudBatch::text_width(atlas, &sel), 11.0),
-                        true,
-                    );
-                }
-                if title_edit.cursor_visible() {
-                    let pre: String = value.chars().take(title_edit.cursor).collect();
-                    batch.fill(
-                        atlas,
-                        tx + HudBatch::text_width(atlas, &pre),
-                        49.0,
-                        1.0,
-                        9.0,
-                        BLACK,
-                    );
+                let title_rect = [((w - 114.0) / 2.0).floor() - 3.0, 50.0, 114.0, 20.0];
+                let title_label = Text::translate("book.sign.titlebox", &[]);
+                let title_resolved = widgets::resolve_engine_widget(widgets::EngineWidgetInput {
+                    bucket: widgets::WidgetBucket::Field,
+                    rect: title_rect,
+                    label: Some(&title_label),
+                    explicit_key: Some("book.sign.titlebox"),
+                    active: true,
+                    hovered: false,
+                    focused: title_edit.focused,
+                    tab_order_group: 0,
+                });
+                if !matches!(title_resolved, widgets::ResolvedEngineWidget::Skip) {
+                    let (draw_rect, active, alpha, tab_order_group, tooltip_hint, msg_plain) =
+                        match title_resolved {
+                            widgets::ResolvedEngineWidget::Draw(props) => (
+                                props.rect,
+                                props.active,
+                                props.alpha,
+                                props.tab_order_group,
+                                props.tooltip_narration,
+                                props.message.map(|m| m.plain()),
+                            ),
+                            _ => (title_rect, true, 1.0, 0, None, None),
+                        };
+                    let (dx, dy) = (draw_rect[0] - title_rect[0], draw_rect[1] - title_rect[1]);
+                    widgets::narratable(|| {
+                        let mut n = Narratable::edit_box(
+                            msg_plain
+                                .clone()
+                                .unwrap_or_else(|| screen_info::tr("book.sign.titlebox", &[])),
+                            title_edit.value.clone(),
+                            draw_rect,
+                        )
+                        .focused(title_edit.focused && active)
+                        .order(tab_order_group);
+                        widgets::apply_narration_overrides(
+                            &mut n,
+                            draw_rect,
+                            active,
+                            false,
+                            msg_plain.as_deref(),
+                            tab_order_group,
+                            tooltip_hint.clone(),
+                        );
+                        n
+                    });
+                    let value = &title_edit.value;
+                    let x = left + 36.0 + dx;
+                    let tx =
+                        x + ((draw_rect[2] - HudBatch::text_width(atlas, value)) / 2.0).floor();
+                    let text_color = widgets::scale_abgr_alpha(BLACK, alpha);
+                    batch.text(atlas, value, tx, 50.0 + dy, text_color, false);
+                    if title_edit.cursor != title_edit.highlight {
+                        let (a, b) = (
+                            title_edit.cursor.min(title_edit.highlight),
+                            title_edit.cursor.max(title_edit.highlight),
+                        );
+                        let pre: String = value.chars().take(a).collect();
+                        let sel: String = value.chars().skip(a).take(b - a).collect();
+                        let sx = tx + HudBatch::text_width(atlas, &pre);
+                        batch.text_highlight(
+                            atlas,
+                            (sx, 49.0 + dy, HudBatch::text_width(atlas, &sel), 11.0),
+                            true,
+                        );
+                    }
+                    if active && title_edit.cursor_visible() {
+                        let pre: String = value.chars().take(title_edit.cursor).collect();
+                        batch.fill(
+                            atlas,
+                            tx + HudBatch::text_width(atlas, &pre),
+                            49.0 + dy,
+                            1.0,
+                            9.0,
+                            text_color,
+                        );
+                    }
                 }
                 // BookSignScreen: `owner.getName()`, the account's name on a server.
                 let owner = self
@@ -1262,61 +1340,109 @@ impl ClientGame<'_> {
                 });
                 // The page's MultiLineEditBox (no message), focused, then the
                 // page buttons.
-                widgets::narratable(|| {
-                    let rect = [((w - 114.0) / 2.0).floor() - 8.0, 28.0, 122.0, 134.0];
-                    Narratable::edit_box("", pages[*page].clone(), rect).focused(page_edit.focused)
+                let page_rect = [((w - 114.0) / 2.0).floor() - 8.0, 28.0, 122.0, 134.0];
+                let page_resolved = widgets::resolve_engine_widget(widgets::EngineWidgetInput {
+                    bucket: widgets::WidgetBucket::Field,
+                    rect: page_rect,
+                    label: None,
+                    explicit_key: Some("book.page"),
+                    active: true,
+                    hovered: false,
+                    focused: page_edit.focused,
+                    tab_order_group: 0,
                 });
+                let page_draw = match page_resolved {
+                    widgets::ResolvedEngineWidget::Skip => None,
+                    widgets::ResolvedEngineWidget::Unchanged => {
+                        Some((page_rect, true, 1.0, 0, None, None))
+                    }
+                    widgets::ResolvedEngineWidget::Draw(props) => Some((
+                        props.rect,
+                        props.active,
+                        props.alpha,
+                        props.tab_order_group,
+                        props.tooltip_narration,
+                        props.message.map(|m| m.plain()),
+                    )),
+                };
+                if let Some((draw_rect, active, _, tab_order_group, tooltip_hint, msg_plain)) =
+                    &page_draw
+                {
+                    widgets::narratable(|| {
+                        let mut n = Narratable::edit_box(
+                            msg_plain.clone().unwrap_or_default(),
+                            pages[*page].clone(),
+                            *draw_rect,
+                        )
+                        .focused(page_edit.focused && *active)
+                        .order(*tab_order_group);
+                        widgets::apply_narration_overrides(
+                            &mut n,
+                            *draw_rect,
+                            *active,
+                            false,
+                            msg_plain.as_deref(),
+                            *tab_order_group,
+                            tooltip_hint.clone(),
+                        );
+                        n
+                    });
+                }
                 page_narratables(*page > 0, true, false);
                 indicator(batch, *page, pages.len());
-                let text = &pages[*page];
-                let lines = self.book_lines(text);
-                for (i, line) in lines.iter().take(LINES).enumerate() {
-                    batch.text_styled(
-                        atlas,
-                        line,
-                        left + 36.0,
-                        top + 30.0 + i as f32 * 9.0,
-                        BLACK,
-                        false,
-                    );
-                }
-                let rows = self.page_rows(text);
-                let (sel_a, sel_b) = (
-                    page_edit.cursor.min(page_edit.highlight),
-                    page_edit.cursor.max(page_edit.highlight),
-                );
-                if sel_a != sel_b {
-                    let chars: Vec<char> = text.chars().collect();
-                    for (i, &(start, end)) in rows.iter().enumerate().take(LINES) {
-                        let from = sel_a.max(start);
-                        let to = sel_b.min(end);
-                        if from >= to {
-                            continue;
-                        }
-                        let pre: String = chars[start..from].iter().collect();
-                        let sel: String = chars[from..to].iter().collect();
-                        batch.text_highlight(
+                if let Some((draw_rect, active, alpha, _, _, _)) = page_draw {
+                    let (dx, dy) = (draw_rect[0] - page_rect[0], draw_rect[1] - page_rect[1]);
+                    let text = &pages[*page];
+                    let lines = self.book_lines(text);
+                    let text_color = widgets::scale_abgr_alpha(BLACK, alpha);
+                    for (i, line) in lines.iter().take(LINES).enumerate() {
+                        batch.text_styled(
                             atlas,
-                            (
-                                left + 36.0 + atlas.font.width(&pre),
-                                top + 29.0 + i as f32 * 9.0,
-                                atlas.font.width(&sel),
-                                9.0,
-                            ),
-                            true,
+                            line,
+                            left + 36.0 + dx,
+                            top + 30.0 + dy + i as f32 * 9.0,
+                            text_color,
+                            false,
                         );
                     }
-                }
-                if page_edit.cursor_visible() {
-                    let (x, row) = self.caret_on(text, &rows, page_edit.cursor);
-                    batch.fill(
-                        atlas,
-                        left + 36.0 + x,
-                        top + 29.0 + row as f32 * 9.0,
-                        1.0,
-                        9.0,
-                        BLACK,
+                    let rows = self.page_rows(text);
+                    let (sel_a, sel_b) = (
+                        page_edit.cursor.min(page_edit.highlight),
+                        page_edit.cursor.max(page_edit.highlight),
                     );
+                    if sel_a != sel_b {
+                        let chars: Vec<char> = text.chars().collect();
+                        for (i, &(start, end)) in rows.iter().enumerate().take(LINES) {
+                            let from = sel_a.max(start);
+                            let to = sel_b.min(end);
+                            if from >= to {
+                                continue;
+                            }
+                            let pre: String = chars[start..from].iter().collect();
+                            let sel: String = chars[from..to].iter().collect();
+                            batch.text_highlight(
+                                atlas,
+                                (
+                                    left + 36.0 + dx + atlas.font.width(&pre),
+                                    top + 29.0 + dy + i as f32 * 9.0,
+                                    atlas.font.width(&sel),
+                                    9.0,
+                                ),
+                                true,
+                            );
+                        }
+                    }
+                    if active && page_edit.cursor_visible() {
+                        let (x, row) = self.caret_on(text, &rows, page_edit.cursor);
+                        batch.fill(
+                            atlas,
+                            left + 36.0 + dx + x,
+                            top + 29.0 + dy + row as f32 * 9.0,
+                            1.0,
+                            9.0,
+                            text_color,
+                        );
+                    }
                 }
                 page_buttons(batch, *page > 0, true);
                 button(

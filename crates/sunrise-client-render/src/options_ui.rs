@@ -1519,7 +1519,7 @@ pub fn binding_text(key: &str, modifiers: u32) -> Text {
     text.append(keybinds::display_name(key))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Page {
     Main,
     Video,
@@ -2251,6 +2251,18 @@ impl OptionsUi {
     pub fn page(&self) -> Page {
         *self.stack.last().unwrap_or(&Page::Main)
     }
+    /// Distinguishes sub-pages and confirm/error views that share `ScreenView.id == "options"`.
+    pub fn sub_page_key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.page().hash(&mut hasher);
+        self.pack_screen
+            .as_ref()
+            .is_some_and(crate::pack_screen::PackScreen::confirming)
+            .hash(&mut hasher);
+        self.resource_error.is_some().hash(&mut hasher);
+        hasher.finish()
+    }
     /// Whether the screen's focus is a search box that takes the keys (an
     /// `EditBox` that `canConsumeInput`): the language list's, the settings
     /// search, or the pack screen's.
@@ -2310,10 +2322,10 @@ impl OptionsUi {
         self.data_pack_stamp = (crate::datapack::folder_stamp(&dir), Instant::now());
         self.data_pack_dir = Some(dir);
     }
-    /// `PackSelectionScreen.tick`'s watcher: once a second, the Data Packs
-    /// folder's packs are listed again if it changed, the selection kept
+    /// `PackSelectionScreen.tick`'s watcher (`PackSelectionScreen.java:175-180`): once a second,
+    /// the Data Packs folder's packs are listed again if it changed, the selection kept
     /// (the search text and scroll start over).
-    fn watch_data_packs(&mut self, atlas: &HudAtlas, size: (f32, f32)) {
+    pub fn watch_data_packs(&mut self, atlas: &HudAtlas, size: (f32, f32)) {
         let Some(dir) = &self.data_pack_dir else {
             return;
         };
@@ -8700,6 +8712,23 @@ mod tests {
             .set("maxAnisotropyBit", crate::options_file::V::Int(3));
         let events = ui.back(&mut s);
         assert!(events.contains(&Event::ReloadTextures));
+    }
+
+    #[test]
+    fn sub_page_key_distinguishes_pages_and_error_overlay() {
+        let mut ui = OptionsUi::default();
+        ui.open(true);
+        let main = ui.sub_page_key();
+        ui.show(Page::Video);
+        let video = ui.sub_page_key();
+        assert_ne!(main, video);
+        ui.show(Page::NativeMod(0));
+        let mod0 = ui.sub_page_key();
+        ui.show(Page::NativeMod(1));
+        let mod1 = ui.sub_page_key();
+        assert_ne!(mod0, mod1);
+        ui.resource_error = Some("failed".into());
+        assert_ne!(mod1, ui.sub_page_key());
     }
 }
 

@@ -68,9 +68,6 @@ impl OptionsUi {
             self.size = (w, h);
             FrameDraw::Shell(page)
         } else if matches!(page, Page::Mods | Page::Packs) {
-            if page == Page::Packs {
-                self.watch_data_packs(atlas, (w, h));
-            }
             ui::menu_background(batch, atlas, 0.0, 0.0, w, h, in_world);
             match page {
                 Page::Mods => FrameDraw::Mods,

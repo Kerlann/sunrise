@@ -258,32 +258,87 @@ pub(crate) fn page_tab(
     (has, open, focused): (bool, bool, bool),
     cursor: (f32, f32),
 ) {
+    let orig_hover = has && ui::hovered(cursor, rect[0], rect[1], rect[2], rect[3]);
+    let name_text = Text::literal(name);
+    let (rect, message, has, hover, alpha, label_text_color, tab_order_group, tooltip_hint) =
+        match crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
+            bucket: crate::widgets::WidgetBucket::Button,
+            rect,
+            label: Some(&name_text),
+            explicit_key: None,
+            active: has,
+            hovered: orig_hover,
+            focused,
+            tab_order_group: 0,
+        }) {
+            crate::widgets::ResolvedEngineWidget::Skip => return,
+            crate::widgets::ResolvedEngineWidget::Unchanged => {
+                (rect, None, has, orig_hover, 1.0, None, 0, None)
+            }
+            crate::widgets::ResolvedEngineWidget::Draw(props) => (
+                props.rect,
+                props.message,
+                props.active,
+                props.hovered,
+                props.alpha,
+                props.label_text_color,
+                props.tab_order_group,
+                props.tooltip_narration,
+            ),
+        };
     let [px, py, pw, ph] = rect;
-    crate::widgets::record(name, rect, has);
-    let hover = has && ui::hovered(cursor, px, py, pw, ph);
+    let display_name = message.as_ref().map(Text::plain);
+    let effective_name = display_name.as_deref().unwrap_or(name);
+    crate::widgets::record(effective_name, rect, has);
     crate::widgets::narratable(|| {
-        crate::widgets::Narratable::button(name.to_owned(), rect, has)
+        let mut n = crate::widgets::Narratable::button(effective_name.to_owned(), rect, has)
             .hovered(hover)
             .focused(focused)
+            .order(tab_order_group);
+        if let Some(hint) = tooltip_hint.clone() {
+            n = n.hint(hint);
+        }
+        n
     });
     crate::widgets::widget_cursor(hover, has);
     if has {
         crate::widgets::target_as(rect, crate::widgets::Kind::Tab(open));
     }
     if open {
-        style::fill(batch, atlas, rect, style::open());
-        style::fill(batch, atlas, [px, py, 2.0, ph], style::accent());
+        style::fill(
+            batch,
+            atlas,
+            rect,
+            crate::widgets::scale_abgr_alpha(style::open(), alpha),
+        );
+        style::fill(
+            batch,
+            atlas,
+            [px, py, 2.0, ph],
+            crate::widgets::scale_abgr_alpha(style::accent(), alpha),
+        );
     }
-    let color = match (open || hover, has) {
-        (true, _) => style::WHITE,
-        (false, true) => style::soft(),
-        (false, false) => style::muted(),
+    let color = match label_text_color {
+        Some(argb) => crate::widgets::label_abgr_color(has, Some(argb), alpha),
+        None => crate::widgets::scale_abgr_alpha(
+            match (open || hover, has) {
+                (true, _) => style::WHITE,
+                (false, true) => style::soft(),
+                (false, false) => style::muted(),
+            },
+            alpha,
+        ),
     };
     let ty = py + ((ph - 8.0) / 2.0).floor();
-    let name = Text::literal(style::fit(atlas, name, pw - 12.0));
-    batch.text_styled(atlas, &name, px + 8.0, ty, color, true);
+    let shown = Text::literal(style::fit(atlas, effective_name, pw - 12.0));
+    batch.text_styled(atlas, &shown, px + 8.0, ty, color, true);
     if focused {
-        style::ring(batch, atlas, rect, style::WHITE);
+        style::ring(
+            batch,
+            atlas,
+            rect,
+            crate::widgets::scale_abgr_alpha(style::WHITE, alpha),
+        );
     }
 }
 
@@ -555,7 +610,43 @@ pub(crate) fn row(batch: &mut HudBatch, atlas: &HudAtlas, cols: &Columns, y: f32
                     };
                     style::slider(batch, atlas, control, &value, position, states);
                 } else {
-                    batch.text_styled(atlas, &value, start, ty, soft, true);
+                    match crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
+                        bucket: crate::widgets::WidgetBucket::Slider,
+                        rect: control,
+                        label: Some(&value),
+                        explicit_key: None,
+                        active: live,
+                        hovered: hover,
+                        focused,
+                        tab_order_group: 0,
+                    }) {
+                        crate::widgets::ResolvedEngineWidget::Skip => {}
+                        crate::widgets::ResolvedEngineWidget::Unchanged => {
+                            batch.text_styled(atlas, &value, start, ty, soft, true);
+                        }
+                        crate::widgets::ResolvedEngineWidget::Draw(props) => {
+                            let shown_val = props.message.as_ref().unwrap_or(&value);
+                            let val_w = atlas.font.width_text(shown_val);
+                            let vx = props.rect[0] + props.rect[2] - val_w;
+                            let vy = props.rect[1] + ((props.rect[3] - 8.0) / 2.0).floor();
+                            let val_color = match props.label_text_color {
+                                Some(argb) => crate::widgets::label_abgr_color(
+                                    props.active,
+                                    Some(argb),
+                                    props.alpha,
+                                ),
+                                None => crate::widgets::scale_abgr_alpha(
+                                    if props.active {
+                                        style::soft()
+                                    } else {
+                                        style::muted()
+                                    },
+                                    props.alpha,
+                                ),
+                            };
+                            batch.text_styled(atlas, shown_val, vx, vy, val_color, true);
+                        }
+                    }
                 }
             }
             (None, None) if key.is_some() => {
@@ -631,12 +722,47 @@ fn read_row(
     (label, name, value): (&str, &str, &str),
     (hover, focused, live): (bool, bool, bool),
 ) {
-    let rect = cols.row(y);
-    crate::widgets::record(label, rect, live);
+    let orig_rect = cols.row(y);
+    let label_text = Text::literal(label);
+    let (rect, message, live, hover, alpha, label_text_color, tab_order_group, tooltip_hint) =
+        match crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
+            bucket: crate::widgets::WidgetBucket::Button,
+            rect: orig_rect,
+            label: Some(&label_text),
+            explicit_key: None,
+            active: live,
+            hovered: hover,
+            focused,
+            tab_order_group: 0,
+        }) {
+            crate::widgets::ResolvedEngineWidget::Skip => return,
+            crate::widgets::ResolvedEngineWidget::Unchanged => {
+                (orig_rect, None, live, hover, 1.0, None, 0, None)
+            }
+            crate::widgets::ResolvedEngineWidget::Draw(props) => (
+                props.rect,
+                props.message,
+                props.active,
+                props.hovered,
+                props.alpha,
+                props.label_text_color,
+                props.tab_order_group,
+                props.tooltip_narration,
+            ),
+        };
+    let override_plain = message.as_ref().map(Text::plain);
+    let record_label = override_plain.as_deref().unwrap_or(label);
+    let draw_name = override_plain.as_deref().unwrap_or(name);
+    crate::widgets::record(record_label, rect, live);
     crate::widgets::narratable(|| {
-        crate::widgets::Narratable::button(label.to_owned(), rect, live)
+        let mut n = crate::widgets::Narratable::button(record_label.to_owned(), rect, live)
             .hovered(hover)
             .focused(focused)
+            .order(tab_order_group);
+        if let Some(hint) = tooltip_hint.clone() {
+            n = n.hint(hint);
+        }
+        n
     });
     if live {
         crate::widgets::target(rect);
@@ -644,14 +770,26 @@ fn read_row(
     if live && (hover || focused) {
         lit(batch, atlas, rect);
     }
-    let ty = y + ((style::ROW - 8.0) / 2.0).floor();
+    let ty = rect[1] + ((rect[3] - 8.0) / 2.0).floor();
     let left = rect[0] + style::INSET;
-    let name_w = atlas.font.width(name);
-    let shown = Text::literal(name.to_owned());
-    let (color, soft) = if live {
-        (style::WHITE, style::soft())
-    } else {
-        (style::muted(), style::muted())
+    let name_w = atlas.font.width(draw_name);
+    let shown = Text::literal(draw_name.to_owned());
+    let (color, soft) = match label_text_color {
+        Some(argb) => {
+            let c = crate::widgets::label_abgr_color(live, Some(argb), alpha);
+            (c, c)
+        }
+        None => {
+            let (c, s) = if live {
+                (style::WHITE, style::soft())
+            } else {
+                (style::muted(), style::muted())
+            };
+            (
+                crate::widgets::scale_abgr_alpha(c, alpha),
+                crate::widgets::scale_abgr_alpha(s, alpha),
+            )
+        }
     };
     batch.text_styled(atlas, &shown, left, ty, color, true);
     let room = rect[2] - 2.0 * style::INSET - name_w - 8.0;
@@ -662,8 +800,8 @@ fn read_row(
         style::ring(
             batch,
             atlas,
-            [rect[0] + 1.0, y, rect[2] - 2.0, style::ROW],
-            style::WHITE,
+            [rect[0] + 1.0, rect[1], rect[2] - 2.0, rect[3]],
+            crate::widgets::scale_abgr_alpha(style::WHITE, alpha),
         );
     }
 }
@@ -910,20 +1048,57 @@ fn strip_place(
     (has, open, focused): (bool, bool, bool),
     cursor: (f32, f32),
 ) {
-    let [x, y, w, h] = rect;
-    crate::widgets::record(name, rect, has);
-    let hover = has && ui::hovered(cursor, x, y, w, h);
+    let orig_hover = has && ui::hovered(cursor, rect[0], rect[1], rect[2], rect[3]);
+    let name_text = Text::literal(name);
+    let (rect, message, has, hover, alpha, tab_order_group, tooltip_hint) =
+        match crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
+            bucket: crate::widgets::WidgetBucket::Button,
+            rect,
+            label: Some(&name_text),
+            explicit_key: None,
+            active: has,
+            hovered: orig_hover,
+            focused,
+            tab_order_group: 0,
+        }) {
+            crate::widgets::ResolvedEngineWidget::Skip => return,
+            crate::widgets::ResolvedEngineWidget::Unchanged => {
+                (rect, None, has, orig_hover, 1.0, 0, None)
+            }
+            crate::widgets::ResolvedEngineWidget::Draw(props) => (
+                props.rect,
+                props.message,
+                props.active,
+                props.hovered,
+                props.alpha,
+                props.tab_order_group,
+                props.tooltip_narration,
+            ),
+        };
+    let display_name = message.as_ref().map(Text::plain);
+    let effective_name = display_name.as_deref().unwrap_or(name);
+    crate::widgets::record(effective_name, rect, has);
     crate::widgets::narratable(|| {
-        crate::widgets::Narratable::button(name.to_owned(), rect, has)
+        let mut n = crate::widgets::Narratable::button(effective_name.to_owned(), rect, has)
             .hovered(hover)
             .focused(focused)
+            .order(tab_order_group);
+        if let Some(hint) = tooltip_hint.clone() {
+            n = n.hint(hint);
+        }
+        n
     });
     crate::widgets::widget_cursor(hover, has);
     if has {
         crate::widgets::target_as(rect, crate::widgets::Kind::Tab(open));
     }
     if focused {
-        style::ring(batch, atlas, ring, style::WHITE);
+        style::ring(
+            batch,
+            atlas,
+            ring,
+            crate::widgets::scale_abgr_alpha(style::WHITE, alpha),
+        );
     }
 }
 
@@ -1008,17 +1183,58 @@ pub(crate) fn foot_button(
     room: f32,
 ) {
     let [x, y, w, h] = rect;
-    let hovered = ui::hovered(cursor, x, y, w, h);
+    let orig_hovered = ui::hovered(cursor, x, y, w, h);
+    let props = match crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
+        bucket: crate::widgets::WidgetBucket::Button,
+        rect,
+        label: Some(label),
+        explicit_key: None,
+        active: true,
+        hovered: orig_hovered,
+        focused: primary || focused,
+        tab_order_group: 0,
+    }) {
+        crate::widgets::ResolvedEngineWidget::Skip => return,
+        crate::widgets::ResolvedEngineWidget::Unchanged => None,
+        crate::widgets::ResolvedEngineWidget::Draw(props) => Some(props),
+    };
+    let (draw_rect, draw_label, active, hovered, tab_order_group, tooltip_hint) = match &props {
+        None => (rect, label, true, orig_hovered, 0, None),
+        Some(p) => (
+            p.rect,
+            p.message.as_ref().unwrap_or(label),
+            p.active,
+            p.hovered,
+            p.tab_order_group,
+            p.tooltip_narration.clone(),
+        ),
+    };
     let hover = hovered || focused;
-    crate::widgets::record(&label.plain(), rect, true);
+    let plain = draw_label.plain();
+    crate::widgets::record(&plain, draw_rect, active);
     crate::widgets::narratable(|| {
-        crate::widgets::Narratable::button(label.plain(), rect, true)
+        let mut n = crate::widgets::Narratable::button(plain.clone(), draw_rect, active)
             .hovered(hovered)
             .focused(focused)
+            .order(tab_order_group);
+        if let Some(hint) = tooltip_hint.clone() {
+            n = n.hint(hint);
+        }
+        n
     });
-    crate::widgets::widget_cursor(hovered, true);
-    crate::widgets::target(rect);
-    style::button_with_room(batch, atlas, rect, label, (hover, true, primary), room);
+    crate::widgets::widget_cursor(hovered, active);
+    if active {
+        crate::widgets::target(draw_rect);
+    }
+    style::button_with_room_resolved(
+        batch,
+        atlas,
+        draw_rect,
+        draw_label,
+        (hover, active),
+        room,
+        props.as_ref(),
+    );
 }
 
 /// Of the rows (their target, `y` and whether they can take the focus), those the keys reach.

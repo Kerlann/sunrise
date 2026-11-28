@@ -422,35 +422,100 @@ pub fn draw_contents(
             } else {
                 "mute_button"
             };
-            // The button's narration (`PlayerEntry`: `narration.hide` / `narration.show`).
-            let key = if e.hidden {
+            // Vanilla `PlayerEntry` constructs the mute/unmute `ImageButton` with `HIDE_TEXT` / `SHOW_TEXT`
+            // as `getMessage()` and narrates with `gui.socialInteractions.narration.{hide,show}`.
+            let narration_key = if e.hidden {
                 "gui.socialInteractions.narration.show"
             } else {
                 "gui.socialInteractions.narration.hide"
             };
-            crate::widgets::record(
-                &Text::translate(key, &[Text::literal(e.name.clone())]).plain(),
-                [hide[0], hide[1], 20.0, 20.0],
-                true,
-            );
-            batch.sprite_scaled(
-                atlas,
-                &sprite(base, hovered(hide)),
-                hide[0],
-                hide[1],
-                20.0,
-                20.0,
-                WHITE,
-            );
-            batch.sprite_scaled(
-                atlas,
-                "social_interactions/report_button_disabled",
-                report[0],
-                report[1],
-                20.0,
-                20.0,
-                WHITE,
-            );
+            let msg_key = if e.hidden {
+                "gui.socialInteractions.show"
+            } else {
+                "gui.socialInteractions.hide"
+            };
+            let hide_rect = [hide[0], hide[1], 20.0, 20.0];
+            let narration_label = Text::translate(narration_key, &[Text::literal(e.name.clone())]);
+            let hide_label = Text::translate(msg_key, &[]);
+            let hide_hover = hovered(hide);
+            match crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
+                bucket: crate::widgets::WidgetBucket::Button,
+                rect: hide_rect,
+                label: Some(&hide_label),
+                explicit_key: Some("gui.socialInteractions.toggle_hide"),
+                active: true,
+                hovered: hide_hover,
+                focused: false,
+                tab_order_group: 0,
+            }) {
+                crate::widgets::ResolvedEngineWidget::Skip => {}
+                crate::widgets::ResolvedEngineWidget::Unchanged => {
+                    crate::widgets::record(&narration_label.plain(), hide_rect, true);
+                    batch.sprite_scaled(
+                        atlas,
+                        &sprite(base, hide_hover),
+                        hide[0],
+                        hide[1],
+                        20.0,
+                        20.0,
+                        WHITE,
+                    );
+                }
+                crate::widgets::ResolvedEngineWidget::Draw(props) => {
+                    let draw_label = props.message.as_ref().unwrap_or(&narration_label);
+                    crate::widgets::record(&draw_label.plain(), props.rect, props.active);
+                    let lit = props
+                        .override_render_highlighted_sprite
+                        .unwrap_or(props.active && props.hovered);
+                    let tint = crate::widgets::scale_abgr_alpha(WHITE, props.alpha);
+                    batch.sprite_scaled(
+                        atlas,
+                        &sprite(base, lit),
+                        props.rect[0],
+                        props.rect[1],
+                        props.rect[2],
+                        props.rect[3],
+                        tint,
+                    );
+                }
+            }
+            let report_rect = [report[0], report[1], 20.0, 20.0];
+            let report_label = Text::translate("gui.socialInteractions.report", &[]);
+            match crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
+                bucket: crate::widgets::WidgetBucket::Button,
+                rect: report_rect,
+                label: Some(&report_label),
+                explicit_key: Some("gui.socialInteractions.report"),
+                active: false,
+                hovered: hovered(report),
+                focused: false,
+                tab_order_group: 0,
+            }) {
+                crate::widgets::ResolvedEngineWidget::Skip => {}
+                crate::widgets::ResolvedEngineWidget::Unchanged => {
+                    batch.sprite_scaled(
+                        atlas,
+                        "social_interactions/report_button_disabled",
+                        report[0],
+                        report[1],
+                        20.0,
+                        20.0,
+                        WHITE,
+                    );
+                }
+                crate::widgets::ResolvedEngineWidget::Draw(props) => {
+                    let tint = crate::widgets::scale_abgr_alpha(WHITE, props.alpha);
+                    batch.sprite_scaled(
+                        atlas,
+                        "social_interactions/report_button_disabled",
+                        props.rect[0],
+                        props.rect[1],
+                        props.rect[2],
+                        props.rect[3],
+                        tint,
+                    );
+                }
+            }
         }
     }
     hud_layout::paint(batch, atlas, &faces);

@@ -144,12 +144,13 @@ impl ClientGame<'_> {
                 && local.0 < 93.0 + SHIFT
                 && local.1 >= 18.0 + 20.0 * row as f32
                 && local.1 < 38.0 + 20.0 * row as f32;
-            let sprite = if hover || focused == Some(row) {
-                "widget/button_highlighted"
-            } else {
-                "widget/button"
-            };
-            batch.sprite_scaled(&self.client.gui.atlas, sprite, bx, by, 88.0, 20.0, u32::MAX);
+            draw_trade_offer_button(
+                batch,
+                &self.client.gui.atlas,
+                [bx, by, 88.0, 20.0],
+                hover,
+                focused == Some(row),
+            );
             let y = oy + 16.0 + 1.0 + 20.0 * row as f32 + 2.0;
             let base = offer.base_cost_a.stack.clone();
             let cost_a = costs[index].clone();
@@ -567,4 +568,96 @@ pub(in crate::game) fn drag_scroll(y: f32, offers: usize) -> usize {
     ((offs * max as f32 + 0.5) as i32).clamp(0, max) as usize
 }
 
+fn draw_trade_offer_button(
+    batch: &mut HudBatch,
+    atlas: &sunrise_client::hud::HudAtlas,
+    rect: [f32; 4],
+    hover: bool,
+    focused: bool,
+) {
+    sunrise_client::ui::button_focused_as(
+        batch,
+        atlas,
+        rect,
+        &Text::empty(),
+        sunrise_client::ui::ButtonVisualState {
+            active: true,
+            hovered: hover,
+            focused,
+        },
+        None,
+        |rect| sunrise_client::widgets::Narratable::button(String::new(), rect, true),
+    );
+}
+
 use sunrise_gameplay_common::game::tables::GameItems as _;
+
+#[cfg(test)]
+mod trade_button_tests {
+    use super::*;
+    use sunrise_client::{
+        hud::{GuiSprite, HudAtlas, Rect},
+        widgets::{self, ScreenInfo},
+    };
+
+    #[test]
+    fn trade_offer_button_registers_target_highlights_and_narrates() {
+        let mut atlas =
+            HudAtlas::build(&sunrise_assets::resource_source::ResourceSource::directory(
+                "/nonexistent/sunrise-test-assets".into(),
+            ))
+            .unwrap();
+        for (n, name) in ["widget/button", "widget/button_highlighted"]
+            .into_iter()
+            .enumerate()
+        {
+            atlas.gui.insert(
+                name.into(),
+                GuiSprite::Present {
+                    rect: Rect {
+                        u0: n as f32 / 4.0,
+                        v0: 0.0,
+                        u1: (n as f32 + 0.5) / 4.0,
+                        v1: 0.25,
+                        w: 16,
+                        h: 16,
+                    },
+                    scaling: None,
+                },
+            );
+        }
+        let saved = widgets::take();
+        widgets::set_narrating(true);
+        let rect = [20.0, 40.0, 88.0, 20.0];
+        let mut frame = 730;
+        for (hover, focused, expect_u0, expect_cursor, expect_narr_hover) in [
+            (false, false, 0.0, Cursor::Arrow, false),
+            (true, false, 0.25, Cursor::PointingHand, true),
+            (false, true, 0.25, Cursor::Arrow, true),
+        ] {
+            frame += 1;
+            widgets::end_frame(frame);
+            widgets::begin_screen(|| ScreenInfo::new("merchant", "Villager"));
+            let _ = widgets::take_cursor();
+            let mut batch = HudBatch::scratch([320, 240]);
+            draw_trade_offer_button(&mut batch, &atlas, rect, hover, focused);
+            assert_eq!(widgets::take_cursor(), expect_cursor);
+            let sprite_u0 = batch.vertices.iter().find(|v| v.text == 0).map(|v| v.uv[0]);
+            assert_eq!(sprite_u0, Some(expect_u0));
+            frame += 1;
+            widgets::end_frame(frame);
+            assert_eq!(
+                widgets::last_targets()
+                    .iter()
+                    .map(|t| t.rect)
+                    .collect::<Vec<_>>(),
+                [rect]
+            );
+            let narration = widgets::take_last_narration();
+            assert_eq!(narration.items.len(), 1);
+            assert_eq!(narration.items[0].hovered, Some(expect_narr_hover));
+        }
+        widgets::set_narrating(false);
+        widgets::put(saved);
+    }
+}

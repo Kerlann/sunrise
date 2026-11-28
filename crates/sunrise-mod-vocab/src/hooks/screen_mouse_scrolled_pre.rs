@@ -22,10 +22,9 @@ pub trait Hooks {
     /// keyboard focus move does not.
     #[hook(
         target = "sunrise_client_gameplay::game::native_hooks::base::ClientGame<'_>::native_screen_mouse_scrolled_pre",
-        receiver = "read",
         dispatch = "flat",
         side = "client",
-        version = 2,
+        version = 3,
         contract = "cancel",
         out = "canceled",
         neoforge = "ScreenEvent.MouseScrolled.Pre",

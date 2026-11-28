@@ -208,6 +208,7 @@ pub(crate) fn observed(id: &'static str, overlay: bool) -> Option<ObservedScreen
         menu: None,
         menu_generation: None,
         dialog_key: None,
+        sub_page: 0,
         title: None,
         rect: [0.0; 4],
         screen_size: [0.0; 2],
@@ -269,7 +270,7 @@ fn title_hook_requests_one_orderly_quit() {
     impl Hooks for QuitProbe {
         fn screen_key_pressed_pre(
             &self,
-            host: &dyn ClientHost,
+            host: &mut dyn ClientHost,
             event: &mut ScreenKeyPressedPreEvent<'_>,
         ) -> Flow {
             if event.screen.id != "title" {

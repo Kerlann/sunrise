@@ -600,6 +600,37 @@ impl Text {
     pub fn option_name_value(caption: Text, value: Text) -> Self {
         Self::translate_with_fallback("options.generic_value", "%s: %s", &[caption, value])
     }
+    /// Stable translation-key identity when this component was built from a `translate` node,
+    /// invariant across language changes and across changing values in `options.generic_value` /
+    /// `options.percent_value` / `options.pixel_value` labels.
+    pub fn translation_key_hint(&self) -> Option<String> {
+        let obj = self.source.as_deref()?.as_object()?;
+        let key = obj.get("translate")?.as_str()?;
+        if matches!(
+            key,
+            "options.generic_value"
+                | "options.generic_value_no_colon"
+                | "options.percent_value"
+                | "options.percent_add_value"
+                | "options.pixel_value"
+        ) && let Some(first) = obj
+            .get("with")
+            .and_then(Value::as_array)
+            .and_then(|args| args.first())
+        {
+            if let Some(arg_key) = first
+                .as_object()
+                .and_then(|a| a.get("translate"))
+                .and_then(Value::as_str)
+            {
+                return Some(format!("{key}:{arg_key}"));
+            }
+            if let Some(arg_str) = first.as_str() {
+                return Some(format!("{key}:{arg_str}"));
+            }
+        }
+        Some(key.to_owned())
+    }
     /// A translatable message whose arguments are plain strings.
     pub fn tr(key: &str, args: &[&dyn std::fmt::Display]) -> Self {
         let args: Vec<Text> = args.iter().map(|a| Text::literal(a.to_string())).collect();

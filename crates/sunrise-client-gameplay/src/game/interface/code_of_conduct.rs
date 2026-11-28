@@ -222,33 +222,105 @@ impl crate::game::ClientGame<'_> {
 
         let [x, y, cw, ch] = layout.check;
         let hover = ui::hovered(cursor, x, y, cw, ch);
-        sunrise_client::widgets::record(&layout.label.plain(), layout.check, true);
-        sunrise_client::widgets::narratable(|| {
-            sunrise_client::widgets::Narratable::new(
-                sunrise_client::widgets::What::Checkbox {
-                    message: layout.label.plain(),
-                    selected: prompt.stop_showing,
-                    active: true,
-                },
-                [x, y, cw, ch],
-            )
-            .hovered(hover)
-        });
-        let sprite = match (prompt.stop_showing, hover) {
-            (true, true) => "widget/checkbox_selected_highlighted",
-            (true, false) => "widget/checkbox_selected",
-            (false, true) => "widget/checkbox_highlighted",
-            (false, false) => "widget/checkbox",
-        };
-        batch.sprite_scaled(atlas, sprite, x, y, BOX, BOX, u32::MAX);
-        batch.text_styled(
-            atlas,
-            &layout.label,
-            x + BOX + 4.0,
-            y + 4.0,
-            rgba(224, 224, 224, 255),
-            true,
-        );
+        match sunrise_client::widgets::resolve_engine_widget(
+            sunrise_client::widgets::EngineWidgetInput {
+                bucket: sunrise_client::widgets::WidgetBucket::Checkbox,
+                rect: layout.check,
+                label: Some(&layout.label),
+                explicit_key: None,
+                active: true,
+                hovered: hover,
+                focused: false,
+                tab_order_group: 0,
+            },
+        ) {
+            sunrise_client::widgets::ResolvedEngineWidget::Skip => {}
+            sunrise_client::widgets::ResolvedEngineWidget::Unchanged => {
+                sunrise_client::widgets::record(&layout.label.plain(), layout.check, true);
+                sunrise_client::widgets::narratable(|| {
+                    sunrise_client::widgets::Narratable::new(
+                        sunrise_client::widgets::What::Checkbox {
+                            message: layout.label.plain(),
+                            selected: prompt.stop_showing,
+                            active: true,
+                        },
+                        [x, y, cw, ch],
+                    )
+                    .hovered(hover)
+                });
+                let sprite = match (prompt.stop_showing, hover) {
+                    (true, true) => "widget/checkbox_selected_highlighted",
+                    (true, false) => "widget/checkbox_selected",
+                    (false, true) => "widget/checkbox_highlighted",
+                    (false, false) => "widget/checkbox",
+                };
+                batch.sprite_scaled(atlas, sprite, x, y, BOX, BOX, u32::MAX);
+                batch.text_styled(
+                    atlas,
+                    &layout.label,
+                    x + BOX + 4.0,
+                    y + 4.0,
+                    rgba(224, 224, 224, 255),
+                    true,
+                );
+            }
+            sunrise_client::widgets::ResolvedEngineWidget::Draw(props) => {
+                let [rx, ry, rw, rh] = props.rect;
+                let draw_label = props.message.as_ref().unwrap_or(&layout.label);
+                let draw_plain = draw_label.plain();
+                let props_active = props.active;
+                let props_hovered = props.hovered;
+                let tab_order_group = props.tab_order_group;
+                let tooltip_hint = props.tooltip_narration.clone();
+                sunrise_client::widgets::record(&draw_plain, [rx, ry, rw, rh], props_active);
+                sunrise_client::widgets::narratable(|| {
+                    let mut n = sunrise_client::widgets::Narratable::new(
+                        sunrise_client::widgets::What::Checkbox {
+                            message: draw_plain.clone(),
+                            selected: prompt.stop_showing,
+                            active: props_active,
+                        },
+                        [rx, ry, rw, rh],
+                    );
+                    sunrise_client::widgets::apply_narration_overrides(
+                        &mut n,
+                        [rx, ry, rw, rh],
+                        props_active,
+                        props_hovered,
+                        Some(&draw_plain),
+                        tab_order_group,
+                        tooltip_hint,
+                    );
+                    n
+                });
+                let lit = props
+                    .override_render_highlighted_sprite
+                    .unwrap_or(props_active && props_hovered);
+                let sprite = match (prompt.stop_showing, lit) {
+                    (true, true) => "widget/checkbox_selected_highlighted",
+                    (true, false) => "widget/checkbox_selected",
+                    (false, true) => "widget/checkbox_highlighted",
+                    (false, false) => "widget/checkbox",
+                };
+                let tint = sunrise_client::widgets::white_abgr_alpha(props.alpha);
+                let text_color = sunrise_client::widgets::scale_abgr_alpha(
+                    props
+                        .label_text_color
+                        .map(sunrise_client::hud_layout::abgr)
+                        .unwrap_or_else(|| rgba(224, 224, 224, 255)),
+                    props.alpha,
+                );
+                batch.sprite_scaled(atlas, sprite, rx, ry, BOX, BOX, tint);
+                batch.text_styled(
+                    atlas,
+                    draw_label,
+                    rx + BOX + 4.0,
+                    ry + 4.0,
+                    text_color,
+                    true,
+                );
+            }
+        }
 
         let labels = [
             Text::translate("gui.acknowledge", &[]),

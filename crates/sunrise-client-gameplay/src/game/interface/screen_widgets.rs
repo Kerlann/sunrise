@@ -3,17 +3,22 @@
 //! instances with synchronous callback execution via temporary ownership extraction.
 
 #[cfg(feature = "client")]
+use super::stations::tooltip::{
+    PreparedTooltipItem, WidgetTooltipPositioner, quantize_tooltip_anchor,
+};
+#[cfg(feature = "client")]
 use crate::game::host::draw::GameDrawContext;
 use mod_api::{
     __private::game::CallbackOwner,
-    ScreenView, ScreenWidget, ScreenWidgetId, ScreenWidgets,
+    ScreenView, ScreenWidget, ScreenWidgetId, ScreenWidgets, Text as ApiText,
     client::widgets::{
-        Button, ButtonPress, ButtonState, ScreenChild, TextEdit, TextField, TextFieldCallback,
-        is_allowed_chat_character,
+        Button, ButtonPress, ButtonSprites, ButtonState, ScreenChild, TextEdit, TextField,
+        TextFieldCallback, WidgetTooltip, is_allowed_chat_character,
     },
 };
 use std::cell::{Cell, RefCell};
-use std::time::Instant;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 use sunrise_client::{
     clipboard::EditShortcut,
     hud::HudBatch,
@@ -22,22 +27,63 @@ use sunrise_client::{
     ui::{self, EditBox},
     widgets::{self, Kind, Narratable, Target},
 };
+#[cfg(feature = "client")]
+use sunrise_game_data::Result;
 use sunrise_game_data::text::{DARK_GRAY, Style, Text};
-use sunrise_gameplay_common::game::api_values::TryIntoEngine;
+use sunrise_gameplay_common::game::api_values::{TryIntoApi, TryIntoEngine};
+#[cfg(feature = "client")]
+use winit::event::MouseButton;
 use winit::keyboard::KeyCode;
 
+/// One engine-drawn widget listed on the active screen instance.
+#[derive(Clone, Debug)]
+pub(in crate::game) struct EngineChildSlot {
+    pub(in crate::game) id: ScreenWidgetId,
+    pub(in crate::game) key: widgets::EngineWidgetKey,
+    pub(in crate::game) default_rect: [f32; 4],
+    pub(in crate::game) default_message: Option<ApiText>,
+    pub(in crate::game) default_active: bool,
+    pub(in crate::game) default_tab_order_group: i32,
+}
+
+/// How an incoming pointer click should be routed against active engine widget overrides.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(in crate::game) enum EngineClickRoute {
+    PassThrough,
+    Redirect((f32, f32)),
+    Block,
+}
+
 pub(in crate::game) struct MountedWidgetsInner {
+    pub(in crate::game) order: Vec<ScreenWidgetId>,
+    pub(in crate::game) engine_children: Vec<EngineChildSlot>,
+    pub(in crate::game) engine_id_by_key: HashMap<widgets::EngineWidgetKey, ScreenWidgetId>,
+    pub(in crate::game) engine_overrides: widgets::EngineOverrideMaps,
+    pub(in crate::game) engine_hits: Vec<widgets::EngineHitEntry>,
+    pub(in crate::game) engine_hovered: HashMap<widgets::EngineWidgetKey, bool>,
+    pub(in crate::game) pending_tooltip: Option<widgets::PendingWidgetTooltip>,
+    pub(in crate::game) mounted_hover_since: HashMap<ScreenWidgetId, Instant>,
     pub(in crate::game) entries: Vec<Option<MountedWidgetEntry>>,
-    pub(in crate::game) removed_pause_actions: Vec<u8>,
+    pub(in crate::game) discovered: bool,
+    pub(in crate::game) needs_engine_resync: bool,
+    pub(in crate::game) overrides_active: bool,
     pub(in crate::game) focused: Option<usize>,
     pub(in crate::game) dragging: Option<(usize, i32)>,
 }
 
-/// Mounted widgets attached to the currently open screen during `Hooks::screen_init_post`.
+/// Mounted widgets and engine widget overrides attached to the currently open screen.
 pub struct MountedScreenWidgets {
     pub(in crate::game) generation: Cell<u64>,
     pub(in crate::game) next_id: Cell<u64>,
+    /// Synchronized child snapshot returned by `ScreenWidgets::children(&self)`.
+    pub(in crate::game) children_cache: Vec<ScreenChild>,
     pub(in crate::game) inner: RefCell<MountedWidgetsInner>,
+}
+
+thread_local! {
+    /// True while dispatching a redirected or programmatic (`press`) click at an engine widget's
+    /// original coordinates, so moved widgets still pass screen-local hit checks.
+    static REDIRECTING_ENGINE_CLICK: Cell<bool> = const { Cell::new(false) };
 }
 
 impl Default for MountedScreenWidgets {
@@ -45,9 +91,20 @@ impl Default for MountedScreenWidgets {
         Self {
             generation: Cell::new(0),
             next_id: Cell::new(1),
+            children_cache: Vec::new(),
             inner: RefCell::new(MountedWidgetsInner {
+                order: Vec::new(),
+                engine_children: Vec::new(),
+                engine_id_by_key: HashMap::new(),
+                engine_overrides: widgets::EngineOverrideMaps::default(),
+                engine_hits: Vec::new(),
+                engine_hovered: HashMap::new(),
+                pending_tooltip: None,
+                mounted_hover_since: HashMap::new(),
                 entries: Vec::new(),
-                removed_pause_actions: Vec::new(),
+                discovered: false,
+                needs_engine_resync: false,
+                overrides_active: false,
                 focused: None,
                 dragging: None,
             }),
@@ -67,12 +124,17 @@ impl MountedScreenWidgets {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.inner.borrow().entries.is_empty()
+        self.inner.borrow().entries.iter().all(Option::is_none)
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub fn len(&self) -> usize {
-        self.inner.borrow().entries.len()
+        self.inner
+            .borrow()
+            .entries
+            .iter()
+            .filter(|slot| slot.is_some())
+            .count()
     }
 
     pub fn has_focus(&self) -> bool {
@@ -112,13 +174,23 @@ impl MountedScreenWidgets {
         inner.entries.get(idx)?.as_ref().map(|entry| entry.id)
     }
 
-    /// Bump the screen-widget generation, clear focus/drag state, and dispose all entries.
+    /// Bump the screen-widget generation, clear focus/drag/override state, and dispose all entries.
     pub fn clear(&self) {
         self.generation.set(self.generation.get().wrapping_add(1));
         let (mut entries, focused) = {
             let mut inner = self.inner.borrow_mut();
+            inner.order.clear();
+            inner.engine_children.clear();
+            inner.engine_id_by_key.clear();
+            inner.engine_overrides = widgets::EngineOverrideMaps::default();
+            inner.engine_hits.clear();
+            inner.engine_hovered.clear();
+            inner.pending_tooltip = None;
+            inner.mounted_hover_since.clear();
             inner.dragging = None;
-            inner.removed_pause_actions.clear();
+            inner.discovered = false;
+            inner.needs_engine_resync = false;
+            inner.overrides_active = false;
             (std::mem::take(&mut inner.entries), inner.focused.take())
         };
         if let Some(entry) = focused.and_then(|idx| entries.get_mut(idx)?.as_mut()) {
@@ -140,6 +212,30 @@ impl MountedScreenWidgets {
     }
 }
 
+/// Convert and validate an API [`WidgetTooltip`] into engine [`widgets::EngineWidgetTooltip`].
+/// Returns `None` when a `Text` tree inside the tooltip fails boundary validation.
+pub(in crate::game) fn convert_widget_tooltip(
+    tooltip: Option<WidgetTooltip>,
+) -> Option<Option<widgets::EngineWidgetTooltip>> {
+    let Some(tip) = tooltip else {
+        return Some(None);
+    };
+    let message: Text = tip.message.try_into_engine(&()).ok()?;
+    let narration = match tip.narration {
+        Some(narration) => {
+            let text: Text = narration.try_into_engine(&()).ok()?;
+            text.plain()
+        }
+        None => message.plain(),
+    };
+    Some(Some(widgets::EngineWidgetTooltip {
+        message,
+        narration,
+        component: tip.component,
+        style: tip.style,
+    }))
+}
+
 /// One widget mounted on the active screen, owned by the engine with per-widget panic isolation.
 pub struct MountedWidgetEntry {
     pub(in crate::game) id: ScreenWidgetId,
@@ -153,12 +249,17 @@ pub enum MountedWidgetKind {
     Button {
         state: ButtonState,
         on_press: Option<Box<ButtonPress>>,
+        narration: Option<ApiText>,
     },
     TextField {
         edit_box: EditBox,
         hint: Option<Text>,
         active: bool,
         visible: bool,
+        alpha: f32,
+        tooltip: Option<WidgetTooltip>,
+        tooltip_delay: Duration,
+        tab_order_group: i32,
         on_change: Option<Box<TextFieldCallback>>,
         on_submit: Option<Box<TextFieldCallback>>,
     },
@@ -173,7 +274,10 @@ impl MountedWidgetEntry {
 
     #[cfg(feature = "client")]
     pub(in crate::game) fn press_button(&mut self, game: &mut crate::game::ClientGame<'_>) -> bool {
-        let MountedWidgetKind::Button { state, on_press } = &mut self.kind else {
+        let MountedWidgetKind::Button {
+            state, on_press, ..
+        } = &mut self.kind
+        else {
             return false;
         };
         let Some(callback) = on_press.as_mut() else {
@@ -234,12 +338,173 @@ impl MountedWidgetEntry {
     }
 }
 
-/// Registrar passed to `Hooks::screen_init_post` (`ScreenEvent.Init.Post`).
+/// One staged mutation recorded inside `screen_init_pre` / `screen_init_post` for an existing
+/// child (either an engine widget or a mounted widget from an earlier listener).
+#[derive(Clone, Debug)]
+pub(in crate::game) enum StagedWidgetOp {
+    Bounds([f32; 4]),
+    Message(ApiText, Text),
+    Active(bool),
+    Visible(bool),
+    Alpha(f32),
+    LabelTextColor(Option<u32>),
+    Tooltip(Option<WidgetTooltip>, Option<widgets::EngineWidgetTooltip>),
+    TooltipDelay(Duration),
+    TabOrderGroup(i32),
+    Sprites(Option<ButtonSprites>),
+    OverrideHighlighted(Option<bool>),
+}
+
+/// Apply one staged override operation to an already-accepted mounted entry.
+pub(in crate::game) fn apply_staged_op_to_mounted(
+    entry: &mut MountedWidgetEntry,
+    op: StagedWidgetOp,
+) {
+    match (&mut entry.kind, op) {
+        (MountedWidgetKind::Button { state, .. }, StagedWidgetOp::Bounds(rect)) => {
+            state.rect = rect;
+        }
+        (MountedWidgetKind::TextField { edit_box, .. }, StagedWidgetOp::Bounds(rect)) => {
+            edit_box.x = rect[0];
+            edit_box.y = rect[1];
+            edit_box.width = rect[2];
+            edit_box.height = rect[3];
+        }
+        (MountedWidgetKind::Button { state, .. }, StagedWidgetOp::Message(api, _)) => {
+            state.message = api;
+        }
+        (MountedWidgetKind::TextField { edit_box, .. }, StagedWidgetOp::Message(_, engine)) => {
+            edit_box.message = engine.plain();
+        }
+        (MountedWidgetKind::Button { state, .. }, StagedWidgetOp::Active(v)) => {
+            state.active = v;
+        }
+        (MountedWidgetKind::TextField { active, .. }, StagedWidgetOp::Active(v)) => {
+            *active = v;
+        }
+        (MountedWidgetKind::Button { state, .. }, StagedWidgetOp::Visible(v)) => {
+            state.visible = v;
+        }
+        (MountedWidgetKind::TextField { visible, .. }, StagedWidgetOp::Visible(v)) => {
+            *visible = v;
+        }
+        (MountedWidgetKind::Button { state, .. }, StagedWidgetOp::Alpha(v)) => {
+            state.alpha = v;
+        }
+        (MountedWidgetKind::TextField { alpha, .. }, StagedWidgetOp::Alpha(v)) => {
+            *alpha = v;
+        }
+        (MountedWidgetKind::Button { state, .. }, StagedWidgetOp::LabelTextColor(c)) => {
+            state.label_text_color = c;
+        }
+        (MountedWidgetKind::Button { state, .. }, StagedWidgetOp::Tooltip(api, _)) => {
+            state.tooltip = api;
+        }
+        (MountedWidgetKind::TextField { tooltip, .. }, StagedWidgetOp::Tooltip(api, _)) => {
+            *tooltip = api;
+        }
+        (MountedWidgetKind::Button { state, .. }, StagedWidgetOp::TooltipDelay(d)) => {
+            state.tooltip_delay = d;
+        }
+        (MountedWidgetKind::TextField { tooltip_delay, .. }, StagedWidgetOp::TooltipDelay(d)) => {
+            *tooltip_delay = d;
+        }
+        (MountedWidgetKind::Button { state, .. }, StagedWidgetOp::TabOrderGroup(g)) => {
+            state.tab_order_group = g;
+        }
+        (
+            MountedWidgetKind::TextField {
+                tab_order_group, ..
+            },
+            StagedWidgetOp::TabOrderGroup(g),
+        ) => {
+            *tab_order_group = g;
+        }
+        (MountedWidgetKind::Button { state, .. }, StagedWidgetOp::Sprites(s)) => {
+            state.sprites = s;
+        }
+        (MountedWidgetKind::Button { state, .. }, StagedWidgetOp::OverrideHighlighted(h)) => {
+            state.override_render_highlighted_sprite = h;
+        }
+        _ => {}
+    }
+}
+
+/// Apply one staged override operation to an engine widget's override entry.
+pub(in crate::game) fn apply_staged_op_to_engine(
+    ov: &mut widgets::EngineWidgetOverride,
+    op: StagedWidgetOp,
+) {
+    match op {
+        StagedWidgetOp::Bounds(rect) => ov.rect = Some(rect),
+        StagedWidgetOp::Message(_, engine) => ov.message = Some(engine),
+        StagedWidgetOp::Active(v) => ov.active = Some(v),
+        StagedWidgetOp::Visible(v) => ov.visible = Some(v),
+        StagedWidgetOp::Alpha(v) => ov.alpha = Some(v),
+        StagedWidgetOp::LabelTextColor(c) => ov.label_text_color = Some(c),
+        StagedWidgetOp::Tooltip(_, engine_tip) => ov.tooltip = Some(engine_tip),
+        StagedWidgetOp::TooltipDelay(d) => ov.tooltip_delay = Some(d),
+        StagedWidgetOp::TabOrderGroup(g) => ov.tab_order_group = Some(g),
+        StagedWidgetOp::Sprites(s) => ov.sprites = Some(s),
+        StagedWidgetOp::OverrideHighlighted(h) => ov.override_render_highlighted_sprite = Some(h),
+    }
+}
+
+/// Build hit-test entries directly from discovered engine slots and active overrides so clicks,
+/// blocking, and `press(id)` match the override table immediately before the next frame draws.
+pub(in crate::game) fn build_engine_hits(
+    slots: &[EngineChildSlot],
+    maps: &widgets::EngineOverrideMaps,
+) -> Vec<widgets::EngineHitEntry> {
+    slots
+        .iter()
+        .map(|slot| {
+            if maps.suppress_all {
+                return widgets::EngineHitEntry {
+                    key: slot.key.clone(),
+                    original_rect: slot.default_rect,
+                    resolved_rect: slot.default_rect,
+                    interactive: false,
+                    blocks_original: true,
+                };
+            }
+            let ov = maps.overrides.get(&slot.key);
+            let removed = ov.is_some_and(|o| o.removed);
+            let visible = ov.and_then(|o| o.visible).unwrap_or(true);
+            if removed || !visible {
+                return widgets::EngineHitEntry {
+                    key: slot.key.clone(),
+                    original_rect: slot.default_rect,
+                    resolved_rect: slot.default_rect,
+                    interactive: false,
+                    blocks_original: true,
+                };
+            }
+            let resolved_rect = ov.and_then(|o| o.rect).unwrap_or(slot.default_rect);
+            let active = ov.and_then(|o| o.active).unwrap_or(slot.default_active);
+            let moved = ov.and_then(|o| o.rect).is_some();
+            widgets::EngineHitEntry {
+                key: slot.key.clone(),
+                original_rect: slot.default_rect,
+                resolved_rect,
+                interactive: active,
+                blocks_original: moved || (!active && slot.default_active),
+            }
+        })
+        .collect()
+}
+
+/// Registrar passed to `Hooks::screen_init_pre` and `Hooks::screen_init_post`.
 pub(in crate::game) struct ScreenWidgetMount {
     pub(in crate::game) next_id: u64,
     pub(in crate::game) entries: Vec<MountedWidgetEntry>,
     pub(in crate::game) children: Vec<ScreenChild>,
+    pub(in crate::game) engine_ids: Vec<ScreenWidgetId>,
+    pub(in crate::game) field_ids: Vec<ScreenWidgetId>,
+    pub(in crate::game) custom_ids: Vec<ScreenWidgetId>,
     pub(in crate::game) removed: Vec<ScreenWidgetId>,
+    pub(in crate::game) cleared: bool,
+    pub(in crate::game) ops: Vec<(ScreenWidgetId, StagedWidgetOp)>,
     pub(in crate::game) initial_focus: Option<ScreenWidgetId>,
 }
 
@@ -260,31 +525,66 @@ impl ScreenWidgetMount {
 
     pub(in crate::game) fn stage(&mut self, kind: MountedWidgetKind) -> ScreenWidgetId {
         let id = self.alloc_id();
+        let is_field = matches!(kind, MountedWidgetKind::TextField { .. });
+        let is_custom = matches!(kind, MountedWidgetKind::Custom(_));
         let mut entry = MountedWidgetEntry {
             id,
             owner: widget_callback_owner(),
             disabled: false,
             kind,
         };
-        let bounds = match &entry.kind {
+        let child = match &entry.kind {
             MountedWidgetKind::Button { state, .. } => {
-                Some((state.rect, Some(state.label.clone())))
+                let mut child = ScreenChild::new(id, state.rect, Some(state.message.clone()));
+                child.active = state.active;
+                child.visible = state.visible;
+                child.alpha = state.alpha;
+                child.label_text_color = state.label_text_color;
+                child.tab_order_group = state.tab_order_group;
+                child.override_render_highlighted_sprite = state.override_render_highlighted_sprite;
+                Some(child)
             }
-            MountedWidgetKind::TextField { edit_box, .. } => Some((
-                [edit_box.x, edit_box.y, edit_box.width, edit_box.height],
-                None,
-            )),
+            MountedWidgetKind::TextField {
+                edit_box,
+                active,
+                visible,
+                alpha,
+                tab_order_group,
+                ..
+            } => {
+                let mut child = ScreenChild::new(
+                    id,
+                    [edit_box.x, edit_box.y, edit_box.width, edit_box.height],
+                    None,
+                );
+                child.active = *active;
+                child.visible = *visible;
+                child.alpha = *alpha;
+                child.tab_order_group = *tab_order_group;
+                Some(child)
+            }
             MountedWidgetKind::Custom(widget) => call_owner(
                 &entry.owner,
                 &mut entry.disabled,
                 "screen_widget_bounds",
-                || (widget.bounds(), None),
+                || {
+                    let mut child = ScreenChild::new(id, widget.bounds(), None);
+                    child.active = widget.active();
+                    child.visible = widget.visible();
+                    child.tab_order_group = widget.tab_order_group();
+                    child
+                },
             ),
         };
-        if let Some((rect, label)) = bounds
-            && valid_widget_rect(rect)
+        if let Some(child) = child
+            && valid_widget_rect(child.rect)
         {
-            self.children.push(ScreenChild::new(id, rect, label));
+            if is_field {
+                self.field_ids.push(id);
+            } else if is_custom {
+                self.custom_ids.push(id);
+            }
+            self.children.push(child);
             self.entries.push(entry);
         } else {
             entry.dispose();
@@ -299,8 +599,12 @@ impl ScreenWidgets for ScreenWidgetMount {
     }
 
     fn add_button(&mut self, button: Button) -> ScreenWidgetId {
-        let (state, on_press) = button.into_parts();
-        self.stage(MountedWidgetKind::Button { state, on_press })
+        let (state, on_press, narration) = button.into_parts();
+        self.stage(MountedWidgetKind::Button {
+            state,
+            on_press,
+            narration,
+        })
     }
 
     fn add_text_field(&mut self, field: TextField) -> ScreenWidgetId {
@@ -327,6 +631,10 @@ impl ScreenWidgets for ScreenWidgetMount {
             hint,
             active: parts.active,
             visible: parts.visible,
+            alpha: parts.alpha,
+            tooltip: parts.tooltip,
+            tooltip_delay: parts.tooltip_delay,
+            tab_order_group: parts.tab_order_group,
             on_change: parts.on_change,
             on_submit: parts.on_submit,
         })
@@ -337,14 +645,23 @@ impl ScreenWidgets for ScreenWidgetMount {
     }
 
     fn set_initial_focus(&mut self, id: ScreenWidgetId) -> bool {
-        let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) else {
-            return false;
-        };
-        if !entry.can_focus() {
-            return false;
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
+            if !entry.can_focus() {
+                return false;
+            }
+            self.initial_focus = Some(id);
+            return true;
         }
-        self.initial_focus = Some(id);
-        true
+        if !self.engine_ids.contains(&id)
+            && self
+                .children
+                .iter()
+                .any(|child| child.id == id && child.visible && child.active)
+        {
+            self.initial_focus = Some(id);
+            return true;
+        }
+        false
     }
 
     fn remove(&mut self, id: ScreenWidgetId) -> bool {
@@ -361,6 +678,264 @@ impl ScreenWidgets for ScreenWidgetMount {
             self.removed.push(id);
         }
         true
+    }
+
+    fn clear(&mut self) {
+        self.cleared = true;
+        let ids: Vec<_> = self.children.iter().map(|child| child.id).collect();
+        for id in ids {
+            self.remove(id);
+        }
+    }
+
+    fn set_bounds(&mut self, id: ScreenWidgetId, rect: [f32; 4]) -> bool {
+        if !valid_widget_rect(rect)
+            || rect[2] < 0.0
+            || rect[3] < 0.0
+            || self.custom_ids.contains(&id)
+        {
+            return false;
+        }
+        let Some(child) = self.children.iter_mut().find(|child| child.id == id) else {
+            return false;
+        };
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
+            match &mut entry.kind {
+                MountedWidgetKind::Button { state, .. } => state.rect = rect,
+                MountedWidgetKind::TextField { edit_box, .. } => {
+                    edit_box.x = rect[0];
+                    edit_box.y = rect[1];
+                    edit_box.width = rect[2];
+                    edit_box.height = rect[3];
+                }
+                MountedWidgetKind::Custom(_) => return false,
+            }
+        } else {
+            self.ops.push((id, StagedWidgetOp::Bounds(rect)));
+        }
+        child.rect = rect;
+        true
+    }
+
+    fn set_message(&mut self, id: ScreenWidgetId, message: ApiText) -> bool {
+        if self.custom_ids.contains(&id) {
+            return false;
+        }
+        let Ok(engine_text): std::result::Result<Text, _> = message.try_into_engine(&()) else {
+            return false;
+        };
+        let Some(child) = self.children.iter_mut().find(|child| child.id == id) else {
+            return false;
+        };
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
+            match &mut entry.kind {
+                MountedWidgetKind::Button { state, .. } => state.message = message.clone(),
+                MountedWidgetKind::TextField { edit_box, .. } => {
+                    edit_box.message = engine_text.plain();
+                }
+                MountedWidgetKind::Custom(_) => return false,
+            }
+        } else {
+            self.ops
+                .push((id, StagedWidgetOp::Message(message.clone(), engine_text)));
+        }
+        child.message = Some(message);
+        true
+    }
+
+    fn set_active(&mut self, id: ScreenWidgetId, active: bool) -> bool {
+        if self.custom_ids.contains(&id) {
+            return false;
+        }
+        let Some(child) = self.children.iter_mut().find(|child| child.id == id) else {
+            return false;
+        };
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
+            match &mut entry.kind {
+                MountedWidgetKind::Button { state, .. } => state.active = active,
+                MountedWidgetKind::TextField { active: slot, .. } => *slot = active,
+                MountedWidgetKind::Custom(_) => return false,
+            }
+        } else {
+            self.ops.push((id, StagedWidgetOp::Active(active)));
+        }
+        child.active = active;
+        true
+    }
+
+    fn set_visible(&mut self, id: ScreenWidgetId, visible: bool) -> bool {
+        if self.custom_ids.contains(&id) {
+            return false;
+        }
+        let Some(child) = self.children.iter_mut().find(|child| child.id == id) else {
+            return false;
+        };
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
+            match &mut entry.kind {
+                MountedWidgetKind::Button { state, .. } => state.visible = visible,
+                MountedWidgetKind::TextField { visible: slot, .. } => *slot = visible,
+                MountedWidgetKind::Custom(_) => return false,
+            }
+        } else {
+            self.ops.push((id, StagedWidgetOp::Visible(visible)));
+        }
+        child.visible = visible;
+        true
+    }
+
+    fn set_alpha(&mut self, id: ScreenWidgetId, alpha: f32) -> bool {
+        if !alpha.is_finite() || self.custom_ids.contains(&id) {
+            return false;
+        }
+        let Some(child) = self.children.iter_mut().find(|child| child.id == id) else {
+            return false;
+        };
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
+            match &mut entry.kind {
+                MountedWidgetKind::Button { state, .. } => state.alpha = alpha,
+                MountedWidgetKind::TextField { alpha: slot, .. } => *slot = alpha,
+                MountedWidgetKind::Custom(_) => return false,
+            }
+        } else {
+            self.ops.push((id, StagedWidgetOp::Alpha(alpha)));
+        }
+        child.alpha = alpha;
+        true
+    }
+
+    fn set_label_text_color(&mut self, id: ScreenWidgetId, color: Option<u32>) -> bool {
+        if self.custom_ids.contains(&id) || self.field_ids.contains(&id) {
+            return false;
+        }
+        let Some(child) = self.children.iter_mut().find(|child| child.id == id) else {
+            return false;
+        };
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
+            match &mut entry.kind {
+                MountedWidgetKind::Button { state, .. } => state.label_text_color = color,
+                MountedWidgetKind::TextField { .. } | MountedWidgetKind::Custom(_) => return false,
+            }
+        } else {
+            self.ops.push((id, StagedWidgetOp::LabelTextColor(color)));
+        }
+        child.label_text_color = color;
+        true
+    }
+
+    fn set_tooltip(&mut self, id: ScreenWidgetId, tooltip: Option<WidgetTooltip>) -> bool {
+        if self.custom_ids.contains(&id) {
+            return false;
+        }
+        let Some(engine_tip) = convert_widget_tooltip(tooltip.clone()) else {
+            return false;
+        };
+        if !self.children.iter().any(|child| child.id == id) {
+            return false;
+        }
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
+            match &mut entry.kind {
+                MountedWidgetKind::Button { state, .. } => state.tooltip = tooltip,
+                MountedWidgetKind::TextField { tooltip: slot, .. } => *slot = tooltip,
+                MountedWidgetKind::Custom(_) => return false,
+            }
+        } else {
+            self.ops
+                .push((id, StagedWidgetOp::Tooltip(tooltip, engine_tip)));
+        }
+        true
+    }
+
+    fn set_tooltip_delay(&mut self, id: ScreenWidgetId, delay: Duration) -> bool {
+        if self.custom_ids.contains(&id) {
+            return false;
+        }
+        if !self.children.iter().any(|child| child.id == id) {
+            return false;
+        }
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
+            match &mut entry.kind {
+                MountedWidgetKind::Button { state, .. } => state.tooltip_delay = delay,
+                MountedWidgetKind::TextField {
+                    tooltip_delay: slot,
+                    ..
+                } => *slot = delay,
+                MountedWidgetKind::Custom(_) => return false,
+            }
+        } else {
+            self.ops.push((id, StagedWidgetOp::TooltipDelay(delay)));
+        }
+        true
+    }
+
+    fn set_tab_order_group(&mut self, id: ScreenWidgetId, group: i32) -> bool {
+        if self.custom_ids.contains(&id) {
+            return false;
+        }
+        let Some(child) = self.children.iter_mut().find(|child| child.id == id) else {
+            return false;
+        };
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
+            match &mut entry.kind {
+                MountedWidgetKind::Button { state, .. } => state.tab_order_group = group,
+                MountedWidgetKind::TextField {
+                    tab_order_group: slot,
+                    ..
+                } => *slot = group,
+                MountedWidgetKind::Custom(_) => return false,
+            }
+        } else {
+            self.ops.push((id, StagedWidgetOp::TabOrderGroup(group)));
+        }
+        child.tab_order_group = group;
+        true
+    }
+
+    fn set_sprites(&mut self, id: ScreenWidgetId, sprites: Option<ButtonSprites>) -> bool {
+        if self.custom_ids.contains(&id) || self.field_ids.contains(&id) {
+            return false;
+        }
+        if !self.children.iter().any(|child| child.id == id) {
+            return false;
+        }
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
+            match &mut entry.kind {
+                MountedWidgetKind::Button { state, .. } => state.sprites = sprites,
+                MountedWidgetKind::TextField { .. } | MountedWidgetKind::Custom(_) => return false,
+            }
+        } else {
+            self.ops.push((id, StagedWidgetOp::Sprites(sprites)));
+        }
+        true
+    }
+
+    fn set_override_render_highlighted_sprite(
+        &mut self,
+        id: ScreenWidgetId,
+        highlighted: Option<bool>,
+    ) -> bool {
+        if self.custom_ids.contains(&id) || self.field_ids.contains(&id) {
+            return false;
+        }
+        let Some(child) = self.children.iter_mut().find(|child| child.id == id) else {
+            return false;
+        };
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
+            match &mut entry.kind {
+                MountedWidgetKind::Button { state, .. } => {
+                    state.override_render_highlighted_sprite = highlighted;
+                }
+                MountedWidgetKind::TextField { .. } | MountedWidgetKind::Custom(_) => return false,
+            }
+        } else {
+            self.ops
+                .push((id, StagedWidgetOp::OverrideHighlighted(highlighted)));
+        }
+        child.override_render_highlighted_sprite = highlighted;
+        true
+    }
+
+    fn press(&mut self, _id: ScreenWidgetId) -> bool {
+        false
     }
 }
 
@@ -451,115 +1026,808 @@ impl MountedWidgetEntry {
 
 #[cfg(feature = "client")]
 impl crate::game::ClientGame<'_> {
-    /// Run `ScreenEvent.Init.Post` to mount widgets on the initialized screen and apply focus.
+    /// Allocate the next screen-local widget id for the open screen instance.
+    pub(in crate::game) fn alloc_widget_id(&self) -> ScreenWidgetId {
+        let raw = self.client.screen_state.0.widgets.next_id.get();
+        self.client
+            .screen_state
+            .0
+            .widgets
+            .next_id
+            .set(raw.saturating_add(1).max(1));
+        ScreenWidgetId::from_raw(raw)
+    }
+
+    /// Rebuild `children_cache` from `order`, `engine_children`, `engine_overrides`, and `entries`
+    /// so `ScreenWidgets::children(&self)` reflects every live mutation and frame hover state.
+    pub(in crate::game) fn sync_children_cache(&mut self) {
+        let mouse = self.cursor();
+        let snapshot = {
+            let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+            let mut out = Vec::with_capacity(inner.order.len());
+            let order = inner.order.clone();
+            for id in order {
+                if let Some(slot) = inner.engine_children.iter().find(|s| s.id == id) {
+                    let ov = inner.engine_overrides.overrides.get(&slot.key);
+                    if ov.is_some_and(|o| o.removed) {
+                        continue;
+                    }
+                    let rect = ov.and_then(|o| o.rect).unwrap_or(slot.default_rect);
+                    let message = ov
+                        .and_then(|o| o.message.as_ref())
+                        .and_then(|text| text.try_into_api().ok())
+                        .or_else(|| slot.default_message.clone());
+                    let mut child = ScreenChild::new(id, rect, message);
+                    child.active = ov.and_then(|o| o.active).unwrap_or(slot.default_active);
+                    child.visible = ov.and_then(|o| o.visible).unwrap_or(true);
+                    child.hovered = inner
+                        .engine_hovered
+                        .get(&slot.key)
+                        .copied()
+                        .unwrap_or_else(|| child.is_mouse_over(mouse));
+                    child.alpha = ov.and_then(|o| o.alpha).unwrap_or(1.0);
+                    child.label_text_color = ov.and_then(|o| o.label_text_color).flatten();
+                    child.tab_order_group = ov
+                        .and_then(|o| o.tab_order_group)
+                        .unwrap_or(slot.default_tab_order_group);
+                    child.override_render_highlighted_sprite = ov
+                        .and_then(|o| o.override_render_highlighted_sprite)
+                        .flatten();
+                    out.push(child);
+                    continue;
+                }
+                if let Some(entry) = inner
+                    .entries
+                    .iter_mut()
+                    .flatten()
+                    .find(|entry| entry.id == id)
+                {
+                    if entry.disabled || !entry.owner.is_enabled() {
+                        entry.disabled = true;
+                        continue;
+                    }
+                    match &entry.kind {
+                        MountedWidgetKind::Button { state, .. } => {
+                            let mut child =
+                                ScreenChild::new(id, state.rect, Some(state.message.clone()));
+                            child.active = state.active;
+                            child.visible = state.visible;
+                            child.hovered = state.visible && point_in_rect(mouse, state.rect);
+                            child.alpha = state.alpha;
+                            child.label_text_color = state.label_text_color;
+                            child.tab_order_group = state.tab_order_group;
+                            child.override_render_highlighted_sprite =
+                                state.override_render_highlighted_sprite;
+                            out.push(child);
+                        }
+                        MountedWidgetKind::TextField {
+                            edit_box,
+                            active,
+                            visible,
+                            alpha,
+                            tab_order_group,
+                            ..
+                        } => {
+                            let rect = [edit_box.x, edit_box.y, edit_box.width, edit_box.height];
+                            let message = (!edit_box.message.is_empty())
+                                .then(|| ApiText::literal(edit_box.message.clone()));
+                            let mut child = ScreenChild::new(id, rect, message);
+                            child.active = *active;
+                            child.visible = *visible;
+                            child.hovered = *visible && point_in_rect(mouse, rect);
+                            child.alpha = *alpha;
+                            child.tab_order_group = *tab_order_group;
+                            out.push(child);
+                        }
+                        MountedWidgetKind::Custom(widget) => {
+                            if let Some(child) = call_owner(
+                                &entry.owner,
+                                &mut entry.disabled,
+                                "screen_widget_snapshot",
+                                || {
+                                    let rect = widget.bounds();
+                                    let mut child = ScreenChild::new(id, rect, None);
+                                    child.active = widget.active();
+                                    child.visible = widget.visible();
+                                    child.hovered = child.visible && point_in_rect(mouse, rect);
+                                    child.tab_order_group = widget.tab_order_group();
+                                    child
+                                },
+                            ) {
+                                out.push(child);
+                            }
+                        }
+                    }
+                }
+            }
+            out
+        };
+        self.client.screen_state.0.widgets.children_cache = snapshot;
+    }
+
+    /// Reconcile `engine_children` and `order` with the latest observed engine widgets (`seen`),
+    /// preserving stable `ScreenWidgetId`s for existing keys, adding newly revealed sub-component
+    /// widgets (such as an opened recipe book or switched tab), and pruning gone ones without
+    /// disturbing mounted mod widgets.
+    fn reconcile_engine_children(&mut self, seen: Vec<widgets::CollectedWidget>) {
+        let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+        inner.needs_engine_resync = false;
+        if inner.engine_overrides.suppress_all {
+            return;
+        }
+        let mut new_slots = Vec::with_capacity(seen.len());
+        let mut new_ids = Vec::with_capacity(seen.len());
+        for item in seen {
+            if inner
+                .engine_overrides
+                .overrides
+                .get(&item.key)
+                .is_some_and(|ov| ov.removed)
+            {
+                continue;
+            }
+            let id = if let Some(&existing) = inner.engine_id_by_key.get(&item.key) {
+                existing
+            } else {
+                let fresh = self.alloc_widget_id();
+                inner.engine_id_by_key.insert(item.key.clone(), fresh);
+                fresh
+            };
+            let default_message = item.message.as_ref().and_then(|t| t.try_into_api().ok());
+            new_ids.push(id);
+            new_slots.push(EngineChildSlot {
+                id,
+                key: item.key,
+                default_rect: item.rect,
+                default_message,
+                default_active: item.active,
+                default_tab_order_group: item.tab_order_group,
+            });
+        }
+        let old_ids: Vec<ScreenWidgetId> = inner.engine_children.iter().map(|s| s.id).collect();
+        if old_ids != new_ids {
+            inner
+                .order
+                .retain(|id| !old_ids.contains(id) || new_ids.contains(id));
+            for (idx, &id) in new_ids.iter().enumerate() {
+                if inner.order.contains(&id) {
+                    continue;
+                }
+                let insert_at = new_ids[..idx]
+                    .iter()
+                    .rev()
+                    .find_map(|prev| {
+                        inner
+                            .order
+                            .iter()
+                            .position(|cid| cid == prev)
+                            .map(|p| p + 1)
+                    })
+                    .or_else(|| {
+                        new_ids[idx + 1..]
+                            .iter()
+                            .find_map(|next| inner.order.iter().position(|cid| cid == next))
+                    })
+                    .unwrap_or(inner.order.len());
+                inner.order.insert(insert_at, id);
+            }
+        }
+        inner.engine_children = new_slots;
+    }
+
+    fn with_redirecting_engine_click<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        struct Guard(bool);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                REDIRECTING_ENGINE_CLICK.set(self.0);
+            }
+        }
+        let _guard = Guard(REDIRECTING_ENGINE_CLICK.replace(true));
+        f(self)
+    }
+
+    /// Live widget collection for the currently open screen (`ClientHost::screen_widgets`).
+    pub fn screen_widgets(&mut self) -> Option<&mut dyn ScreenWidgets> {
+        self.observed_screen_view()?;
+        let (needs_discover, needs_resync) = {
+            let inner = self.client.screen_state.0.widgets.inner.borrow();
+            (
+                !inner.discovered,
+                inner.discovered && inner.needs_engine_resync,
+            )
+        };
+        if needs_discover {
+            let collected = self.discover_screen_widgets();
+            let mut new_slots = Vec::with_capacity(collected.len());
+            let mut new_ids = Vec::with_capacity(collected.len());
+            let mut id_by_key = HashMap::with_capacity(collected.len());
+            for item in collected {
+                let id = self.alloc_widget_id();
+                let default_message = item.message.as_ref().and_then(|t| t.try_into_api().ok());
+                id_by_key.insert(item.key.clone(), id);
+                new_ids.push(id);
+                new_slots.push(EngineChildSlot {
+                    id,
+                    key: item.key,
+                    default_rect: item.rect,
+                    default_message,
+                    default_active: item.active,
+                    default_tab_order_group: item.tab_order_group,
+                });
+            }
+            let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+            let existing_order = std::mem::take(&mut inner.order);
+            inner.order = new_ids;
+            inner.order.extend(existing_order);
+            inner.engine_children = new_slots;
+            inner.engine_id_by_key = id_by_key;
+            inner.engine_hits = build_engine_hits(&inner.engine_children, &inner.engine_overrides);
+            inner.discovered = true;
+            inner.needs_engine_resync = false;
+            inner.overrides_active = true;
+        } else {
+            if needs_resync && !widgets::in_override_pass() {
+                let collected = self.discover_screen_widgets();
+                self.reconcile_engine_children(collected);
+                let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+                inner.engine_hits =
+                    build_engine_hits(&inner.engine_children, &inner.engine_overrides);
+            }
+            self.client
+                .screen_state
+                .0
+                .widgets
+                .inner
+                .borrow_mut()
+                .overrides_active = true;
+        }
+        self.sync_children_cache();
+        Some(self)
+    }
+
+    /// Whether an engine widget whose original rectangle matches `rect` is non-interactive
+    /// (removed, hidden, disabled, or suppressed by `screen_init_pre` cancellation), regardless
+    /// of whether it has been moved.
+    pub(in crate::game) fn engine_rect_suppressed(&self, rect: [f32; 4]) -> bool {
+        let inner = self.client.screen_state.0.widgets.inner.borrow();
+        if !inner.overrides_active {
+            return false;
+        }
+        if inner.engine_overrides.suppress_all {
+            return true;
+        }
+        inner.engine_hits.iter().any(|hit| {
+            !hit.interactive
+                && hit
+                    .original_rect
+                    .iter()
+                    .zip(rect)
+                    .all(|(a, b)| (a - b).abs() < 0.5)
+        })
+    }
+
+    /// Whether an engine widget whose original rectangle matches `rect` is currently blocked
+    /// (removed, hidden, disabled, moved away, or suppressed by `screen_init_pre` cancellation).
+    /// During redirected or programmatic (`press`) engine clicks, moved-but-interactive widgets
+    /// remain clickable.
+    pub(in crate::game) fn engine_rect_blocked(&self, rect: [f32; 4]) -> bool {
+        if REDIRECTING_ENGINE_CLICK.get() {
+            return self.engine_rect_suppressed(rect);
+        }
+        let inner = self.client.screen_state.0.widgets.inner.borrow();
+        if !inner.overrides_active {
+            return false;
+        }
+        if inner.engine_overrides.suppress_all {
+            return true;
+        }
+        inner.engine_hits.iter().any(|hit| {
+            hit.blocks_original
+                && hit
+                    .original_rect
+                    .iter()
+                    .zip(rect)
+                    .all(|(a, b)| (a - b).abs() < 0.5)
+        })
+    }
+
+    /// Run a scoped collector pass over the currently open engine screen or overlay to enumerate
+    /// its built-in widgets in exact draw/registration order, preserving any rasterized font or
+    /// pack icon atlas patches without touching live widget/target/narration buffers.
+    pub(in crate::game) fn discover_screen_widgets(&mut self) -> Vec<widgets::CollectedWidget> {
+        let size = self.renderer_framebuffer().unwrap_or([854, 480]);
+        let mut batch = HudBatch::new(size, self.client.settings.gui_scale_inputs());
+        let prev_room = std::mem::replace(
+            &mut self.client.chat_ui.room,
+            sunrise_client::hud_kit::room::Room::new(batch.width, batch.height),
+        );
+        let prev_frame_ticks = std::mem::replace(&mut self.client.frame_ticks, 0.0);
+        let ((), collected) = widgets::with_widget_collector(|| {
+            if self.client.command_prompt.0.is_some() {
+                self.draw_command_prompt(&mut batch);
+            } else if self.client.link_prompt.is_some() {
+                self.draw_link_prompt(&mut batch);
+            } else if self.client.code_of_conduct.is_some() {
+                self.draw_code_of_conduct(&mut batch);
+            } else if self.client.server_packs.0.prompt.is_some() {
+                self.draw_pack_prompt(&mut batch);
+            } else if self.dialog_open() {
+                self.draw_dialog(&mut batch);
+            } else if self.client.book.is_some() {
+                self.draw_book(&mut batch);
+            } else if self.client.sign_edit.is_some() {
+                self.draw_sign_editor(&mut batch);
+            } else if self.client.screen == super::Screen::Win {
+                self.draw_win_screen(&mut batch);
+            } else if self.client.screen == super::Screen::Options && self.client.title.0.is_some()
+            {
+                self.draw_options(&mut batch, true);
+            } else if self.client.screen == super::Screen::DebugOptions
+                && self.client.title.0.is_some()
+            {
+                self.draw_debug_options(&mut batch);
+            } else if self.client.screen == super::Screen::Mod && self.client.title.0.is_some() {
+                // Mod-owned screens have no built-in engine widgets.
+            } else if self.client.title.0.is_some() {
+                let mods = self.client.settings.mods.installed.len();
+                if let Some(title) = &mut self.client.title.0 {
+                    title.mods = mods;
+                }
+                if let Some(title) = &self.client.title.0 {
+                    title.draw_with_items(
+                        &self.client.gui.atlas,
+                        Some(&self.client.client_pack.item_renderer),
+                        &mut batch,
+                        self.client.cursor,
+                        self.client.settings.file.bool("hideSplashTexts"),
+                        self.client.settings.file.bool("hideServerAddress"),
+                        &mut |_, _| {},
+                    );
+                }
+            } else if self.remote_loading() {
+                let _ = self.remote_overlay(&mut batch);
+            } else {
+                match self.client.screen {
+                    super::Screen::Options => self.draw_options(&mut batch, true),
+                    super::Screen::Paused if self.client.pause_menu => {
+                        self.draw_pause_menu(&mut batch)
+                    }
+                    super::Screen::GameModeSwitcher => self.draw_gamemode_switcher(&mut batch),
+                    super::Screen::Dead => self.draw_death_screen(&mut batch),
+                    super::Screen::Stats => self.draw_stats(&mut batch),
+                    super::Screen::Advancements => self.draw_advancements(&mut batch),
+                    super::Screen::WorldOptions => self.draw_world_options(&mut batch),
+                    super::Screen::Friends => self.draw_friends_screen(&mut batch),
+                    super::Screen::Social => self.draw_social_screen(&mut batch),
+                    super::Screen::ServerLinks => self.draw_server_links(&mut batch),
+                    super::Screen::ConfirmLink => self.draw_confirm_link(&mut batch),
+                    super::Screen::DemoIntro => self.draw_demo_intro(&mut batch),
+                    super::Screen::DialogWarning => self.draw_dialog_warning(&mut batch),
+                    super::Screen::CommandBlock => self.draw_command_block(&mut batch),
+                    super::Screen::BlockEditor => self.draw_block_editor(&mut batch),
+                    super::Screen::DebugOptions => self.draw_debug_options(&mut batch),
+                    super::Screen::Inventory => {
+                        let _ = self.draw_inventory(&mut batch);
+                    }
+                    super::Screen::Creative => {
+                        let _ = self.draw_creative(&mut batch);
+                    }
+                    super::Screen::Chat => self.draw_chat_screen(&mut batch),
+                    super::Screen::Playing
+                    | super::Screen::Win
+                    | super::Screen::Paused
+                    | super::Screen::Mod => {}
+                }
+            }
+        });
+        self.client.frame_ticks = prev_frame_ticks;
+        self.client.chat_ui.room = prev_room;
+        // Keep any newly rasterized font glyphs or pack icons queued for GPU upload.
+        self.client
+            .text_patches
+            .borrow_mut()
+            .append(&mut batch.patches);
+        collected
+    }
+
+    /// Re-layout engine widgets after a resize on a screen whose vanilla counterpart overrides
+    /// `repositionElements()`: clear only engine bounds overrides while keeping all non-bounds
+    /// overrides and all mounted mod widgets (with their bounds) intact.
+    pub(in crate::game) fn reposition_screen_widgets(&mut self) {
+        let should_rediscover = {
+            let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+            for ov in inner.engine_overrides.overrides.values_mut() {
+                ov.rect = None;
+            }
+            inner.discovered && !inner.engine_overrides.suppress_all
+        };
+        if should_rediscover {
+            let collected = self.discover_screen_widgets();
+            self.reconcile_engine_children(collected);
+            let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+            inner.engine_hits = build_engine_hits(&inner.engine_children, &inner.engine_overrides);
+        }
+        self.sync_children_cache();
+    }
+
+    /// Run a screen draw closure under the active screen's engine widget override table when
+    /// overrides or widget inspection are active for this screen instance.
+    pub(in crate::game) fn with_screen_widget_overrides<R>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let active = self
+            .client
+            .screen_state
+            .0
+            .widgets
+            .inner
+            .borrow()
+            .overrides_active;
+        if !active || widgets::in_override_pass() {
+            return f(self);
+        }
+        let cursor = self.client.cursor;
+        let now = Instant::now();
+        let mut maps = std::mem::take(
+            &mut self
+                .client
+                .screen_state
+                .0
+                .widgets
+                .inner
+                .borrow_mut()
+                .engine_overrides,
+        );
+        let (result, output) = widgets::with_widget_overrides(&mut maps, cursor, now, || f(self));
+        {
+            let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+            inner.engine_overrides = maps;
+            inner.engine_hits = output.hits;
+            inner.engine_hovered = output.hovered;
+            if output.pending_tooltip.is_some() {
+                inner.pending_tooltip = output.pending_tooltip;
+            }
+        }
+        self.reconcile_engine_children(output.seen);
+        result
+    }
+
+    /// Resolve how a pointer click at `cursor` interacts with active engine widget overrides.
+    pub(in crate::game) fn resolve_engine_click_cursor(
+        &self,
+        cursor: (f32, f32),
+    ) -> EngineClickRoute {
+        let inner = self.client.screen_state.0.widgets.inner.borrow();
+        if !inner.overrides_active {
+            return EngineClickRoute::PassThrough;
+        }
+        let pt = [cursor.0, cursor.1];
+        if inner.engine_overrides.suppress_all {
+            if inner
+                .engine_hits
+                .iter()
+                .any(|hit| point_in_rect(pt, hit.original_rect))
+            {
+                return EngineClickRoute::Block;
+            }
+            return EngineClickRoute::PassThrough;
+        }
+        if let Some(hit) = inner
+            .engine_hits
+            .iter()
+            .find(|hit| hit.interactive && point_in_rect(pt, hit.resolved_rect))
+        {
+            if hit.resolved_rect != hit.original_rect {
+                let [rx, ry, rw, rh] = hit.resolved_rect;
+                let [ox, oy, ow, oh] = hit.original_rect;
+                let u = ((cursor.0 - rx) / rw).clamp(0.01, 0.99);
+                let v = ((cursor.1 - ry) / rh).clamp(0.01, 0.99);
+                return EngineClickRoute::Redirect((ox + u * ow, oy + v * oh));
+            }
+            return EngineClickRoute::PassThrough;
+        }
+        if inner
+            .engine_hits
+            .iter()
+            .any(|hit| hit.blocks_original && point_in_rect(pt, hit.original_rect))
+        {
+            return EngineClickRoute::Block;
+        }
+        EngineClickRoute::PassThrough
+    }
+
+    /// Route a real mouse button edge through [`Self::resolve_engine_click_cursor`] before calling
+    /// [`Self::route_screen_button`], so moved engine widgets click at their new rectangle and
+    /// removed/hidden/disabled/moved-away widgets never accept clicks at their old rectangle.
+    pub(in crate::game) fn route_screen_button_with_overrides(
+        &mut self,
+        button: MouseButton,
+        code: i32,
+        pressed: bool,
+        double_click: bool,
+    ) -> Result<bool> {
+        if !pressed {
+            return self.route_screen_button(button, code, false, double_click);
+        }
+        let generation = self.client.screen_state.0.widgets.generation();
+        let res = match self.resolve_engine_click_cursor(self.client.cursor) {
+            EngineClickRoute::PassThrough => {
+                self.route_screen_button(button, code, true, double_click)
+            }
+            EngineClickRoute::Block => Ok(false),
+            EngineClickRoute::Redirect(mapped) => {
+                let prev = self.client.cursor;
+                self.client.cursor = mapped;
+                let res = self.with_redirecting_engine_click(|game| {
+                    game.route_screen_button(button, code, true, double_click)
+                });
+                self.client.cursor = prev;
+                res
+            }
+        };
+        if matches!(res, Ok(true)) && self.client.screen_state.0.widgets.generation() == generation
+        {
+            let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+            if inner.discovered {
+                inner.needs_engine_resync = true;
+            }
+        }
+        res
+    }
+
+    /// Paint any deferred tooltip scheduled by an overridden engine widget or mounted widget
+    /// during the current screen pass, before `ScreenEvent.Render.Post`.
+    pub(in crate::game) fn draw_pending_widget_tooltip(&self, batch: &mut HudBatch) {
+        let pending = self
+            .client
+            .screen_state
+            .0
+            .widgets
+            .inner
+            .borrow_mut()
+            .pending_tooltip
+            .take()
+            .or_else(widgets::take_active_pending_tooltip);
+        let Some(pending) = pending else {
+            return;
+        };
+        let atlas = &self.client.gui.atlas;
+        let lines = atlas.font.split(&pending.tooltip.message, 170.0);
+        if let Some(component) = pending.tooltip.component {
+            let mut items: Vec<PreparedTooltipItem> = lines
+                .into_iter()
+                .map(|text| PreparedTooltipItem::Text {
+                    text,
+                    color: u32::MAX,
+                })
+                .collect();
+            if let Ok(prepared) = self.prepare_tooltip_component(&component) {
+                items.push(prepared);
+            }
+            let bounds = pending.rect.map(|v| v.round() as i32);
+            let positioner = if pending.focused_only {
+                WidgetTooltipPositioner::BelowOrAbove(bounds)
+            } else {
+                WidgetTooltipPositioner::Menu(bounds)
+            };
+            let anchor = quantize_tooltip_anchor(self.widget_tooltip_cursor());
+            self.draw_prepared_tooltip(batch, None, &mut items, anchor, &positioner, false);
+            return;
+        }
+        let style = pending
+            .tooltip
+            .style
+            .as_ref()
+            .map(|id| (id.namespace(), id.path()));
+        if pending.focused_only {
+            ui::tooltip_focused_styled(batch, atlas, &lines, style, pending.rect);
+        } else {
+            ui::tooltip_menu_styled(
+                batch,
+                atlas,
+                &lines,
+                style,
+                self.widget_tooltip_cursor(),
+                pending.rect,
+            );
+        }
+    }
+
+    /// Run `ScreenEvent.Init.Pre`, discover the open screen's built-in widgets unless cancelled,
+    /// run `ScreenEvent.Init.Post`, and commit mounted widgets, engine overrides, and initial focus.
     pub fn init_screen_widgets(&mut self, view: &ScreenView<'_>) {
-        if !mod_api::__private::listened(mod_api::HookId::ScreenInitPost) {
+        let listen_pre = mod_api::__private::listened(mod_api::HookId::ScreenInitPre);
+        let listen_post = mod_api::__private::listened(mod_api::HookId::ScreenInitPost);
+        if !listen_pre && !listen_post {
             return;
         }
         let mut mount = ScreenWidgetMount {
             next_id: self.client.screen_state.0.widgets.next_id.get(),
             entries: Vec::new(),
             children: Vec::new(),
+            engine_ids: Vec::new(),
+            field_ids: Vec::new(),
+            custom_ids: Vec::new(),
             removed: Vec::new(),
+            cleared: false,
+            ops: Vec::new(),
             initial_focus: None,
         };
-        // Use the initialized layout, not last frame's draw registrations (which may
-        // still belong to a different screen, and omit children clipped offscreen).
-        let native = match (view.id, self.client.title.0.as_ref()) {
-            ("paused", _) => self.pause_init_children(),
-            ("title", Some(title)) => {
-                let [w, h] = self.gui_frame_now().1.size.map(|axis| axis as f32);
-                title
-                    .init_children(&self.client.gui.atlas, w, h)
-                    .into_iter()
-                    .map(|(action, rect, key)| {
-                        (
-                            action,
-                            rect,
-                            Some(mod_api::Text::translate(key, Vec::new())),
-                        )
-                    })
-                    .collect()
-            }
-            _ => Vec::new(),
-        };
-        let native = native
-            .into_iter()
-            .map(|(action, rect, label)| {
-                let id = mount.alloc_id();
-                mount.children.push(ScreenChild::new(id, rect, label));
-                (id, action)
-            })
-            .collect::<Vec<_>>();
         let mut entries: Vec<MountedWidgetEntry> = Vec::new();
-        let mut removed_actions = Vec::new();
-        let mut initial_focus = None;
-        self.native_screen_init_post(view, |listen| {
-            let children = mount.children.clone();
-            if listen(&mut mount) {
+        let mut engine_children: Vec<EngineChildSlot> = Vec::new();
+        let mut engine_overrides = widgets::EngineOverrideMaps::default();
+        let mut initial_focus: Option<ScreenWidgetId> = None;
+
+        let commit_listener =
+            |mount: &mut ScreenWidgetMount,
+             entries: &mut Vec<MountedWidgetEntry>,
+             engine_children: &[EngineChildSlot],
+             engine_overrides: &mut widgets::EngineOverrideMaps,
+             initial_focus: &mut Option<ScreenWidgetId>| {
+                if mount.cleared {
+                    mount.cleared = false;
+                    *initial_focus = None;
+                    for entry in entries.drain(..) {
+                        entry.dispose();
+                    }
+                    if !engine_children.is_empty() {
+                        engine_overrides.suppress_all = true;
+                        for slot in engine_children {
+                            engine_overrides
+                                .overrides
+                                .entry(slot.key.clone())
+                                .or_default()
+                                .removed = true;
+                        }
+                    }
+                }
                 for id in mount.removed.drain(..) {
-                    if initial_focus == Some(id) {
-                        initial_focus = None;
+                    if *initial_focus == Some(id) {
+                        *initial_focus = None;
                     }
                     if let Some(pos) = entries.iter().position(|entry| entry.id == id) {
                         entries.remove(pos).dispose();
-                    } else if let Some(&(_, action)) =
-                        native.iter().find(|&&(child, _)| child == id)
-                    {
-                        removed_actions.push(action);
+                    } else if let Some(slot) = engine_children.iter().find(|s| s.id == id) {
+                        engine_overrides
+                            .overrides
+                            .entry(slot.key.clone())
+                            .or_default()
+                            .removed = true;
                     }
                 }
-                initial_focus = mount.initial_focus.take().or(initial_focus);
-                entries.append(&mut mount.entries);
-            } else {
-                mount.children = children;
-                mount.initial_focus = None;
-                mount.removed.clear();
-                for entry in mount.entries.drain(..) {
-                    entry.dispose();
+                for (id, op) in mount.ops.drain(..) {
+                    if let Some(entry) = entries.iter_mut().find(|entry| entry.id == id) {
+                        apply_staged_op_to_mounted(entry, op);
+                    } else if let Some(slot) = engine_children.iter().find(|s| s.id == id) {
+                        let ov = engine_overrides
+                            .overrides
+                            .entry(slot.key.clone())
+                            .or_default();
+                        apply_staged_op_to_engine(ov, op);
+                    }
                 }
+                *initial_focus = mount.initial_focus.take().or(*initial_focus);
+                entries.append(&mut mount.entries);
+            };
+
+        let mut pre_canceled = false;
+        if listen_pre {
+            self.native_screen_init_pre(
+                view,
+                |listen| {
+                    let children = mount.children.clone();
+                    let field_ids = mount.field_ids.clone();
+                    let custom_ids = mount.custom_ids.clone();
+                    if listen(&mut mount) {
+                        commit_listener(
+                            &mut mount,
+                            &mut entries,
+                            &engine_children,
+                            &mut engine_overrides,
+                            &mut initial_focus,
+                        );
+                    } else {
+                        mount.children = children;
+                        mount.field_ids = field_ids;
+                        mount.custom_ids = custom_ids;
+                        mount.initial_focus = None;
+                        mount.cleared = false;
+                        mount.removed.clear();
+                        mount.ops.clear();
+                        for entry in mount.entries.drain(..) {
+                            entry.dispose();
+                        }
+                    }
+                },
+                &mut pre_canceled,
+            );
+        }
+
+        if pre_canceled {
+            engine_overrides.suppress_all = true;
+        } else {
+            let collected = self.discover_screen_widgets();
+            for item in collected {
+                let id = mount.alloc_id();
+                let api_msg = item.message.as_ref().and_then(|t| t.try_into_api().ok());
+                let mut child = ScreenChild::new(id, item.rect, api_msg.clone());
+                child.active = item.active;
+                child.tab_order_group = item.tab_order_group;
+                mount.children.push(child);
+                mount.engine_ids.push(id);
+                engine_children.push(EngineChildSlot {
+                    id,
+                    key: item.key,
+                    default_rect: item.rect,
+                    default_message: api_msg,
+                    default_active: item.active,
+                    default_tab_order_group: item.tab_order_group,
+                });
             }
-            // IDs issued to a failed listener are never reused.
-        });
+        }
+
+        if listen_post {
+            self.native_screen_init_post(view, |listen| {
+                let children = mount.children.clone();
+                let field_ids = mount.field_ids.clone();
+                let custom_ids = mount.custom_ids.clone();
+                if listen(&mut mount) {
+                    commit_listener(
+                        &mut mount,
+                        &mut entries,
+                        &engine_children,
+                        &mut engine_overrides,
+                        &mut initial_focus,
+                    );
+                } else {
+                    mount.children = children;
+                    mount.field_ids = field_ids;
+                    mount.custom_ids = custom_ids;
+                    mount.initial_focus = None;
+                    mount.cleared = false;
+                    mount.removed.clear();
+                    mount.ops.clear();
+                    for entry in mount.entries.drain(..) {
+                        entry.dispose();
+                    }
+                }
+                // IDs issued to a failed listener are never reused.
+            });
+        }
+
         self.client
             .screen_state
             .0
             .widgets
             .next_id
             .set(mount.next_id);
-        let initial_focus =
-            initial_focus.and_then(|id| entries.iter().position(|entry| entry.id == id));
-        if view.id == "title"
-            && let Some(title) = self.client.title.0.as_mut()
-        {
-            title.set_removed_children(std::mem::take(&mut removed_actions));
-        }
+        let initial_focus = initial_focus.and_then(|id| {
+            entries
+                .iter_mut()
+                .position(|entry| entry.id == id && entry.can_focus())
+        });
+        let order: Vec<ScreenWidgetId> = mount.children.iter().map(|c| c.id).collect();
+        let engine_hits = build_engine_hits(&engine_children, &engine_overrides);
+        let engine_id_by_key: HashMap<widgets::EngineWidgetKey, ScreenWidgetId> = engine_children
+            .iter()
+            .map(|slot| (slot.key.clone(), slot.id))
+            .collect();
         let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+        inner.order = order;
+        inner.engine_children = engine_children;
+        inner.engine_id_by_key = engine_id_by_key;
+        inner.engine_overrides = engine_overrides;
+        inner.engine_hits = engine_hits;
         inner.entries = entries.into_iter().map(Some).collect();
-        inner.removed_pause_actions = removed_actions;
-        if self
-            .client
-            .pause_focus
-            .is_some_and(|id| inner.removed_pause_actions.contains(&id))
-        {
-            self.client.pause_focus = None;
-        }
+        inner.discovered = true;
+        inner.needs_engine_resync = false;
+        inner.overrides_active = true;
         drop(inner);
+        self.sync_children_cache();
         if let Some(idx) = initial_focus {
             self.set_mounted_widget_focus(Some(idx));
         }
-    }
-
-    /// Whether Init.Post removed this native PauseScreen action from the current build.
-    pub fn pause_child_removed(&self, action: u8) -> bool {
-        self.client
-            .screen_state
-            .0
-            .widgets
-            .inner
-            .borrow()
-            .removed_pause_actions
-            .contains(&action)
     }
 
     /// Clear and dispose all mounted widgets for the current screen without
@@ -567,9 +1835,7 @@ impl crate::game::ClientGame<'_> {
     /// preserving `MouseHandler.LastClick`).
     pub fn clear_screen_widgets(&mut self) {
         self.client.screen_state.0.widgets.clear();
-        if let Some(title) = self.client.title.0.as_mut() {
-            title.set_removed_children(Vec::new());
-        }
+        self.client.screen_state.0.widgets.children_cache.clear();
         sunrise_client::preedit::reset();
         self.client.ime_area = None;
     }
@@ -733,6 +1999,12 @@ impl crate::game::ClientGame<'_> {
     }
 
     pub fn draw_mounted_screen_widgets_at(&self, batch: &mut HudBatch, now: Instant) {
+        widgets::without_engine_overrides(|| {
+            self.draw_mounted_screen_widgets_inner(batch, now);
+        });
+    }
+
+    fn draw_mounted_screen_widgets_inner(&self, batch: &mut HudBatch, now: Instant) {
         let len = self
             .client
             .screen_state
@@ -749,6 +2021,17 @@ impl crate::game::ClientGame<'_> {
         let partial_tick = self.common.clock.fraction() as f32;
         let focused_idx = self.client.screen_state.0.widgets.focused_index();
         let generation = self.client.screen_state.0.widgets.generation();
+        let mut next_hover_since = HashMap::new();
+        let prev_hover_since = self
+            .client
+            .screen_state
+            .0
+            .widgets
+            .inner
+            .borrow()
+            .mounted_hover_since
+            .clone();
+        let mut scheduled_tooltip: Option<widgets::PendingWidgetTooltip> = None;
         for idx in 0..len {
             if self.client.screen_state.0.widgets.generation() != generation {
                 break;
@@ -769,12 +2052,36 @@ impl crate::game::ClientGame<'_> {
             let focused = focused_idx == Some(idx);
             if !entry.disabled && entry.owner.is_enabled() {
                 match &mut entry.kind {
-                    MountedWidgetKind::Button { state, .. } => {
+                    MountedWidgetKind::Button {
+                        state, narration, ..
+                    } => {
                         if state.visible {
                             let mark = widgets::frame_mark();
                             let hovered = point_in_rect(mouse, state.rect);
-                            let label: Text = state.label.try_into_engine(&()).unwrap_or_default();
-                            ui::button_focused_as(
+                            let label: Text =
+                                state.message.try_into_engine(&()).unwrap_or_default();
+                            let custom_narration = narration.as_ref().and_then(|n| {
+                                let t: Text = n.try_into_engine(&()).ok()?;
+                                Some(t.plain())
+                            });
+                            let converted_tip =
+                                convert_widget_tooltip(state.tooltip.clone()).flatten();
+                            let tooltip_hint = converted_tip.as_ref().map(|t| t.narration.as_str());
+                            if hovered || (focused && self.key_focus_driving()) {
+                                let started =
+                                    prev_hover_since.get(&entry.id).copied().unwrap_or(now);
+                                next_hover_since.insert(entry.id, started);
+                                if let Some(tip) = converted_tip.clone()
+                                    && now.duration_since(started) >= state.tooltip_delay
+                                {
+                                    scheduled_tooltip = Some(widgets::PendingWidgetTooltip {
+                                        tooltip: tip,
+                                        rect: state.rect,
+                                        focused_only: !hovered,
+                                    });
+                                }
+                            }
+                            ui::button_mounted(
                                 batch,
                                 &self.client.gui.atlas,
                                 state.rect,
@@ -784,8 +2091,19 @@ impl crate::game::ClientGame<'_> {
                                     hovered,
                                     focused,
                                 },
-                                state.sprites.as_ref(),
-                                |rect| Narratable::button(label.plain(), rect, state.active),
+                                ui::ButtonStyle {
+                                    alpha: state.alpha,
+                                    label_text_color: state.label_text_color,
+                                    sprites: state.sprites.as_ref(),
+                                    override_render_highlighted_sprite: state
+                                        .override_render_highlighted_sprite,
+                                    tab_order_group: state.tab_order_group,
+                                    tooltip_narration: tooltip_hint,
+                                },
+                                |rect| match custom_narration {
+                                    Some(title) => Narratable::named(title, rect, state.active),
+                                    None => Narratable::button(label.plain(), rect, state.active),
+                                },
                             );
                             widgets::mark_mounted(mark, entry.id.raw(), false);
                         }
@@ -795,35 +2113,71 @@ impl crate::game::ClientGame<'_> {
                         hint,
                         active,
                         visible,
+                        alpha,
+                        tooltip,
+                        tooltip_delay,
+                        tab_order_group,
                         ..
                     } => {
                         if *visible {
+                            let rect = [edit_box.x, edit_box.y, edit_box.width, edit_box.height];
+                            let hovered = point_in_rect(mouse, rect);
+                            let converted_tip = convert_widget_tooltip(tooltip.clone()).flatten();
+                            let tooltip_hint = converted_tip.as_ref().map(|t| t.narration.as_str());
+                            if hovered || (focused && self.key_focus_driving()) {
+                                let started =
+                                    prev_hover_since.get(&entry.id).copied().unwrap_or(now);
+                                next_hover_since.insert(entry.id, started);
+                                if let Some(tip) = converted_tip.clone()
+                                    && now.duration_since(started) >= *tooltip_delay
+                                {
+                                    scheduled_tooltip = Some(widgets::PendingWidgetTooltip {
+                                        tooltip: tip,
+                                        rect,
+                                        focused_only: !hovered,
+                                    });
+                                }
+                            }
                             edit_box.focused = focused && *active;
                             let mark = widgets::frame_mark();
-                            edit_box.draw_at(batch, &self.client.gui.atlas, None, now);
+                            edit_box.draw_mounted_at(
+                                batch,
+                                &self.client.gui.atlas,
+                                now,
+                                *active,
+                                *alpha,
+                                *tab_order_group,
+                                tooltip_hint,
+                            );
                             widgets::mark_mounted(mark, entry.id.raw(), true);
                             if let Some(hint) = hint
                                 && edit_box.value.is_empty()
                                 && !edit_box.focused
                             {
-                                let color = if edit_box.editable {
-                                    edit_box.text_color
-                                } else {
-                                    edit_box.text_color_uneditable
-                                };
-                                batch.text_styled(
-                                    &self.client.gui.atlas,
-                                    hint,
-                                    edit_box.text_x(),
-                                    edit_box.text_y(),
-                                    color,
-                                    true,
+                                let color = widgets::scale_abgr_alpha(
+                                    if edit_box.editable && *active {
+                                        edit_box.text_color
+                                    } else {
+                                        edit_box.text_color_uneditable
+                                    },
+                                    *alpha,
                                 );
+                                if (color >> 24) != 0 {
+                                    batch.text_styled(
+                                        &self.client.gui.atlas,
+                                        hint,
+                                        edit_box.text_x(),
+                                        edit_box.text_y(),
+                                        color,
+                                        true,
+                                    );
+                                }
                             }
                         }
                     }
                     MountedWidgetKind::Custom(widget) => {
                         let paint = batch.paint_checkpoint();
+                        let mut custom_tip = None;
                         let outcome = call_owner(
                             &entry.owner,
                             &mut entry.disabled,
@@ -846,6 +2200,10 @@ impl crate::game::ClientGame<'_> {
                                     );
                                 }
                                 let hovered = point_in_rect(mouse, bounds);
+                                if hovered || (focused && self.key_focus_driving()) {
+                                    custom_tip =
+                                        widget.tooltip().map(|tip| (tip, bounds, !hovered));
+                                }
                                 let host: &crate::game::ClientGame<'_> = self;
                                 let mut draw = GameDrawContext::new(host, batch);
                                 widget.render(
@@ -860,6 +2218,14 @@ impl crate::game::ClientGame<'_> {
                         );
                         if outcome.is_none() {
                             paint.discard(batch);
+                        } else if let Some((tip, rect, focused_only)) = custom_tip
+                            && let Some(Some(converted)) = convert_widget_tooltip(Some(tip))
+                        {
+                            scheduled_tooltip = Some(widgets::PendingWidgetTooltip {
+                                tooltip: converted,
+                                rect,
+                                focused_only,
+                            });
                         }
                     }
                 }
@@ -885,6 +2251,67 @@ impl crate::game::ClientGame<'_> {
                 entry.dispose();
                 break;
             }
+        }
+        if self.client.screen_state.0.widgets.generation() == generation {
+            let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+            inner.mounted_hover_since = next_hover_since;
+            if scheduled_tooltip.is_some() {
+                inner.pending_tooltip = scheduled_tooltip;
+            }
+        }
+    }
+
+    /// Notify custom mounted widgets of pointer movement (`GuiEventListener.mouseMoved`).
+    pub fn mounted_widget_mouse_moved(&mut self, mouse: [f32; 2]) {
+        let len = self
+            .client
+            .screen_state
+            .0
+            .widgets
+            .inner
+            .borrow()
+            .entries
+            .len();
+        if len == 0 {
+            return;
+        }
+        let generation = self.client.screen_state.0.widgets.generation();
+        for idx in 0..len {
+            if self.client.screen_state.0.widgets.generation() != generation {
+                return;
+            }
+            let is_custom = matches!(
+                self.client
+                    .screen_state
+                    .0
+                    .widgets
+                    .inner
+                    .borrow()
+                    .entries
+                    .get(idx)
+                    .and_then(Option::as_ref),
+                Some(entry)
+                    if !entry.disabled
+                        && entry.owner.is_enabled()
+                        && matches!(entry.kind, MountedWidgetKind::Custom(_))
+            );
+            if !is_custom {
+                continue;
+            }
+            self.with_mounted_widget(idx, |game, entry| {
+                if let MountedWidgetKind::Custom(widget) = &mut entry.kind {
+                    call_owner(
+                        &entry.owner,
+                        &mut entry.disabled,
+                        "screen_widget_mouse_moved",
+                        || {
+                            if widget.visible() && widget.active() {
+                                widget.mouse_moved(game, mouse);
+                            }
+                        },
+                    );
+                }
+            });
         }
     }
 
@@ -1043,7 +2470,7 @@ impl crate::game::ClientGame<'_> {
                     return true;
                 }
                 Hit::Custom => {
-                    let handled = self
+                    let (handled, take_focus) = self
                         .with_mounted_widget(idx, |game, entry| {
                             if let MountedWidgetKind::Custom(widget) = &mut entry.kind {
                                 call_owner(
@@ -1051,23 +2478,28 @@ impl crate::game::ClientGame<'_> {
                                     &mut entry.disabled,
                                     "screen_widget_mouse_clicked",
                                     || {
-                                        widget.mouse_clicked(
+                                        let handled = widget.mouse_clicked(
                                             game,
                                             mouse,
                                             button,
                                             modifiers,
                                             double_click,
-                                        )
+                                        );
+                                        let take_focus =
+                                            handled && widget.should_take_focus_after_interaction();
+                                        (handled, take_focus)
                                     },
                                 )
-                                .unwrap_or(false)
+                                .unwrap_or((false, false))
                             } else {
-                                false
+                                (false, false)
                             }
                         })
-                        .unwrap_or(false);
+                        .unwrap_or((false, false));
                     if handled && self.client.screen_state.0.widgets.generation() == generation {
-                        self.set_mounted_widget_focus(Some(idx));
+                        if take_focus {
+                            self.set_mounted_widget_focus(Some(idx));
+                        }
                         if button == 0 {
                             self.client
                                 .screen_state
@@ -1541,6 +2973,792 @@ impl crate::game::ClientGame<'_> {
                 })
                 .unwrap_or(false),
             MountedWidgetKind::Button { .. } => false,
+        }
+    }
+}
+
+#[cfg(feature = "client")]
+impl crate::game::ClientGame<'_> {
+    fn stage_live_mounted(&mut self, kind: MountedWidgetKind) -> ScreenWidgetId {
+        let id = self.alloc_widget_id();
+        let mut entry = MountedWidgetEntry {
+            id,
+            owner: widget_callback_owner(),
+            disabled: false,
+            kind,
+        };
+        let rect = match &entry.kind {
+            MountedWidgetKind::Button { state, .. } => Some(state.rect),
+            MountedWidgetKind::TextField { edit_box, .. } => {
+                Some([edit_box.x, edit_box.y, edit_box.width, edit_box.height])
+            }
+            MountedWidgetKind::Custom(widget) => call_owner(
+                &entry.owner,
+                &mut entry.disabled,
+                "screen_widget_bounds",
+                || widget.bounds(),
+            ),
+        };
+        if let Some(rect) = rect
+            && valid_widget_rect(rect)
+        {
+            let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+            inner.entries.push(Some(entry));
+            inner.order.push(id);
+            drop(inner);
+            self.sync_children_cache();
+        } else {
+            entry.dispose();
+        }
+        id
+    }
+}
+
+#[cfg(feature = "client")]
+impl ScreenWidgets for crate::game::ClientGame<'_> {
+    fn children(&self) -> &[ScreenChild] {
+        &self.client.screen_state.0.widgets.children_cache
+    }
+
+    fn add_button(&mut self, button: Button) -> ScreenWidgetId {
+        let (state, on_press, narration) = button.into_parts();
+        self.stage_live_mounted(MountedWidgetKind::Button {
+            state,
+            on_press,
+            narration,
+        })
+    }
+
+    fn add_text_field(&mut self, field: TextField) -> ScreenWidgetId {
+        let parts = field.into_parts();
+        let [x, y, w, h] = parts.rect;
+        let mut edit_box = EditBox::new(x, y, w, h);
+        edit_box.max_length = parts.max_length;
+        edit_box.bordered = parts.bordered;
+        edit_box.editable = parts.editable;
+        edit_box.focused = false;
+        edit_box.set_value(&parts.value);
+        let hint = parts.hint.and_then(|hint| {
+            let text: Text = hint.try_into_engine(&()).ok()?;
+            let unstyled = text.spans.iter().all(|span| span.style == Style::default());
+            Some(if unstyled {
+                text.with_color(DARK_GRAY)
+            } else {
+                text
+            })
+        });
+        self.stage_live_mounted(MountedWidgetKind::TextField {
+            edit_box,
+            hint,
+            active: parts.active,
+            visible: parts.visible,
+            alpha: parts.alpha,
+            tooltip: parts.tooltip,
+            tooltip_delay: parts.tooltip_delay,
+            tab_order_group: parts.tab_order_group,
+            on_change: parts.on_change,
+            on_submit: parts.on_submit,
+        })
+    }
+
+    fn add_widget(&mut self, widget: Box<dyn ScreenWidget>) -> ScreenWidgetId {
+        self.stage_live_mounted(MountedWidgetKind::Custom(widget))
+    }
+
+    fn set_initial_focus(&mut self, id: ScreenWidgetId) -> bool {
+        let Some(idx) = self.client.screen_state.0.widgets.index_of(id) else {
+            return false;
+        };
+        let can = self
+            .client
+            .screen_state
+            .0
+            .widgets
+            .inner
+            .borrow_mut()
+            .entries
+            .get_mut(idx)
+            .and_then(Option::as_mut)
+            .is_some_and(MountedWidgetEntry::can_focus);
+        if !can {
+            return false;
+        }
+        self.set_mounted_widget_focus(Some(idx));
+        true
+    }
+
+    fn remove(&mut self, id: ScreenWidgetId) -> bool {
+        let (removed_mounted, was_focused) = {
+            let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+            let Some(order_pos) = inner.order.iter().position(|&cid| cid == id) else {
+                return false;
+            };
+            inner.order.remove(order_pos);
+            if let Some(slot_key) = inner
+                .engine_children
+                .iter()
+                .find(|s| s.id == id)
+                .map(|s| s.key.clone())
+            {
+                inner
+                    .engine_overrides
+                    .overrides
+                    .entry(slot_key.clone())
+                    .or_default()
+                    .removed = true;
+                for hit in &mut inner.engine_hits {
+                    if hit.key == slot_key {
+                        hit.interactive = false;
+                        hit.blocks_original = true;
+                    }
+                }
+                (None, false)
+            } else if let Some(idx) = inner
+                .entries
+                .iter()
+                .position(|slot| slot.as_ref().is_some_and(|e| e.id == id))
+            {
+                let was_focused = inner.focused == Some(idx);
+                if was_focused {
+                    inner.focused = None;
+                }
+                if inner.dragging.is_some_and(|(drag_idx, _)| drag_idx == idx) {
+                    inner.dragging = None;
+                }
+                (inner.entries[idx].take(), was_focused)
+            } else {
+                (None, false)
+            }
+        };
+        if let Some(mut entry) = removed_mounted {
+            if was_focused {
+                entry.apply_focus(false);
+                sunrise_client::preedit::reset();
+                self.client.ime_area = None;
+            }
+            entry.dispose();
+        }
+        self.sync_children_cache();
+        true
+    }
+
+    fn clear(&mut self) {
+        let (entries, focused) = {
+            let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+            let MountedWidgetsInner {
+                order,
+                engine_children,
+                engine_overrides,
+                engine_hits,
+                dragging,
+                pending_tooltip,
+                entries,
+                focused,
+                ..
+            } = &mut *inner;
+            order.clear();
+            engine_overrides.suppress_all = true;
+            for slot in engine_children.iter() {
+                engine_overrides
+                    .overrides
+                    .entry(slot.key.clone())
+                    .or_default()
+                    .removed = true;
+            }
+            for hit in engine_hits.iter_mut() {
+                hit.interactive = false;
+                hit.blocks_original = true;
+            }
+            *dragging = None;
+            *pending_tooltip = None;
+            (std::mem::take(entries), focused.take())
+        };
+        if let Some(idx) = focused {
+            sunrise_client::preedit::reset();
+            self.client.ime_area = None;
+            let _ = idx;
+        }
+        for (idx, mut entry) in entries
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, e)| Some((i, e?)))
+        {
+            if focused == Some(idx) {
+                entry.apply_focus(false);
+            }
+            entry.dispose();
+        }
+        self.sync_children_cache();
+    }
+
+    fn set_bounds(&mut self, id: ScreenWidgetId, rect: [f32; 4]) -> bool {
+        if !valid_widget_rect(rect) || rect[2] < 0.0 || rect[3] < 0.0 {
+            return false;
+        }
+        let ok = {
+            let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+            if !inner.order.contains(&id) {
+                return false;
+            }
+            if let Some(key) = inner
+                .engine_children
+                .iter()
+                .find(|s| s.id == id)
+                .map(|s| s.key.clone())
+            {
+                inner
+                    .engine_overrides
+                    .overrides
+                    .entry(key.clone())
+                    .or_default()
+                    .rect = Some(rect);
+                for hit in &mut inner.engine_hits {
+                    if hit.key == key {
+                        hit.resolved_rect = rect;
+                        hit.blocks_original =
+                            hit.resolved_rect != hit.original_rect || !hit.interactive;
+                    }
+                }
+                true
+            } else if let Some(entry) = inner.entries.iter_mut().flatten().find(|e| e.id == id) {
+                match &mut entry.kind {
+                    MountedWidgetKind::Button { state, .. } => {
+                        state.rect = rect;
+                        true
+                    }
+                    MountedWidgetKind::TextField { edit_box, .. } => {
+                        edit_box.x = rect[0];
+                        edit_box.y = rect[1];
+                        edit_box.width = rect[2];
+                        edit_box.height = rect[3];
+                        true
+                    }
+                    MountedWidgetKind::Custom(_) => false,
+                }
+            } else {
+                false
+            }
+        };
+        if ok {
+            self.sync_children_cache();
+        }
+        ok
+    }
+
+    fn set_message(&mut self, id: ScreenWidgetId, message: ApiText) -> bool {
+        let Ok(engine_text): std::result::Result<Text, _> = message.try_into_engine(&()) else {
+            return false;
+        };
+        let ok = {
+            let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+            if !inner.order.contains(&id) {
+                return false;
+            }
+            if let Some(key) = inner
+                .engine_children
+                .iter()
+                .find(|s| s.id == id)
+                .map(|s| s.key.clone())
+            {
+                inner
+                    .engine_overrides
+                    .overrides
+                    .entry(key)
+                    .or_default()
+                    .message = Some(engine_text);
+                true
+            } else if let Some(entry) = inner.entries.iter_mut().flatten().find(|e| e.id == id) {
+                match &mut entry.kind {
+                    MountedWidgetKind::Button { state, .. } => {
+                        state.message = message;
+                        true
+                    }
+                    MountedWidgetKind::TextField { edit_box, .. } => {
+                        edit_box.message = engine_text.plain();
+                        true
+                    }
+                    MountedWidgetKind::Custom(_) => false,
+                }
+            } else {
+                false
+            }
+        };
+        if ok {
+            self.sync_children_cache();
+        }
+        ok
+    }
+
+    fn set_active(&mut self, id: ScreenWidgetId, active: bool) -> bool {
+        let ok = {
+            let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+            if !inner.order.contains(&id) {
+                return false;
+            }
+            if let Some(key) = inner
+                .engine_children
+                .iter()
+                .find(|s| s.id == id)
+                .map(|s| s.key.clone())
+            {
+                let ov = inner
+                    .engine_overrides
+                    .overrides
+                    .entry(key.clone())
+                    .or_default();
+                ov.active = Some(active);
+                let visible = ov.visible.unwrap_or(true) && !ov.removed;
+                for hit in &mut inner.engine_hits {
+                    if hit.key == key {
+                        hit.interactive = visible && active;
+                        hit.blocks_original =
+                            !hit.interactive || hit.resolved_rect != hit.original_rect;
+                    }
+                }
+                true
+            } else if let Some(entry) = inner.entries.iter_mut().flatten().find(|e| e.id == id) {
+                match &mut entry.kind {
+                    MountedWidgetKind::Button { state, .. } => {
+                        state.active = active;
+                        true
+                    }
+                    MountedWidgetKind::TextField { active: slot, .. } => {
+                        *slot = active;
+                        true
+                    }
+                    MountedWidgetKind::Custom(_) => false,
+                }
+            } else {
+                false
+            }
+        };
+        if ok {
+            self.sync_children_cache();
+        }
+        ok
+    }
+
+    fn set_visible(&mut self, id: ScreenWidgetId, visible: bool) -> bool {
+        let ok = {
+            let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+            if !inner.order.contains(&id) {
+                return false;
+            }
+            if let Some((key, default_active)) = inner
+                .engine_children
+                .iter()
+                .find(|s| s.id == id)
+                .map(|s| (s.key.clone(), s.default_active))
+            {
+                let ov = inner
+                    .engine_overrides
+                    .overrides
+                    .entry(key.clone())
+                    .or_default();
+                ov.visible = Some(visible);
+                let active = ov.active.unwrap_or(default_active);
+                let removed = ov.removed;
+                for hit in &mut inner.engine_hits {
+                    if hit.key == key {
+                        hit.interactive = !removed && visible && active;
+                        hit.blocks_original =
+                            !hit.interactive || hit.resolved_rect != hit.original_rect;
+                    }
+                }
+                true
+            } else if let Some(entry) = inner.entries.iter_mut().flatten().find(|e| e.id == id) {
+                match &mut entry.kind {
+                    MountedWidgetKind::Button { state, .. } => {
+                        state.visible = visible;
+                        true
+                    }
+                    MountedWidgetKind::TextField { visible: slot, .. } => {
+                        *slot = visible;
+                        true
+                    }
+                    MountedWidgetKind::Custom(_) => false,
+                }
+            } else {
+                false
+            }
+        };
+        if ok {
+            self.sync_children_cache();
+        }
+        ok
+    }
+
+    fn set_alpha(&mut self, id: ScreenWidgetId, alpha: f32) -> bool {
+        if !alpha.is_finite() {
+            return false;
+        }
+        let ok = {
+            let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+            if !inner.order.contains(&id) {
+                return false;
+            }
+            if let Some(key) = inner
+                .engine_children
+                .iter()
+                .find(|s| s.id == id)
+                .map(|s| s.key.clone())
+            {
+                inner
+                    .engine_overrides
+                    .overrides
+                    .entry(key)
+                    .or_default()
+                    .alpha = Some(alpha);
+                true
+            } else if let Some(entry) = inner.entries.iter_mut().flatten().find(|e| e.id == id) {
+                match &mut entry.kind {
+                    MountedWidgetKind::Button { state, .. } => {
+                        state.alpha = alpha;
+                        true
+                    }
+                    MountedWidgetKind::TextField { alpha: slot, .. } => {
+                        *slot = alpha;
+                        true
+                    }
+                    MountedWidgetKind::Custom(_) => false,
+                }
+            } else {
+                false
+            }
+        };
+        if ok {
+            self.sync_children_cache();
+        }
+        ok
+    }
+
+    fn set_label_text_color(&mut self, id: ScreenWidgetId, color: Option<u32>) -> bool {
+        let ok = {
+            let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+            if !inner.order.contains(&id) {
+                return false;
+            }
+            if let Some(key) = inner
+                .engine_children
+                .iter()
+                .find(|s| s.id == id)
+                .map(|s| s.key.clone())
+            {
+                inner
+                    .engine_overrides
+                    .overrides
+                    .entry(key)
+                    .or_default()
+                    .label_text_color = Some(color);
+                true
+            } else if let Some(entry) = inner.entries.iter_mut().flatten().find(|e| e.id == id) {
+                match &mut entry.kind {
+                    MountedWidgetKind::Button { state, .. } => {
+                        state.label_text_color = color;
+                        true
+                    }
+                    MountedWidgetKind::TextField { .. } | MountedWidgetKind::Custom(_) => false,
+                }
+            } else {
+                false
+            }
+        };
+        if ok {
+            self.sync_children_cache();
+        }
+        ok
+    }
+
+    fn set_tooltip(&mut self, id: ScreenWidgetId, tooltip: Option<WidgetTooltip>) -> bool {
+        let Some(engine_tip) = convert_widget_tooltip(tooltip.clone()) else {
+            return false;
+        };
+        let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+        if !inner.order.contains(&id) {
+            return false;
+        }
+        if let Some(key) = inner
+            .engine_children
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| s.key.clone())
+        {
+            inner
+                .engine_overrides
+                .overrides
+                .entry(key)
+                .or_default()
+                .tooltip = Some(engine_tip);
+            true
+        } else if let Some(entry) = inner.entries.iter_mut().flatten().find(|e| e.id == id) {
+            match &mut entry.kind {
+                MountedWidgetKind::Button { state, .. } => {
+                    state.tooltip = tooltip;
+                    true
+                }
+                MountedWidgetKind::TextField { tooltip: slot, .. } => {
+                    *slot = tooltip;
+                    true
+                }
+                MountedWidgetKind::Custom(_) => false,
+            }
+        } else {
+            false
+        }
+    }
+
+    fn set_tooltip_delay(&mut self, id: ScreenWidgetId, delay: Duration) -> bool {
+        let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+        if !inner.order.contains(&id) {
+            return false;
+        }
+        if let Some(key) = inner
+            .engine_children
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| s.key.clone())
+        {
+            inner
+                .engine_overrides
+                .overrides
+                .entry(key)
+                .or_default()
+                .tooltip_delay = Some(delay);
+            true
+        } else if let Some(entry) = inner.entries.iter_mut().flatten().find(|e| e.id == id) {
+            match &mut entry.kind {
+                MountedWidgetKind::Button { state, .. } => {
+                    state.tooltip_delay = delay;
+                    true
+                }
+                MountedWidgetKind::TextField {
+                    tooltip_delay: slot,
+                    ..
+                } => {
+                    *slot = delay;
+                    true
+                }
+                MountedWidgetKind::Custom(_) => false,
+            }
+        } else {
+            false
+        }
+    }
+
+    fn set_tab_order_group(&mut self, id: ScreenWidgetId, group: i32) -> bool {
+        let ok = {
+            let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+            if !inner.order.contains(&id) {
+                return false;
+            }
+            if let Some(key) = inner
+                .engine_children
+                .iter()
+                .find(|s| s.id == id)
+                .map(|s| s.key.clone())
+            {
+                inner
+                    .engine_overrides
+                    .overrides
+                    .entry(key)
+                    .or_default()
+                    .tab_order_group = Some(group);
+                true
+            } else if let Some(entry) = inner.entries.iter_mut().flatten().find(|e| e.id == id) {
+                match &mut entry.kind {
+                    MountedWidgetKind::Button { state, .. } => {
+                        state.tab_order_group = group;
+                        true
+                    }
+                    MountedWidgetKind::TextField {
+                        tab_order_group: slot,
+                        ..
+                    } => {
+                        *slot = group;
+                        true
+                    }
+                    MountedWidgetKind::Custom(_) => false,
+                }
+            } else {
+                false
+            }
+        };
+        if ok {
+            self.sync_children_cache();
+        }
+        ok
+    }
+
+    fn set_sprites(&mut self, id: ScreenWidgetId, sprites: Option<ButtonSprites>) -> bool {
+        let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+        if !inner.order.contains(&id) {
+            return false;
+        }
+        if let Some(key) = inner
+            .engine_children
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| s.key.clone())
+        {
+            inner
+                .engine_overrides
+                .overrides
+                .entry(key)
+                .or_default()
+                .sprites = Some(sprites);
+            true
+        } else if let Some(entry) = inner.entries.iter_mut().flatten().find(|e| e.id == id) {
+            match &mut entry.kind {
+                MountedWidgetKind::Button { state, .. } => {
+                    state.sprites = sprites;
+                    true
+                }
+                MountedWidgetKind::TextField { .. } | MountedWidgetKind::Custom(_) => false,
+            }
+        } else {
+            false
+        }
+    }
+
+    fn set_override_render_highlighted_sprite(
+        &mut self,
+        id: ScreenWidgetId,
+        highlighted: Option<bool>,
+    ) -> bool {
+        let ok = {
+            let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+            if !inner.order.contains(&id) {
+                return false;
+            }
+            if let Some(key) = inner
+                .engine_children
+                .iter()
+                .find(|s| s.id == id)
+                .map(|s| s.key.clone())
+            {
+                inner
+                    .engine_overrides
+                    .overrides
+                    .entry(key)
+                    .or_default()
+                    .override_render_highlighted_sprite = Some(highlighted);
+                true
+            } else if let Some(entry) = inner.entries.iter_mut().flatten().find(|e| e.id == id) {
+                match &mut entry.kind {
+                    MountedWidgetKind::Button { state, .. } => {
+                        state.override_render_highlighted_sprite = highlighted;
+                        true
+                    }
+                    MountedWidgetKind::TextField { .. } | MountedWidgetKind::Custom(_) => false,
+                }
+            } else {
+                false
+            }
+        };
+        if ok {
+            self.sync_children_cache();
+        }
+        ok
+    }
+
+    fn press(&mut self, id: ScreenWidgetId) -> bool {
+        let generation = self.client.screen_state.0.widgets.generation();
+        enum TargetKind {
+            MountedButton(usize),
+            Engine([f32; 4]),
+        }
+        let target = {
+            let inner = self.client.screen_state.0.widgets.inner.borrow();
+            if !inner.order.contains(&id) {
+                return false;
+            }
+            if let Some(idx) = inner
+                .entries
+                .iter()
+                .position(|slot| slot.as_ref().is_some_and(|e| e.id == id))
+            {
+                let Some(Some(entry)) = inner.entries.get(idx) else {
+                    return false;
+                };
+                if entry.disabled || !entry.owner.is_enabled() {
+                    return false;
+                }
+                match &entry.kind {
+                    MountedWidgetKind::Button { state, .. } if state.visible && state.active => {
+                        Some(TargetKind::MountedButton(idx))
+                    }
+                    _ => None,
+                }
+            } else if let Some(slot) = inner.engine_children.iter().find(|s| s.id == id) {
+                if inner.engine_overrides.suppress_all {
+                    return false;
+                }
+                let ov = inner.engine_overrides.overrides.get(&slot.key);
+                let removed = ov.is_some_and(|o| o.removed);
+                let visible = ov.and_then(|o| o.visible).unwrap_or(true);
+                let active = ov.and_then(|o| o.active).unwrap_or(slot.default_active);
+                if removed || !visible || !active {
+                    return false;
+                }
+                let orig_rect = inner
+                    .engine_hits
+                    .iter()
+                    .find(|h| h.key == slot.key)
+                    .map(|h| h.original_rect)
+                    .unwrap_or(slot.default_rect);
+                Some(TargetKind::Engine(orig_rect))
+            } else {
+                None
+            }
+        };
+        match target {
+            None => false,
+            Some(TargetKind::MountedButton(idx)) => {
+                self.play_audio_button_click();
+                let accepted =
+                    self.with_mounted_widget(idx, |game, entry| entry.press_button(game));
+                if self.client.screen_state.0.widgets.generation() == generation {
+                    self.sync_children_cache();
+                }
+                accepted == Some(true)
+            }
+            Some(TargetKind::Engine([ox, oy, ow, oh])) => {
+                if ow <= 0.0 || oh <= 0.0 {
+                    return false;
+                }
+                let prev_cursor = self.client.cursor;
+                self.client.cursor = (ox + ow * 0.5, oy + oh * 0.5);
+                let handled = self
+                    .with_redirecting_engine_click(|game| {
+                        game.route_screen_button(MouseButton::Left, 0, true, false)
+                    })
+                    .unwrap_or(false);
+                self.settle_title_mode();
+                self.client.cursor = prev_cursor;
+                if self.client.screen_state.0.widgets.generation() == generation {
+                    if handled {
+                        let discovered =
+                            self.client.screen_state.0.widgets.inner.borrow().discovered;
+                        if discovered && !widgets::in_override_pass() {
+                            let collected = self.discover_screen_widgets();
+                            self.reconcile_engine_children(collected);
+                            let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+                            inner.engine_hits =
+                                build_engine_hits(&inner.engine_children, &inner.engine_overrides);
+                        } else if discovered {
+                            self.client
+                                .screen_state
+                                .0
+                                .widgets
+                                .inner
+                                .borrow_mut()
+                                .needs_engine_resync = true;
+                        }
+                    }
+                    self.sync_children_cache();
+                }
+                handled
+            }
         }
     }
 }

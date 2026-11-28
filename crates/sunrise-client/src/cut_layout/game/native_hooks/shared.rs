@@ -584,6 +584,7 @@ pub(in crate::game) mod tests {
                         menu: None,
                         menu_generation: None,
                         dialog_key: None,
+                        sub_page: 0,
                         title: None,
                         rect: [0.0; 4],
                         screen_size: [0.0; 2],

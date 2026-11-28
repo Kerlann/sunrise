@@ -1485,6 +1485,12 @@ impl crate::game::ClientGame<'_> {
                         if self.client.screen_state.0.screen_instance != initial_instance {
                             return Ok(());
                         }
+                        if self.observed_screen_view().is_some() {
+                            self.mounted_widget_mouse_moved(self.cursor());
+                            if self.client.screen_state.0.screen_instance != initial_instance {
+                                return Ok(());
+                            }
+                        }
                         match self.screen_mouse_dragged(delta) {
                             ScreenMousePre::Canceled => return Ok(()),
                             ScreenMousePre::Passed(post) => mouse_post = Some(post),
@@ -1805,8 +1811,12 @@ impl crate::game::ClientGame<'_> {
                         if let Some(child) = native_child {
                             // A hit belongs to the first ordered child even if it declines.
                             // Only the child's own answer can change focus.
-                            let accepted =
-                                self.route_screen_button(button, code, true, double_click)?;
+                            let accepted = self.route_screen_button_with_overrides(
+                                button,
+                                code,
+                                true,
+                                double_click,
+                            )?;
                             if accepted
                                 && button == MouseButton::Left
                                 && self.client.screen_state.0.screen_instance == initial_instance
@@ -1841,8 +1851,12 @@ impl crate::game::ClientGame<'_> {
                             if !handled
                                 && self.client.screen_state.0.screen_instance == initial_instance
                             {
-                                handled =
-                                    self.route_screen_button(button, code, pressed, double_click)?;
+                                handled = self.route_screen_button_with_overrides(
+                                    button,
+                                    code,
+                                    pressed,
+                                    double_click,
+                                )?;
                             }
                         }
                         if inventory_release
@@ -2229,6 +2243,14 @@ impl crate::game::ClientGame<'_> {
         title_settled
     }
     pub fn hud_layers(&mut self, size: [u32; 2]) -> HudBatch {
+        let standalone = !sunrise_client::widgets::in_override_pass();
+        let mut batch = self.with_screen_widget_overrides(|this| this.hud_layers_body(size));
+        if standalone {
+            self.draw_pending_widget_tooltip(&mut batch);
+        }
+        batch
+    }
+    fn hud_layers_body(&mut self, size: [u32; 2]) -> HudBatch {
         use sunrise_client::gui_layers::VanillaGuiLayer;
 
         self.client.hud_status_heights = Default::default();
@@ -2251,6 +2273,7 @@ impl crate::game::ClientGame<'_> {
         if self.client.screen == Screen::Win {
             let drawn = self.draw_screen_with_pre_hook(&mut batch);
             if drawn {
+                self.advance_win_screen();
                 self.draw_win_screen(&mut batch);
             }
             // The early return skips the match below: the hooks still see the
@@ -2260,8 +2283,12 @@ impl crate::game::ClientGame<'_> {
             return batch;
         }
         if self.client.screen == Screen::Options && self.client.title.0.is_some() {
+            self.sync_options_controller_context();
             let drawn = self.draw_screen_with_pre_hook(&mut batch);
             self.draw_options(&mut batch, drawn);
+            if drawn {
+                self.show_calibration((w, h));
+            }
             self.publish_screen_regions(&batch, None);
             self.draw_screen_with_post_hook(&mut batch);
             return batch;
@@ -2695,11 +2722,17 @@ impl crate::game::ClientGame<'_> {
         if screen == Screen::Options {
             self.flush_skin_slots();
             self.update_remote_skins();
+            self.sync_options_controller_context();
         }
         let drawn = self.draw_screen_with_pre_hook(&mut batch);
         let mut region_screen = None;
         match screen {
-            Screen::Options => self.draw_options(&mut batch, drawn),
+            Screen::Options => {
+                self.draw_options(&mut batch, drawn);
+                if drawn {
+                    self.show_calibration((w, h));
+                }
+            }
             _ if !drawn => {}
             Screen::Paused if self.client.pause_menu => self.draw_pause_menu(&mut batch),
             // PauseScreen(false): only its title, at the top.
@@ -2726,7 +2759,10 @@ impl crate::game::ClientGame<'_> {
                     sunrise_client::screen_draw::RenderPhase::Foreground,
                 );
             }
-            Screen::GameModeSwitcher => self.draw_gamemode_switcher(&mut batch),
+            Screen::GameModeSwitcher => {
+                self.update_gamemode_switcher_hover(w, h);
+                self.draw_gamemode_switcher(&mut batch);
+            }
             Screen::Dead => self.draw_death_screen(&mut batch),
             Screen::Stats => self.draw_stats(&mut batch),
             Screen::Advancements => self.draw_advancements(&mut batch),
@@ -2793,23 +2829,27 @@ impl crate::game::ClientGame<'_> {
         // The pack prompt replaces the connecting screen (setScreen), but
         // in game it opens over the world.
         self.settle_title_toasts();
-        let mut batch = if (self.client.server_packs.0.prompt.is_some()
-            || self.client.code_of_conduct.is_some()
-            || self.dialog_open())
-            && self.common.player.is_none()
-        {
-            gui
-        } else {
-            self.hud_layers(size)
-        };
-        // Vanilla's confirmation replaces the dialog as the screen.
-        if self.client.command_prompt.0.is_none() {
-            self.draw_dialog(&mut batch);
-        }
-        self.draw_pack_prompt(&mut batch);
-        self.draw_code_of_conduct(&mut batch);
-        self.draw_link_prompt(&mut batch);
-        self.draw_command_prompt(&mut batch);
+        let mut batch = self.with_screen_widget_overrides(|this| {
+            let mut batch = if (this.client.server_packs.0.prompt.is_some()
+                || this.client.code_of_conduct.is_some()
+                || this.dialog_open())
+                && this.common.player.is_none()
+            {
+                gui
+            } else {
+                this.hud_layers(size)
+            };
+            // Vanilla's confirmation replaces the dialog as the screen.
+            if this.client.command_prompt.0.is_none() {
+                this.draw_dialog(&mut batch);
+            }
+            this.draw_pack_prompt(&mut batch);
+            this.draw_code_of_conduct(&mut batch);
+            this.draw_link_prompt(&mut batch);
+            this.draw_command_prompt(&mut batch);
+            batch
+        });
+        self.draw_pending_widget_tooltip(&mut batch);
         self.draw_context_menu(&mut batch);
         if let Some((bar, fade)) = reload_overlay {
             self.draw_reload_overlay(&mut batch, bar, fade);
@@ -2904,7 +2944,7 @@ impl crate::game::ClientGame<'_> {
     }
     /// Window bookkeeping, shortcuts and overlays before dispatching to the screen. Returns
     /// `true` when an early handler consumed the event.
-    fn screen_mouse_moved(&self, delta: [f32; 2]) -> bool {
+    fn screen_mouse_moved(&mut self, delta: [f32; 2]) -> bool {
         if self.pad_synthetic_input()
             || delta == [0.0; 2]
             || self.client.screen_grab

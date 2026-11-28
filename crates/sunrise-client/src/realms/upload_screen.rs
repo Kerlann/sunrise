@@ -496,25 +496,14 @@ impl Screen {
                         );
                     }
                     // `WorldListEntry.extractContent`: the world's 32x32 `icon.png` at the
-                    // content origin (a missing icon shows the unknown-server sprite),
-                    // then three lines at contentY+1/+12/+21, the text at contentX + 35.
+                    // content origin (decoded in `poll`; a missing icon shows the unknown-server
+                    // sprite), then three lines at contentY+1/+12/+21, the text at contentX + 35.
                     let pixels = self.saves.as_ref().and_then(|saves| {
                         let path = saves.join(&world.folder).join("icon.png");
-                        let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok()?;
-                        let mut icons = self.world_icons.borrow_mut();
-                        let cached = icons
-                            .entry(path.clone())
-                            .or_insert_with(|| (std::time::UNIX_EPOCH, None));
-                        if cached.0 != modified {
-                            *cached = (
-                                modified,
-                                crate::hud::decode(&path)
-                                    .ok()
-                                    .filter(|(w, h, _)| *w == 64 && *h == 64)
-                                    .map(|(_, _, pixels)| pixels),
-                            );
-                        }
-                        cached.1.clone()
+                        self.world_icons
+                            .borrow()
+                            .get(&path)
+                            .and_then(|(_, px)| px.clone())
                     });
                     let icon = pixels
                         .as_deref()

@@ -48,7 +48,7 @@ pub(crate) fn exercise_blank_inventory_presses() {
     impl Hooks for Observer {
         fn screen_mouse_button_pressed_post(
             &self,
-            _: &dyn ClientHost,
+            _: &mut dyn ClientHost,
             event: &mut ScreenMouseButtonPressedPostEvent<'_>,
         ) {
             self.0.lock().unwrap().push((

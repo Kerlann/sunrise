@@ -547,9 +547,8 @@ impl crate::game::ClientGame<'_> {
     ) -> (i32, i32, i32, i32) {
         (width as i32 / 2 - 100, height as i32 - 40, 200, 20)
     }
-    /// The Leave Bed button's draws. It registers as a button
-    /// (`widgets::record`), so the pad's and the keyboard's focus reach it (the
-    /// pad's starts on it) and `sunrise-ctl click-button` finds it.
+    /// The Leave Bed button's draws; `screen_draw::button` registers it as a button so
+    /// keyboard focus and `sunrise-ctl click-button` reach it.
     pub(in crate::game::client_side) fn leave_bed_draws(
         m: &Measure,
         mouse: (i32, i32),
@@ -559,11 +558,6 @@ impl crate::game::ClientGame<'_> {
             "multiplayer.stopSleeping",
             "Leave Bed",
         ));
-        sunrise_client::widgets::record(
-            &label.plain(),
-            [x as f32, y as f32, w as f32, h as f32],
-            true,
-        );
         let mut button = Vec::new();
         sunrise_client::screen_draw::button(
             &mut button,
@@ -2158,6 +2152,15 @@ pub(in crate::game) mod tests {
         crate::game::ClientGame::leave_bed_draws(&m, (0, 0), (x, y, w, h));
         sunrise_client::widgets::end_frame(u64::MAX);
 
+        let bed_rect = [x as f32, y as f32, w as f32, h as f32];
+        assert_eq!(
+            sunrise_client::widgets::last()
+                .iter()
+                .filter(|w| [w.x, w.y, w.w, w.h] == bed_rect)
+                .count(),
+            1,
+            "Leave Bed is recorded exactly once through screen_draw::button"
+        );
         let targets = key_focus::drawn_targets();
         let bed = targets
             .iter()

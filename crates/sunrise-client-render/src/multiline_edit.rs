@@ -467,44 +467,70 @@ impl MultiLineEdit {
     /// `extractWidgetRenderState`: the frame, the text under a scissor, the
     /// scroll bar and the character count.
     pub fn draw(&self, batch: &mut HudBatch, atlas: &HudAtlas) {
-        crate::widgets::target_as(
-            [self.x, self.y, self.width, self.height],
-            crate::widgets::Kind::Field,
-        );
-        let sprite = if self.focused {
+        let orig_rect = [self.x, self.y, self.width, self.height];
+        let (rect, active, alpha, override_hl) =
+            match crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
+                bucket: crate::widgets::WidgetBucket::Field,
+                rect: orig_rect,
+                label: None,
+                explicit_key: None,
+                active: true,
+                hovered: false,
+                focused: self.focused,
+                tab_order_group: 0,
+            }) {
+                crate::widgets::ResolvedEngineWidget::Skip => return,
+                crate::widgets::ResolvedEngineWidget::Unchanged => (orig_rect, true, 1.0, None),
+                crate::widgets::ResolvedEngineWidget::Draw(props) => (
+                    props.rect,
+                    props.active,
+                    props.alpha,
+                    props.override_render_highlighted_sprite,
+                ),
+            };
+        let [rx, ry, rw, rh] = rect;
+        let (dx, dy) = (rx - self.x, ry - self.y);
+        if active {
+            crate::widgets::target_as(rect, crate::widgets::Kind::Field);
+        }
+        let lit = override_hl.unwrap_or(self.focused && active);
+        let sprite = if lit {
             "widget/text_field_highlighted"
         } else {
             "widget/text_field"
         };
-        ui::nine_slice(
-            batch,
-            atlas,
-            sprite,
-            self.x,
-            self.y,
-            self.width,
-            self.height,
-            u32::MAX,
-        );
+        let sprite_tint = crate::widgets::white_abgr_alpha(alpha);
+        ui::nine_slice(batch, atlas, sprite, rx, ry, rw, rh, sprite_tint);
         let start = batch.vertices.len();
         self.draw_contents(batch, atlas);
-        batch.clip_since(
-            start,
-            self.x + 1.0,
-            self.y + 1.0,
-            self.x + self.width - 1.0,
-            self.y + self.height - 1.0,
-        );
+        if dx != 0.0 || dy != 0.0 {
+            for v in &mut batch.vertices[start..] {
+                v.pos[0] += dx;
+                v.pos[1] += dy;
+            }
+        }
+        if (alpha - 1.0).abs() > f32::EPSILON {
+            for v in &mut batch.vertices[start..] {
+                v.color = crate::widgets::scale_abgr_alpha(v.color, alpha);
+            }
+        }
+        batch.clip_since(start, rx + 1.0, ry + 1.0, rx + rw - 1.0, ry + rh - 1.0);
         // Its text scrolls with its caret: not a list for the focus to step through.
+        let scroll_start = batch.vertices.len();
         ui::scrollbar_sprites(
             batch,
             atlas,
-            self.x + self.width,
-            self.y,
-            self.y + self.height,
+            rx + rw,
+            ry,
+            ry + rh,
             self.content_height(),
             self.scroll.amount,
         );
+        if (alpha - 1.0).abs() > f32::EPSILON {
+            for v in &mut batch.vertices[scroll_start..] {
+                v.color = crate::widgets::scale_abgr_alpha(v.color, alpha);
+            }
+        }
         if let Some(limit) = self.character_limit {
             let count = crate::lang::tr(
                 "gui.multiLineEditBox.character_limit",
@@ -514,9 +540,9 @@ impl MultiLineEdit {
             batch.text(
                 atlas,
                 &count,
-                self.x + self.width - width,
-                self.y + self.height + 4.0,
-                rgba(160, 160, 160, 255),
+                rx + rw - width,
+                ry + rh + 4.0,
+                crate::widgets::scale_abgr_alpha(rgba(160, 160, 160, 255), alpha),
                 true,
             );
         }
