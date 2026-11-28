@@ -422,3 +422,303 @@ impl crate::game::ServerGame<'_> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::{ServerGame, native_guest_turn_tests::with_guests};
+    use mod_api::{Hooks, HostSide, ModEntry, ServerHost};
+    use std::sync::{Arc, Mutex};
+    use sunrise_core::{
+        geometry::Vec3,
+        nbt::Tag,
+        random::{LegacyRandom, RandomSource},
+    };
+    use sunrise_game_data::nbt_value::{float, string, text};
+    use sunrise_sim::lan::{
+        configuration_tasks::{PreparedSpawn, SpawnLevel},
+        playerdata,
+    };
+
+    const CONN: u32 = 12;
+    const UUID: u128 = 12;
+    const PREPARED: [f64; 3] = [6.5, 70.0, 1.5];
+    const SAVED: [f64; 3] = [4.5, 69.0, 2.5];
+
+    fn prepared_join(game: &mut ServerGame<'_>, held: bool) {
+        game.server.world_root = game.server.save.0.root.clone();
+        let tag = Tag::compound([
+            (
+                "Pos",
+                Tag::List(SAVED.map(|v| Tag::Double(v.to_bits())).to_vec()),
+            ),
+            ("Health", Tag::Float(25.0f32.to_bits())),
+            (
+                "attributes",
+                Tag::List(
+                    [("minecraft:max_health", 30.0f64), ("minecraft:scale", 0.5)]
+                        .map(|(name, base)| {
+                            Tag::compound([
+                                ("id", string(name)),
+                                ("base", Tag::Double(base.to_bits())),
+                            ])
+                        })
+                        .to_vec(),
+                ),
+            ),
+        ]);
+        sunrise_sim::save::write_dat(&playerdata::path(&game.server.world_root, UUID), tag)
+            .unwrap();
+        game.server
+            .lan
+            .as_mut()
+            .unwrap()
+            .hub
+            .update_guest(CONN, |guest| {
+                assert!(guest.motion.is_none());
+                guest.placed = false;
+                guest.expected = held;
+            })
+            .unwrap();
+        game.lan_guest_joined(
+            CONN,
+            &[],
+            PREPARED,
+            Some(PreparedSpawn {
+                level: SpawnLevel {
+                    id: Dim::Overworld.id(),
+                    generation: 0,
+                },
+                position: PREPARED,
+                rotation: [40.0, 10.0],
+            }),
+        );
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn prepared_join_applies_saved_entities_and_player_data_before_placing_the_same_body() {
+        #[derive(Debug, PartialEq, Eq)]
+        enum Stage {
+            Entities,
+            Construct,
+            File,
+            Commands,
+            Placed,
+            Login,
+        }
+        struct Observe(Arc<Mutex<Vec<Stage>>>);
+        #[mod_api::__subscriptions]
+        impl Hooks for Observe {
+            fn entities_load(
+                &self,
+                _: &mut dyn ServerHost,
+                event: &mut mod_api::EntitiesLoadEvent<'_>,
+            ) {
+                assert_eq!((event.chunk, event.count), ([0, 0], 1));
+                self.0.lock().unwrap().push(Stage::Entities);
+            }
+            fn entity_constructing(
+                &self,
+                host: HostSide<'_>,
+                event: &mut mod_api::EntityConstructingEvent,
+            ) {
+                if matches!(host, HostSide::Server(_))
+                    && event.holder == mod_api::Holder::Player(UUID)
+                {
+                    self.0.lock().unwrap().push(Stage::Construct);
+                }
+            }
+            fn player_load_from_file(
+                &self,
+                host: &mut dyn ServerHost,
+                event: &mut mod_api::PlayerLoadFromFileEvent<'_>,
+            ) {
+                assert_eq!(event.player, UUID);
+                assert!(host.player(UUID).is_none());
+                self.0.lock().unwrap().push(Stage::File);
+            }
+            fn player_commands_sent(
+                &self,
+                host: &dyn mod_api::Host,
+                event: &mut mod_api::PlayerCommandsSentEvent<'_>,
+            ) -> Option<mod_api::CommandTreeSelection> {
+                assert_eq!(event.player.uuid(), UUID);
+                let living = host
+                    .living(event.player.entity())
+                    .expect("joining player's lent body");
+                assert_eq!(living.max_health(host), Some(30.0));
+                assert_eq!(living.health(host), Some(25.0));
+                assert_eq!(event.player.entity().position(host), Some(PREPARED));
+                self.0.lock().unwrap().push(Stage::Commands);
+                None
+            }
+            fn client_information_updated(
+                &self,
+                host: &mut dyn ServerHost,
+                event: &mut mod_api::ClientInformationUpdatedEvent<'_>,
+            ) {
+                assert_eq!(event.player, UUID);
+                assert!(host.player(UUID).is_some());
+                self.0.lock().unwrap().push(Stage::Placed);
+            }
+            fn player_logged_in(
+                &self,
+                host: &mut dyn ServerHost,
+                event: &mut mod_api::PlayerLoggedInEvent<'_>,
+            ) {
+                assert_eq!(event.player, UUID);
+                assert!(host.player(UUID).is_some());
+                self.0.lock().unwrap().push(Stage::Login);
+            }
+        }
+        let stages = Arc::new(Mutex::new(Vec::new()));
+        let mods = vec![ModEntry::new(
+            "prepared-join-order",
+            Box::new(Observe(stages.clone())),
+        )]
+        .into();
+        mod_platform::testing::with_mods(mods, || {
+            with_guests(|game| {
+                game.world.loaded_entities.push((
+                    (0, 0),
+                    vec![
+                        Tag::compound([
+                            ("id", string("minecraft:marker")),
+                            ("UUID", Tag::IntArray(vec![100, 2, 3, 4])),
+                            (
+                                "Pos",
+                                Tag::List(SAVED.map(|v| Tag::Double(v.to_bits())).to_vec()),
+                            ),
+                        ])
+                        .into(),
+                    ],
+                ));
+                prepared_join(game, false);
+                let guest = game.server.lan.as_ref().unwrap().hub.guest(CONN).unwrap();
+                assert!(guest.placed);
+                let body = guest
+                    .motion
+                    .as_deref()
+                    .expect("body already installed on join");
+                // A Handle names one instance of one map, not its equal attribute value.
+                // The loan moves the body value out and reboxes it on return.
+                let key = body.attributes.key("minecraft:scale").unwrap();
+                let identity = body.attributes.lookup(Some(&key)).unwrap();
+                let name = guest.name.clone();
+                game.announce_login(UUID, &name);
+                game.as_guest(CONN, |game| {
+                    let attributes = &game.player.as_ref().unwrap().attributes;
+                    assert!(attributes.lookup(Some(&key)).unwrap() == identity);
+                })
+                .unwrap();
+                let body = game
+                    .server
+                    .lan
+                    .as_ref()
+                    .unwrap()
+                    .hub
+                    .guest(CONN)
+                    .unwrap()
+                    .motion
+                    .as_deref()
+                    .unwrap();
+                assert!(body.attributes.lookup(Some(&key)).unwrap() == identity);
+                assert_eq!(
+                    *stages.lock().unwrap(),
+                    [
+                        Stage::Entities,
+                        Stage::Construct,
+                        Stage::File,
+                        Stage::Commands,
+                        Stage::Placed,
+                        Stage::Login
+                    ]
+                );
+            });
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn held_partial_import_confirms_the_merged_save_without_reseeding_the_body() {
+        with_guests(|game| {
+            prepared_join(game, true);
+            let hub = &mut game.server.lan.as_mut().unwrap().hub;
+            hub.transfers = Some(arrivals::Transfers::new(Default::default()));
+            let mut expected = LegacyRandom::new(816);
+            let identity = hub
+                .update_guest(CONN, |guest| {
+                    assert!(guest.held && !guest.placed);
+                    let body = guest
+                        .motion
+                        .as_deref_mut()
+                        .expect("held join, before any lend");
+                    body.random.set_seed(816);
+                    assert_eq!(body.random.next_long(), expected.next_long());
+                    std::ptr::from_ref(body)
+                })
+                .unwrap();
+
+            let handover = arrivals::handover_text(1);
+            let uuid = sunrise_protocol::crypto::uuid_string(UUID);
+            let bytes = sunrise_core::nbt::write_named(
+                &sunrise_core::nbt::NamedTag {
+                    name: "".into(),
+                    tag: Tag::compound([("XpLevel", Tag::Int(28))]),
+                },
+                sunrise_core::nbt::Limits::saved(),
+            )
+            .unwrap();
+            let request = json!({
+                "record": {
+                    "version": arrivals::RECORD_VERSION,
+                    "data_version": sunrise_world::DATA_VERSION,
+                    "uuid": uuid,
+                    "handover": handover,
+                    "player": sunrise_sim::lan::base64(&bytes),
+                },
+                "parts": ["experience"],
+                "place": false,
+            });
+            let imported = game.player_request("player-import", &format!("{uuid} {request}"));
+            assert_eq!(imported["ok"], true, "{imported}");
+            assert_eq!(imported["placed"], false);
+            let confirmed = game.player_request("player-confirm", &format!("{uuid} {handover}"));
+            assert_eq!(confirmed["ok"], true, "{confirmed}");
+            assert_eq!(confirmed["placed"], true);
+            let saved =
+                sunrise_sim::save::read_dat(&playerdata::path(&game.server.world_root, UUID))
+                    .unwrap();
+            let mut level = sunrise_sim::save::Level::default();
+            level.read_player(&saved);
+            assert_eq!(level.xp_level, 28);
+            assert_eq!(level.position, Some(PREPARED));
+            assert_eq!(level.health, 25.0);
+            let Some(Tag::List(attributes)) = saved.get("attributes") else {
+                panic!("saved attributes")
+            };
+            let scale = attributes
+                .iter()
+                .find(|a| text(a.get("id")).as_deref() == Some("minecraft:scale"))
+                .unwrap();
+            assert_eq!(float(scale.get("base")), Some(0.5));
+            game.server
+                .lan
+                .as_mut()
+                .unwrap()
+                .hub
+                .update_guest(CONN, |guest| {
+                    assert!(guest.placed && !guest.held);
+                    let body = guest.motion.as_deref_mut().unwrap();
+                    assert_eq!(std::ptr::from_ref(body), identity);
+                    assert_eq!(
+                        body.position,
+                        Vec3::new(PREPARED[0], PREPARED[1], PREPARED[2])
+                    );
+                    assert_eq!(body.random.next_long(), expected.next_long());
+                })
+                .unwrap();
+        });
+    }
+}
