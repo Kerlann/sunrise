@@ -44,6 +44,8 @@ explicit id and keeps `Form::tag` for the convention tag, so the material is sti
 
 {{#include ../../examples/src/material.rs:explicit}}
 
+The function only requests the item key and builds the tag name. Registering the item under that key, and listing it in the child tag file, are separate steps.
+
 The id and the tag are independent by design. `amethyst_gem` registers `mymod:amethyst_shard` and
 `c:gems/amethyst`; a GE-era metal can register `mymod:steel_gem` and still join `c:gems/steel`.
 
@@ -53,7 +55,7 @@ An item form's id goes to `Registrar::item_key` and its child tag is an **item**
 storage block's id goes to `Registrar::block_key` and its child tag is a **block** tag. The shipped
 `c:ores` and `c:storage_blocks` parents exist in both registries, for the block and for its block
 item; when a recipe should match the item form of an ore or storage block, add the item membership
-too (`data/c/tags/item/ores/steel.json`, or the storage-block equivalent).
+too (`data/c/tags/item/ores/steel.json`, or the storage-block equivalent). The item child also needs a line in the item parent (`#c:ores/steel` in `data/c/tags/item/ores.json`) when recipes query that parent.
 
 ## Declare the family
 
@@ -69,17 +71,17 @@ Writing only the child file does not put the material in its family. A recipe th
 `c:ingots` with its own value list (`#c:ingots/copper`, `#c:ingots/iron`, …), and that file alone does
 not mention steel.
 
-Add both memberships, in the `c` tag namespace:
+Add both memberships, in the `c` tag namespace. First `data/c/tags/item/ingots/steel.json`, the child the mod defines:
 
 ```json
-// data/c/tags/item/ingots/steel.json — the child the mod defines
 {
   "values": ["mymod:steel_ingot"]
 }
 ```
 
+Then `data/c/tags/item/ingots.json`, which appends to the parent Sunrise ships:
+
 ```json
-// data/c/tags/item/ingots.json — append to the parent Sunrise ships
 {
   "values": ["#c:ingots/steel"]
 }

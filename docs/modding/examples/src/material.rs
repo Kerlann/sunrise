@@ -41,7 +41,8 @@ pub fn declare_steel_items(registrar: &mut dyn Registrar, namespace: &str) -> Ve
 
 // ANCHOR: explicit
 /// A gem whose id is not the suggestion: vanilla's gem is `amethyst_shard`, not `amethyst`, but it
-/// still joins `c:gems/amethyst`, so the convention tag is independent of the id the mod picks.
+/// still joins `c:gems/amethyst`, so the convention tag is independent of the id the mod picks. This
+/// requests the key and builds the tag name; registering the item and its tag membership are separate.
 pub fn amethyst_gem(registrar: &mut dyn Registrar, namespace: &str) -> (ItemKey, String) {
     let id = registrar.item_key(&format!("{namespace}:amethyst_shard"));
     let tag = Form::Gem
