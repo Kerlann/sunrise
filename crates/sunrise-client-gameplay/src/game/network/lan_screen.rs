@@ -104,6 +104,43 @@ enum Button {
     Cancel,
 }
 
+impl Button {
+    fn tag(self) -> u64 {
+        match self {
+            Self::DefaultMode => 0,
+            Self::PersonalMode => 1,
+            Self::Cheats => 2,
+            Self::Difficulty => 3,
+            Self::Lock => 4,
+            Self::GameRules => 5,
+            Self::Restrictions => 6,
+            Self::Lan => 7,
+            Self::CommandAccess => 8,
+            Self::Force => 9,
+            Self::Apply => 10,
+            Self::Cancel => 11,
+        }
+    }
+
+    fn from_tag(tag: u64) -> Option<Self> {
+        match tag {
+            0 => Some(Self::DefaultMode),
+            1 => Some(Self::PersonalMode),
+            2 => Some(Self::Cheats),
+            3 => Some(Self::Difficulty),
+            4 => Some(Self::Lock),
+            5 => Some(Self::GameRules),
+            6 => Some(Self::Restrictions),
+            7 => Some(Self::Lan),
+            8 => Some(Self::CommandAccess),
+            9 => Some(Self::Force),
+            10 => Some(Self::Apply),
+            11 => Some(Self::Cancel),
+            _ => None,
+        }
+    }
+}
+
 fn on_off(on: bool) -> Text {
     Text::translate(if on { "options.on" } else { "options.off" }, &[])
 }
@@ -912,17 +949,19 @@ impl crate::game::ClientGame<'_> {
             let is_focused = o.popup_focus == Some(i);
             let hover = ui::hovered(self.client.cursor, bx, by, POPUP_BUTTON, 20.0) || is_focused;
             let label = Text::translate(key, &[]);
-            ui::button(
-                batch,
-                atlas,
-                bx,
-                by,
-                POPUP_BUTTON,
-                20.0,
-                &label,
-                true,
-                hover,
-            );
+            widgets::with_native_action((1u64 << 32) | (i as u64), || {
+                ui::button(
+                    batch,
+                    atlas,
+                    bx,
+                    by,
+                    POPUP_BUTTON,
+                    20.0,
+                    &label,
+                    true,
+                    hover,
+                );
+            });
         }
         self.draw_screen_phase(batch, sunrise_client::screen_draw::RenderPhase::Foreground);
     }
@@ -963,7 +1002,9 @@ impl crate::game::ClientGame<'_> {
                 == Some(0);
             let hover = ui::hovered(self.client.cursor, ax, ay, 200.0, 20.0) || is_focused;
             let label = Text::translate("chat_restriction.chat_disabled_by_options.action", &[]);
-            ui::button(batch, atlas, ax, ay, 200.0, 20.0, &label, true, hover);
+            widgets::with_native_action(2u64 << 32, || {
+                ui::button(batch, atlas, ax, ay, 200.0, 20.0, &label, true, hover);
+            });
         }
         batch.clip_since(first, 0.0, r.area.0, w, r.area.1);
         let (dx, dy) = Restrictions::done(w, h);
@@ -972,18 +1013,20 @@ impl crate::game::ClientGame<'_> {
         });
         let hover = ui::hovered(self.client.cursor, dx, dy, 200.0, 20.0) || is_focused;
         let label = Text::translate("gui.done", &[]);
-        ui::action_button(
-            batch,
-            atlas,
-            sunrise_client::widgets::Action::Done,
-            dx,
-            dy,
-            200.0,
-            20.0,
-            &label,
-            true,
-            hover,
-        );
+        widgets::with_native_action((2u64 << 32) | 1, || {
+            ui::action_button(
+                batch,
+                atlas,
+                sunrise_client::widgets::Action::Done,
+                dx,
+                dy,
+                200.0,
+                20.0,
+                &label,
+                true,
+                hover,
+            );
+        });
         self.draw_screen_phase(batch, sunrise_client::screen_draw::RenderPhase::Foreground);
     }
 
@@ -1060,15 +1103,17 @@ impl crate::game::ClientGame<'_> {
                 let lock_rect = [bx, by, 20.0, 20.0];
                 let lock_label = o.label(b);
                 let (rect, active, hover, alpha, override_hl, tab_order_group, tooltip_hint, msg) =
-                    match widgets::resolve_engine_widget(widgets::EngineWidgetInput {
-                        bucket: widgets::WidgetBucket::Button,
-                        rect: lock_rect,
-                        label: Some(&lock_label),
-                        explicit_key: Some("difficulty.lock.title"),
-                        active,
-                        hovered: hover,
-                        focused: is_focused,
-                        tab_order_group: 0,
+                    match widgets::with_native_action(b.tag(), || {
+                        widgets::resolve_engine_widget(widgets::EngineWidgetInput {
+                            bucket: widgets::WidgetBucket::Button,
+                            rect: lock_rect,
+                            label: Some(&lock_label),
+                            explicit_key: Some("difficulty.lock.title"),
+                            active,
+                            hovered: hover,
+                            focused: is_focused,
+                            tab_order_group: 0,
+                        })
                     }) {
                         widgets::ResolvedEngineWidget::Skip => continue,
                         widgets::ResolvedEngineWidget::Unchanged => {
@@ -1114,16 +1159,18 @@ impl crate::game::ClientGame<'_> {
                 batch.sprite_scaled(atlas, &sprite, rect[0], rect[1], rect[2], rect[3], tint);
                 continue;
             }
-            ui::button_as(
-                batch,
-                atlas,
-                [bx, by, bw, 20.0],
-                &o.label(b),
-                active,
-                hover,
-                None,
-                |rect| o.narration(b, rect, tr),
-            );
+            widgets::with_native_action(b.tag(), || {
+                ui::button_as(
+                    batch,
+                    atlas,
+                    [bx, by, bw, 20.0],
+                    &o.label(b),
+                    active,
+                    hover,
+                    None,
+                    |rect| o.narration(b, rect, tr),
+                );
+            });
             if b == Button::Lan {
                 // The port box is added after it.
                 port_at = Some(widgets::narratables_mark());
@@ -1143,7 +1190,9 @@ impl crate::game::ClientGame<'_> {
                 rgba(0xDF, 0x50, 0x50, 255)
             };
             let mark = widgets::narratables_mark();
-            o.port.draw(batch, atlas, None);
+            widgets::with_native_action(7u64 << 32, || {
+                o.port.draw(batch, atlas, None);
+            });
             // updatePortControlsState: the box is active with LAN only.
             let lan = o.lan;
             widgets::last_narratable(|n| {
@@ -1189,18 +1238,20 @@ impl crate::game::ClientGame<'_> {
                 Button::Apply => sunrise_client::widgets::Action::Apply,
                 _ => sunrise_client::widgets::Action::Cancel,
             };
-            ui::action_button(
-                batch,
-                atlas,
-                action,
-                bx,
-                by,
-                bw,
-                20.0,
-                &o.label(b),
-                active,
-                hover,
-            );
+            widgets::with_native_action(b.tag(), || {
+                ui::action_button(
+                    batch,
+                    atlas,
+                    action,
+                    bx,
+                    by,
+                    bw,
+                    20.0,
+                    &o.label(b),
+                    active,
+                    hover,
+                );
+            });
         }
         let tooltip = WorldOptions::port_tooltip(&o.port, cursor, o.remote);
         if active_screen {
@@ -1306,6 +1357,168 @@ impl crate::game::ClientGame<'_> {
         false
     }
 
+    pub(in crate::game) fn world_options_press_child(
+        &mut self,
+        tag: u64,
+        mapped_cursor: (f32, f32),
+    ) -> bool {
+        let Some(mut o) = self.client.world_options.0.take() else {
+            return false;
+        };
+        let (w, h) = self.gui_size();
+        match o.view {
+            View::GameRules => {
+                let atlas = &self.client.gui.atlas;
+                let (clicked, exit, handled) =
+                    o.rules.as_mut().map_or((false, None, false), |rules| {
+                        rules.press_child(atlas, tag, mapped_cursor)
+                    });
+                self.client.world_options.0 = Some(o);
+                if clicked {
+                    self.play_audio_button_click();
+                }
+                if let Some(exit) = exit {
+                    self.close_game_rules(exit);
+                }
+                handled
+            }
+            View::LockQuestion => match tag {
+                t if t == (1u64 << 32) => {
+                    self.play_audio_button_click();
+                    self.apply_and_close_world_options(o);
+                    true
+                }
+                t if t == ((1u64 << 32) | 1) => {
+                    self.play_audio_button_click();
+                    o.view = View::Options;
+                    self.client.world_options.0 = Some(o);
+                    true
+                }
+                _ => {
+                    self.client.world_options.0 = Some(o);
+                    false
+                }
+            },
+            View::Restrictions => match tag {
+                t if t == (2u64 << 32) => {
+                    let r = Restrictions::new(
+                        &self.client.gui.atlas.font,
+                        self.client.settings.chat_visibility,
+                        (w, h),
+                    );
+                    if r.action.is_some() {
+                        self.play_audio_button_click();
+                        o.view = View::Options;
+                        self.client.world_options.0 = Some(o);
+                        self.open_options_at(false, sunrise_client::options_ui::Page::Chat);
+                        self.client.options_to_world_options = true;
+                        true
+                    } else {
+                        self.client.world_options.0 = Some(o);
+                        false
+                    }
+                }
+                t if t == ((2u64 << 32) | 1) => {
+                    self.play_audio_button_click();
+                    o.view = View::Options;
+                    self.client.world_options.0 = Some(o);
+                    true
+                }
+                _ => {
+                    self.client.world_options.0 = Some(o);
+                    false
+                }
+            },
+            View::Options => {
+                if tag == (7u64 << 32) {
+                    if o.remote {
+                        self.client.world_options.0 = Some(o);
+                        return false;
+                    }
+                    o.port.focused = true;
+                    o.port.reset_blink();
+                    o.port
+                        .click(&self.client.gui.atlas, mapped_cursor.0, false, false);
+                    self.client.world_options.0 = Some(o);
+                    return true;
+                }
+                let Some(b) = Button::from_tag(tag) else {
+                    self.client.world_options.0 = Some(o);
+                    return false;
+                };
+                if o.remote
+                    && matches!(
+                        b,
+                        Button::DefaultMode
+                            | Button::PersonalMode
+                            | Button::Cheats
+                            | Button::Lan
+                            | Button::CommandAccess
+                            | Button::Force
+                    )
+                {
+                    self.client.world_options.0 = Some(o);
+                    return false;
+                }
+                if !o.active(b) {
+                    self.client.world_options.0 = Some(o);
+                    return false;
+                }
+                o.port.focused = false;
+                self.apply_world_options_button(o, b);
+                true
+            }
+        }
+    }
+
+    fn apply_world_options_button(&mut self, mut o: WorldOptions, b: Button) {
+        o.focused_button = Some(b);
+        self.play_audio_button_click();
+        match b {
+            Button::DefaultMode => o.default_mode = (o.default_mode + 1) % 4,
+            Button::PersonalMode => o.personal_mode = (o.personal_mode + 1) % 4,
+            Button::Cheats => {
+                o.cheats = !o.cheats;
+                // updatePermissionDependentButtons: without commands both
+                // game modes return to the world's default.
+                if !o.cheats {
+                    o.default_mode = o.initial.default_mode;
+                    o.personal_mode = o.default_mode;
+                }
+            }
+            Button::Difficulty => o.difficulty = (o.difficulty + 1) % 4,
+            Button::Lock => o.locked = !o.locked,
+            Button::Restrictions => o.view = View::Restrictions,
+            Button::GameRules => {
+                if self.client.remote.is_some() {
+                    o.rules = None;
+                    self.send(S::ClientCommand(play::ClientCommand { action: 2 }));
+                } else {
+                    o.rules = Some(RulesScreen::new(&self.common.ui.rules));
+                }
+                o.view = View::GameRules;
+            }
+            Button::Lan => {
+                o.lan = !o.lan;
+                o.port.focused = false;
+            }
+            Button::CommandAccess => o.guest_commands = !o.guest_commands,
+            Button::Force => o.force = !o.force,
+            Button::Cancel => {
+                self.client.world_options.0 = Some(o);
+                self.close_world_options();
+                return;
+            }
+            // A new lock asks first.
+            Button::Apply if o.locked != o.initial.locked => o.view = View::LockQuestion,
+            Button::Apply => {
+                self.apply_and_close_world_options(o);
+                return;
+            }
+        }
+        self.client.world_options.0 = Some(o);
+    }
+
     pub(in crate::game::client_side) fn world_options_click(&mut self) -> bool {
         let Some(mut o) = self.client.world_options.0.take() else {
             return false;
@@ -1388,53 +1601,10 @@ impl crate::game::ClientGame<'_> {
             );
         let hit = o.hit(self.client.cursor, (w, h));
         if let Some(b) = hit {
-            o.focused_button = Some(b);
-            self.play_audio_button_click();
+            self.apply_world_options_button(o, b);
+            return true;
         }
-        match hit {
-            Some(Button::DefaultMode) => o.default_mode = (o.default_mode + 1) % 4,
-            Some(Button::PersonalMode) => o.personal_mode = (o.personal_mode + 1) % 4,
-            Some(Button::Cheats) => {
-                o.cheats = !o.cheats;
-                // updatePermissionDependentButtons: without commands both
-                // game modes return to the world's default.
-                if !o.cheats {
-                    o.default_mode = o.initial.default_mode;
-                    o.personal_mode = o.default_mode;
-                }
-            }
-            Some(Button::Difficulty) => o.difficulty = (o.difficulty + 1) % 4,
-            Some(Button::Lock) => o.locked = !o.locked,
-            Some(Button::Restrictions) => o.view = View::Restrictions,
-            Some(Button::GameRules) => {
-                if self.client.remote.is_some() {
-                    o.rules = None;
-                    self.send(S::ClientCommand(play::ClientCommand { action: 2 }));
-                } else {
-                    o.rules = Some(RulesScreen::new(&self.common.ui.rules));
-                }
-                o.view = View::GameRules;
-            }
-            Some(Button::Lan) => {
-                o.lan = !o.lan;
-                o.port.focused = false;
-            }
-            Some(Button::CommandAccess) => o.guest_commands = !o.guest_commands,
-            Some(Button::Force) => o.force = !o.force,
-            Some(Button::Cancel) => {
-                self.client.world_options.0 = Some(o);
-                self.close_world_options();
-                return true;
-            }
-            // A new lock asks first.
-            Some(Button::Apply) if o.locked != o.initial.locked => o.view = View::LockQuestion,
-            Some(Button::Apply) => {
-                self.apply_and_close_world_options(o);
-                return true;
-            }
-            None => {}
-        }
-        let handled = hit.is_some() || o.port.focused;
+        let handled = o.port.focused;
         self.client.world_options.0 = Some(o);
         handled
     }

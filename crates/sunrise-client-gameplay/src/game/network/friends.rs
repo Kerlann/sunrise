@@ -228,6 +228,23 @@ impl ClientGame<'_> {
             &mut |phase, batch| self.draw_screen_phase(batch, phase),
         );
     }
+    pub(in crate::game) fn friends_screen_press_child(&mut self, tag: u64) -> bool {
+        let Some(action) = Action::from_tag(tag) else {
+            return false;
+        };
+        let view = self.friends_view();
+        if !friends_screen::has_active_action(
+            &self.client.gui.atlas,
+            self.gui_size(),
+            &view,
+            action,
+        ) {
+            return false;
+        }
+        self.friends_execute_action(action, &view);
+        true
+    }
+
     pub(in crate::game::client_side) fn friends_screen_click(&mut self) -> bool {
         let view = self.friends_view();
         let Some(action) = friends_screen::click(
@@ -238,6 +255,11 @@ impl ClientGame<'_> {
         ) else {
             return false;
         };
+        self.friends_execute_action(action, &view);
+        true
+    }
+
+    fn friends_execute_action(&mut self, action: Action, view: &FriendsView) {
         self.play_audio_button_click();
         match action {
             Action::Share => {
@@ -261,7 +283,6 @@ impl ClientGame<'_> {
             }
             Action::Done => self.set_screen(super::Screen::Paused),
         }
-        true
     }
 
     /// Whether the pause menu offers Play with Friends (a singleplayer world).

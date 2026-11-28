@@ -3917,6 +3917,90 @@ fn press_id_and_mutating_widgets_from_screen_input_hooks_and_lazy_discovery() {
                 "hiding captured widget mid-drag must cancel gesture ownership"
             );
             send_mouse_button(game, win_id, MouseButton::Left, false);
+
+            // Hide-then-release with no move in between must cancel without dispatching release.
+            assert!(game.screen_widgets().unwrap().set_visible(gain_id, true));
+            move_mouse(
+                game,
+                win_id,
+                f64::from(shared_rect[0] + 10.0),
+                f64::from(shared_rect[1] + shared_rect[3] * 0.5),
+            );
+            send_mouse_button(game, win_id, MouseButton::Left, true);
+            assert_eq!(
+                std::mem::take(&mut *be_log.lock().unwrap()),
+                vec!["slider:3".to_owned()],
+                "slider press starts drag before hide-then-release"
+            );
+            assert_eq!(
+                game.client.screen_state.0.widgets.active_redirect_button(),
+                Some(0)
+            );
+            assert!(game.screen_widgets().unwrap().set_visible(gain_id, false));
+            send_mouse_button(game, win_id, MouseButton::Left, false);
+            assert_eq!(
+                game.client.screen_state.0.widgets.active_redirect_button(),
+                None,
+                "hide-then-release with no move between must cancel gesture ownership"
+            );
+            assert!(
+                be_log.lock().unwrap().is_empty(),
+                "hide-then-release must not dispatch release to the hidden widget or underneath"
+            );
+
+            // Replacing the captured child under the same key (new native action) mid-drag must
+            // cancel both drag and release without dispatching.
+            assert!(game.screen_widgets().unwrap().set_visible(gain_id, true));
+            send_mouse_button(game, win_id, MouseButton::Left, true);
+            assert_eq!(
+                std::mem::take(&mut *be_log.lock().unwrap()),
+                vec!["slider:3".to_owned()],
+                "slider press starts drag before replace-same-key"
+            );
+            game.test_replace_engine_widget_native_action(gain_id, 999);
+            move_mouse(
+                game,
+                win_id,
+                f64::from(shared_rect[0] + shared_rect[2] - 10.0),
+                f64::from(shared_rect[1] + shared_rect[3] * 0.5),
+            );
+            assert!(
+                be_log.lock().unwrap().is_empty(),
+                "replacing captured widget under same key mid-drag must cancel without dispatch"
+            );
+            assert_eq!(
+                game.client.screen_state.0.widgets.active_redirect_button(),
+                None,
+                "replacing captured widget under same key mid-drag must clear gesture ownership"
+            );
+            send_mouse_button(game, win_id, MouseButton::Left, false);
+            assert!(be_log.lock().unwrap().is_empty());
+
+            // A discovered widget on a bound-dispatch screen with no native_action fails visibly
+            // on both press(id) and real click, with no silent coordinate fallback.
+            assert!(game.screen_widgets().unwrap().set_visible(gain_id, false));
+            assert!(game.screen_widgets().unwrap().set_visible(beta_id, false));
+            game.test_clear_engine_widget_native_action(alpha_id);
+            assert!(
+                !game.screen_widgets().unwrap().press(alpha_id),
+                "press(id) on a discovered widget with no native_action must return false"
+            );
+            assert!(
+                be_log.lock().unwrap().is_empty(),
+                "press(id) with no native_action must not fall back to coordinate hit-testing"
+            );
+            move_mouse(
+                game,
+                win_id,
+                f64::from(shared_rect[0] + shared_rect[2] * 0.5),
+                f64::from(shared_rect[1] + shared_rect[3] * 0.5),
+            );
+            send_mouse_button(game, win_id, MouseButton::Left, true);
+            send_mouse_button(game, win_id, MouseButton::Left, false);
+            assert!(
+                be_log.lock().unwrap().is_empty(),
+                "real click on a discovered widget with no native_action must not fall back to coordinate hit-testing"
+            );
             game.close_block_editor();
             game.observe_screen();
 

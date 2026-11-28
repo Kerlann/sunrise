@@ -845,6 +845,42 @@ impl crate::game::ClientGame<'_> {
         let amount = amount.clamp(-1.0, 1.0) * if shift { 1.0 } else { 7.0 };
         self.client.chat_ui.chat.scroll_by(amount as i32, true);
     }
+    pub(in crate::game) fn chat_press_child(
+        &mut self,
+        tag: u64,
+        mapped_cursor: (f32, f32),
+    ) -> bool {
+        match tag {
+            1 => {
+                if self.client.chat_ui.in_bed_chat && self.common.sleeping.is_some() {
+                    self.remote_stop_sleeping();
+                    true
+                } else {
+                    false
+                }
+            }
+            0 => {
+                let m = Measure(&self.client.gui.atlas.font);
+                let c = Commands {
+                    dispatcher: chat_tree(&self.client.remote),
+                    registries: &self.common.ui.registries,
+                };
+                let Some(screen) = self.client.chat_ui.chat_screen.as_mut() else {
+                    return false;
+                };
+                let (x, y) = (f64::from(mapped_cursor.0), f64::from(mapped_cursor.1));
+                let double_click = screen.live_double_click(x, y);
+                if screen.click(&m, &c, x, y, double_click) {
+                    self.notify_chat_suggestion_completion();
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
     pub fn chat_click(&mut self) -> bool {
         let cursor = self.client.cursor;
         let height = self.client.renderer.0.as_ref().map_or(720.0, |r| {
@@ -1310,14 +1346,18 @@ impl crate::game::ClientGame<'_> {
             .map_or(0, |t| t.elapsed().as_millis() as u64);
         let draws = screen.draw(&m, mouse, blink, background);
         self.client.chat_ui.chat_screen = Some(screen);
-        let tooltip = sunrise_client::screen_draw::paint(batch, &self.client.gui.atlas, &draws);
+        let tooltip = sunrise_client::widgets::with_native_action(0, || {
+            sunrise_client::screen_draw::paint(batch, &self.client.gui.atlas, &draws)
+        });
         if in_bed {
             let (w, h) = (batch.width, batch.height);
             let rect = self
                 .built_chat(w, h)
                 .map_or_else(|| Self::leave_bed_button(w, h), |l| l.leave_bed);
             let button = Self::leave_bed_draws(&m, mouse, rect);
-            let _ = sunrise_client::screen_draw::paint(batch, &self.client.gui.atlas, &button);
+            let _ = sunrise_client::widgets::with_native_action(1, || {
+                sunrise_client::screen_draw::paint(batch, &self.client.gui.atlas, &button)
+            });
         }
         self.draw_screen_phase(batch, sunrise_client::screen_draw::RenderPhase::Foreground);
         sunrise_client::screen_draw::paint_tooltip(batch, &self.client.gui.atlas, &draws, tooltip);

@@ -181,6 +181,27 @@ pub fn click_kind(size: (f32, f32), cursor: (f32, f32), view: &SocialView) -> Op
     }
     click(size, cursor, view).map(Click::Action)
 }
+/// Resolve a bound child native action tag directly without coordinate hit-testing.
+pub fn click_for_tag(tag: u64, view: &SocialView) -> Option<Click> {
+    match tag {
+        0 => Some(Click::Action(Action::Page(Page::All))),
+        1 => Some(Click::Action(Action::Page(Page::Hidden))),
+        2 => Some(Click::Action(Action::Page(Page::Blocked))),
+        t if t == (1u64 << 32) => Some(Click::Search),
+        t if (t >> 32) == 2 => {
+            let idx = (t & 0xffff_ffff) as usize;
+            view.entries.get(idx).filter(|e| !e.local).map(|e| {
+                Click::Action(if e.hidden {
+                    Action::Show(e.id)
+                } else {
+                    Action::Hide(e.id)
+                })
+            })
+        }
+        t if t == (4u64 << 32) => Some(Click::Action(Action::Done)),
+        _ => None,
+    }
+}
 /// Done's rectangle (`HeaderAndFooterLayout`'s footer).
 fn done(w: f32, h: f32) -> [f32; 4] {
     [(w / 2.0).floor() - 100.0, h - 27.0, 200.0, 20.0]
@@ -333,17 +354,24 @@ pub fn draw_contents(
         true,
     );
     for (x, page) in tabs(w) {
-        ui::button(
-            batch,
-            atlas,
-            x,
-            45.0,
-            (ROW_WIDTH / 3.0).floor(),
-            20.0,
-            &tab_label(page, view.page == page),
-            true,
-            ui::hovered(cursor, x, 45.0, (ROW_WIDTH / 3.0).floor(), 20.0),
-        );
+        let tag = match page {
+            Page::All => 0,
+            Page::Hidden => 1,
+            Page::Blocked => 2,
+        };
+        crate::widgets::with_native_action(tag, || {
+            ui::button(
+                batch,
+                atlas,
+                x,
+                45.0,
+                (ROW_WIDTH / 3.0).floor(),
+                20.0,
+                &tab_label(page, view.page == page),
+                true,
+                ui::hovered(cursor, x, 45.0, (ROW_WIDTH / 3.0).floor(), 20.0),
+            );
+        });
         crate::widgets::target_as(
             [x, 45.0, (ROW_WIDTH / 3.0).floor(), 20.0],
             crate::widgets::Kind::Tab(view.page == page),
@@ -356,7 +384,9 @@ pub fn draw_contents(
     search.max_length = 16;
     search.text_color = WHITE;
     search.focused = true;
-    search.draw(batch, atlas, None);
+    crate::widgets::with_native_action(1u64 << 32, || {
+        search.draw(batch, atlas, None);
+    });
     // The rows, clipped to the list; a focus step still walks them.
     let max = max_scroll(h, view.entries.len());
     if max > 0.0 {
@@ -438,15 +468,17 @@ pub fn draw_contents(
             let narration_label = Text::translate(narration_key, &[Text::literal(e.name.clone())]);
             let hide_label = Text::translate(msg_key, &[]);
             let hide_hover = hovered(hide);
-            match crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
-                bucket: crate::widgets::WidgetBucket::Button,
-                rect: hide_rect,
-                label: Some(&hide_label),
-                explicit_key: Some("gui.socialInteractions.toggle_hide"),
-                active: true,
-                hovered: hide_hover,
-                focused: false,
-                tab_order_group: 0,
+            match crate::widgets::with_native_action((2u64 << 32) | (i as u64), || {
+                crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
+                    bucket: crate::widgets::WidgetBucket::Button,
+                    rect: hide_rect,
+                    label: Some(&hide_label),
+                    explicit_key: Some("gui.socialInteractions.toggle_hide"),
+                    active: true,
+                    hovered: hide_hover,
+                    focused: false,
+                    tab_order_group: 0,
+                })
             }) {
                 crate::widgets::ResolvedEngineWidget::Skip => {}
                 crate::widgets::ResolvedEngineWidget::Unchanged => {
@@ -481,15 +513,17 @@ pub fn draw_contents(
             }
             let report_rect = [report[0], report[1], 20.0, 20.0];
             let report_label = Text::translate("gui.socialInteractions.report", &[]);
-            match crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
-                bucket: crate::widgets::WidgetBucket::Button,
-                rect: report_rect,
-                label: Some(&report_label),
-                explicit_key: Some("gui.socialInteractions.report"),
-                active: false,
-                hovered: hovered(report),
-                focused: false,
-                tab_order_group: 0,
+            match crate::widgets::with_native_action((3u64 << 32) | (i as u64), || {
+                crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
+                    bucket: crate::widgets::WidgetBucket::Button,
+                    rect: report_rect,
+                    label: Some(&report_label),
+                    explicit_key: Some("gui.socialInteractions.report"),
+                    active: false,
+                    hovered: hovered(report),
+                    focused: false,
+                    tab_order_group: 0,
+                })
             }) {
                 crate::widgets::ResolvedEngineWidget::Skip => {}
                 crate::widgets::ResolvedEngineWidget::Unchanged => {
@@ -537,18 +571,20 @@ pub fn draw_contents(
     }
     // `Done`.
     let [dx, dy, dw, dh] = done(w, h);
-    ui::action_button(
-        batch,
-        atlas,
-        crate::widgets::Action::Done,
-        dx,
-        dy,
-        dw,
-        dh,
-        &Text::translate("gui.done", &[]),
-        true,
-        ui::hovered(cursor, dx, dy, dw, dh),
-    );
+    crate::widgets::with_native_action(4u64 << 32, || {
+        ui::action_button(
+            batch,
+            atlas,
+            crate::widgets::Action::Done,
+            dx,
+            dy,
+            dw,
+            dh,
+            &Text::translate("gui.done", &[]),
+            true,
+            ui::hovered(cursor, dx, dy, dw, dh),
+        );
+    });
     // The empty page's note, in place of the list.
     if view.entries.is_empty() {
         let key = if !view.search.is_empty() {

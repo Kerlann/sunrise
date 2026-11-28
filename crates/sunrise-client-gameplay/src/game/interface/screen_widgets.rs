@@ -1648,7 +1648,72 @@ impl crate::game::ClientGame<'_> {
                 left && self.command_block_press_child(tag, mapped_cursor),
             )),
             super::Screen::Advancements => Ok(Some(left && self.advancements_press_child(tag))),
+            super::Screen::WorldOptions => Ok(Some(
+                left && self.world_options_press_child(tag, mapped_cursor),
+            )),
+            super::Screen::Friends => Ok(Some(left && self.friends_screen_press_child(tag))),
+            super::Screen::Social => Ok(Some(left && self.social_press_child(tag, mapped_cursor))),
+            super::Screen::Chat => Ok(Some(left && self.chat_press_child(tag, mapped_cursor))),
             _ => Ok(None),
+        }
+    }
+
+    /// Whether the active screen/overlay owns bound selected-child dispatch for every discovered
+    /// input-bearing engine widget (everything outside the specialized `Options`, `Title`,
+    /// `Paused`, and container screens).
+    fn uses_bound_child_dispatch(&self) -> bool {
+        self.client.command_prompt.0.is_some()
+            || self.client.link_prompt.is_some()
+            || self.client.code_of_conduct.is_some()
+            || self.client.server_packs.0.prompt.is_some()
+            || self.dialog_open()
+            || self.remote_loading()
+            || self.client.book.is_some()
+            || self.client.sign_edit.is_some()
+            || matches!(
+                self.client.screen,
+                super::Screen::BlockEditor
+                    | super::Screen::Stats
+                    | super::Screen::DebugOptions
+                    | super::Screen::DemoIntro
+                    | super::Screen::Dead
+                    | super::Screen::ServerLinks
+                    | super::Screen::ConfirmLink
+                    | super::Screen::DialogWarning
+                    | super::Screen::CommandBlock
+                    | super::Screen::Advancements
+                    | super::Screen::WorldOptions
+                    | super::Screen::Friends
+                    | super::Screen::Social
+                    | super::Screen::Chat
+            )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn test_clear_engine_widget_native_action(&mut self, id: ScreenWidgetId) {
+        let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+        if let Some(slot) = inner.engine_children.iter_mut().find(|s| s.id == id) {
+            slot.native_action = None;
+            let key = slot.key.clone();
+            for hit in &mut inner.engine_hits {
+                if hit.key == key {
+                    hit.native_action = None;
+                }
+            }
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn test_replace_engine_widget_native_action(&mut self, id: ScreenWidgetId, new_tag: u64) {
+        let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+        if let Some(slot) = inner.engine_children.iter_mut().find(|s| s.id == id) {
+            slot.native_action = Some(new_tag);
+            let key = slot.key.clone();
+            for hit in &mut inner.engine_hits {
+                if hit.key == key {
+                    hit.native_action = Some(new_tag);
+                }
+            }
         }
     }
 
@@ -1707,12 +1772,16 @@ impl crate::game::ClientGame<'_> {
                 None => DragTarget::None,
                 Some(t) if t.button != code => DragTarget::WrongButton,
                 Some(t) => {
-                    if !inner.overrides_active {
+                    if !inner.overrides_active && !inner.discovered {
                         DragTarget::Ready(t.clone())
                     } else if inner.engine_overrides.suppress_all {
                         inner.active_redirect = None;
                         DragTarget::Ineligible
-                    } else if let Some(hit) = inner.engine_hits.iter().find(|h| h.key == t.key) {
+                    } else if let Some(hit) = inner
+                        .engine_hits
+                        .iter()
+                        .find(|h| h.key == t.key && h.native_action == t.native_action)
+                    {
                         if !hit.interactive {
                             inner.active_redirect = None;
                             DragTarget::Ineligible
@@ -1723,7 +1792,7 @@ impl crate::game::ClientGame<'_> {
                             DragTarget::Ready(ActiveEngineTarget {
                                 key: t.key.clone(),
                                 button: t.button,
-                                native_action: hit.native_action,
+                                native_action: t.native_action,
                                 redirect,
                             })
                         }
@@ -1779,9 +1848,14 @@ impl crate::game::ClientGame<'_> {
             return res;
         }
         if !pressed {
+            let direct_override_screen = self.title_input_active()
+                || (self.observed_overlay_now().is_none()
+                    && self.client.screen == super::Screen::Paused
+                    && self.client.pause_menu);
             enum ReleaseTarget {
                 None,
                 WrongButton,
+                Ineligible,
                 Matched(ActiveEngineTarget),
             }
             let release = {
@@ -1789,11 +1863,42 @@ impl crate::game::ClientGame<'_> {
                 match inner.active_redirect.as_ref() {
                     None => ReleaseTarget::None,
                     Some(t) if t.button != code => ReleaseTarget::WrongButton,
-                    Some(_) => ReleaseTarget::Matched(inner.active_redirect.take().unwrap()),
+                    Some(_) => {
+                        let t = inner.active_redirect.take().unwrap();
+                        if !inner.overrides_active && !inner.discovered {
+                            ReleaseTarget::Matched(t)
+                        } else if inner.engine_overrides.suppress_all {
+                            ReleaseTarget::Ineligible
+                        } else if let Some(hit) = inner
+                            .engine_hits
+                            .iter()
+                            .find(|h| h.key == t.key && h.native_action == t.native_action)
+                        {
+                            if !hit.interactive {
+                                ReleaseTarget::Ineligible
+                            } else {
+                                let redirect = (!direct_override_screen
+                                    && hit.resolved_rect != hit.original_rect)
+                                    .then_some((hit.resolved_rect, hit.original_rect));
+                                ReleaseTarget::Matched(ActiveEngineTarget {
+                                    key: t.key,
+                                    button: t.button,
+                                    native_action: t.native_action,
+                                    redirect,
+                                })
+                            }
+                        } else {
+                            ReleaseTarget::Ineligible
+                        }
+                    }
                 }
             };
             return match release {
                 ReleaseTarget::WrongButton => Ok(false),
+                ReleaseTarget::Ineligible => {
+                    self.cancel_active_engine_drag();
+                    Ok(false)
+                }
                 ReleaseTarget::Matched(target) => self
                     .dispatch_selected_engine_target(&target, |game| {
                         game.route_screen_button(button, code, false, double_click)
@@ -1888,16 +1993,22 @@ impl crate::game::ClientGame<'_> {
                 } else {
                     self.client.cursor
                 };
-                let direct = if let Some(tag) = native_action {
-                    self.dispatch_selected_child_press(tag, button, mapped_cursor, original)?
+                let res = if let Some(tag) = native_action {
+                    match self.dispatch_selected_child_press(tag, button, mapped_cursor, original) {
+                        Ok(Some(handled)) => Ok(handled),
+                        Ok(None) => self.dispatch_selected_engine_target(&target, |game| {
+                            game.route_screen_button(button, code, true, double_click)
+                        }),
+                        Err(err) => Err(err),
+                    }
+                } else if self.uses_bound_child_dispatch() {
+                    // A discovered widget on a bound-dispatch screen without a native action
+                    // fails visibly (returns false) with no silent coordinate fallback.
+                    Ok(false)
                 } else {
-                    None
-                };
-                let res = match direct {
-                    Some(handled) => Ok(handled),
-                    None => self.dispatch_selected_engine_target(&target, |game| {
+                    self.dispatch_selected_engine_target(&target, |game| {
                         game.route_screen_button(button, code, true, double_click)
-                    }),
+                    })
                 };
                 if !matches!(res, Ok(true)) {
                     self.client
@@ -3712,11 +3823,30 @@ impl ScreenWidgets for crate::game::ClientGame<'_> {
                     return false;
                 }
                 let center = (ox + ow * 0.5, oy + oh * 0.5);
-                let handled = if let Some(tag) = native_action
-                    && let Ok(Some(direct)) =
-                        self.dispatch_selected_child_press(tag, MouseButton::Left, center, rect)
-                {
-                    direct
+                let handled = if let Some(tag) = native_action {
+                    match self.dispatch_selected_child_press(tag, MouseButton::Left, center, rect) {
+                        Ok(Some(direct)) => direct,
+                        Ok(None) => {
+                            let prev_cursor = self.client.cursor;
+                            self.client.cursor = center;
+                            let handled = widgets::with_selected_engine_widget(&key, || {
+                                self.with_redirecting_engine_click(|game| {
+                                    game.with_screen_input_overrides(|game| {
+                                        game.route_screen_button(MouseButton::Left, 0, true, false)
+                                    })
+                                })
+                            })
+                            .unwrap_or(false);
+                            self.client.cursor = prev_cursor;
+                            handled
+                        }
+                        // A bound action's error is terminal: return false with no coordinate fallback.
+                        Err(_) => false,
+                    }
+                } else if self.uses_bound_child_dispatch() {
+                    // Missing native_action on a bound-dispatch screen fails visibly without
+                    // falling back to whole-screen coordinate hit-testing.
+                    false
                 } else {
                     let prev_cursor = self.client.cursor;
                     self.client.cursor = center;

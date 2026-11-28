@@ -974,7 +974,9 @@ impl crate::game::ClientGame<'_> {
             return Ok(false);
         }
         let kind = tag >> 32;
-        let payload = (tag & 0xFFFF_FFFF) as usize;
+        let Ok(payload) = u8::try_from(tag & 0xFFFF_FFFF) else {
+            return Ok(false);
+        };
         if let Some(opened) = self.client.chat_ui.death_confirm {
             if opened.elapsed().as_millis() < 1000 {
                 return Ok(false);
