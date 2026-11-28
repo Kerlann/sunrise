@@ -3246,12 +3246,13 @@ mod tests {
                 hovered: false,
                 focused: true,
             },
-            None,
-            Some(ButtonIcon::Centered {
-                sprite: "icon/centered",
-                size: 15.0,
-            }),
-            None,
+            ButtonStyle {
+                icon: Some(ButtonIcon::Centered {
+                    sprite: "icon/centered",
+                    size: 15.0,
+                }),
+                ..Default::default()
+            },
             |rect| crate::widgets::Narratable::button("Language", rect, true),
         );
         assert_eq!(crate::widgets::take_cursor(), crate::widgets::Cursor::Arrow);
@@ -3266,12 +3267,14 @@ mod tests {
                 hovered: true,
                 focused: false,
             },
-            Some(crate::widgets::Action::Options),
-            Some(ButtonIcon::Trailing {
-                sprite: "icon/trailing",
-                size: 16.0,
-            }),
-            None,
+            ButtonStyle {
+                action: Some(crate::widgets::Action::Options),
+                icon: Some(ButtonIcon::Trailing {
+                    sprite: "icon/trailing",
+                    size: 16.0,
+                }),
+                ..Default::default()
+            },
             |rect| crate::widgets::Narratable::button("Options", rect, true),
         );
         assert_eq!(
@@ -3312,9 +3315,7 @@ mod tests {
                         hovered: false,
                         focused: false,
                     },
-                    None,
-                    None,
-                    None,
+                    ButtonStyle::default(),
                     |rect| crate::widgets::Narratable::button(name, rect, true),
                 );
             }

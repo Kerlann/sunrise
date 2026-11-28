@@ -109,13 +109,10 @@ impl OptionsUi {
             {
                 let layout = calibration.draw_background(batch, atlas);
                 calibration.draw_contents(batch, atlas, cursor, layout);
-            } else if page == Page::ControllerRadialName && self.radial.screen.naming.is_some() {
-                self.radial
-                    .screen
-                    .naming
-                    .as_mut()
-                    .expect("name entry remains open")
-                    .draw_contents(batch, atlas, cursor);
+            } else if page == Page::ControllerRadialName
+                && let Some(naming) = self.radial.screen.naming.as_mut()
+            {
+                naming.draw_contents(batch, atlas, cursor);
             } else if let Some(shell) = self.shell_mut() {
                 shell.draw_background(s, batch, atlas, in_world, waiting);
                 shell.draw_contents(batch, atlas, cursor);
