@@ -331,7 +331,27 @@ impl OptionsUi {
             // does not: the description goes when the mouse leaves, like
             // vanilla's.
             let tip_hover = pointer_over || (is_focused && self.focus_from_keyboard);
-            if tip_hover && let Some(tip) = tooltip_text(s, wd) {
+            let tip_overridden = match &wd.kind {
+                WKind::Button { label, .. } => {
+                    crate::widgets::active_tooltip_overridden(&crate::widgets::EngineWidgetKey {
+                        key: crate::widgets::stable_key_from_text(label),
+                        bucket: crate::widgets::WidgetBucket::Button,
+                        occurrence: 0,
+                    })
+                }
+                WKind::Slider { label, .. } => {
+                    crate::widgets::active_tooltip_overridden(&crate::widgets::EngineWidgetKey {
+                        key: crate::widgets::stable_key_from_text(label),
+                        bucket: crate::widgets::WidgetBucket::Slider,
+                        occurrence: 0,
+                    })
+                }
+                _ => false,
+            };
+            if tip_hover
+                && !tip_overridden
+                && let Some(tip) = tooltip_text(s, wd)
+            {
                 tooltip = Some(match &wd.kind {
                     // The duplicate keybinds tooltip keeps its own lines.
                     WKind::Button {

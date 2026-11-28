@@ -422,7 +422,11 @@ impl crate::game::ClientGame<'_> {
                     bucket: widgets::WidgetBucket::Button,
                     occurrence: 0,
                 };
-                if (id == 11 || id == 14) && hover && !self.engine_key_blocked(&btn_key) {
+                if (id == 11 || id == 14)
+                    && hover
+                    && !self.engine_key_blocked(&btn_key)
+                    && !widgets::active_tooltip_overridden(&btn_key)
+                {
                     *tooltip = Some(Text::translate("menu.custom_options.tooltip", &[]));
                 }
             };
@@ -472,7 +476,7 @@ impl crate::game::ClientGame<'_> {
                     }
                 },
             );
-            if hover && !blocked {
+            if hover && !blocked && !widgets::active_tooltip_overridden(&icon_key) {
                 tooltip = Some(if i == FRIENDS_ICON {
                     Text::literal(super::friends::title())
                 } else {

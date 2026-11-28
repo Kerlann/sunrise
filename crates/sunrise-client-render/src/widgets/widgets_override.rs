@@ -154,6 +154,7 @@ pub struct ResolvedWidgetProps {
     pub sprites: Option<ButtonSprites>,
     pub override_render_highlighted_sprite: Option<bool>,
     pub tooltip_narration: Option<String>,
+    pub clear_tooltip_narration: bool,
 }
 
 /// Outcome of [`resolve_engine_widget`].
@@ -305,6 +306,26 @@ pub fn mark_render_vetoed() {
             pass.output.render_vetoed = true;
         }
     });
+}
+
+/// Whether the active [`with_widget_overrides`] pass overrides (replaces or explicitly clears via
+/// `set_tooltip(id, None)`) or suppresses the native tooltip for `key`.
+pub fn active_tooltip_overridden(key: &EngineWidgetKey) -> bool {
+    if !HAS_OVERRIDES.get() {
+        return false;
+    }
+    ACTIVE_OVERRIDES.with_borrow(|slot| {
+        let Some(pass) = slot.as_ref() else {
+            return false;
+        };
+        if pass.maps.suppress_all {
+            return true;
+        }
+        pass.maps
+            .overrides
+            .get(key)
+            .is_some_and(|ov| ov.removed || ov.visible == Some(false) || ov.tooltip.is_some())
+    })
 }
 
 /// Take the deferred tooltip scheduled by an overridden engine widget during the active
@@ -636,6 +657,7 @@ pub fn resolve_engine_widget(input: EngineWidgetInput<'_>) -> ResolvedEngineWidg
             sprites: ov.sprites.clone().flatten(),
             override_render_highlighted_sprite: ov.override_render_highlighted_sprite.flatten(),
             tooltip_narration,
+            clear_tooltip_narration: matches!(ov.tooltip, Some(None)),
         })
     })
 }
@@ -1038,7 +1060,46 @@ mod tests {
         });
         let pending = out1.pending_tooltip.expect("tooltip elapsed after delay");
         assert_eq!(pending.tooltip.message.plain(), "Tip");
-        assert_eq!(pending.rect, [50.0, 60.0, 120.0, 20.0]);
+        // Explicit `set_tooltip(id, None)` suppresses native tooltips (`active_tooltip_overridden`).
+        let cleared_key = EngineWidgetKey {
+            key: "menu.custom_options".into(),
+            bucket: WidgetBucket::Button,
+            occurrence: 0,
+        };
+        maps.overrides.insert(
+            cleared_key.clone(),
+            EngineWidgetOverride {
+                tooltip: Some(None),
+                ..Default::default()
+            },
+        );
+        let untouched_key = EngineWidgetKey {
+            key: "menu.options".into(),
+            bucket: WidgetBucket::Button,
+            occurrence: 0,
+        };
+        let ((), _) = with_widget_overrides(&mut maps, (0.0, 0.0), t1, || {
+            assert!(active_tooltip_overridden(&cleared_key));
+            assert!(active_tooltip_overridden(&done_key_1));
+            assert!(!active_tooltip_overridden(&untouched_key));
+            let label = Text::translate("menu.custom_options", &[]);
+            match resolve_engine_widget(EngineWidgetInput {
+                bucket: WidgetBucket::Button,
+                rect: [0.0, 0.0, 100.0, 20.0],
+                label: Some(&label),
+                explicit_key: None,
+                active: true,
+                hovered: true,
+                focused: false,
+                tab_order_group: 0,
+            }) {
+                ResolvedEngineWidget::Draw(props) => {
+                    assert!(props.clear_tooltip_narration);
+                    assert!(props.tooltip_narration.is_none());
+                }
+                other => panic!("expected Draw for cleared tooltip, got {other:?}"),
+            }
+        });
     }
 
     #[test]

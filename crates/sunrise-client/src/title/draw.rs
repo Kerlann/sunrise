@@ -904,7 +904,17 @@ impl Title {
         for b in self.buttons(w, h) {
             let rect = [b.x, b.y, b.w, 20.0];
             let inside = crate::ui::hovered(cursor, b.x, b.y, b.w, 20.0);
-            if inside && let Some(key) = self.button_tooltip(b.id) {
+            let label = b.display_text();
+            let tip_overridden =
+                crate::widgets::active_tooltip_overridden(&crate::widgets::EngineWidgetKey {
+                    key: crate::widgets::stable_key_from_text(label.as_ref()),
+                    bucket: crate::widgets::WidgetBucket::Button,
+                    occurrence: 0,
+                });
+            if inside
+                && !tip_overridden
+                && let Some(key) = self.button_tooltip(b.id)
+            {
                 button_tooltip = Some((key, rect));
             }
             let icon = b
@@ -914,7 +924,6 @@ impl Title {
                     b.trailing
                         .map(|(sprite, size)| crate::ui::ButtonIcon::Trailing { sprite, size })
                 });
-            let label = b.display_text();
             crate::ui::button_decorated(
                 batch,
                 atlas,
