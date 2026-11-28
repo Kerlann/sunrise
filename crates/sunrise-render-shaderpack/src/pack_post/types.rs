@@ -402,8 +402,9 @@ pub struct Pass {
     pub block: Vec<u8>,
     /// Shader-declared defaults must survive a reset of the mutable upload block.
     pub initial_block: Vec<u8>,
-    /// `(index into FrameUniforms::values, declared type, offset)` for built-in and custom pack
-    /// uniforms not handled by `mod_uniforms`.
+    /// `(index into FrameUniforms::values if the name has one, declared type, offset)` for
+    /// built-in and custom pack uniforms. A slot a mod uniform handles, bound or type-mismatched
+    /// (a mismatch stays zero), is in neither this list nor `mod_uniforms`' upload.
     pub uniforms: Vec<(Option<usize>, String, u32)>,
     /// Mod-declared frame uniforms bound to this pass: `(table_index, is_previous, std140_offset)`.
     pub mod_uniforms: Vec<(usize, bool, u32)>,
