@@ -883,7 +883,9 @@ impl crate::game::ClientGame<'_> {
             self.client.screen_state.0.bump_instance();
             if opening_overlay {
                 if let Some(prev) = self.client.screen_state.0.observed.take() {
+                    let next_id = self.client.screen_state.0.widgets.next_id.get();
                     let saved_widgets = std::mem::take(&mut self.client.screen_state.0.widgets);
+                    self.client.screen_state.0.widgets.next_id.set(next_id);
                     self.client
                         .screen_state
                         .0
@@ -900,6 +902,7 @@ impl crate::game::ClientGame<'_> {
                 return;
             }
             if revealed_suspended {
+                let overlay_next_id = self.client.screen_state.0.widgets.next_id.get();
                 self.clear_screen_widgets();
                 let (saved_obs, saved_widgets) = self
                     .client
@@ -908,6 +911,8 @@ impl crate::game::ClientGame<'_> {
                     .suspended_under_overlay
                     .pop()
                     .expect("revealed suspended screen exists");
+                let restored_next = saved_widgets.next_id.get().max(overlay_next_id);
+                saved_widgets.next_id.set(restored_next);
                 self.client.screen_state.0.widgets = saved_widgets;
                 self.client.screen_state.0.observed = current.clone();
                 if let Some(new) = &current

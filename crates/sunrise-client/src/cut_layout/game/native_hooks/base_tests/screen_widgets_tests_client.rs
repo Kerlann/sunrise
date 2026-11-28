@@ -4322,6 +4322,38 @@ fn closing_overlay_preserves_revealed_screen_widgets_without_reinit() {
                 0,
                 "underlying chat widgets must stay alive while overlay is open"
             );
+            let overlay_btn_id = {
+                let overlay_widgets = game.screen_widgets().unwrap();
+                assert!(
+                    !overlay_widgets
+                        .children()
+                        .iter()
+                        .any(|c| c.id == chat_btn_id),
+                    "overlay widget IDs must not collide with suspended background IDs"
+                );
+                assert!(
+                    !overlay_widgets.set_message(chat_btn_id, ApiText::literal("Stale")),
+                    "suspended background ID must not mutate an overlay widget"
+                );
+                assert!(
+                    !overlay_widgets.remove(chat_btn_id),
+                    "suspended background ID must not remove an overlay widget"
+                );
+                assert!(
+                    !overlay_widgets.press(chat_btn_id),
+                    "suspended background ID must not press an overlay widget"
+                );
+                let id = overlay_widgets.add_button(Button::new(
+                    [10.0, 40.0, 90.0, 20.0],
+                    ApiText::literal("OverlayBtn"),
+                    |_state, _host| {},
+                ));
+                assert!(
+                    id.raw() > chat_btn_id.raw(),
+                    "overlay next_id must be seeded from the suspended screen"
+                );
+                id
+            };
 
             // Close the link_prompt overlay: chat is revealed without re-running Init.Pre/Post.
             game.answer_link_prompt(false);
@@ -4336,6 +4368,23 @@ fn closing_overlay_preserves_revealed_screen_widgets_without_reinit() {
             assert!(
                 revealed.children().iter().any(|c| c.id == chat_btn_id),
                 "revealed chat screen must keep its existing mounted widget ID"
+            );
+            let post_reveal_id = revealed.add_button(Button::new(
+                [10.0, 70.0, 90.0, 20.0],
+                ApiText::literal("AfterReveal"),
+                |_state, _host| {},
+            ));
+            assert!(
+                post_reveal_id.raw() > overlay_btn_id.raw(),
+                "revealed screen must keep max next_id so old overlay IDs never alias new widgets"
+            );
+            assert!(
+                !revealed.set_message(overlay_btn_id, ApiText::literal("StaleOverlay")),
+                "old overlay ID must not act on a revealed screen widget"
+            );
+            assert!(
+                !revealed.remove(overlay_btn_id),
+                "old overlay ID must not remove a revealed screen widget"
             );
         });
     });
