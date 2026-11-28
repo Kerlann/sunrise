@@ -4227,7 +4227,7 @@ impl OptionsUi {
         let layout = self.built_layout(s, self.size.0, self.size.1);
         let (widgets, top, bottom, content) = layout.parts();
         let has_search = (self.page() == Page::Language) || self.settings_search_active();
-        let mut focusables: Vec<(FocusId, [f32; 4], bool)> = Vec::new();
+        let mut focusables: Vec<(FocusId, [f32; 4], bool, i32)> = Vec::new();
         let mut counts: std::collections::HashMap<(String, crate::widgets::WidgetBucket), u32> =
             std::collections::HashMap::new();
         let next_occ = |counts: &mut std::collections::HashMap<
@@ -4271,7 +4271,14 @@ impl OptionsUi {
                 [search.x, search.y, search.width, search.height],
                 true,
             ) {
-                focusables.push((FocusId::Search, rect, false));
+                let group = crate::widgets::resolve_engine_tab_order_group(
+                    crate::widgets::WidgetBucket::Field,
+                    msg.as_ref(),
+                    None,
+                    occ,
+                    0,
+                );
+                focusables.push((FocusId::Search, rect, false, group));
             }
         }
         for (i, wd) in widgets.iter().enumerate() {
@@ -4292,7 +4299,14 @@ impl OptionsUi {
                         [wd.x, wd.y, wd.w, wd.h],
                         *active,
                     ) {
-                        focusables.push((focus_id(i, wd), rect, wd.list));
+                        let group = crate::widgets::resolve_engine_tab_order_group(
+                            crate::widgets::WidgetBucket::Button,
+                            Some(label),
+                            None,
+                            occ,
+                            0,
+                        );
+                        focusables.push((focus_id(i, wd), rect, wd.list, group));
                     }
                 }
                 WKind::Slider { label, .. } => {
@@ -4310,11 +4324,18 @@ impl OptionsUi {
                         [wd.x, wd.y, wd.w, wd.h],
                         true,
                     ) {
-                        focusables.push((focus_id(i, wd), rect, wd.list));
+                        let group = crate::widgets::resolve_engine_tab_order_group(
+                            crate::widgets::WidgetBucket::Slider,
+                            Some(label),
+                            None,
+                            occ,
+                            0,
+                        );
+                        focusables.push((focus_id(i, wd), rect, wd.list, group));
                     }
                 }
                 WKind::LanguageRow { .. } => {
-                    focusables.push((focus_id(i, wd), [wd.x, wd.y, wd.w, wd.h], wd.list));
+                    focusables.push((focus_id(i, wd), [wd.x, wd.y, wd.w, wd.h], wd.list, 0));
                 }
                 _ => {}
             }
@@ -4323,29 +4344,31 @@ impl OptionsUi {
             return (false, Vec::new());
         }
 
-        // 1. Tab / Shift+Tab navigation
+        // 1. Tab / Shift+Tab navigation (ordered stably by resolved tab_order_group)
         if key == K::Tab {
+            let mut tab_order: Vec<usize> = (0..focusables.len()).collect();
+            tab_order.sort_by_key(|&i| focusables[i].3);
             let at = self
                 .focus
                 .as_ref()
-                .and_then(|fid| focusables.iter().position(|(id, ..)| id == fid));
-            let next_idx = match at {
+                .and_then(|fid| tab_order.iter().position(|&i| &focusables[i].0 == fid));
+            let next_pos = match at {
                 None => {
                     if shift {
-                        focusables.len() - 1
+                        tab_order.len() - 1
                     } else {
                         0
                     }
                 }
                 Some(p) => {
                     if shift {
-                        (p + focusables.len() - 1) % focusables.len()
+                        (p + tab_order.len() - 1) % tab_order.len()
                     } else {
-                        (p + 1) % focusables.len()
+                        (p + 1) % tab_order.len()
                     }
                 }
             };
-            let (next_id, rect, in_list) = &focusables[next_idx];
+            let (next_id, rect, in_list, _) = &focusables[tab_order[next_pos]];
             self.focus = Some(next_id.clone());
             self.focus_from_keyboard = true;
             self.can_change_value = matches!(next_id, FocusId::Slider(_));
@@ -4384,7 +4407,7 @@ impl OptionsUi {
                         gamepad::Button::DPadLeft
                     };
                     if let Some(next_idx) = gamepad::focus_step_rect(from, dir, &rects) {
-                        let (next_id, rect, in_list) = &focusables[next_idx];
+                        let (next_id, rect, in_list, _) = &focusables[next_idx];
                         self.focus = Some(next_id.clone());
                         self.focus_from_keyboard = true;
                         self.can_change_value = false;
@@ -4421,7 +4444,7 @@ impl OptionsUi {
                     let step = gamepad::focus_step_strict(from, dir, &rects)
                         .or_else(|| gamepad::focus_step_vague(from, dir, &rects));
                     if let Some(next_idx) = step {
-                        let (next_id, rect, in_list) = &focusables[next_idx];
+                        let (next_id, rect, in_list, _) = &focusables[next_idx];
                         self.focus = Some(next_id.clone());
                         self.focus_from_keyboard = true;
                         self.can_change_value = false;
@@ -9016,6 +9039,56 @@ mod tests {
                 assert_eq!(s.vsync, initial_vsync);
             }
         }
+    }
+
+    #[test]
+    fn options_tab_respects_tab_order_group_overrides() {
+        let atlas = atlas();
+        let mut s = Settings::default();
+        let mut ui = OptionsUi::default();
+        ui.open(false);
+        ui.size = (854.0, 480.0);
+
+        let done_key = crate::widgets::EngineWidgetKey {
+            key: crate::widgets::stable_key_from_text(&tr("gui.done")),
+            bucket: crate::widgets::WidgetBucket::Button,
+            occurrence: 0,
+        };
+        let mut maps = crate::widgets::EngineOverrideMaps::default();
+        maps.overrides.insert(
+            done_key,
+            crate::widgets::EngineWidgetOverride {
+                tab_order_group: Some(-10),
+                ..Default::default()
+            },
+        );
+
+        crate::widgets::with_input_overrides(&mut maps, || {
+            let _ = ui.key_input(&mut s, &atlas, winit::keyboard::KeyCode::Tab, None, false);
+        });
+        assert_eq!(
+            ui.focus,
+            Some(FocusId::Act(Act::Done)),
+            "negative tab_order_group override must visit Done first on Tab"
+        );
+
+        crate::widgets::with_input_overrides(&mut maps, || {
+            let _ = ui.key_input(&mut s, &atlas, winit::keyboard::KeyCode::Tab, None, false);
+        });
+        assert_eq!(
+            ui.focus,
+            Some(FocusId::Slider(Opt::Fov)),
+            "second Tab must advance to the first default-group widget (FOV)"
+        );
+
+        crate::widgets::with_input_overrides(&mut maps, || {
+            let _ = ui.key_input(&mut s, &atlas, winit::keyboard::KeyCode::Tab, None, true);
+        });
+        assert_eq!(
+            ui.focus,
+            Some(FocusId::Act(Act::Done)),
+            "Shift+Tab from FOV must step back to the negative-group Done button"
+        );
     }
 }
 

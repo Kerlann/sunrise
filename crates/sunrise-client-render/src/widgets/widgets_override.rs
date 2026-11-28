@@ -346,6 +346,35 @@ pub fn resolve_engine_input(
     })
 }
 
+/// Resolve an engine widget's `tab_order_group` against the active `EngineOverrideMaps`
+/// (`with_input_overrides`), returning `default_group` when no override is set.
+pub fn resolve_engine_tab_order_group(
+    bucket: WidgetBucket,
+    label: Option<&Text>,
+    explicit_key: Option<&str>,
+    occurrence: u32,
+    default_group: i32,
+) -> i32 {
+    if !HAS_INPUT_OVERRIDES.get() {
+        return default_group;
+    }
+    let key_str = match explicit_key {
+        Some(explicit) => explicit.to_owned(),
+        None => label.map(stable_key_from_text).unwrap_or_default(),
+    };
+    let key = EngineWidgetKey {
+        key: key_str,
+        bucket,
+        occurrence,
+    };
+    INPUT_OVERRIDES.with_borrow(|slot| {
+        slot.as_ref()
+            .and_then(|maps| maps.overrides.get(&key))
+            .and_then(|ov| ov.tab_order_group)
+            .unwrap_or(default_group)
+    })
+}
+
 /// Mark the active [`with_widget_overrides`] pass as vetoed by `ScreenEvent.Render.Pre` so this
 /// frame's empty draw never clears live widget membership or hit tables.
 pub fn mark_render_vetoed() {
