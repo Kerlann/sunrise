@@ -586,20 +586,21 @@ impl crate::game::ServerGame<'_> {
             was_death,
             |g| {
                 let previous = g.motion.take();
+                let food = (!was_death)
+                    .then(|| previous.as_ref().map(|body| body.health.food))
+                    .flatten();
                 // Entity's constructor starts it at the origin; snapTo follows clone and copy.
                 g.place([0.0; 3]);
                 (g.yaw, g.pitch) = (0.0, 0.0);
                 let body = g.build_motion(motion, [0.0; 3]);
                 if let Some(previous) = previous {
-                    let _ =
-                        body.apply_saved_attributes(Some(&previous.carried_attributes(!was_death)));
+                    body.apply_saved_attributes(Some(&previous.carried_attributes(!was_death)))
+                        .expect("attributes packed from the previous validated player body");
                     (body.hurt_log, body.attack_log) = (previous.hurt_log, previous.attack_log);
                 }
                 if was_death {
                     // ServerPlayer.restoreFrom: max health after copying the old base attributes.
-                    g.health = body
-                        .attribute("minecraft:max_health")
-                        .map_or(20.0, |max| max as f32);
+                    g.health = body.max_health();
                 }
                 g.spawn = None;
                 g.respawn_elsewhere = None;
@@ -628,7 +629,23 @@ impl crate::game::ServerGame<'_> {
                     g.effects = Default::default();
                     (g.xp_level, g.xp_progress, g.xp_total) = (xp.level, xp.progress, xp.total);
                 }
+                if let Some(food) = food {
+                    (g.food, g.saturation) = (food.food, food.saturation);
+                }
                 g.apply_loaded_motion(false);
+                if let Some(body) = g.motion.as_mut() {
+                    if let Some(food) = food {
+                        body.health.food = food;
+                    }
+                    if !was_death {
+                        for effect in &g.effects.list {
+                            body.write_effect_modifiers(
+                                effect.registry_index,
+                                Some(effect.amplifier),
+                            );
+                        }
+                    }
+                }
             },
             |game| {
                 if !copy_spawn {

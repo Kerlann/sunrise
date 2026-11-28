@@ -1328,17 +1328,6 @@ impl Guest {
         }
         Some(m)
     }
-    /// `ServerPlayer.restoreFrom(old, false)`'s `setHealth(getMaxHealth())`:
-    /// the health a player comes back from a death with, the max health of
-    /// the base values their next body takes over, before its equipment
-    /// modifies it (40 after `/attribute @s minecraft:max_health base set
-    /// 40`, not 20).
-    pub fn respawn_health(&self, resources: &crate::motion::MotionResources) -> f32 {
-        let mut body = PlayerMotion::new(resources, Vec3::ZERO);
-        let _ = body.apply_saved_attributes(self.carried_attributes.as_ref());
-        body.attribute("minecraft:max_health")
-            .map_or(20.0, |max| max as f32)
-    }
     /// `Entity.getBoundingBox`.
     pub fn bounds(&self) -> Aabb {
         let [x, y, z] = self.position;
@@ -1728,12 +1717,12 @@ mod tests {
                 .edit(&handle, |a, o| a.add_permanent(bonus, o))
                 .unwrap();
             g.motion = Some(Box::new(m));
-            assert!(g.new_body(false).is_some());
-            assert_eq!(g.respawn_health(&resources), want, "base {base}");
+            let old = g.motion.take().unwrap();
+            let body = g.build_motion(&resources, [0.5, 64.0, 0.5]);
+            body.apply_saved_attributes(Some(&old.carried_attributes(false)))
+                .unwrap();
+            assert_eq!(body.max_health(), want, "base {base}");
         }
-        // No body to take anything from: the default.
-        let g = guest_at([0.5, 64.0, 0.5]);
-        assert_eq!(g.respawn_health(&resources), 20.0);
     }
 
     /// #3684: a glide the client announced (`START_FALL_FLYING`) is the

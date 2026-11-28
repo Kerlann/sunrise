@@ -903,6 +903,47 @@ fn credits_respawn_position_cross_dimension_resets_player_tick_count() {
 
 #[test]
 #[ignore = "daily"]
+fn credits_restore_live_food_and_reapply_speed_to_the_replacement() {
+    use sunrise_sim::effects::EffectInstance;
+    with_server(ExecutionRole::DedicatedServer, |game| {
+        prepare_end_exit(game, false);
+        game.server
+            .lan
+            .as_mut()
+            .unwrap()
+            .hub
+            .update_guest(CONN, |g| {
+                let food = &mut g.motion.as_mut().unwrap().health.food;
+                (food.food, food.saturation, food.exhaustion, food.timer) = (13, 2.5, 3.25, 19);
+                (g.food, g.saturation) = (food.food, food.saturation);
+                // The active effect can come from a save without an explicit attribute modifier.
+                g.effects.add(EffectInstance::new("speed", 200, 1));
+            })
+            .unwrap();
+        game.handle_server_portal(CONN);
+        game.guest_respawn(CONN);
+        finish_trip(game, Dim::Overworld);
+        let g = game.server.lan.as_ref().unwrap().hub.guest(CONN).unwrap();
+        let body = g.motion.as_deref().unwrap();
+        let food = &body.health.food;
+        assert_eq!(
+            (food.food, food.saturation, food.exhaustion, food.timer),
+            (13, 2.5, 3.25, 19)
+        );
+        assert_eq!(g.effects.get("speed").unwrap().amplifier, 1);
+        let modifier = body
+            .attributes
+            .modifiers("minecraft:movement_speed")
+            .unwrap()
+            .iter()
+            .find(|modifier| modifier.id() == "minecraft:effect.speed")
+            .unwrap();
+        assert_eq!(modifier.amount(), f64::from(0.2f32) * 2.0);
+    });
+}
+
+#[test]
+#[ignore = "daily"]
 fn credits_configured_respawn_keeps_permanent_player_attributes() {
     use sunrise_world::attributes::{Modifier, Operation};
 

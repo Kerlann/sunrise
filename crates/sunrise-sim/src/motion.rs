@@ -849,6 +849,11 @@ impl PlayerMotion {
     fn packed_attributes(&self, modifiers: bool) -> sunrise_core::nbt::Tag {
         sunrise_core::nbt::Tag::List(crate::living_attributes::pack(&self.attributes, modifiers))
     }
+    /// `LivingEntity.getMaxHealth` on the validated player supplier.
+    pub fn max_health(&mut self) -> f32 {
+        self.attribute("minecraft:max_health")
+            .expect("validated player max health") as f32
+    }
     /// `AttributeMap.apply` of a saved `attributes` list
     /// (LivingEntity.readAdditionalSaveData): each known attribute takes its
     /// saved base and permanent modifiers; unknown ones are skipped.
