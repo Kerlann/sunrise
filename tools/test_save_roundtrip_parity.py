@@ -39,16 +39,12 @@ import threading
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import anvil_dump  # noqa: E402
-import save_roundtrip_scene as scene  # noqa: E402
-
-try:
-    from . import lab
-except ImportError:
-    import lab
-
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from tools import anvil_dump, save_roundtrip_scene as scene  # noqa: E402
+
+from tools import lab, vanilla_world_check
+
 LOCAL = ROOT / '.local'
 RESOURCES = lab.RESOURCES
 SERVER = lab.GAME / 'jars' / 'server.jar'
@@ -182,7 +178,7 @@ class Vanilla:
             self.process.kill()
 
     def problems(self):
-        return [l for l in self.lines if SUSPICIOUS.search(l) and not BENIGN.search(l)]
+        return vanilla_world_check.log_problems(self.lines, suspicious=SUSPICIOUS, benign=BENIGN)
 
 
 def command_failed(lines):
@@ -311,8 +307,7 @@ def build_world(directory, *, fixed_spawn=False, sunrise_binary=None):
     server.run('time set 6000')
     server.run('gamerule advance_time false')
     server.run('gamerule advance_weather false')
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    import vanilla_login
+    from tools import vanilla_login
     threading.Thread(target=lambda: vanilla_login.join('127.0.0.1', server.port, 'RoundTrip', 25), daemon=True).start()
     time.sleep(6)
     server.run('item replace entity RoundTrip container.0 with minecraft:iron_sword[damage=3]')
@@ -329,10 +324,7 @@ def build_world(directory, *, fixed_spawn=False, sunrise_binary=None):
 
 def lower_sky_observer():
     """Compile a vanilla protocol client that records the first explicit sky pad layers."""
-    try:
-        from . import oracle_harness, test_model_baking_parity as baking, test_rust_parity as parity
-    except ImportError:
-        import oracle_harness, test_model_baking_parity as baking, test_rust_parity as parity
+    from tools import oracle_harness, test_model_baking_parity as baking, test_rust_parity as parity
 
     build = RUN / 'pad-observer'
     build.mkdir(exist_ok=True)
@@ -759,7 +751,8 @@ def main():
     parser.add_argument('--gen-only', action='store_true', help='stop after building the vanilla world')
     args = parser.parse_args()
     RUN.mkdir(parents=True, exist_ok=True)
-    failures = 0
+    # Each failure counted by what it is, so the verdict line names them (CI keeps only this log).
+    failures = collections.Counter()
     if args.vanilla:
         v0 = Path(args.vanilla)
     else:
@@ -785,12 +778,13 @@ def main():
             for directory, binary in ((cold_vanilla, None), (cold_sunrise, bin_dir / 'sunrise-client')):
                 shutil.rmtree(directory, ignore_errors=True)
                 failed, problems = build_world(directory, fixed_spawn=True, sunrise_binary=binary)
-                failures += len(failed) + len(problems)
+                failures['cold scene commands'] += len(failed)
+                failures['cold server log lines'] += len(problems)
                 for command, out in failed:
                     print('cold scene command failed:', command[:100], out[:2])
                 for line in problems:
                     print('cold server log:', line)
-            failures += compare_cold_pads(cold_vanilla / 'world', cold_sunrise / 'world')
+            failures['cold sky pad differences'] += compare_cold_pads(cold_vanilla / 'world', cold_sunrise / 'world')
     observations = None
     if not args.skip_vanilla_load:
         observe = lower_sky_observer() if not args.sunrise else None
@@ -807,7 +801,7 @@ def main():
         for line in problems1:
             if untimed.sub('', line) not in seen0:
                 print('vanilla log (Sunrise save):', line)
-                failures += 1
+                failures['vanilla log lines on the Sunrise save'] += 1
         volatile = re.compile(r'(cooking_time_spent|lit_time_remaining|ticks_since_song_started|Age|BrewTime|'
                               r'ticks_in_hive|triggered|state_updating_resumes_at|LastExecution|last_vibration_frequency|warning_level): -?[0-9]+[a-zA-Z]?')
         # A lit campfire keeps cooking while each server runs before `data get`: its
@@ -823,17 +817,19 @@ def main():
                     continue  # lands in Sunrise (known gap above)
                 if 'No entity was found' in views1.get(label, '') and 'No entity was found' not in views0[label]:
                     print(f'VANILLA cannot find {label} in the Sunrise save')
-                    failures += 1
+                    failures['entities vanilla cannot find'] += 1
                 continue
             def stable(text):
                 text = volatile2.sub('', volatile.sub('', text))
                 return volatile_items.sub('', text) if label == 'block 10 furnace' else text
             if stable(views0[label]) != stable(views1.get(label, '')):
                 print(f'VANILLA VIEW differs: {label}\n   V0 {views0[label][:900]}\n   H  {str(views1.get(label))[:900]}')
-                failures += 1
+                failures['vanilla view differences'] += 1
     print('comparing', v0, 'with', h)
-    failures += summarize(compare_worlds(v0, h, lower_sky_observations=observations))
-    print('save round-trip parity', 'FAILED' if failures else 'ok', f'({failures} unexplained differences)')
+    failures['unexplained world differences'] += summarize(compare_worlds(v0, h, lower_sky_observations=observations))
+    failures = +failures
+    print('save round-trip parity', 'FAILED (' + ', '.join(f'{n} {kind}' for kind, n in failures.items()) + ')'
+          if failures else 'ok')
     if not args.keep and not failures:
         shutil.rmtree(RUN, ignore_errors=True)
     sys.exit(1 if failures else 0)

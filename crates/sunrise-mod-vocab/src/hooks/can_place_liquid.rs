@@ -12,13 +12,21 @@ pub trait Hooks {
     /// spreading fluid lend `None`. The host is
     /// read-only on both sides. Answer from its reads, not from side effects.
     #[hook(
+        receiver = "read",
+        dispatch = "flat",
         side = "both",
         contract = "replace",
         scope = "block",
         key = "state",
         out = "answer",
-        target = "sunrise_client::game::native_hooks::place_liquid::GameLevel<'_>::native_can_place_liquid",
+        target = "sunrise_gameplay_common::game::native_hooks::place_liquid::GameLevel<'_>::native_can_place_liquid",
         neoforge = "none (vanilla LiquidBlockContainer.canPlaceLiquid)"
     )]
-    fn can_place_liquid();
+    fn can_place_liquid(
+        pos: BlockPos,
+        state: BlockState,
+        fluid: mod_api::FluidKey,
+        user: Option<mod_api::LivingRef>,
+        answer: &mut Option<bool>,
+    );
 }

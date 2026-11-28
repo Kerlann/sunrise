@@ -6,7 +6,8 @@ use crate::options_file::{OptionsFile, V};
 use std::{fs, path::Path};
 use sunrise_protocol::packets::configuration::ClientInformation;
 
-pub use sunrise_client_core::sound_source::SOUND_SOURCES;
+pub use sunrise_game_data::sound_source::SOUND_SOURCES;
+pub use sunrise_level::sim_settings::SimSettings;
 
 /// Per-source volumes for the mixer (soundCategory_* except master).
 static SOURCE_VOLUMES: std::sync::RwLock<[f32; 11]> = std::sync::RwLock::new([1.0; 11]);
@@ -15,82 +16,7 @@ pub fn set_source_volumes(volumes: [f32; 11]) {
 }
 /// The SoundSource an event plays on. Vanilla callers pick the source; this
 /// follows their conventions by event family.
-pub fn sound_source(event: &str) -> usize {
-    let e = event.trim_start_matches("minecraft:");
-    let index = |name: &str| SOUND_SOURCES.iter().position(|n| *n == name).unwrap_or(0);
-    const HOSTILE: [&str; 34] = [
-        "zombie",
-        "skeleton",
-        "creeper",
-        "spider",
-        "cave_spider",
-        "enderman",
-        "witch",
-        "slime",
-        "magma_cube",
-        "blaze",
-        "ghast",
-        "drowned",
-        "husk",
-        "stray",
-        "phantom",
-        "pillager",
-        "vindicator",
-        "evoker",
-        "illusioner",
-        "ravager",
-        "guardian",
-        "elder_guardian",
-        "silverfish",
-        "zombified_piglin",
-        "wither_skeleton",
-        "bogged",
-        "breeze",
-        "endermite",
-        "parched",
-        "warden",
-        "zombie_villager",
-        "vex",
-        "wither",
-        // Monster's common hurt/death (e.g. Giant) and other shared sounds.
-        "hostile",
-    ];
-    if e == "block.potent_sulfur.noxious_gas" {
-        // PotentSulfurBlock.animateTick, its only caller, plays it as AMBIENT.
-        index("ambient")
-    } else if e.starts_with("music_disc.") {
-        index("record")
-    } else if e.starts_with("item.goat_horn.") {
-        // InstrumentItem.play: SoundSource.RECORDS.
-        index("record")
-    } else if e.starts_with("music.") {
-        index("music")
-    } else if e.starts_with("weather.") || e.starts_with("entity.lightning_bolt") {
-        index("weather")
-    } else if e.starts_with("block.") {
-        index("block")
-    } else if e.starts_with("ambient.") {
-        index("ambient")
-    } else if e.starts_with("ui.") {
-        index("ui")
-    } else if e.starts_with("entity.player.")
-        || e.starts_with("item.")
-        || e.starts_with("entity.item.")
-        || e.starts_with("entity.experience_orb")
-        || e.starts_with("entity.arrow")
-    {
-        index("player")
-    } else if let Some(rest) = e.strip_prefix("entity.") {
-        let mob = rest.split('.').next().unwrap_or("");
-        if HOSTILE.contains(&mob) {
-            index("hostile")
-        } else {
-            index("neutral")
-        }
-    } else {
-        index("master")
-    }
-}
+pub use sunrise_game_data::sound_source::sound_source_for_event as sound_source;
 /// Volume multiplier of a sound source by index.
 pub fn source_volume(i: usize) -> f32 {
     if i == 0 {
@@ -203,16 +129,13 @@ pub struct Settings {
     pub startup_api: crate::graphics::GraphicsApi,
     /// `Monitor.videoModes` of the window's monitor, for the Video page (set by the game).
     pub video_modes: Vec<crate::window::VideoMode>,
-    /// Fullbright is held off: this window plays on another's server (set by the game, not
-    /// saved). The graphics screen hides its row; `extras.fullbright` keeps the choice.
-    pub fullbright_held: bool,
     /// Controller settings (`sunrise-controller.txt`, Sunrise's own).
     pub controller: crate::gamepad::PadSettings,
     /// Sunrise's optional extras (`sunrise-extras.txt`), all off by default.
     pub extras: crate::extras::Extras,
     /// The Sunrise mods turned on (`sunrise-mods.txt`), all off by default.
     pub mods: crate::mod_list::ModList,
-    /// The packs in `shaderpacks/`, listed when the Shader Packs page opens; the pick is
+    /// The packs in `shaderpacks/`, listed when Sunrise Settings opens (Shaders); the pick is
     /// `sunrise.shader_pack`.
     pub shader_packs: Vec<crate::shader_pack_list::Entry>,
     /// The picked pack's options while its Shader Options page is open.
@@ -296,7 +219,6 @@ impl Default for Settings {
             sunrise: Default::default(),
             startup_api: Default::default(),
             video_modes: Vec::new(),
-            fullbright_held: false,
             controller: Default::default(),
             extras: Default::default(),
             mods: Default::default(),
@@ -363,7 +285,7 @@ impl Settings {
                 .map(|read| read.text),
             None => None,
         });
-        let mut sunrise = path
+        let sunrise = path
             .parent()
             .map(|dir| {
                 crate::graphics::Graphics::load_text(
@@ -373,16 +295,6 @@ impl Settings {
             })
             .unwrap_or_default();
         crate::mipmap::set_dither_cutouts(sunrise.dither_cutout_mips);
-        if let Some(dir) = path.parent() {
-            let (key, _) = crate::shader_pack_list::resolve(
-                &crate::logging::shared_dir(dir).join(crate::shader_pack_list::DIR),
-                &sunrise.shader_pack,
-            );
-            if key != sunrise.shader_pack {
-                sunrise.shader_pack = key;
-                sunrise.save(dir);
-            }
-        }
         let controller = path
             .parent()
             .map(crate::gamepad::PadSettings::load)
@@ -524,7 +436,6 @@ impl Settings {
             sunrise: Default::default(),
             startup_api: Default::default(),
             video_modes: Vec::new(),
-            fullbright_held: false,
             controller: Default::default(),
             extras: Default::default(),
             mods: Default::default(),
@@ -556,6 +467,14 @@ impl Settings {
             keys,
             file: f,
         }
+    }
+    /// Validated live `(textureFiltering, maxAnisotropyBit, mipmapLevels)` for atlas stitching.
+    pub fn texture_atlas_settings(&self) -> (i32, i32, i32) {
+        (
+            self.file.int("textureFiltering").clamp(0, 2),
+            self.file.int("maxAnisotropyBit").clamp(1, 3),
+            self.mipmap_levels.clamp(0, 4),
+        )
     }
     /// `Options.createInformation`: what the server learns about this player.
     pub fn client_information(&self, view_distance: i8) -> ClientInformation {
@@ -799,6 +718,8 @@ impl Settings {
 pub enum Opt {
     Fov,
     RenderDistance,
+    /// `RenderDistance` on the classic Video Settings page: vanilla's range (2..=32), same saved value.
+    VanillaRenderDistance,
     SimulationDistance,
     Sensitivity,
     WheelSensitivity,
@@ -939,6 +860,40 @@ impl Settings {
             requested: self.gui_scale,
             unicode: self.force_unicode,
         }
+    }
+
+    pub fn sim_settings(&self) -> SimSettings {
+        SimSettings {
+            render_distance: self.render_distance,
+            simulation_distance: self.simulation_distance,
+            entity_distance: self.entity_distance,
+            parallel_tick: self.sunrise.parallel_tick,
+            auto_jump: self.auto_jump,
+            main_hand_left: self.main_hand_left,
+            chat_visibility: self.chat_visibility,
+            operator_items_tab: self.operator_items_tab,
+            reduced_debug_info: self.reduced_debug_info,
+            language: self.language.clone(),
+            mods: self.mods.clone(),
+            no_ai: self.extras.no_ai,
+            agent_control: self.extras.agent_control,
+        }
+    }
+
+    pub fn apply_sim_settings(&mut self, sim: &SimSettings) {
+        self.render_distance = sim.render_distance;
+        self.simulation_distance = sim.simulation_distance;
+        self.entity_distance = sim.entity_distance;
+        self.sunrise.parallel_tick = sim.parallel_tick;
+        self.auto_jump = sim.auto_jump;
+        self.main_hand_left = sim.main_hand_left;
+        self.chat_visibility = sim.chat_visibility;
+        self.operator_items_tab = sim.operator_items_tab;
+        self.reduced_debug_info = sim.reduced_debug_info;
+        self.language.clone_from(&sim.language);
+        self.mods.clone_from(&sim.mods);
+        self.extras.no_ai = sim.no_ai;
+        self.extras.agent_control = sim.agent_control;
     }
 }
 
@@ -1123,5 +1078,21 @@ mod tests {
         assert_eq!(again.sound_device, "Headphones");
         let empty = Settings::parse("");
         assert_eq!(empty.sound_device, "");
+    }
+    #[test]
+    fn texture_atlas_settings_uses_live_validated_mipmap_and_filtering() {
+        let mut s = Settings::default();
+        assert_eq!(s.texture_atlas_settings(), (0, 2, 4));
+        // Live `mipmap_levels` wins even before `file` is rewritten.
+        s.mipmap_levels = 0;
+        assert_eq!(s.file.int("mipmapLevels"), 4);
+        assert_eq!(s.texture_atlas_settings(), (0, 2, 0));
+        // Out-of-range stored values fail `OptionInstance` validation and keep the defaults.
+        s.mipmap_levels = 4;
+        s.file
+            .set("textureFiltering", crate::options_file::V::Int(9));
+        s.file
+            .set("maxAnisotropyBit", crate::options_file::V::Int(0));
+        assert_eq!(s.texture_atlas_settings(), (0, 2, 4));
     }
 }

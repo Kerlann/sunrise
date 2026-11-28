@@ -5,6 +5,8 @@ import subprocess
 import tempfile
 import unittest
 
+from tests.os_support import BASH, needs_runner_shell
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -47,15 +49,16 @@ fi
                 path = root / name
                 path.write_text(content)
                 path.chmod(0o755)
-            env = dict(os.environ, PATH=f"{root}:{os.environ['PATH']}",
+            env = dict(os.environ, PATH=f"{root}{os.pathsep}{os.environ['PATH']}",
                        LOG=str(root / "log"), STATE=str(root / "state"),
                        FAILED_COMMAND=failed_command, FAILURES=str(failures),
                        DYNA_CI_APT_TRIES="4", DYNA_CI_APT_PAUSE="5")
             result = subprocess.run(
-                ["bash", ROOT / "tools/ci/install_launcher_deps.sh", "libx11-xcb-dev", "libudev-dev"],
+                [BASH, ROOT / "tools/ci/install_launcher_deps.sh", "libx11-xcb-dev", "libudev-dev"],
                 env=env, text=True, capture_output=True)
             return result, (root / "log").read_text().splitlines()
 
+    @needs_runner_shell
     def test_timed_out_attempts_stop_at_the_bound(self):
         """A network timeout exhausts retries before package installation."""
         result, calls = self.run_install("timeout", 99)
@@ -63,6 +66,7 @@ fi
         self.assertEqual(calls, ["sleep 5", "sleep 10", "sleep 15"])
         self.assertIn("failed after 4 tries", result.stderr)
 
+    @needs_runner_shell
     def test_transient_index_and_download_failures_recover(self):
         """Recover index/download errors, then install once without a timer."""
         for command in ("update", "download"):
@@ -73,6 +77,7 @@ fi
                 self.assertEqual(len([c for c in calls if c.startswith("apt")]), 5)
                 self.assertEqual(calls[-1], "apt install -y --no-download --no-install-recommends libx11-xcb-dev libudev-dev")
 
+    @needs_runner_shell
     def test_install_failure_is_not_retried(self):
         """A dpkg-phase error is returned without retrying mutation."""
         result, calls = self.run_install("install", 99)
@@ -80,6 +85,7 @@ fi
         self.assertEqual(len(calls), 3)
         self.assertIn("--no-download", calls[-1])
 
+    @needs_runner_shell
     def test_persistent_errors_fail_closed_at_the_bound(self):
         """Persistent network errors prevent the mutating install phase."""
         for command in ("update", "download"):

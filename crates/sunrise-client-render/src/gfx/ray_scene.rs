@@ -72,7 +72,7 @@ impl Renderer {
 }
 
 /// The terrain's acceleration structures.
-pub(in crate::gfx) struct RayScene {
+pub(crate) struct RayScene {
     /// Each section's BLAS, while it has solid quads within reach.
     blas: FxHashMap<SectionKey, wgpu::Blas>,
     /// Sections meshed again or emptied since their BLAS was built.
@@ -94,7 +94,7 @@ pub(in crate::gfx) struct RayScene {
     /// Whether the log said the store is at its largest.
     full_logged: bool,
     /// `Resident::removals` when the scene last dropped the sections no longer resident:
-    /// gfx.rs releases sections (unloaded columns, far terrain's fade-out) without `ray_mark`.
+    /// gfx.rs releases sections (unloaded columns) without `ray_mark`.
     removals: u64,
 }
 
@@ -770,13 +770,14 @@ mod tests {
     /// The off path is main's: a device opened without ray queries (every device without
     /// `SUNRISE_RAY_TRACING`, and every plain build) gets no scene, and its buffers no usage.
     #[test]
+    #[ignore = "daily"]
     fn without_ray_queries_there_is_no_scene() {
         let _gpu = crate::gfx::test_gpu::lock();
-        let instance = crate::gfx::test_gpu::instance();
-        let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
+        let Some(adapter) = crate::gfx::test_gpu::adapter() else {
             return;
         };
-        let Ok((device, _)) = pollster::block_on(adapter.request_device(&Default::default()))
+        let Some((device, _)) =
+            crate::gfx::test_gpu::optional_device_with(&adapter, &Default::default())
         else {
             return;
         };

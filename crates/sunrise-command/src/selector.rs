@@ -199,7 +199,7 @@ impl<'r, 'a> SelectorParser<'r, 'a> {
         let string: &'a str = self.reader.string;
         let word = string[start..]
             .bytes()
-            .take_while(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_')
+            .take_while(|&b| crate::is_unquoted(b))
             .count();
         let word = &string[start..start + word];
         if let Some(token) = self.reg.selector_tokens.iter().find(|t| t.name == word) {
@@ -692,12 +692,12 @@ impl<'r, 'a> SelectorParser<'r, 'a> {
 
     fn fill_selectors(builder: &mut SuggestionsBuilder, reg: &Registries) {
         for (s, tip) in SELECTOR_KINDS {
-            builder.suggest_tooltip(s, sunrise_client_core::lang::get(tip));
+            builder.suggest_tooltip(s, sunrise_game_data::lang::get(tip));
         }
         for token in &reg.selector_tokens {
             builder.suggest_tooltip(
                 format!("@{}", token.name),
-                sunrise_client_core::lang::get(&token.tooltip),
+                sunrise_game_data::lang::get(&token.tooltip),
             );
         }
     }
@@ -796,7 +796,7 @@ impl<'r, 'a> SelectorParser<'r, 'a> {
             if self.can_use(o) && o.starts_with(&lower) {
                 b.suggest_tooltip(
                     format!("{o}="),
-                    sunrise_client_core::lang::get(&format!(
+                    sunrise_game_data::lang::get(&format!(
                         "argument.entity.options.{o}.description"
                     )),
                 );

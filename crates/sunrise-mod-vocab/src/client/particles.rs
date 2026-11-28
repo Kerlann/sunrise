@@ -18,12 +18,14 @@ pub enum PositionSource {
     },
 }
 
-/// `ParticleOptions` with the parameters of the option classes used here.
-#[derive(sunrise_mod_api_macros::Wire, Clone, Debug, PartialEq)]
-// exhaustive: the game builds it with a literal; mods use the constructors
+/// An owned particle request: built-in options, an asset-only type, or the
+/// value paired with a registered [`ParticleType`].
+// no wire: process-local type slots and erased native values; each type owns its stream codec.
+#[derive(Clone, Debug, PartialEq)]
+// exhaustive: construction is through the methods, which pair typed values and keys.
 pub struct ParticleOptions {
-    /// Provider identity issued by `Registrar::particle_key`, never an engine enum.
-    pub ty: ParticleKey,
+    ty: ParticleKey,
+    typed: Option<super::particle_types::TypedParticleOptions>,
     /// `BlockParticleOption`: the block's particle sprite and terrain tint.
     pub block: Option<(String, u32)>,
     /// RGB(A) for dust, spells, entity effects and tinted leaves. The item crumbs (`item` and
@@ -53,10 +55,33 @@ pub struct ParticleOptions {
     pub vibration: Option<(PositionSource, [f64; 3], i32)>,
 }
 impl ParticleOptions {
-    /// Construct an option for a retained vanilla or custom sprite-provider key.
+    /// The option's registered particle key.
+    pub fn key(&self) -> ParticleKey {
+        self.ty
+    }
+
+    // hidden: the game wraps a value decoded by the registered codec.
+    #[doc(hidden)]
+    pub fn from_typed(value: super::particle_types::TypedParticleOptions) -> Self {
+        let key = value.key();
+        Self {
+            typed: Some(value),
+            ..Self::simple(key)
+        }
+    }
+
+    // hidden: the game's spawn and send paths inspect the erased value.
+    #[doc(hidden)]
+    pub fn typed(&self) -> Option<&super::particle_types::TypedParticleOptions> {
+        self.typed.as_ref()
+    }
+
+    /// Construct a value for a vanilla or asset-only sprite-provider key.
+    /// Code-defined types require [`ParticleType::options`].
     pub fn simple(ty: ParticleKey) -> Self {
         Self {
             ty,
+            typed: None,
             block: None,
             color: [1.0; 4],
             scale: 1.0,
@@ -206,7 +231,7 @@ pub struct FireworksRequest {
     /// The rocket's velocity in blocks per tick, which the sparks carry.
     pub velocity: [f64; 3],
     /// The explosions, one every other tick in this order; none puffs a little smoke, as a
-    /// rocket without stars does. At most 256, as vanilla's fireworks component.
+    /// rocket without stars does.
     pub explosions: Vec<FireworkExplosion>,
     /// The blast, and the crackle of a twinkling explosion, play; false bursts silently, as a
     /// silent rocket does (`!FireworkRocketEntity.isSilent()`).

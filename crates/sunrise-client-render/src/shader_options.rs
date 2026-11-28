@@ -24,6 +24,9 @@ pub struct ShaderOptions {
     pub changed: bool,
     /// The values the pack's file holds, as read or as last saved.
     saved: BTreeMap<String, String>,
+    /// The pack was read with Iris compatibility on (`IS_IRIS`, `IRIS_VERSION`), as its load
+    /// will be with these values: what its row on the Shaders page says.
+    pub iris_compat: bool,
 }
 
 impl ShaderOptions {
@@ -43,6 +46,7 @@ impl ShaderOptions {
             path: Vec::new(),
             changed: false,
             saved: BTreeMap::new(),
+            iris_compat: false,
         };
         for (name, value) in chosen {
             out.set(&name, value);
@@ -83,15 +87,9 @@ impl ShaderOptions {
     }
 
     fn set(&mut self, name: &str, value: String) {
-        let Some(option) = self.options.get(name).filter(|o| o.values.contains(&value)) else {
-            return;
-        };
-        if value == option.default {
-            self.chosen.remove(name);
-        } else {
-            self.chosen.insert(name.to_owned(), value);
+        if sunrise_shaders::choose_option(&mut self.chosen, &self.options, name, value) {
+            self.changed = self.chosen != self.saved;
         }
-        self.changed = self.chosen != self.saved;
     }
 
     /// The option's next value (the previous one with `back`), wrapping around.

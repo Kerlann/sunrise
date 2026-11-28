@@ -5,29 +5,33 @@ use crate::{Result, sprites::Sprites};
 pub use catalog::StateModels;
 use catalog::descriptor;
 pub use cube::CubeStyle;
+use mod_api::{
+    __private::game::{CallbackOwner, StandaloneModelBaker, StandaloneModelRegistration},
+    Answered,
+};
 use serde_json::{Value, json};
-use std::path::Path;
+use std::{
+    path::Path,
+    sync::{Arc, Mutex, OnceLock},
+};
 use sunrise_core::position::BlockPos;
 use sunrise_world::registry::{BlockRegistry, BlockStateId};
 
 /// The standalone models native mods asked for (`native_standalone_models`).
-static STANDALONE: std::sync::OnceLock<StandaloneModels> = std::sync::OnceLock::new();
+static STANDALONE: OnceLock<Arc<StandaloneModels>> = OnceLock::new();
 /// Test fixture shared with the resource-bake worker.
-static STANDALONE_FIXTURE: std::sync::Mutex<Option<(StandaloneModels, usize)>> =
-    std::sync::Mutex::new(None);
+static STANDALONE_FIXTURE: Mutex<Option<Arc<StandaloneModels>>> = Mutex::new(None);
 
-/// Standalone file ids and forms with unforgeable registration-time ownership.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct StandaloneModels {
-    pub names: Vec<String>,
-    pub forms: Vec<StandaloneFormRegistration>,
+#[derive(Default)]
+struct StandaloneModels {
+    names: Vec<String>,
+    bakers: Vec<StandaloneBaker>,
 }
 
-/// A form with the mod identity attached by hook dispatch.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StandaloneFormRegistration {
-    pub owner: &'static str,
-    pub form: mod_api::StandaloneModelForm,
+struct StandaloneBaker {
+    registration: StandaloneModelBaker,
+    mod_id: &'static str,
+    owner: CallbackOwner,
 }
 
 #[cfg(feature = "test-support")]
@@ -45,67 +49,94 @@ fn standalone_names(mut names: Vec<String>) -> Vec<String> {
     names
 }
 
+fn freeze_standalone(
+    registrations: Vec<Answered<StandaloneModelRegistration>>,
+) -> StandaloneModels {
+    let mut frozen = StandaloneModels::default();
+    for Answered { answer, mod_id, .. } in registrations {
+        match answer {
+            StandaloneModelRegistration::File(id) => frozen.names.push(id),
+            StandaloneModelRegistration::Baker(registration) => {
+                let id = &registration.id;
+                if !namespaced(id) {
+                    log::warn!(
+                        "Sunrise: mod {mod_id} standalone baker ID {id:?} needs a namespace and path"
+                    );
+                    continue;
+                }
+                let Some(owner) = CallbackOwner::new(mod_id) else {
+                    log::warn!(
+                        "Sunrise: mod {mod_id} standalone baker {id} has no installed owner"
+                    );
+                    continue;
+                };
+                frozen.bakers.push(StandaloneBaker {
+                    registration,
+                    mod_id,
+                    owner,
+                });
+            }
+        }
+    }
+    frozen.names = standalone_names(frozen.names);
+    frozen
+}
+
 /// Sets the models no blockstate names that every resource load bakes
-/// beside the block models ([`StateModels::standalone`]): once, at start,
-/// as vanilla's `ModelEvent.RegisterStandalone` is posted once per model
-/// discovery. Names are sorted and deduplicated; one without a namespace
-/// (`mymod:block/shaft_half`) is dropped. False when already set.
-pub fn register_standalone(mut models: StandaloneModels) -> bool {
-    models.names = standalone_names(models.names);
-    models.forms.retain(|entry| namespaced(entry.form.id()));
-    STANDALONE.set(models).is_ok()
+/// beside the block models ([`StateModels::standalone`]), once at startup.
+/// File IDs are namespaced, sorted and deduplicated; bakers keep registration order.
+/// Returns false when already set.
+pub fn register_standalone(registrations: Vec<Answered<StandaloneModelRegistration>>) -> bool {
+    STANDALONE
+        .set(Arc::new(freeze_standalone(registrations)))
+        .is_ok()
 }
 
 /// Declarations baked beside block models; a test fixture overrides process registration.
-pub fn standalone() -> StandaloneModels {
-    if let Some((models, _)) = STANDALONE_FIXTURE
+fn standalone() -> Option<Arc<StandaloneModels>> {
+    STANDALONE_FIXTURE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .as_ref()
-    {
-        return models.clone();
-    }
-    STANDALONE.get().cloned().unwrap_or_default()
+        .clone()
+        .or_else(|| STANDALONE.get().cloned())
 }
 
-/// Installs standalone names until dropped, including on the bake worker, without sealing
+#[cfg(any(test, feature = "test-support"))]
+pub fn has_standalone_models() -> bool {
+    standalone().is_some()
+}
+
+/// Installs standalone declarations until dropped, including on the bake worker, without sealing
 /// process registration. Other fixture holders wait until the active fixture finishes.
 #[cfg(feature = "test-support")]
 pub struct StandaloneFixture;
 
 #[cfg(feature = "test-support")]
 pub fn standalone_fixture(names: Vec<String>) -> StandaloneFixture {
-    let names = standalone_names(names);
-    let mut fixture = STANDALONE_FIXTURE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    while fixture.is_some() {
-        fixture = FIXTURE_CHANGED
-            .wait(fixture)
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-    }
-    *fixture = Some((
-        StandaloneModels {
-            names,
-            forms: Vec::new(),
-        },
-        1,
-    ));
-    StandaloneFixture
+    StandaloneFixture::install(StandaloneModels {
+        names: standalone_names(names),
+        bakers: Vec::new(),
+    })
 }
 
 #[cfg(feature = "test-support")]
 impl StandaloneFixture {
-    /// Add attributed forms before loading the fixture's resources.
-    pub fn with_forms(self, forms: Vec<StandaloneFormRegistration>) -> Self {
+    /// Install a dispatch-attributed batch while its mod set is installed.
+    pub fn from_registrations(registrations: Vec<Answered<StandaloneModelRegistration>>) -> Self {
+        Self::install(freeze_standalone(registrations))
+    }
+
+    fn install(models: StandaloneModels) -> Self {
         let mut fixture = STANDALONE_FIXTURE
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let models = &mut fixture.as_mut().expect("active fixture").0;
-        models.forms = forms;
-        models.forms.retain(|entry| namespaced(entry.form.id()));
-        drop(fixture);
-        self
+        while fixture.is_some() {
+            fixture = FIXTURE_CHANGED
+                .wait(fixture)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        *fixture = Some(Arc::new(models));
+        Self
     }
 }
 
@@ -115,13 +146,8 @@ impl Drop for StandaloneFixture {
         let mut fixture = STANDALONE_FIXTURE
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some((_, holders)) = fixture.as_mut() {
-            *holders -= 1;
-            if *holders == 0 {
-                *fixture = None;
-                FIXTURE_CHANGED.notify_all();
-            }
-        }
+        *fixture = None;
+        FIXTURE_CHANGED.notify_all();
     }
 }
 
@@ -204,9 +230,10 @@ pub(crate) fn prepare_with_models(
     };
     {
         let _step = crate::spans::startup::step("core.bake_standalone");
-        let standalone = standalone();
-        catalog.bake_standalone(root.source(), sprites, models, &standalone.names)?;
-        catalog.bake_standalone_forms(root.source(), sprites, models, &standalone.forms);
+        if let Some(standalone) = standalone() {
+            catalog.bake_standalone(root.source(), sprites, models, &standalone.names)?;
+            catalog.bake_standalone_bakers(root.source(), sprites, models, &standalone.bakers);
+        }
     }
     let mut placements = Vec::new();
     let mut states = Vec::new();
@@ -254,19 +281,21 @@ pub fn load_visibility(
     root: &Path,
     registry: &BlockRegistry,
 ) -> Result<sunrise_world::block_render::FaceVisibility> {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use sunrise_world::{
         block_render::{FaceVisibility, RenderDefinition, SkipRendering},
         collision::CachedCollisionRegistry,
         registry::BlockTableFile,
+        worldgen::tags::TagDefinitions,
     };
     let file = BlockTableFile::open(&root.join("occlusion.nbt"), registry)?;
     let occlusion = CachedCollisionRegistry::from_table(file.table("occlusion")?)?;
     let raw: BTreeMap<String, Value> =
         sunrise_world::json_file::read(&root.join("render-definitions.json"))?;
+    let mut needs_tags = false;
     let definitions = raw
         .into_iter()
-        .map(|(name, v)| {
+        .map(|(name, v)| -> std::result::Result<_, String> {
             let skip = match v["rule"].as_str().ok_or("missing render rule")? {
                 "never" => SkipRendering::Never,
                 "same_block" => SkipRendering::SameBlock,
@@ -274,7 +303,45 @@ pub fn load_visibility(
                 "leaves" => SkipRendering::Leaves,
                 "liquid" => SkipRendering::Liquid,
                 "mangrove_roots" => SkipRendering::MangroveRoots,
-                _ => return Err("unrecognized render rule"),
+                _ => return Err("unrecognized render rule".into()),
+            };
+            let skip_rules = match v.get("skip_rendering") {
+                None | Some(Value::Null) => None,
+                Some(raw_rules) => {
+                    let rules =
+                        sunrise_mod_package::content::parse_face_rules(raw_rules, "skip_rendering")
+                            .map_err(|e| format!("{name}: {e}"))?;
+                    if rules
+                        .iter()
+                        .any(|r| matches!(r.neighbor, mod_api::FaceNeighbor::Tag { .. }))
+                    {
+                        needs_tags = true;
+                    }
+                    Some(rules)
+                }
+            };
+            let hides_rules = match v.get("hides_neighbor_face") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(raw_rules) => {
+                    let rules = sunrise_mod_package::content::parse_face_rules(
+                        raw_rules,
+                        "hides_neighbor_face",
+                    )
+                    .map_err(|e| format!("{name}: {e}"))?;
+                    if rules
+                        .iter()
+                        .any(|r| matches!(r.neighbor, mod_api::FaceNeighbor::Tag { .. }))
+                    {
+                        needs_tags = true;
+                    }
+                    rules
+                }
+            };
+            let supports_external_face_hiding = match v.get("supports_external_face_hiding") {
+                None | Some(Value::Null) => true,
+                Some(flag) => flag.as_bool().ok_or_else(|| {
+                    format!("{name}: supports_external_face_hiding: expected a boolean")
+                })?,
             };
             Ok((
                 name,
@@ -282,58 +349,120 @@ pub fn load_visibility(
                     skip,
                     can_occlude: v["can_occlude"].as_bool().ok_or("missing occlusion flag")?,
                     bars_tag: v["bars_tag"].as_bool().ok_or("missing bars tag")?,
+                    skip_rules,
+                    hides_rules,
+                    supports_external_face_hiding,
                 },
             ))
         })
-        .collect::<std::result::Result<_, &str>>()?;
-    Ok(FaceVisibility::new(&occlusion, &definitions)?)
+        .collect::<std::result::Result<BTreeMap<_, _>, String>>()?;
+    if needs_tags {
+        let tags_path = root.join("block-tags.json");
+        let bundle: Value = sunrise_world::json_file::read(&tags_path)?;
+        let mut tag_defs = TagDefinitions::with_conventions("block")?;
+        for (tag_name, text) in bundle.as_object().ok_or("invalid block tag bundle")? {
+            tag_defs.apply_json(
+                tag_name,
+                "vanilla",
+                text.as_str().ok_or("invalid block tag text")?,
+            )?;
+        }
+        let built = tag_defs.bind(|block_name, _| {
+            registry
+                .default_state(block_name)
+                .map(|_| block_name.to_owned())
+        });
+        let block_tags: BTreeMap<String, BTreeSet<String>> = built
+            .tags
+            .into_iter()
+            .map(|(tag, members)| (tag, members.into_iter().collect()))
+            .collect();
+        Ok(FaceVisibility::new_with_tags(
+            &occlusion,
+            &definitions,
+            &block_tags,
+        )?)
+    } else {
+        Ok(FaceVisibility::new(&occlusion, &definitions)?)
+    }
+}
+
+#[cfg(test)]
+fn with_test_registrations<R>(
+    register: impl Fn(&mut mod_api::StandaloneModelsEvent<'_>) + Send + Sync + 'static,
+    run: impl FnOnce(Vec<Answered<StandaloneModelRegistration>>) -> R,
+) -> R {
+    use mod_api::{__private::game::RegistrationContextNew, Hooks, RegistrationContext};
+
+    struct Register<F>(F);
+    #[mod_api::__subscriptions]
+    impl<F: Fn(&mut mod_api::StandaloneModelsEvent<'_>) + Send + Sync + 'static> Hooks for Register<F> {
+        fn standalone_models(
+            &self,
+            _: &RegistrationContext,
+            event: &mut mod_api::StandaloneModelsEvent<'_>,
+        ) {
+            (self.0)(event);
+        }
+    }
+
+    mod_platform::testing::with_mods(
+        vec![mod_api::ModEntry::new(
+            "registering_mod",
+            Box::new(Register(register)),
+        )]
+        .into(),
+        || {
+            let mut staged = Vec::new();
+            mod_api::dispatch_standalone_models(&RegistrationContext::new(), &mut staged);
+            run(staged)
+        },
+    )
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// Freezing the registrations namespaces, sorts and deduplicates the file IDs and keeps only
+    /// namespaced bakers. It goes through `freeze_standalone` alone, so the process-wide
+    /// `STANDALONE` registry other bake tests fall back to stays unset (#6457).
     #[test]
-    fn standalone_names_are_namespaced_sorted_and_set_once() {
-        assert!(super::standalone().names.is_empty());
-        let names = [
-            "lanef:block/b",
-            "nonamespace",
-            ":x",
-            "lanef:",
-            "lanef:block/a",
-            "lanef:block/b",
-        ];
-        assert!(super::register_standalone(super::StandaloneModels {
-            names: names.map(str::to_owned).into(),
-            forms: [
-                "no_namespace",
-                ":empty_namespace",
-                "namespace:",
-                "other:valid"
-            ]
-            .map(|id| super::StandaloneFormRegistration {
-                owner: "registering_mod",
-                form: mod_api::StandaloneModelForm::Combined {
-                    id: id.into(),
-                    parts: Vec::new(),
-                },
-            })
-            .into(),
-        }));
-        assert_eq!(
-            super::standalone().names,
-            ["lanef:block/a".to_owned(), "lanef:block/b".to_owned()]
+    fn standalone_names_are_namespaced_sorted_and_deduplicated() {
+        with_test_registrations(
+            |event| {
+                for id in [
+                    "lanef:block/b",
+                    "nonamespace",
+                    ":x",
+                    "lanef:",
+                    "lanef:block/a",
+                    "lanef:block/b",
+                ] {
+                    event.register_model(id);
+                }
+                for id in [
+                    "no_namespace",
+                    ":empty_namespace",
+                    "namespace:",
+                    "other:valid",
+                ] {
+                    event.register(id, std::iter::empty::<&str>(), |_| Ok(()));
+                }
+            },
+            |staged| {
+                let registered = freeze_standalone(staged);
+                assert_eq!(registered.names, ["lanef:block/a", "lanef:block/b"]);
+                let [baker] = registered.bakers.as_slice() else {
+                    panic!("expected only the namespaced baker");
+                };
+                assert_eq!(baker.registration.id, "other:valid");
+                assert_eq!(baker.mod_id, "registering_mod");
+            },
         );
-        let registered = super::standalone();
-        assert_eq!(registered.forms.len(), 1);
-        assert_eq!(registered.forms[0].form.id(), "other:valid");
-        assert_eq!(registered.forms[0].owner, "registering_mod");
-        assert!(!super::register_standalone(super::StandaloneModels {
-            names: vec!["other:block/c".into()],
-            forms: Vec::new(),
-        }));
-        assert_eq!(
-            super::standalone().names,
-            ["lanef:block/a".to_owned(), "lanef:block/b".to_owned()]
+        assert!(
+            STANDALONE.get().is_none(),
+            "the test sealed the process registry"
         );
     }
 }

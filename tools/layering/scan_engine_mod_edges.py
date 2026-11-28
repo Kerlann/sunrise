@@ -31,31 +31,48 @@ import re
 import subprocess
 import sys
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import rust_text  # noqa: E402
-
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from tools.layering import rust_text
 STRANDS = ["loading", "host", "slots", "attachments", "content_render", "hooks"]
 # Each strand's #2534 phase; None where nothing moves: the engine keeps its Host impls (phase 2 dropped) and attachment
 # storage is already engine-layer (phase 4 dropped), owner 2026-11-10.
 PHASE = {"loading": 1, "host": None, "slots": 3, "attachments": None, "content_render": 5, "hooks": 6}
 # The host areas the scan inventories, as repo paths.
-MOVE_SET = ("crates/sunrise-client/src/game/modding/", "crates/sunrise-client/src/game/native_hooks/")
-GAME = "crates/sunrise-client/src/game"
+MOVE_SET = (
+    "crates/sunrise-client/src/game/modding/",
+    "crates/sunrise-client/src/game/native_hooks/",
+    "crates/sunrise-client/src/cut_layout/game/modding/",
+    "crates/sunrise-client/src/cut_layout/game/native_hooks/",
+    "crates/sunrise-gameplay-common/src/game/modding/",
+    "crates/sunrise-gameplay-common/src/game/native_hooks/",
+    "crates/sunrise-gameplay/src/game/modding/",
+    "crates/sunrise-gameplay/src/game/native_hooks/",
+    "crates/sunrise-client-gameplay/src/game/modding/",
+    "crates/sunrise-client-gameplay/src/game/native_hooks/",
+)
+GAME_PREFIXES = (
+    "crates/sunrise-client/src/game",
+    "crates/sunrise-client/src/cut_layout/game",
+    "crates/sunrise-gameplay-common/src/game",
+    "crates/sunrise-gameplay/src/game",
+    "crates/sunrise-client-gameplay/src/game",
+)
+GAME_CRATES = {"sunrise-client", "sunrise-gameplay-common", "sunrise-gameplay", "sunrise-client-gameplay"}
 # sunrise-client-lib's library root sits in sunrise-client's src/; these paths there are sunrise-client's own.
 CLIENT_SRC = "crates/sunrise-client/src/"
-CLIENT_OWN = re.compile(r"crates/sunrise-client/src/(game(\.rs|/)|entry\.rs|main\.rs|lib\.rs)")
+CLIENT_OWN = re.compile(r"crates/sunrise-client/src/(game(\.rs|/)|cut_layout/|game_facade\.rs|entry\.rs|main\.rs|lib\.rs|test_game_dir\.rs)")
 
 # (strand, pattern on the edge's path "crate::a::b"); the first match wins. Owners correct strands here.
 RULES = [
     ("loading", r"^(sunrise_mod_package|sunrise_mod_deps)\b"),
-    ("loading", r"^mod_api::(ModEntry|Mods|ModFields|__private::(install|mods|set_mod_enabled|ModPhase|PhaseOwner"
-                r"|current_phase|LoadAccess|check_access|with_test_packages|loaded_mods|LoadedMods"
+    ("loading", r"^mod_api::(ModEntry|Mods|ModFields|__private::(install|mods|set_mod_enabled"
+                r"|RegistrationGuard|registration_open|with_test_packages|loaded_mods|LoadedMods"
                 r"|installed_code_ids|mod_index\w*|mark_game_thread|command_argument_types))\b"),
     ("slots", r"^(sunrise_mod_api_macros|sunrise_mod_api_gen)\b"),
     ("attachments", r"^sunrise_mod_runtime::(attachments|impl_attachment_lifetime)\b"),
     ("attachments", r"^mod_api::(Attachment\w*|attachment_queries|__private::attach\w*)\b"),
-    ("host", r"^mod_api::(\w*Host|HostSide|Backend\w*|__private::(backend\w*|game))\b"),
+    ("host", r"^mod_api::(\w*Host|HostSide|Backend\w*|ConfigContext|ReloadContext|ClientReloadListenerContext|ClientSetupContext|__private::(backend\w*|game))\b"),
     ("content_render", r"^mod_render\b|^sunrise_mod_runtime\b"),
     ("content_render", r"^mod_api::(content|client|sprite_source|RegistrationContext|Registr\w*|Config\w*"
                        r"|__private::(\w+_key(_id|_by_\w+)?|\w+_id|effect_index|resolve_\w+|block_definitions"
@@ -65,9 +82,8 @@ RULES = [
 RULES = [(strand, re.compile(pattern)) for strand, pattern in RULES]
 # Generated files an engine crate includes, by strand.
 GENERATED = {
-    "game_modules.rs": "slots", "lan_action_modules.rs": "slots", "native_hook_modules.rs": "hooks",
     "mod_api_fire_generated.rs": "hooks", "mod_api_goal_view_generated.rs": "hooks",
-    "game_host_modules.rs": "host",
+    "game_host_generated.rs": "host",
 }
 # File rules for the move set, before the edges' majority decides.
 FILE_RULES = [
@@ -81,7 +97,7 @@ FILE_RULES = [
 OUT_DIR_INCLUDE = re.compile(r'include!\(\s*concat!\(\s*env!\(\s*"OUT_DIR"\s*\)\s*,\s*"/([\w.]+)"\s*\)\s*\)')
 FN_DEF = re.compile(r"(?<![\w])(pub(?:\s*\([^)]*\))?\s+)?(?:const\s+|async\s+|unsafe\s+|extern\s+)*fn\s+(\w+)")
 TYPE_DEF = re.compile(r"(?<![\w])(pub(?:\s*\([^)]*\))?\s+)?(struct|enum|trait|type|union|const|static|mod)\s+(\w+)")
-METHOD_CALL = re.compile(r"(?:\.|\bSelf::|\bGame::|\bGameLevel::)\s*(\w+)\s*(?:::\s*<[^;{}]*?>\s*)?\(")
+METHOD_CALL = re.compile(r"(?:\.|\bSelf::|\b(?:Game|CommonGame|ServerGame|ClientGame|GameLevel)::)\s*(\w+)\s*(?:::\s*<[^;{}]*?>\s*)?\(")
 FIELD = re.compile(r"\b(self|game|level|g)\s*\.\s*([a-z_]\w*)\b(?!\s*(?:\(|::\s*<))")
 IMPL = re.compile(r"(?<![\w])impl\b")
 STATE = re.compile(r"(?<!['\w])(static\s+(?:mut\s+)?\w+|thread_local!|OnceLock|LazyLock|OnceCell|Mutex|RwLock"
@@ -323,7 +339,7 @@ class Definitions:
                 self.fns[m.group(2)].append((s.path, (m.group(1) or "").strip()))
             for m in TYPE_DEF.finditer(s.code):
                 self.types[m.group(3)].append((s.path, (m.group(1) or "").strip()))
-            for m in re.finditer(r"(?<![\w])(pub(?:\s*\([^)]*\))?\s+)?struct\s+(Game|GameLevel)\b[^{;]*\{", s.code):
+            for m in re.finditer(r"(?<![\w])(pub(?:\s*\([^)]*\))?\s+)?struct\s+(Game|CommonGame|ServerGame|ClientGame|GameLevel)\b[^{;]*\{", s.code):
                 end, _ = rust_text.item_end(s.code, m.start())
                 body = s.code[m.end():end]
                 for f in re.finditer(r"(?:^|,)\s*(pub(?:\s*\([^)]*\))?\s+)?([a-z_]\w*)\s*:(?!:)", body, re.M):
@@ -341,7 +357,7 @@ def public(defs):
 def move_set_analysis(sources, edges_by_file, defs):
     """Per move-set file: strand, phase, impls to rewrite, outbound engine-private names. Plus inbound edges."""
     files = {}
-    game_sources = [s for s in sources if s.crate == "sunrise-client" and s.path.startswith(GAME)]
+    game_sources = [s for s in sources if s.crate in GAME_CRATES and s.path.startswith(GAME_PREFIXES)]
     moved = [s for s in game_sources if in_move_set(s.path)]
     for s in moved:
         strand = next((st for st, rule in FILE_RULES if rule.search(s.path)), None)
@@ -349,7 +365,7 @@ def move_set_analysis(sources, edges_by_file, defs):
         if strand is None:
             strand = max(STRANDS, key=lambda st: (counts[st], -STRANDS.index(st))) if counts else "hooks"
         inherent = len(re.findall(r"(?<![\w])impl\b\s*(?:<[^{;]*?>)?\s*(?:super::|crate::game::)?"
-                                  r"(?:Game|GameLevel)\s*<[^{;]*?>\s*(?:where\b[^{]*)?\{", s.code))
+                                  r"(?:Game|CommonGame|ServerGame|ClientGame|GameLevel)\s*<[^{;]*?>\s*(?:where\b[^{]*)?\{", s.code))
         foreign = sum(1 for e in edges_by_file.get(s.path, []) if e["kind"] == "impl" and not e["test"])
         outbound = set()
         for m in METHOD_CALL.finditer(s.code):
@@ -357,7 +373,7 @@ def move_set_analysis(sources, edges_by_file, defs):
             if s.is_test(m.start()) or any(in_move_set(p) for p, _ in defs.fns.get(name, [])):
                 continue
             outside = [d for d in defs.fns.get(name, []) if not in_move_set(d[0])]
-            if outside and not public(outside) and all(p.startswith(GAME) for p, _ in outside):
+            if outside and not public(outside) and all(p.startswith(GAME_PREFIXES) for p, _ in outside):
                 outbound.add(("fn", name))
         for m in FIELD.finditer(s.code):
             name = m.group(2)
@@ -370,7 +386,7 @@ def move_set_analysis(sources, edges_by_file, defs):
                     continue
                 defs_here = defs.types.get(name, []) + defs.fns.get(name, [])
                 outside = [d for d in defs_here if not in_move_set(d[0])]
-                if outside and not public(outside) and all(p.startswith(GAME) for p, _ in outside):
+                if outside and not public(outside) and all(p.startswith(GAME_PREFIXES) for p, _ in outside):
                     outbound.add(("item", name))
         files[s.path] = {
             "strand": strand, "phase": PHASE[strand], "lines": s.text.count("\n"), "test_file": s.test_file,
@@ -477,7 +493,7 @@ def main(argv=None):
     parser.add_argument("--json", help="write the full scan here")
     parser.add_argument("--map", help="write the tables docs/layering/mod-host-map.md describes to this file")
     args = parser.parse_args(argv)
-    from mod_host_map import render  # noqa: E402  (the map's tables, kept beside the scanner)
+    from tools.layering.mod_host_map import render  # the map's tables, kept beside the scanner
     result = scan()
     if args.json:
         Path(args.json).write_text(json.dumps(result, indent=1, sort_keys=True) + "\n", encoding="utf-8")

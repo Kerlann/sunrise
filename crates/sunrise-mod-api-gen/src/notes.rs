@@ -25,9 +25,9 @@ pub fn render(catalog: &Catalog) -> String {
     page
 }
 
-/// Reads the checkout's hook declarations and renders the page without resolving native targets.
+/// Reads the checkout's hook declarations and renders the page.
 pub fn generate(root: &Path) -> Result<String, String> {
-    let catalog = Catalog::load_declarations(root)?;
+    let catalog = Catalog::load(root)?;
     Ok(render(&catalog))
 }
 
@@ -70,6 +70,10 @@ mod tests {
         );
         let page = super::generate(&root).unwrap();
         assert!(page.contains("## Counterparts"));
+        assert!(
+            !page.contains("@API:"),
+            "rendered Hook notes must not leak raw @API: tokens"
+        );
         assert!(!path.exists(), "rendering must not write into book sources");
     }
 }

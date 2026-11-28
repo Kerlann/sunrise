@@ -9,13 +9,20 @@ pub trait Hooks {
     /// touching the world. With no part attached to the state, the cost is one table lookup.
     /// Diverges from upstream: new hook.
     #[hook(
+        receiver = "read",
+        dispatch = "flat",
         side = "server",
         contract = "collect",
         out = "valid",
         scope = "block",
         key = "state",
-        target = "sunrise_client::game::native_hooks::rails::GameLevel<'_>::native_rail_valid_shape",
+        target = "sunrise_gameplay_common::game::native_hooks::rails::GameLevel<'_>::native_rail_valid_shape",
         neoforge = "IBaseRailBlockExtension.isValidRailShape"
     )]
-    fn rail_valid_shape();
+    fn rail_valid_shape(
+        dimension: LevelDimension,
+        state: BlockState,
+        shape: RailShape,
+        valid: &mut bool,
+    );
 }

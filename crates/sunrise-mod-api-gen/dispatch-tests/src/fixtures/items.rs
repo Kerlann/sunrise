@@ -19,9 +19,11 @@ fn item_dispatch_records_each_owner_with_its_submission() {
     );
     DECLARATION_OWNERS.with_borrow_mut(Vec::clear);
     let mut items = Vec::new();
-    dispatch_items(&RegistrationContext("bootstrap"), &mut |item| {
-        items.push(item);
-        Ok(())
+    dispatch_items(&RegistrationContext("bootstrap"), &mut |listen| {
+        assert!(listen(&mut |item| {
+            items.push(item);
+            Ok(())
+        }));
     });
     assert_eq!(
         items

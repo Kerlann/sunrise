@@ -52,6 +52,7 @@ fn quad(z: f32) -> [crate::mesher::Vertex; 4] {
 }
 
 #[test]
+#[ignore = "daily"]
 fn the_sun_leaves_its_own_alpha_over_the_sky() {
     let _gpu = crate::gfx::test_gpu::lock();
     let Some(gpu) = Gpu::new() else { return };
@@ -76,8 +77,8 @@ fn the_sun_leaves_its_own_alpha_over_the_sky() {
             hand: false,
         },
         sunrise_shaders::GameInputs {
-            sky: Some(super::super::pack_sky::inputs()),
-            celestial: Some(super::super::pack_sky::celestial_inputs()),
+            sky: Some(crate::gfx::pack_sky::inputs()),
+            celestial: Some(crate::gfx::pack_sky::celestial_inputs()),
             ..Default::default()
         },
     );

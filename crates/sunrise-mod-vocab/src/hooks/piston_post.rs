@@ -1,5 +1,4 @@
 //! The `piston_post` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0041
 
 pub trait Hooks {
     /// On an authoritative server, the piston at `piston` is about to push
@@ -12,11 +11,13 @@ pub trait Hooks {
     /// blocks rather than the retraction to replay. Diverges from upstream: `piston_move` is renamed to
     /// `piston_pre`, and `piston_post` is new.
     #[hook(
+        receiver = "read",
+        dispatch = "api_carrier",
         side = "server",
         contract = "cancel",
         out = "canceled",
         neoforge = "PistonEvent.Pre",
-        target = "sunrise_client::game::native_hooks::base::GameLevel<'_>::native_piston_pre"
+        target = "sunrise_gameplay_common::game::native_hooks::base::GameLevel<'_>::native_piston_pre"
     )]
     fn piston_pre(
         dimension: LevelDimension,
@@ -35,10 +36,19 @@ pub trait Hooks {
     /// Server-side. Diverges from upstream: `piston_move` is split into
     /// `piston_pre` and `piston_post`.
     #[hook(
+        receiver = "read",
+        dispatch = "flat",
         side = "server",
         contract = "listen",
         neoforge = "PistonEvent.Post",
-        target = "sunrise_client::game::native_hooks::base::GameLevel<'_>::native_piston_post"
+        target = "sunrise_gameplay_common::game::native_hooks::base::GameLevel<'_>::native_piston_post"
     )]
-    fn piston_post();
+    fn piston_post(
+        dimension: LevelDimension,
+        piston: BlockPos,
+        direction: [i32; 3],
+        extending: bool,
+        push: &[BlockPos],
+        destroy: &[BlockPos],
+    );
 }

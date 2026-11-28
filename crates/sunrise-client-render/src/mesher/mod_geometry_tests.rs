@@ -1,5 +1,4 @@
-//! The section geometry design's acceptance cases (docs/design/mod-api/section-geometry.md)
-//! that the mesher alone decides.
+//! Acceptance cases for mod section geometry that the mesher alone decides.
 use super::mod_geometry::{
     Batch, Budget, MAX_IN_FLIGHT_BYTES, MAX_QUADS, MAX_SECTION_BYTES, QUAD_BYTES, Renderer,
 };
@@ -204,23 +203,24 @@ fn an_invalid_quad_refuses_the_batch_and_its_earlier_quads() {
     assert_eq!(budget, full_budget());
 }
 
-struct World {
-    assets: Assets,
-    render: RenderAssets,
+/// Prepared resources and the mesher over them.
+pub(super) struct World {
+    pub(super) assets: Assets,
+    pub(super) render: RenderAssets,
     facts: BlockFacts,
     biomes: Biomes,
-    root: std::path::PathBuf,
+    pub(super) root: std::path::PathBuf,
 }
 
 impl World {
-    fn load() -> Option<Self> {
+    pub(super) fn load() -> Option<Self> {
         let root = resources()?;
         let assets = Assets::load(&root).unwrap();
         let facts = BlockFacts::load(&root, assets.registry).unwrap();
         let biomes = Biomes::load(&ResourceRoot::directory(root.clone())).unwrap();
-        let render = assets
-            .reload(&ResourceRoot::directory(root.clone()))
-            .unwrap();
+        let render =
+            crate::assets::RenderAssets::load(&ResourceRoot::directory(root.clone()), &assets)
+                .unwrap();
         Some(Self {
             assets,
             render,
@@ -235,7 +235,7 @@ impl World {
     }
 
     /// Mesh tables whose section geometry is `renderers`.
-    fn tables(&self, renderers: Vec<Arc<dyn SectionGeometry>>) -> MeshTables {
+    pub(super) fn tables(&self, renderers: Vec<Arc<dyn SectionGeometry>>) -> MeshTables {
         let mut tables = MeshTables::new(
             &self.assets,
             &self.render,
@@ -245,11 +245,13 @@ impl World {
         )
         .unwrap();
         tables.section_geometry = renderers.into_iter().map(Renderer::new).collect();
-        tables.mod_tints.values = Some(tint_values(self.assets.registry));
+        if !tables.section_geometry.is_empty() {
+            tables.mod_tints.values = Some(tint_values(self.assets.registry));
+        }
         tables
     }
 
-    fn mesher<'a>(&'a self, tables: &'a MeshTables) -> Mesher<'a> {
+    pub(super) fn mesher<'a>(&'a self, tables: &'a MeshTables) -> Mesher<'a> {
         Mesher {
             nether_shading: false,
             shader_pack_lighting: false,
@@ -266,6 +268,7 @@ impl World {
             cutout_leaves: true,
             opaque_ice: false,
             translucent_layers: &[],
+            layer_overrides: &[],
             leaf_culling: LeafCullingMode::Off,
             hidden_states: &[],
             part_tables: Default::default(),
@@ -273,7 +276,7 @@ impl World {
     }
 
     /// A chunk with one stone block in section 0 and section 1 empty.
-    fn cube(&self) -> Chunk {
+    pub(super) fn cube(&self) -> Chunk {
         let stone = self
             .assets
             .registry
@@ -285,7 +288,7 @@ impl World {
     }
 }
 
-fn quads(vertices: &[TerrainVertex]) -> usize {
+pub(super) fn quads(vertices: &[TerrainVertex]) -> usize {
     vertices.len() / 4
 }
 

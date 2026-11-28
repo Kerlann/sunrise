@@ -1,11 +1,49 @@
-//! HUD boxes in the corners: mods' panels, small boxes in GUI pixels stacked per corner
-//! (`docs/extras.md`), and the layers crates above the engine register (`sunrise_hooks::hud`).
+//! HUD layers that crates above the engine register (`sunrise_hooks::hud`).
 use crate::{
     extras::Corner,
     hud::{HudAtlas, HudBatch, rgba},
 };
-pub use mod_api::client::extras_hud::Corners;
 use sunrise_hooks::hud;
+
+/// The gap between an overlay and the screen edge or the next overlay.
+const MARGIN: f32 = 2.0;
+
+// no wire: the stacking cursor is local to a render pass.
+/// Corner-stacking cursor for registered HUD layers.
+pub struct Corners {
+    width: f32,
+    height: f32,
+    /// Distance from the corner's top or bottom edge, per `Corner::ALL`.
+    used: [f32; 4],
+}
+impl Corners {
+    /// `top_right` clears the vanilla active status effect icons.
+    pub fn new(width: f32, height: f32, top_right: f32) -> Self {
+        Self {
+            width,
+            height,
+            used: [0.0, top_right, 0.0, 0.0],
+        }
+    }
+
+    /// Top-left position of a `w` x `h` box in `corner`, advancing that corner's stack.
+    pub fn place(&mut self, corner: Corner, w: f32, h: f32) -> (f32, f32) {
+        let i = corner as usize;
+        let edge = self.used[i] + MARGIN;
+        self.used[i] = edge + h;
+        let x = if corner.left() {
+            MARGIN
+        } else {
+            self.width - MARGIN - w
+        };
+        let y = if corner.top() {
+            edge
+        } else {
+            self.height - edge - h
+        };
+        (x, y)
+    }
+}
 
 const BACKGROUND: u32 = 0x7800_0000;
 
@@ -35,9 +73,8 @@ pub fn draw_lines(
     }
 }
 
-/// Draws the HUD layers crates registered with the HUD ([`hud::Stage::Hud`]), after the extras'
-/// and mods' boxes, which they stack with. `shown`: whether each corner of `Corner::ALL` shows
-/// (the debug screen covers some).
+/// Draws registered HUD layers ([`hud::Stage::Hud`]). `shown` indicates which corners of
+/// `Corner::ALL` are available (the debug screen covers some).
 pub fn draw_layers(
     layers: &[&dyn hud::Layer],
     batch: &mut HudBatch,

@@ -1,8 +1,4 @@
-//! A guest's spectator camera and locator-bar rules (`ServerPlayer.camera`, `waypoint_transmit_range`).
-use sunrise_client::{
-    items::ItemStack,
-    lan::waypoints::{HIDING_HEADS, PLAYER_RANGE},
-};
+//! A guest's spectator camera (`ServerPlayer.camera`).
 use sunrise_core::geometry::Aabb;
 
 /// Where a camera entity is, which way it looks and its box.
@@ -27,16 +23,6 @@ pub struct GuestCamera {
 /// left spectator mode (`setGameMode`) or was teleported (`resetCamera`).
 pub fn camera_ends(alive: bool, sneaking: bool, spectator: bool, teleported: bool) -> bool {
     !alive || sneaking || !spectator || teleported
-}
-
-/// `waypoint_transmit_range`: hidden by crouching, invisibility or a head worn.
-pub fn transmit_range(crouching: bool, invisible: bool, head: Option<&ItemStack>) -> f64 {
-    let hiding_head = head.is_some_and(|s| HIDING_HEADS.contains(&&*s.item));
-    if crouching || invisible || hiding_head {
-        0.0
-    } else {
-        PLAYER_RANGE
-    }
 }
 
 #[cfg(test)]

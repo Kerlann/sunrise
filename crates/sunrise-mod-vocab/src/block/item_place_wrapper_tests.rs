@@ -39,13 +39,13 @@ fn infinite_hand() -> ItemPlace {
 /// `place.insert` of `amount` in a transaction that commits.
 fn insert(host: &mut FakeHost, place: &ItemPlace, resource: &ItemResource, amount: u32) -> u32 {
     let host: &mut dyn ServerHost = host;
-    host.transaction(|host, tx| Ok::<_, ()>(place.insert(host, tx, resource, amount)))
+    host.transaction(|host, tx| place.insert(host, tx, resource, amount))
         .unwrap()
 }
 
 fn extract(host: &mut FakeHost, place: &ItemPlace, resource: &ItemResource, amount: u32) -> u32 {
     let host: &mut dyn ServerHost = host;
-    host.transaction(|host, tx| Ok::<_, ()>(place.extract(host, tx, resource, amount)))
+    host.transaction(|host, tx| place.extract(host, tx, resource, amount))
         .unwrap()
 }
 
@@ -130,12 +130,17 @@ fn without_infinite_materials_it_is_the_place_inside() {
 #[test]
 fn wrappers_nest_far_deeper_than_any_stack_would_recurse() {
     let (mut host, r) = host_with(&[("minecraft:dirt", 64)]);
-    let dirt = &r[0];
-    host.players
-        .get_mut(STEVE)
-        .unwrap()
-        .slots
-        .insert(3, dirt.to_stack(5).unwrap());
+    let mut stored = r[0].to_stack(5).unwrap();
+    let data = Tag::Compound([("value".into(), Tag::Int(42))].into_iter().collect());
+    stored
+        .set_components(
+            [("minecraft:custom_data".into(), data.clone())]
+                .into_iter()
+                .collect(),
+        )
+        .unwrap();
+    let dirt = ItemResource::of(&stored);
+    host.players.get_mut(STEVE).unwrap().slots.insert(3, stored);
     let mut deep = ItemPlace::PlayerSlot {
         player: STEVE,
         slot: 3,
@@ -152,7 +157,22 @@ fn wrappers_nest_far_deeper_than_any_stack_would_recurse() {
     }
     let server: &mut dyn ServerHost = &mut host;
     assert_eq!(deep.amount(server), 1);
-    assert_eq!(extract(&mut host, &deep, dirt, 5), 1);
+    let (count, projected) = deep
+        .with_stack(server, |view| (view.count(), view.project()))
+        .unwrap();
+    let projected = projected.unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(projected.count(), 1);
+    assert_eq!(
+        projected
+            .components()
+            .unwrap()
+            .as_nbt()
+            .get(&crate::JavaString::from("minecraft:custom_data")),
+        Some(&data),
+    );
+    assert_eq!(slots(&host), [(3, 5)], "lending one did not change storage");
+    assert_eq!(extract(&mut host, &deep, &dirt, 5), 1);
     assert_eq!(slots(&host), [(3, 4)]);
     let cloned = deep.clone();
     assert_eq!(cloned.amount(&mut host), 1);
@@ -161,20 +181,222 @@ fn wrappers_nest_far_deeper_than_any_stack_would_recurse() {
 }
 
 #[test]
-fn wire_decode_refuses_wrappers_nested_past_its_depth() {
-    // `Strict` `wrappers` deep around a player slot, as the wire writes it.
-    let wrapped = |wrappers: usize| {
-        let mut bytes = Vec::new();
-        for _ in 0..wrappers {
-            bytes.extend(11u32.to_le_bytes());
-        }
-        bytes.extend(0u32.to_le_bytes());
-        bytes.extend(STEVE.to_le_bytes());
-        bytes.extend(3i32.to_le_bytes());
-        crate::wire::Reader::decode::<ItemPlace>(&bytes)
+fn one_by_one_caps_both_inserts_and_extracts_at_one() {
+    let (mut host, r) = host_with(&[("minecraft:dirt", 64)]);
+    let dirt = &r[0];
+    host.players
+        .get_mut(STEVE)
+        .unwrap()
+        .slots
+        .insert(3, dirt.to_stack(5).unwrap());
+    let slot = ItemPlace::PlayerSlot {
+        player: STEVE,
+        slot: 3,
     };
-    // Each wrapper takes two of the wire's 32 levels, its box and the place inside.
-    assert!(wrapped(15).is_ok());
-    assert_eq!(wrapped(16), Err(crate::wire::WireError::Depth));
-    assert_eq!(wrapped(100_000), Err(crate::wire::WireError::Depth));
+    let one = ItemPlace::OneByOne(Box::new(slot));
+    assert_eq!(insert(&mut host, &one, dirt, 4), 1);
+    assert_eq!(slots(&host), [(3, 6)]);
+    assert_eq!(extract(&mut host, &one, dirt, 4), 1);
+    assert_eq!(slots(&host), [(3, 5)]);
+}
+
+/// A mod's multiblock handler: whichever block of the multiblock it was reached from, index `i`
+/// is slot `i` of the controller's container.
+struct Multiblock {
+    level: LevelRef,
+    controller: [i32; 3],
+}
+
+impl ResourceHandler<ItemResource> for Multiblock {
+    fn size(&self, _: &mut dyn ServerHost) -> usize {
+        2
+    }
+    fn resource(&self, _: &mut dyn ServerHost, _: usize) -> Option<ItemResource> {
+        None
+    }
+    fn amount(&self, _: &mut dyn ServerHost, _: usize) -> u32 {
+        0
+    }
+    fn capacity(&self, _: &mut dyn ServerHost, _: usize, _: Option<&ItemResource>) -> u32 {
+        0
+    }
+    fn insert_at(
+        &self,
+        _: &mut dyn ServerHost,
+        _: &TransactionContext,
+        _: usize,
+        _: &ItemResource,
+        _: u32,
+    ) -> Result<u32, TransactionError<Overanswered>> {
+        Ok(0)
+    }
+    fn extract_at(
+        &self,
+        _: &mut dyn ServerHost,
+        _: &TransactionContext,
+        _: usize,
+        _: &ItemResource,
+        _: u32,
+    ) -> Result<u32, TransactionError<Overanswered>> {
+        Ok(0)
+    }
+    fn backing(&self, _: &mut dyn ServerHost, index: usize) -> Option<StorageSlot> {
+        (index < 2).then_some(StorageSlot {
+            level: self.level,
+            pos: self.controller,
+            slot: index,
+        })
+    }
+}
+
+/// The same handler without a `backing` answer.
+struct Silent(Multiblock);
+
+impl ResourceHandler<ItemResource> for Silent {
+    fn size(&self, host: &mut dyn ServerHost) -> usize {
+        self.0.size(host)
+    }
+    fn resource(&self, host: &mut dyn ServerHost, index: usize) -> Option<ItemResource> {
+        self.0.resource(host, index)
+    }
+    fn amount(&self, host: &mut dyn ServerHost, index: usize) -> u32 {
+        self.0.amount(host, index)
+    }
+    fn capacity(
+        &self,
+        host: &mut dyn ServerHost,
+        index: usize,
+        resource: Option<&ItemResource>,
+    ) -> u32 {
+        self.0.capacity(host, index, resource)
+    }
+    fn insert_at(
+        &self,
+        host: &mut dyn ServerHost,
+        tx: &TransactionContext,
+        index: usize,
+        resource: &ItemResource,
+        amount: u32,
+    ) -> Result<u32, TransactionError<Overanswered>> {
+        self.0.insert_at(host, tx, index, resource, amount)
+    }
+    fn extract_at(
+        &self,
+        host: &mut dyn ServerHost,
+        tx: &TransactionContext,
+        index: usize,
+        resource: &ItemResource,
+        amount: u32,
+    ) -> Result<u32, TransactionError<Overanswered>> {
+        self.0.extract_at(host, tx, index, resource, amount)
+    }
+}
+
+#[test]
+fn a_handler_reports_one_backing_from_every_block_of_a_multiblock() {
+    let mut fake = FakeHost::new();
+    let level = fake.level.level();
+    let host: &mut dyn ServerHost = &mut fake;
+    // Two blocks of one multiblock each answer with their own handler value.
+    let from_a = Multiblock {
+        level,
+        controller: [0, 64, 0],
+    };
+    let from_b = Multiblock {
+        level,
+        controller: [0, 64, 0],
+    };
+    let a = from_a.backing(host, 1).unwrap();
+    assert_eq!(a, from_b.backing(host, 1).unwrap());
+    assert_ne!(a, from_a.backing(host, 0).unwrap());
+    assert_eq!(
+        a,
+        StorageSlot {
+            level,
+            pos: [0, 64, 0],
+            slot: 1
+        }
+    );
+    assert_eq!(from_a.backing(host, 2), None);
+}
+
+#[test]
+fn a_handler_that_does_not_override_backing_reports_none() {
+    let mut fake = FakeHost::new();
+    let level = fake.level.level();
+    let host: &mut dyn ServerHost = &mut fake;
+    let silent = Silent(Multiblock {
+        level,
+        controller: [0, 64, 0],
+    });
+    assert_eq!(silent.backing(host, 0), None);
+}
+
+#[test]
+fn a_block_entity_place_reports_the_slot_wrapped_or_not() {
+    let mut fake = FakeHost::new();
+    let level = fake.level.level();
+    fake.level.block_entity([3, 64, 3]).with_items(4);
+    let host: &mut dyn ServerHost = &mut fake;
+    let place = ItemPlace::BlockEntity {
+        level,
+        pos: [3, 64, 3],
+        side: Some(Direction::Up),
+        slot: 2,
+    };
+    let expected = Some(StorageSlot {
+        level,
+        pos: [3, 64, 3],
+        slot: 2,
+    });
+    assert_eq!(place.backing(host), expected);
+    let strict = ItemPlace::Strict(Box::new(place));
+    assert_eq!(strict.backing(host), expected);
+    let one = ItemPlace::OneByOne(Box::new(strict));
+    assert_eq!(one.backing(host), expected);
+    // A slot past the container, and a block with no container, have none.
+    let past = ItemPlace::BlockEntity {
+        level,
+        pos: [3, 64, 3],
+        side: None,
+        slot: 4,
+    };
+    assert_eq!(past.backing(host), None);
+    let none = ItemPlace::BlockEntity {
+        level,
+        pos: [9, 64, 9],
+        side: None,
+        slot: 0,
+    };
+    assert_eq!(none.backing(host), None);
+}
+
+#[test]
+fn places_that_are_not_block_slots_have_no_backing() {
+    let (mut fake, _) = host_with(&[]);
+    let level = fake.level.level();
+    fake.level.block_entity([3, 64, 3]).with_items(4);
+    let host: &mut dyn ServerHost = &mut fake;
+    let slot = ItemPlace::PlayerSlot {
+        player: STEVE,
+        slot: 0,
+    };
+    let hand = ItemPlace::PlayerHand {
+        player: STEVE,
+        hand: Hand::Main,
+    };
+    assert_eq!(slot.backing(host), None);
+    assert_eq!(hand.backing(host), None);
+    assert_eq!(infinite_hand().backing(host), None);
+    // Even around a block slot, a player with infinite materials reaches it as a wrapper.
+    let wrapped = ItemPlace::InfiniteMaterials {
+        player: STEVE,
+        inner: Box::new(ItemPlace::BlockEntity {
+            level,
+            pos: [3, 64, 3],
+            side: None,
+            slot: 0,
+        }),
+    };
+    assert_eq!(wrapped.backing(host), None);
 }

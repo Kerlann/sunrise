@@ -107,6 +107,7 @@ import net.minecraft.world.phys.Vec3;
  * also records what the server changes about it: its game mode, teleports,
  * motion, inventory slots, effects and death) and {@code end}, which writes each
  * player's lines to OUT. {@code boats on|off} records boat paddle metadata;
+ * {@code boat-damage on|off} records boat spawn, {@code VehicleEntity.DATA_ID_DAMAGE} updates and removal;
  * {@code hooks on|off} records the entity a fishing bobber hooks, by type;
  * {@code paddle NAME LEFT RIGHT} sends the two boolean paddle states;
  * {@code sounds on|off} records typed sound packets and their complete payloads;
@@ -129,9 +130,11 @@ public final class LocatorBarClient {
     private static Path partialTrace;
     private static final Object traceLock = new Object();
     private static volatile boolean boats;
+    private static volatile boolean boatDamage;
     private static volatile boolean hooks;
     private static volatile boolean state;
     private static volatile boolean sounds;
+    private static volatile boolean gameEvents;
     private static volatile boolean events;
     private static volatile boolean spawns;
     private static volatile boolean menus;
@@ -214,10 +217,7 @@ public final class LocatorBarClient {
                     case "selfmetadata" -> selfMetadata = w[1].equals("on");
                     case "trackposes" -> trackPoses = w[1].equals("on");
                     case "still" -> players.get(w[1]).still();
-                    case "fallmove" -> {
-                        String[] a = w[2].split(" ");
-                        players.get(w[1]).fallmove(Double.parseDouble(a[0]), Double.parseDouble(a[1]), Double.parseDouble(a[2]), Boolean.parseBoolean(a[3]));
-                    }
+                    case "fallmove" -> players.get(w[1]).fallmove(w[2].split(" "));
                     case "respawn" -> players.get(w[1]).send(new net.minecraft.network.protocol.game.ServerboundClientCommandPacket(
                         net.minecraft.network.protocol.game.ServerboundClientCommandPacket.Action.PERFORM_RESPAWN));
                     case "use-on" -> {
@@ -282,6 +282,7 @@ public final class LocatorBarClient {
                         }
                     }
                     case "boats" -> boats = w[1].equals("on");
+                    case "boat-damage" -> boatDamage = w[1].equals("on");
                     case "hooks" -> hooks = w[1].equals("on");
                     case "paddle" -> {
                         String[] sides = w[2].split(" ");
@@ -290,6 +291,7 @@ public final class LocatorBarClient {
                     }
                     case "state" -> state = w[1].equals("on");
                     case "sounds" -> sounds = w[1].equals("on");
+                    case "game-events" -> gameEvents = w[1].equals("on");
                     case "events" -> events = w[1].equals("on");
                     case "spawns" -> spawns = w[1].equals("on");
                     case "end" -> {
@@ -376,6 +378,7 @@ public final class LocatorBarClient {
         private int vehicle = -1;
         /** The other players this one was sent, by entity id. */
         private final java.util.Set<Integer> boatIds = new java.util.HashSet<>();
+        private final Map<Integer, String> boatPos = new java.util.HashMap<>();
         private final Map<Integer, String> entityTypes = new java.util.HashMap<>();
         private final Map<Integer, String> seen = new java.util.HashMap<>();
         private final Map<Integer, UUID> trackedProfiles = new java.util.HashMap<>();
@@ -617,15 +620,21 @@ public final class LocatorBarClient {
             position = new PositionMoveRotation(new Vec3(start.x, y, z), Vec3.ZERO, at.yRot(), at.xRot());
         }
 
-        /** One position in a client tick of its own: the server takes one position per client tick. */
-        void fallmove(double x, double y, double z, boolean ground) throws Exception {
+        /** Write the reports together, with a client-tick marker between positions. */
+        synchronized void fallmove(String[] reports) throws Exception {
             PositionMoveRotation before = position;
-            Vec3 to = new Vec3(x, y, z);
-            send(net.minecraft.network.protocol.game.ServerboundClientTickEndPacket.INSTANCE);
-            send(new ServerboundMovePlayerPacket.PosRot(to, before.yRot(), before.xRot(), ground, false));
-            send(net.minecraft.network.protocol.game.ServerboundClientTickEndPacket.INSTANCE);
-            position = new PositionMoveRotation(to, Vec3.ZERO, before.yRot(), before.xRot());
-            record("fallmove " + x + " " + y + " " + z + " " + ground);
+            ByteBuf batch = Unpooled.buffer();
+            frame(batch, net.minecraft.network.protocol.game.ServerboundClientTickEndPacket.INSTANCE);
+            for (int i = 0; i < reports.length; i += 4) {
+                Vec3 to = new Vec3(Double.parseDouble(reports[i]), Double.parseDouble(reports[i + 1]),
+                    Double.parseDouble(reports[i + 2]));
+                boolean ground = Boolean.parseBoolean(reports[i + 3]);
+                frame(batch, new ServerboundMovePlayerPacket.PosRot(to, before.yRot(), before.xRot(), ground, false));
+                frame(batch, net.minecraft.network.protocol.game.ServerboundClientTickEndPacket.INSTANCE);
+                position = new PositionMoveRotation(to, Vec3.ZERO, before.yRot(), before.xRot());
+                record("fallmove " + to.x + " " + to.y + " " + to.z + " " + ground);
+            }
+            flush(batch);
         }
 
         void still() throws Exception {
@@ -864,6 +873,23 @@ public final class LocatorBarClient {
                         advancementUpdate(a, r.payload);
                     }
 
+                    if (gameEvents && p instanceof net.minecraft.network.protocol.game.ClientboundGameEventPacket gameEvent) {
+                        FriendlyByteBuf buf = new FriendlyByteBuf(Unpooled.wrappedBuffer(r.payload));
+                        buf.readVarInt();
+                        int event = buf.readUnsignedByte();
+                        int wireParamBits = Float.floatToRawIntBits(buf.readFloat());
+                        int paramBits = Float.floatToRawIntBits(gameEvent.getParam());
+                        if (wireParamBits != paramBits || buf.readableBytes() != 0) {
+                            throw new IllegalStateException("unexpected game event payload: "
+                                + java.util.HexFormat.of().formatHex(r.payload));
+                        }
+                        var j = new com.google.gson.JsonObject();
+                        j.addProperty("event", event);
+                        j.addProperty("param_bits", String.format(java.util.Locale.ROOT, "%08x", paramBits));
+                        j.addProperty("payload_hex", java.util.HexFormat.of().formatHex(r.payload));
+                        record("game-event " + j);
+                    }
+
                     if (sounds && p instanceof net.minecraft.network.protocol.game.ClientboundSoundPacket sound) {
                         com.google.gson.JsonObject j = new com.google.gson.JsonObject();
                         j.addProperty("event", sound.getSound().value().location().toString());
@@ -944,6 +970,27 @@ if (ownPoses && p instanceof net.minecraft.network.protocol.game.ClientboundSetE
                             }
                         }
                     }
+                    if (boatDamage && p instanceof net.minecraft.network.protocol.game.ClientboundAddEntityPacket a
+                        && isBoat(a.getType())) {
+                        String pos = a.getX() + " " + a.getY() + " " + a.getZ();
+                        boatPos.put(a.getId(), pos);
+                        record("boat-add " + pos);
+                    }
+                    // VehicleEntity.DATA_ID_DAMAGE is entity data id 10 (float).
+                    if (boatDamage && p instanceof net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket data
+                        && boatPos.containsKey(data.id())) {
+                        for (var value : data.packedItems()) {
+                            if (value.id() == 10 && value.value() instanceof Float dmg) {
+                                record("boat-damage " + boatPos.get(data.id()) + " " + dmg);
+                            }
+                        }
+                    }
+                    if (boatDamage && p instanceof net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket rm) {
+                        rm.entityIds().forEach(entityId -> {
+                            String pos = boatPos.remove(entityId);
+                            if (pos != null) record("boat-remove " + pos);
+                        });
+                    }
                     if (spawns && p instanceof net.minecraft.network.protocol.game.ClientboundAddEntityPacket a
                         && a.getType() != net.minecraft.world.entity.EntityTypes.PLAYER) {
                         record(String.format(java.util.Locale.ROOT, "spawn %s %.4f %.4f %.4f",
@@ -974,12 +1021,14 @@ if (ownPoses && p instanceof net.minecraft.network.protocol.game.ClientboundSetE
                             syncs++;
                             replyLock.notifyAll();
                         }
-                    } else if (advancements && p instanceof ClientboundSystemChatPacket c
+                    } else if ((advancements || listSyncs) && p instanceof ClientboundSystemChatPacket c
                         && c.content().getContents() instanceof net.minecraft.network.chat.contents.TranslatableContents t
                         && t.getKey().equals("commands.list.players")) {
                         synchronized (replyLock) {
-                            record("adv-receipt " + net.minecraft.network.chat.ComponentSerialization.CODEC.encodeStart(
-                                ParityData.access.createSerializationContext(com.mojang.serialization.JsonOps.INSTANCE), c.content()).getOrThrow());
+                            if (advancements) {
+                                record("adv-receipt " + net.minecraft.network.chat.ComponentSerialization.CODEC.encodeStart(
+                                    ParityData.access.createSerializationContext(com.mojang.serialization.JsonOps.INSTANCE), c.content()).getOrThrow());
+                            }
                             listReplies++;
                             replyLock.notifyAll();
                         }
@@ -1079,11 +1128,16 @@ if (ownPoses && p instanceof net.minecraft.network.protocol.game.ClientboundSetE
         }
 
         synchronized void send(Packet<?> packet) throws Exception {
+            ByteBuf frame = Unpooled.buffer();
+            frame(frame, packet);
+            flush(frame);
+        }
+
+        private void frame(ByteBuf frame, Packet<?> packet) throws Exception {
             ByteBuf body = Unpooled.buffer();
             ((ProtocolInfo) outbound).codec().encode(body, packet);
             byte[] raw = new byte[body.readableBytes()];
             body.readBytes(raw);
-            ByteBuf frame = Unpooled.buffer();
             if (threshold >= 0) {
                 ByteBuf inner = Unpooled.buffer();
                 if (raw.length >= threshold) {
@@ -1104,8 +1158,11 @@ if (ownPoses && p instanceof net.minecraft.network.protocol.game.ClientboundSetE
                 writeVarInt(frame, raw.length);
                 frame.writeBytes(raw);
             }
-            byte[] bytes = new byte[frame.readableBytes()];
-            frame.readBytes(bytes);
+        }
+
+        private void flush(ByteBuf frames) throws Exception {
+            byte[] bytes = new byte[frames.readableBytes()];
+            frames.readBytes(bytes);
             out.write(bytes);
             out.flush();
         }

@@ -13,6 +13,7 @@ use crate::{
 #[cfg(test)]
 use glam::Vec4;
 use glam::{DVec3, Mat4, Vec3};
+use pack_post::PackPostExt as _;
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Instant};
 use wgpu::util::DeviceExt;
 use winit::window::Window;
@@ -51,9 +52,7 @@ mod section_gpu;
 mod static_entity;
 
 pub(crate) use section_gpu::collect_animated_layers;
-use section_gpu::{
-    Part, SectionGpu, begin_shrink, decide_fade, forget_records, hold_fading, mark_fades,
-};
+use section_gpu::{Part, SectionGpu, begin_shrink, decide_fade, forget_records, mark_fades};
 use static_entity::{GpuStaticEntitySection, StaticEntityUniform};
 pub mod outline;
 mod overlay;
@@ -63,6 +62,7 @@ use gpu_checks::GpuChecks;
 use outline::{debug_line_opaque, debug_lines_opaque_first, outline_vertices_into};
 pub use outline::{outline_params, outline_vertices, outline_width};
 use overlay::Overlay;
+mod dynamic_entity;
 mod entity_batch;
 mod entity_outline;
 #[cfg(any(test, feature = "test-support"))]
@@ -74,7 +74,7 @@ mod prepared_model;
 pub use prepared_model::fail_next_prepared_upload;
 pub use prepared_model::{
     PreparedInstanceBuilder, PreparedModelDraw, PreparedModelInstance, PreparedModelVertex,
-    PreparedModels, camera_matrix,
+    PreparedModels, camera_matrix, prepared_instance_room_for,
 };
 #[cfg(feature = "test-support")]
 pub use prepared_model::{
@@ -92,6 +92,7 @@ mod renderer_construction;
 mod section_fade;
 mod section_upload;
 mod shader_pack;
+pub use shader_pack::PackPoll;
 mod surface_lifecycle;
 use entity_draw::*;
 #[cfg(test)]
@@ -99,25 +100,34 @@ mod sprite_arrays_tests;
 mod terrain_model;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_gpu;
+#[cfg(feature = "test-support")]
+pub use test_gpu::lock as lock_test_gpu;
 mod weather;
 mod world_text;
 use cull::occlusion_culling_requested;
 use entity_batch::EntityBatch;
 pub use entity_batch::{
-    ADDITIVE_PARTICLE_OVERLAY, DISSOLVE_OVERLAY, DRAGON_RAYS_OVERLAY, ENERGY_SWIRL_OVERLAY,
-    FLUID_OVERLAY, OIT_ENTITY, SHADOW_OVERLAY, TERRAIN_MODEL_CUTOUT_MIPPED_OVERLAY,
-    TERRAIN_MODEL_CUTOUT_OVERLAY, TERRAIN_MODEL_SOLID_OVERLAY, TERRAIN_MODEL_TRANSLUCENT_OVERLAY,
-    TEXT_POLYGON_OFFSET_OVERLAY, TRANSLUCENT_GLINT_ITEM_OVERLAY, TRANSLUCENT_ITEM_OVERLAY,
-    TRANSLUCENT_PARTICLE_OVERLAY, WATER_MASK_OVERLAY, WORLD_TEXT_OVERLAY,
-    WORLD_TEXT_POLYGON_OFFSET_OVERLAY, is_native_terrain, mark_oit,
+    ADDITIVE_PARTICLE_OVERLAY, ARMOR_GLINT_ONLY_OVERLAY, BANNER_PATTERN_OVERLAY, DISSOLVE_OVERLAY,
+    DRAGON_RAYS_OVERLAY, DYNAMIC_TEXTURE_CUTOUT_OVERLAY, DYNAMIC_TEXTURE_SOLID_OVERLAY,
+    DYNAMIC_TEXTURE_TRANSLUCENT_OVERLAY, ENERGY_SWIRL_OVERLAY, EntityQuadCapacity, EntityQuadScope,
+    FLUID_OVERLAY, GLINT_ONLY_OVERLAY, OIT_ENTITY, SHADOW_OVERLAY,
+    TERRAIN_MODEL_CUTOUT_MIPPED_OVERLAY, TERRAIN_MODEL_CUTOUT_OVERLAY, TERRAIN_MODEL_SOLID_OVERLAY,
+    TERRAIN_MODEL_TRANSLUCENT_OVERLAY, TEXT_NORMAL_SOLID_OVERLAY, TEXT_POLYGON_OFFSET_OVERLAY,
+    TEXT_POLYGON_OFFSET_SOLID_OVERLAY, TRANSLUCENT_DRAW_FLIP, TRANSLUCENT_GLINT_ITEM_OVERLAY,
+    TRANSLUCENT_ITEM_OVERLAY, TRANSLUCENT_PARTICLE_OVERLAY, WATER_MASK_OVERLAY, WORLD_TEXT_OVERLAY,
+    WORLD_TEXT_POLYGON_OFFSET_OVERLAY, dynamic_texture_bits, is_native_terrain, mark_oit,
 };
+pub use entity_batch::{NAME_TAG_OVERLAY, NAME_TAG_SOLID_OVERLAY};
 use external::{shadow_box, shadow_runs};
-pub use frustum::{Cull, Frusta, JoinedFrusta, ShadowCull};
+pub use frustum::{Cull, JoinedFrusta, ShadowCull};
 use frustum::{block_entities_within_reach, frustum, shadow_casters, taa_frustum};
+pub use mod_gpu::ModGpuResources;
 pub use section_fade::{CHUNK_VISIBILITY_THRESHOLD, chunk_visibility, fade_millis};
 use section_fade::{FadeInputs, compiled_and_visible, section_instance, section_visibility};
+#[doc(hidden)]
+pub use section_upload::section_in_eye_view;
 pub use sunrise_render_core::SectionKey;
-pub use view::{View, ViewSet};
+pub use view::{View, ViewSet, cull_fov, cull_frustum};
 
 /// Whether Translucent Batching is offered (`graphics::offer_translucent_batching`): where
 /// indirect multi-draws (`multi_draw`) take its batches, but not OpenGL's, which loop over
@@ -153,13 +163,29 @@ pub(crate) fn texture_bytes(texture: &wgpu::Texture) -> u64 {
         * u64::from(size.depth_or_array_layers)
 }
 
+/// Whether the section arena's pages are storage too: where flat draws read them (`flat`), or
+/// while a `shaders/` pack's terrain programs read them per section (`pages`,
+/// `pack_atlas::TerrainDraws::Pages`). Otherwise they are vertex buffers alone, which the device's
+/// storage binding size does not cap (`Arena::page_limit`).
+fn arena_storage(flat: bool, pages: bool) -> bool {
+    flat || pages
+}
+
 /// Whether translucent quads have an arena of their own: with Translucent Batching
 /// (`batching`), unless a shader pack's frames can draw terrain flat (as for `flat_frame`),
 /// which reads them in the section arena through its tables: where flat draws exist and
 /// are on (`flat_draws`), for a `shaders/` pack's terrain programs (`terrain`) or a shadow
-/// pass (`shadow`: a `shaders/` pack's, or the `[shadow]` of one of Sunrise's own).
-fn translucent_split(batching: bool, flat_draws: bool, terrain: bool, shadow: bool) -> bool {
-    batching && !(flat_draws && (terrain || shadow))
+/// pass (`shadow`: a `shaders/` pack's, or the `[shadow]` of one of Sunrise's own). Nor while
+/// a `shaders/` pack's terrain or shadow programs read the section arena's pages in per-section
+/// draws (`pages`, `pack_atlas::TerrainDraws::Pages`): the translucent arena is no storage.
+fn translucent_split(
+    batching: bool,
+    flat_draws: bool,
+    pages: bool,
+    terrain: bool,
+    shadow: bool,
+) -> bool {
+    batching && !(flat_draws && (terrain || shadow)) && !pages
 }
 
 /// The compact layout of solid quads, unless `SUNRISE_PACKED_QUADS=0` (A/B checks).
@@ -172,13 +198,16 @@ mod arena;
 pub mod capture;
 mod celestial;
 mod census;
+pub use census::RendererMemorySnapshot;
 pub mod compositor;
 pub(crate) mod core_clouds;
 pub(crate) mod core_lightmap;
 pub use core_lightmap::SHADERS as LIGHTMAP_SHADERS;
 pub(crate) mod core_lines;
 mod core_particles;
+mod particle_draws;
 pub use core_particles::HEIGHTMAP_SIZE as POLYTONE_HEIGHTMAP_SIZE;
+pub(crate) use particle_draws::EXPLICIT_PARTICLE_OVERLAY;
 pub(crate) mod core_sky;
 pub(crate) mod core_text;
 mod cull;
@@ -198,48 +227,54 @@ mod hdr_start;
 mod hdr_stats;
 pub(crate) mod hud_coverage;
 mod in_flight;
+mod material_animation;
+#[cfg(test)]
+mod material_animation_renderer_tests;
+mod terrain_normals;
 use display_watch::DisplayWatch;
 #[cfg(test)]
 use display_watch::{macos_hdr, os_reported};
 pub use hdr::{Calibration as HdrCalibration, Output as HdrOutput};
 pub use output::{DisplayReading, EffectiveOutput, FrameConfiguration, FrameRequest};
 
-pub mod block_light;
 mod custom_sky;
-mod displace;
 mod frame_policy;
 pub mod lightning;
 mod linear_blend;
 #[cfg(test)]
 use frame_policy::frame_format;
-use frame_policy::{frame_configuration, overlay_format, sunrise_tone_curve};
-mod lod;
+use frame_policy::{frame_configuration, overlay_format, pack_owns_tone_curve, sunrise_tone_curve};
+pub mod mod_compute;
+pub mod mod_frame_graph;
+pub mod mod_gpu;
+pub mod mod_meshes;
 pub mod mod_pipelines;
-mod native_material;
-mod native_pack;
-mod native_post;
+pub mod mod_readback;
+pub mod mod_render_targets;
+pub mod mod_storage;
+pub mod mod_uniforms;
 use crate::render_slots as native_render;
-mod native_shadow;
-mod native_sky;
 mod occlusion;
 mod oit;
 mod oit_features;
 pub(crate) mod output;
 mod output_apply;
-mod pack_atlas;
-mod pack_center_depth;
-pub mod pack_draw;
 mod pack_entities;
-mod pack_hand;
-mod pack_images;
-mod pack_lines;
+#[doc(hidden)]
+pub mod visibility_probe;
+// The pack's programs' inputs and helpers, from `sunrise-render-shaderpack`: the client's frame
+// only tells them what a `Frame` and the game's own values are.
+pub use sunrise_render_shaderpack::{
+    pack_atlas, pack_draw, pack_hand, pack_lines, pack_sky, pack_timing, pack_weather,
+};
+#[cfg(test)]
+mod frame_tests;
+#[cfg(test)]
+mod pack_atlas_tests;
 mod pack_post;
-mod pack_shadow;
-mod pack_sky;
-mod pack_textures;
-pub mod pack_timing;
+// The client's `Frame` as the shadow light reads it: a `UniformFrameView`; the uniforms
+// themselves come from `sunrise-render-shaderpack`.
 pub mod pack_uniforms;
-mod pack_weather;
 mod pass_timing_api;
 use pass_timing_api::{after_culling_pass, pixel_count, world_pass_after_culling};
 mod page_runs;
@@ -257,13 +292,14 @@ mod off_page;
 use off_page::move_off_page;
 pub mod submit;
 mod sunrise_fan;
+#[cfg(feature = "test-support")]
+pub mod test_hooks;
 mod timing;
 pub mod translucency;
 pub(crate) mod upload;
 mod view;
 mod view_sections;
 mod visbuffer;
-mod wgsl_prefix;
 mod world_handover;
 mod world_post;
 pub mod world_primitives;
@@ -287,7 +323,7 @@ fn sky_visible(frame: &Frame) -> bool {
 /// `gbuffers_skybasic` still draws a fan around the horizon (`pack_sky`), as our probe packs read
 /// it in Iris 1.11.7.
 fn end_fog_sky(frame: &Frame) -> bool {
-    !frame.title && frame.end_sky && frame.boss_world_fog
+    pack_sky::end_fog_sky(frame.title, frame.end_sky, frame.boss_world_fog)
 }
 
 /// The point a `shaders/` pack's terrain is drawn relative to: the camera with the fraction of
@@ -325,540 +361,8 @@ const COMPACT_BUDGET: u64 = 32 << 20;
 const BULK_REMOVAL_KEYS: usize = 256;
 const SHRINK_SETTLE: std::time::Duration = std::time::Duration::from_secs(1);
 const SHRINK_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
-pub struct Renderer {
-    instance: wgpu::Instance,
-    adapter: wgpu::Adapter,
-    /// The window's swapchain; `None` when rendering offscreen (`--offscreen`). Shared
-    /// with frame generation's present thread while it runs.
-    surface: Option<Arc<wgpu::Surface<'static>>>,
-    /// The surface `release_surface` set aside for the renderer that replaces
-    /// this one on the same device: reused, not created again, as a new
-    /// surface for the window can come back lost (Wayland on Mesa).
-    spare_surface: std::sync::Mutex<Option<wgpu::Surface<'static>>>,
-    /// The offscreen colour target, sized like `config`.
-    offscreen: Option<wgpu::Texture>,
-    /// Offscreen submissions still on the GPU: at most two frames run ahead.
-    in_flight: std::collections::VecDeque<wgpu::SubmissionIndex>,
-    /// Which steps of the first frame on this device still go to the log
-    /// (see `startup_step`).
-    first_frame: FirstFrame,
-    gpu_timer: Option<timing::GpuTimer>,
-    /// GPU frame times (ms) read back since the caller last drained them.
-    pub gpu_times: Vec<f32>,
-    /// The light texture's pixels F3+4 shows, with what drew them (`lightmap_sample`).
-    lightmap_chart: core_lightmap::LightmapChart,
-    /// Time the last `render` spent blocked on the GPU or the display
-    /// (acquiring, presenting, offscreen pacing, the submit thread holding the queue),
-    /// excluded from CPU time.
-    pub last_wait: std::time::Duration,
-    /// CPU time of the last `render`, waits excluded.
-    pub last_encode: std::time::Duration,
-    /// Watched only while HDR is On or Auto, including Auto in SDR;
-    /// before `window`, so it's dropped first.
-    display: Option<DisplayWatch>,
-    /// What this renderer's display last reported (`DisplayWatch`), its own: another
-    /// renderer's watch never changes it.
-    reading: output::DisplayReading,
-    /// The watch was just made: the settings' Auto values take what it reported.
-    display_fresh: bool,
-    window: Arc<Window>,
-    pub device: wgpu::Device,
-    /// The shader modules, layouts and pipelines kept for the next renderer on
-    /// this device ([`reuse`]).
-    reuse: Arc<reuse::Reuse>,
-    /// Frames are finished and submitted on its submit thread ([`submit`]).
-    pub queue: submit::Queue,
-    /// The last frame went to the submit thread; whether it had no window surface.
-    /// The next frame takes it in ([`Self::land_frame`]).
-    deferred: Option<bool>,
-    /// Set by the device's lost callback. wgpu reports nothing else when an
-    /// operation fails on a lost device (no error scope sees it).
-    device_lost: Arc<std::sync::atomic::AtomicBool>,
-    pub config: wgpu::SurfaceConfiguration,
-    solid: SolidPipeline,
-    /// `solid` split in two passes for the world pass (terrain.wgsl's `opaque_quad`).
-    solid_opaque: SolidPipeline,
-    solid_cutout: SolidPipeline,
-    translucent: wgpu::RenderPipeline,
-    translucent_mark: wgpu::RenderPipeline,
-    /// Flat section draws (`flat`), where multi-draw is emulated.
-    flat: Option<flat::Flat>,
-    /// Sections upload their solid quads in the compact layout (`mesher::packed`): the solid
-    /// passes read the arena themselves (`flat`) and no shader pack reads it as vertices.
-    packed_quads: bool,
-    /// The terrain's acceleration structures, with ray tracing on (`ray_scene`).
-    ray_scene: Option<surface_setup::ray_query::ray_scene::RayScene>,
-    /// The compact layout is allowed (`SUNRISE_PACKED_QUADS`, `set_packed_layout`).
-    packed_on: bool,
-    /// The visibility buffer for flat frames' solid terrain (`visbuffer`,
-    /// `SUNRISE_VISBUFFER=1`).
-    visbuf: Option<visbuffer::Visbuffer>,
-    /// `flat` draws this frame's sections (off: the per-section draws).
-    flat_on: bool,
-    /// Occlusion culling of solid section draws, where the GPU's instance
-    /// counts reach a multi-draw's entries (Vulkan, Metal).
-    cull: Option<cull::Cull>,
-    cull_on: bool,
-    /// Solid quads facing away from the eye are left out (`mesher::Sides`).
-    sides_on: bool,
-    /// The near solid sections culled and drawn on the GPU (`gpu_culling`): its pass,
-    /// records and fades while it is on, where it is offered (`gpu_culling_offer`, mirrored
-    /// for the settings in `graphics::gpu_culling_offer`), and whether the last frame drew
-    /// them so (`gpu_frame`).
-    gpu_culling: Option<gpu_culling::GpuCulling>,
-    gpu_culling_offer: crate::graphics::GpuCullingOffer,
-    gpu_frame: bool,
-    /// GPU frames since GPU culling was switched on: the first and every 64th after it
-    /// check its records (`check_gpu_records`).
-    #[cfg(debug_assertions)]
-    gpu_checks: u32,
-    sky: wgpu::RenderPipeline,
-    /// The main sky without the sunrise fan, which `sunrise_pipeline` draws as
-    /// geometry over it. The mirror keeps `sky`: its per-pixel fan is cheap at
-    /// the reflection's size and needs no second projection.
-    sky_base: wgpu::RenderPipeline,
-    sunrise_pipeline: wgpu::RenderPipeline,
-    sunrise_buffer: wgpu::Buffer,
-    dark_disc: wgpu::RenderPipeline,
-    /// Clears the world pass's depth to the far plane so the first-person hand draws in the
-    /// same pass (`hand_in_world`), as the hand's own pass would clear it.
-    depth_reset: wgpu::RenderPipeline,
-    lines: wgpu::RenderPipeline,
-    lines_secondary: wgpu::RenderPipeline,
-    /// A resource pack's `core/rendertype_lines`, which draws the block outline in their place.
-    core_lines: Option<core_lines::CoreLines>,
-    core_text: Option<core_text::CoreText>,
-    /// The packs' `core/sky` and `core/stars`, drawn in place of the native sky and stars.
-    core_sky: Option<core_sky::CoreSky>,
-    /// A resource pack's `core/lightmap`, which draws the light texture in place of the native
-    /// one.
-    core_lightmap: Option<core_lightmap::CoreLightmap>,
-    /// A resource pack's `core/clouds`, which draws the clouds in place of the native ones.
-    core_clouds: Option<core_clouds::CoreClouds>,
-    /// Polytone GPU particle types with their own shader, and this frame's batches of them.
-    core_particles: core_particles::CoreParticles,
-    /// Gizmo lines: opaque ones (`RenderTypes.lines`, which writes depth),
-    /// translucent ones (`RenderTypes.linesTranslucentNoDepthWrite`) and the
-    /// always-on-top ones.
-    debug_lines_opaque: wgpu::RenderPipeline,
-    debug_lines: wgpu::RenderPipeline,
-    debug_lines_on_top: wgpu::RenderPipeline,
-    debug_crosshair: Option<wgpu::RenderPipeline>,
-    /// The debug crosshair and the first-person hand in `overlay_format`, where it isn't the
-    /// frame's.
-    overlay_crosshair: Option<wgpu::RenderPipeline>,
-    overlay_hand: Option<wgpu::RenderPipeline>,
-    debug_line_buffer: wgpu::Buffer,
-    debug_line_capacity: u64,
-    /// The terrain resources with the debug crosshair's projection
-    /// (`crosshair_globals`).
-    crosshair_group: wgpu::BindGroup,
-    crosshair_globals: wgpu::Buffer,
-    /// The water mirror: its solid terrain pipeline, its camera's globals and their group,
-    /// and its targets once drawn.
-    solid_mirror: wgpu::RenderPipeline,
-    mirror_globals: wgpu::Buffer,
-    mirror_group: wgpu::BindGroup,
-    mirror: Option<MirrorTarget>,
-    /// Native mods' world views' targets and pipelines, and the largest side the device gives one.
-    world_views: world_views::Kept,
-    world_view_side: u32,
-    entity_pipeline: wgpu::RenderPipeline,
-    static_entity_pipeline: wgpu::RenderPipeline,
-    static_entity_group: wgpu::BindGroup,
-    static_entity_transform: wgpu::Buffer,
-    static_entity_camera: Option<DVec3>,
-    static_entity_catalog_revision: u64,
-    static_entity_frame_stats: StaticCacheFrameStats,
-    hdr_mark_pipeline: wgpu::RenderPipeline,
-    /// `hdr_mark_pipeline` at `entity_pipeline`'s depth bias, for what that drew.
-    hdr_entity_mark_pipeline: wgpu::RenderPipeline,
-    hdr_hand_unmark_pipeline: wgpu::RenderPipeline,
-    hdr_mark_lightning_pipeline: wgpu::RenderPipeline,
-    weather: weather::Weather,
-    crumbling_pipeline: wgpu::RenderPipeline,
-    shadow_blob_pipeline: wgpu::RenderPipeline,
-    translucent_item_pipeline: wgpu::RenderPipeline,
-    /// `RenderPipelines.WATER_MASK`: depth writes only, no colour.
-    water_mask_pipeline: wgpu::RenderPipeline,
-    cloud_pipeline: wgpu::RenderPipeline,
-    hdr_cloud_mark_pipeline: wgpu::RenderPipeline,
-    cloud_mesh: crate::clouds::Mesh,
-    cloud_buffer: wgpu::Buffer,
-    cloud_capacity: u64,
-    cloud_uniform: wgpu::Buffer,
-    cloud_group: wgpu::BindGroup,
-    additive_pipeline: wgpu::RenderPipeline,
-    dragon_rays_pipeline: wgpu::RenderPipeline,
-    /// `RenderPipelines.ENERGY_SWIRL`: additive, unlit, the sprite repeated within itself.
-    energy_swirl_pipeline: wgpu::RenderPipeline,
-    lightning_pipeline: wgpu::RenderPipeline,
-    lightning: lightning::Renderer,
-    see_through_pipeline: wgpu::RenderPipeline,
-    /// Native mods' world primitives (`Frame::world_primitives`).
-    world_primitives: world_primitives::WorldPrimitives,
-    text_polygon_offset_pipeline: wgpu::RenderPipeline,
-    world_text_pipeline: wgpu::RenderPipeline,
-    fluid_pipeline: wgpu::RenderPipeline,
-    terrain_model_pipelines: [wgpu::RenderPipeline; 4],
-    celestial: celestial::Celestial,
-    celestial_buffer: wgpu::Buffer,
-    end_sky: end_sky::EndSky,
-    stars: stars::Stars,
-    /// Custom sky layers (`crate::custom_sky`), and the frame's from the game.
-    custom_sky: custom_sky::CustomSky,
-    custom_sky_draws: Vec<crate::custom_sky::Draw>,
-    /// The glowing entities' outline (`LevelRenderer.entityOutlineTarget`).
-    entity_outline: entity_outline::EntityOutline,
-    panorama: panorama::Panorama,
-    /// `RenderPipelines.WORLD_BORDER` and its buffers.
-    border_pipeline: wgpu::RenderPipeline,
-    border_group: wgpu::BindGroup,
-    border_uniform: wgpu::Buffer,
-    border_vertices: wgpu::Buffer,
-    /// Screen effects: alpha-blended, then vignette (`dst * (1 - src)`)
-    /// pipelines, each for every sampling (index `blend * 4 + sampling`).
-    screen_pipelines: [wgpu::RenderPipeline; 16],
-    screen_buffer: wgpu::Buffer,
-    screen_capacity: u64,
-    entity_group: wgpu::BindGroup,
-    /// The layout of `entity_group`, for the native shadow pass.
-    entity_bindings: wgpu::BindGroupLayout,
-    /// Generation-owned prepared model geometry. World block entities instance it
-    /// when the draw is not kept, spinning, or claimed by a shader pack.
-    prepared_models: Option<PreparedModels>,
-    prepared_draws: Vec<PreparedModelDraw>,
-    /// Ordinary-stream cuts for `prepared_draws`, filled once per frame.
-    prepared_cuts: Vec<u32>,
-    prepared_ranges: Vec<prepared_model::OrderedSpan>,
-    prepared_uploaded: Vec<PreparedModelInstance>,
-    prepared_instance_buffer: wgpu::Buffer,
-    prepared_instance_capacity: u64,
-    /// The entity resources with the hand's projection (`hand_globals`).
-    hand_group: wgpu::BindGroup,
-    hand_globals: wgpu::Buffer,
-    entity_buffer: wgpu::Buffer,
-    entity_capacity: u64,
-    static_entity_sections: HashMap<[i32; 3], GpuStaticEntitySection>,
-    static_entity_indices: wgpu::Buffer,
-    static_entity_index_quads: u32,
-    entity_batch: EntityBatch,
-    /// Ordinary entity models posed on the GPU; `None` without compute shaders.
-    entity_skin: Option<entity_skin::EntitySkin>,
-    group: wgpu::BindGroup,
-    fluid_group: wgpu::BindGroup,
-    fluid_sampler: wgpu::Sampler,
-    terrain_model_group: wgpu::BindGroup,
-    terrain_model_sampler: wgpu::Sampler,
-    globals: wgpu::Buffer,
-    /// Resource-pack normal/specular maps, split like the colour sprite arrays.
-    pbr_maps: Option<Vec<[wgpu::Texture; 2]>>,
-    lightmap: wgpu::Texture,
-    /// The block sprites, `sprite_split` layers per array (the first is
-    /// `sprites` in terrain.wgsl, the others `sprites_1`...).
-    sprite_textures: Vec<wgpu::Texture>,
-    /// Block sprite layers per array on this device ([`layer_split`]).
-    sprite_split: u32,
-    /// A 1-layer array bound where a pack needs fewer arrays.
-    sprite_unused: wgpu::TextureView,
-    /// The sprite arrays as the terrain samples them (`SPRITE_ARRAYS` views, `sprite_unused`
-    /// past the ones in use, the Mipmap Levels option's levels), for native mods
-    /// (`WorldDrawn::block_sprites`).
-    sprite_views: Vec<wgpu::TextureView>,
-    /// Nearest, repeating, nearest mip level: for drawing a sprite's texels sharp elsewhere.
-    sprite_nearest: wgpu::Sampler,
-    mip_levels: u32,
-    /// The mipmap levels sampled (the Mipmap Levels option), at most `mip_levels - 1`.
-    mipmaps: u32,
-    terrain_layout: wgpu::BindGroupLayout,
-    /// terrain.wgsl's `SPRITE_ARRAYS` and `SPRITE_SPLIT`, for a shader pack's terrain.
-    terrain_sprites: [f64; 2],
-    sprite_sampler: wgpu::Sampler,
-    /// `Options.textureFiltering`: 0 none, 1 RGSS, 2 anisotropic.
-    texture_filtering: u32,
-    /// The anisotropic sampler's clamp (`Options.maxAnisotropyValue`); 1 unless anisotropic.
-    max_anisotropy: u16,
-    lightmap_view: wgpu::TextureView,
-    lightmap_sampler: wgpu::Sampler,
-    animations: animate::SpriteAnimator,
-    material_animations: Vec<SpriteAnimation>,
-    active_animated_layers: Vec<u64>,
-    uploads: upload::Uploads,
-    /// Section meshes are staged through their own belt into
-    /// `section_copies`, which the next frame records its commands after:
-    /// `Queue::write_buffer` would make a staging buffer per write.
-    section_uploads: upload::Uploads,
-    section_copies: Option<wgpu::CommandEncoder>,
-    /// Bytes staged in `section_copies`.
-    section_copy_bytes: u64,
-    /// When a large translucent page may start to shrink (`shrink_translucent`).
-    shrink_gate: ShrinkGate,
-    /// Whether `lightmap` holds `lightmap_chart`'s native pixels yet.
-    lightmap_uploaded: bool,
-    sprite_minimum_size: u32,
-    /// Each sprite layer's own side, before the arrays scaled it up (`mipmap::Settings::native_size`).
-    sprite_native: Vec<u32>,
-    /// The Mipmap Levels option (`set_mipmap_levels`), which sets a shader pack atlas's padding.
-    mipmap_option: u32,
-    indices: wgpu::Buffer,
-    index_quads: u32,
-    instances: wgpu::Buffer,
-    instance_capacity: u64,
-    outline: wgpu::Buffer,
-    depth: wgpu::TextureView,
-    sections: resident::Resident<SectionGpu>,
-    lods: FxHashMap<crate::lod::TileKey, lod::Tile>,
-    /// The same tiles by cell (`lod::TileGrid`), to test them a handful of
-    /// boxes at a time (`draw_frame`).
-    lod_cells: lod::TileGrid,
-    /// Far tiles' occlusion culling slots (`lod::Tile::cull_slot`): those
-    /// free, and the next never used.
-    lod_cull_free: Vec<u32>,
-    lod_cull_next: u32,
-    /// The chunk columns the resident tiles leave out (`Lod::take_cutout`):
-    /// their sections are drawn even past the render distance, so terrain
-    /// leaving it never opens a hole before the tiles fill it in.
-    lod_cutout: crate::fast_hash::FxHashSet<(i32, i32)>,
-    /// Removed sections of `lod_cutout` columns, released once tiles cover them.
-    lod_retiring: crate::fast_hash::FxHashSet<SectionKey>,
-    /// Removed sections fading out over far terrain (`leave_section`).
-    lod_leaving: Vec<(SectionKey, std::time::Instant)>,
-    /// Finished tile meshes `upload_lods` has yet to upload.
-    lod_pending: Option<lod::Pending>,
-    /// When the fades the last tile job began are over (`upload_lods`): until
-    /// then tiles may be dying or standing in for their replacements.
-    lod_settled: Option<std::time::Instant>,
-    detail_columns: FxHashMap<(i32, i32), SectionMask>,
-    /// Bumped whenever a column becomes or stops being complete.
-    detail_revision: u64,
-    arena: arena::Arena,
-    /// Translucent quads' own arena, with large pages, while the layout is split
-    /// (`translucent_split`): the back-to-front list then stays in one page (and
-    /// one sorted-index page) and draws in a few multi-draws rather than one per
-    /// few sections.
-    translucent_arena: Option<arena::Arena>,
-    /// Translucent Batching (`Graphics::translucent_batching`, read when a renderer
-    /// is made), where it is offered (`graphics::offer_translucent_batching`).
-    translucent_batching: bool,
-    /// Every section and far tile was dropped to change the layout since the game
-    /// last asked (`take_dropped_sections`).
-    sections_dropped: bool,
-    sorted_indices: arena::Arena,
-    /// Buffers of released arena pages, freed a few frames later on a thread of their own.
-    graveyard: arena::Graveyard<wgpu::Buffer>,
-    translucent_sorter: translucency::Sorter,
-    translucency_cursor: usize,
-    /// `DrawIndexedIndirectArgs` for this frame's solid then translucent draws.
-    indirect: wgpu::Buffer,
-    indirect_capacity: u64,
-    /// Indirect draws may set `first_instance` (the section origin).
-    pub multi_draw: bool,
-    /// Per-frame scratch, kept to avoid allocating every frame.
-    visible: Vec<resident::Visible>,
-    visible_lods: Vec<lod::Visible>,
-    /// The sections a shader pack's shadow camera sees (`external::ShadowView`).
-    shadow_visible: Vec<resident::Visible>,
-    /// The external shader pipeline world frames call (`external`); `None` draws vanilla's way.
-    external: Option<Box<dyn external::ExternalPipeline>>,
-    translucent_draws: Vec<(u64, usize, [u32; 5], (u32, Option<u32>))>,
-    /// Per visible section: the occlusion test that also sees its translucent quads
-    /// (`NO_TEST` without one): the section is left to phase 2.
-    translucent_tests: Vec<u32>,
-    /// This frame's translucent draws that a test sees: (index among them, test).
-    translucent_marks: Vec<(u32, u32)>,
-    /// Phase 2's draws and the translucent ones after them, with the instance counts the
-    /// tests give (`Cull::upload`).
-    phase2_upload: Vec<[u32; 5]>,
-    origins: Vec<[f32; 4]>,
-    /// `DrawIndexedIndirectArgs` words: index count, instance count, first
-    /// index, base vertex, first instance.
-    draws: Vec<[u32; 5]>,
-    /// Vertex arena page and optional sorted index arena page of each draw:
-    /// with sorted indices (a translucent draw), a page of `translucent_arena`
-    /// when there is one.
-    draw_pages: Vec<(u32, Option<u32>)>,
-    /// Solid draws left to occlusion culling's phase 2, while the list is
-    /// built, and their pages.
-    phase2_draws: Vec<[u32; 5]>,
-    phase2_pages: Vec<(u32, Option<u32>)>,
-    /// Each section's solid draws, to group them by arena page.
-    solid_runs: page_runs::PageRuns,
-    phase2_runs: page_runs::PageRuns,
-    /// The shadow camera's draws by page, in bands of distance from the light.
-    shadow_runs: page_runs::PageRuns,
-    /// Block-entity blocks per meshed section (world position, state id).
-    block_entities: FxHashMap<SectionKey, Vec<([i32; 3], u32)>>,
-    /// Changes on every mesh upload for that section; block-entity static
-    /// geometry also depends on the section's packed light.
-    block_entity_section_revisions: FxHashMap<SectionKey, u64>,
-    /// Changes only when the block-entity positions/states in a section
-    /// change. Empty-section tombstones remain until that section unloads so
-    /// the static cache can remove deleted models without a global flush.
-    block_entity_membership_revisions: FxHashMap<SectionKey, u64>,
-    /// When each section was first uploaded (`RenderSection.uploadedTime`): kept across meshing
-    /// it again, gone with its column. Sections that fade in over far terrain are not in it.
-    section_uploaded: FxHashMap<SectionKey, std::time::Instant>,
-    /// When `section_uploaded` last gained a section: once the fade time has passed since,
-    /// every section is whole and frames skip the per-section lookups.
-    newest_upload: Option<std::time::Instant>,
-    /// When a section last began to fade in over far terrain (`SectionGpu::fading`), for the
-    /// same shortcut.
-    newest_lod_fade: Option<std::time::Instant>,
-    /// Changes whenever `block_entities` does (unique across renderers).
-    block_entity_revision: u64,
-    /// The light sources of each section and their revision, for `block_light`.
-    light_blocks: FxHashMap<SectionKey, Vec<([i32; 3], u32)>>,
-    light_revision: u64,
-    /// VisGraph face connectivity per meshed section (cave culling).
-    occlusion: occlusion::Occlusion,
-    /// The column `occlusion`, `sections` and `detail_columns` count in: the
-    /// level's (`clear_sections`).
-    layout: crate::chunk::ColumnLayout,
-    /// Resolution scale, FXAA and TAA (Sunrise settings).
-    world_post: world_post::Post,
-    /// Frame generation (Sunrise setting).
-    frame_gen: frame_gen::FrameGen,
-    /// The entities' texture atlas (`entity_group`'s), for frame generation's motion.
-    entity_atlas: wgpu::TextureView,
-    /// HDR output (Sunrise setting): `Some` while the swapchain is HDR.
-    hdr: Option<hdr::Hdr>,
-    /// Which pixels of each block sprite may shine in HDR output (terrain.wgsl's
-    /// `emission_thresholds`), measured when HDR output turns on.
-    emission_stats: hdr_stats::EmissionStats,
-    /// What this renderer's destination offers and its device draws.
-    output_caps: output::OutputCapabilities,
-    /// An output that failed to apply, not tried again until something it needs changes.
-    output_rejected: Option<output_apply::Rejected>,
-    /// Since when Auto keeps HDR on through the display's loss of its report.
-    auto_off_since: Option<std::time::Instant>,
-    /// The output applied (`update_output`), with the frame every pipeline that draws it
-    /// targets: the swapchain's 8-bit format, or `Rgba16Unorm` when the renderer was made with
-    /// HDR output on and Smooth Gradients and the device draws and blends into it, or
-    /// `LINEAR_FRAME` (`frame_format`). A 16-bit frame with HDR off since reaches the
-    /// swapchain through `readback`.
-    output: output::EffectiveOutput,
-    /// Whether a pack picked or dropped since the renderer was made has been told it runs on
-    /// the frame that exists (`set_native_shader_pack`).
-    frame_kept_logged: bool,
-    /// The marker file of an HDR output that has not presented a frame yet
-    /// (`graphics::HDR_MARKER`).
-    hdr_marker: Option<std::path::PathBuf>,
-    /// The window's graphics driver (`hdr_start`); `None` offscreen.
-    hdr_driver: Option<String>,
-    /// The HDR Lighting setting, kept for the HDR output made when HDR turns on.
-    hdr_lighting_setting: bool,
-    /// The shader pack's post-processing, and the dimension (legacy id) it was loaded for.
-    pack_post: Option<(i32, Option<pack_post::PackPost>)>,
-    /// A `shaders/` pack whose pipelines build on a thread of their own (`load_shader_pack`).
-    pack_loading: Option<PackLoading>,
-    /// The post passes of one of Sunrise's own shader packs; never beside `pack_post`'s.
-    native: Option<native_pack::NativePack>,
-    /// Time the shader pack's passes on the GPU (F3, or a capture made with `--gpu`).
-    pass_timing: bool,
-    /// Times the parts of passes too (`set_pass_detail`).
-    pass_detail: bool,
-    /// Least time between timed frames (`set_pass_timing_gap`).
-    pass_timing_gap: std::time::Duration,
-    /// Whether the timers keep every timed frame for `take_timed_frames`.
-    keep_timed_frames: bool,
-    /// Times Sunrise's own passes on the GPU, as `pass_timing` does (`own_pass_times`).
-    own_timing: Option<pack_timing::PassTiming>,
-    /// The entity vertices Sunrise draws itself while a shader pack draws the others.
-    pack_entity_rest: Vec<Vertex>,
-    /// Set 1 of the cloud pipeline, for a shader pack's `gbuffers_clouds`.
-    cloud_bindings: wgpu::BindGroupLayout,
-    /// Rain and snow handed to a shader pack's `gbuffers_weather`, once a pack draws them.
-    pack_weather: Option<pack_weather::PackWeather>,
-    /// The block sprites as one atlas, while a shader pack is loaded.
-    pack_atlas: Option<pack_atlas::PackAtlas>,
-    pack_material_atlases: Option<[pack_atlas::PackAtlas; 2]>,
-    /// The shared atlas's LabPBR normal and specular paged maps (`set_shared_material_maps`),
-    /// which shader packs read for entities, items and the hand.
-    shared_material_maps: [Option<wgpu::Texture>; 2],
-    /// The pack's terrain program reads flat draws' vertices (`pack_terrain_inputs`).
-    pack_terrain_flat: bool,
-    /// OptiFine/Iris separate ambient occlusion: pass vertex alpha to hz_Color.a.
-    pub separate_ao: bool,
-    /// Shader-pack terrain pages used by post processing, retained between frames.
-    pack_pages: Vec<pack_post::TerrainPage>,
-    /// Camera-relative selection outline vertices, retained between frames.
-    outline_edges_scratch: Vec<[f32; 6]>,
-    /// Selection outline line vertices, retained between frames.
-    outline_lines_scratch: Vec<[f32; 8]>,
-    /// Debug line vertices, retained between frames.
-    debug_lines_scratch: Vec<[f32; 8]>,
-    /// Screen effect vertices, retained between frames.
-    screen_vertices_scratch: Vec<crate::screen_effects::ScreenVertex>,
-    /// LOD leaving chunk columns, retained between frames.
-    lod_leaving_scratch: crate::fast_hash::FxHashSet<(i32, i32)>,
-    /// Shadow visible boxed sections, retained between frames.
-    shadow_boxed_scratch: Vec<resident::Visible>,
-    /// Shadow visible seen section keys, retained between frames.
-    shadow_seen_scratch: crate::fast_hash::FxHashSet<SectionKey>,
-    /// Shadow translucent section draws, retained between frames.
-    shadow_translucent_scratch: Vec<(u64, [u32; 5], (u32, Option<u32>))>,
-    /// Lava's sprite layers, which a pack's solid terrain draws (`pack_atlas::game_terrain`).
-    pack_lava_layers: Vec<u16>,
-    pub hud: HudRenderer,
-    /// Vanilla's menu background blur, made on first use.
-    menu_blur: Option<crate::menu_blur::MenuBlur>,
-    /// `post_effect` chains, made on first use.
-    post_effects: Option<crate::post_chain::PostEffects>,
-    /// Where a screenshot's frame is drawn when the swapchain cannot be read back.
-    readback: readback::Readback,
-    pub info: wgpu::AdapterInfo,
-    pub suspended: bool,
-    /// Consecutive frames whose surface acquisition failed validation. The
-    /// first gets the swapchain a fresh configuration; later ones reattach
-    /// the window, as a lost surface does.
-    acquire_validation_failures: u32,
-    /// A surface from `recreate_surface` whose configuration failed. wgpu
-    /// panics when such a surface is acquired from (it never had one that
-    /// worked), so frames configure it again first and skip until it takes.
-    surface_unconfigured: bool,
-    /// The last frame's statistics, all of one frame (`show_stats`): its sections drawn
-    /// (F3's `C:`, the world icon's check), section draws (face ranges and translucent
-    /// sections) and the draw calls the backend issued for them. A CPU frame's are its own;
-    /// in GPU frames (`gpu_culling`) they are the newest GPU frame's whose counts came back,
-    /// a frame or a few earlier (`stats_lag`).
-    pub drawn_sections: usize,
-    pub section_draws: usize,
-    pub section_draw_calls: usize,
-    /// `draw_frame`'s frames past its early returns, and the one whose statistics are shown.
-    frame_serial: u64,
-    stats_frame: u64,
-    pub uploaded_bytes: u64,
-    started: Instant,
-    /// The next frame to write to a PNG path (control socket, F2, world icon).
-    pub screenshot: Option<ScreenshotRequest>,
-    /// Readback outcome: CPU pixels for the game to approve before writing, or an error.
-    pub screenshot_result: Option<std::result::Result<PendingScreenshot, String>>,
-    screenshot_readbacks: screenshot_readback::Readbacks,
-    /// Screenshot Quality (Sunrise setting): a `scaled` screenshot's frame is this many
-    /// times the game's resolution (1, 2, 4 or 8).
-    pub screenshot_quality: u32,
-    /// How many times the pending scaled screenshot ran out of video memory: each
-    /// halves its size, down to the window's.
-    screenshot_halvings: u32,
-    /// Brightness option (lightmap gamma), 0..1.
-    pub gamma: f32,
-    /// Optional full-light lightmap (Sunrise Extras).
-    pub fullbright: bool,
-    /// The Improved transparency option (`GameRenderer.useImprovedTransparency`).
-    pub improved_transparency: bool,
-    /// Its passes and targets, made when first drawn with.
-    oit: Option<oit::Oit>,
-    /// Advance animated block textures (Sunrise setting; vanilla always does).
-    pub animated_textures: bool,
-    present_modes: Vec<wgpu::PresentMode>,
-    /// CPU copies of the section and far tile meshes uploaded while `render-capture` is on
-    /// (`keep_capture_copies`, or `SUNRISE_RENDER_CAPTURE` at creation); `None` otherwise.
-    capture_copies: Option<capture::Copies>,
-    /// A scene to write from the next frame (`sunrise-ctl render-capture DIR`).
-    pub capture: Option<capture::Request>,
-    /// Outcome of the last capture: its summary, or the error.
-    pub capture_result: Option<std::result::Result<serde_json::Value, String>>,
-}
+mod renderer;
+pub use renderer::Renderer;
 /// Every layer's mip levels, layer major (`first` is the first layer's
 /// index into `settings`), made by `MipmapGenerator`.
 /// Block sprite layers per texture array at most: the
@@ -1036,7 +540,7 @@ fn startup_step(step: std::fmt::Arguments) {
 }
 /// How far the first frame on a new device got, for `startup_step`.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum FirstFrame {
+pub(crate) enum FirstFrame {
     Acquire,
     Submit,
     Drawn,
@@ -1143,6 +647,25 @@ impl Renderer {
     pub fn custom_sky_draws(&mut self) -> &mut Vec<crate::custom_sky::Draw> {
         &mut self.custom_sky_draws
     }
+    /// The pack's custom lightmaps (`crate::custom_lightmap::load`): a world with one takes its
+    /// light texture from them in place of the default one. A pack without any costs a frame
+    /// nothing.
+    pub fn set_custom_lightmap(
+        &mut self,
+        pack: std::sync::Arc<dyn crate::custom_lightmap::Lightmaps>,
+    ) {
+        self.custom_lightmap = (!pack.is_empty()).then_some(pack);
+        self.lightmap_uploaded = false;
+    }
+    /// Whether the pack has custom lightmaps: only then does the game hand over the weather.
+    pub fn has_custom_lightmap(&self) -> bool {
+        self.custom_lightmap.is_some()
+    }
+    /// The world and weather of the next frame's light texture (custom lightmaps read them). Only
+    /// that frame reads them: a frame the game sets none for has no custom lightmap.
+    pub fn set_lightmap_weather(&mut self, weather: crate::custom_lightmap::Weather) {
+        self.lightmap_weather = Some(weather);
+    }
     fn quad_indices(device: &wgpu::Device, quads: u32) -> wgpu::Buffer {
         surface_setup::ray_query::quad_indices(device, quads)
     }
@@ -1181,7 +704,6 @@ impl Renderer {
                 self.frame_gen.on,
                 (self.pack_post.as_ref())
                     .map(|(_, p)| p.as_ref().is_some_and(|p| p.skins_entities())),
-                self.native.is_some(),
                 || native_render::needs().entity_spans,
             )
     }
@@ -1314,50 +836,21 @@ impl Renderer {
             self.own_timing.as_mut(),
         );
         if let Some(arrays) = &self.pbr_maps {
-            for animation in &self.material_animations {
-                if !self.animations.changed().contains(&animation.layer) {
-                    continue;
-                }
-                let Some(pair) = arrays.get((animation.layer / self.sprite_split) as usize) else {
-                    continue;
-                };
-                for kind in 0..2 {
-                    let Some(pixels) = animation.material_pixels(kind, tick) else {
-                        continue;
-                    };
-                    let texture = &pair[kind];
-                    let from = (pixels.len() / 4).isqrt() as u32;
-                    for level in 0..texture.mip_level_count() {
-                        let size = texture.width() >> level;
-                        let pixels = crate::sprites::resample(pixels, from, size);
-                        self.uploads.texture(
-                            encoder,
-                            wgpu::TexelCopyTextureInfo {
-                                texture,
-                                mip_level: level,
-                                origin: wgpu::Origin3d {
-                                    x: 0,
-                                    y: 0,
-                                    z: animation.layer % self.sprite_split,
-                                },
-                                aspect: wgpu::TextureAspect::All,
-                            },
-                            size,
-                            size,
-                            &pixels,
-                        );
-                    }
-                }
-            }
+            let written = self.material_animations.upload(
+                encoder,
+                &mut self.uploads,
+                arrays,
+                self.sprite_split,
+                tick,
+                self.animations.changed(),
+            );
             if let Some(atlases) = &self.pack_material_atlases {
-                for kind in 0..2 {
+                for (kind, layers) in written.into_iter().enumerate() {
+                    if layers.is_empty() {
+                        continue;
+                    }
                     let arrays: Vec<_> = arrays.iter().map(|pair| pair[kind].clone()).collect();
-                    atlases[kind].copy(
-                        &self.device,
-                        encoder,
-                        &arrays,
-                        self.animations.changed().iter().copied(),
-                    );
+                    atlases[kind].copy(&self.device, encoder, &arrays, layers);
                 }
             }
         }
@@ -1370,8 +863,22 @@ impl Renderer {
             );
         }
     }
+    /// Device `max_buffer_size`, for instance-room checks while `Renderer` is borrowed by `render`.
+    pub fn max_buffer_size(&self) -> u64 {
+        self.mod_gpu.max_buffer_size()
+    }
+    /// See [`ModGpuResources::mod_binding_limits`].
+    pub fn mod_binding_limits(&self) -> (u64, u64) {
+        self.mod_gpu.mod_binding_limits()
+    }
+    /// Render `frame`, optionally driving mod world-render hooks (`FrameHooks`) at the renderer's
+    /// real visibility, sky, prepare, pass-stage, and post-world boundaries.
     #[sunrise_mod_api_macros::replaceable]
-    pub fn render(&mut self, frame: &Frame) -> Result<bool> {
+    pub fn render(
+        &mut self,
+        frame: &Frame,
+        hooks: Option<&mut dyn world_primitives::FrameHooks>,
+    ) -> Result<bool> {
         // A lost device cannot accept uploads either. Leave recovery to the
         // owner instead of submitting atlas patches to the invalid device.
         if self.device_lost() {
@@ -1383,8 +890,8 @@ impl Renderer {
         }
         let scaled = self.screenshot_size();
         let rendered = match scaled {
-            Some(size) => self.draw_scaled_frame(frame, size),
-            None => self.draw_frame(frame, None, self.output),
+            Some(size) => self.draw_scaled_frame(frame, size, hooks),
+            None => self.draw_frame(frame, None, self.output, hooks),
         };
         self.finish_prepared_frame();
         // A frame that was not drawn still submits the section copies and
@@ -1393,7 +900,7 @@ impl Renderer {
         if self.device_lost() {
             return Err("the graphics device was lost".into());
         }
-        let patched = !frame.hud.patches.is_empty() || !frame.hud.image_patches.is_empty();
+        let patched = !frame.hud.patches.is_empty() || !frame.hud.dynamic_commands.is_empty();
         if !matches!(rendered, Ok(true)) && patched {
             let section_copies = self.section_copies.take();
             let has_section_copies = section_copies.is_some();
@@ -1404,7 +911,7 @@ impl Renderer {
                     })
             });
             self.hud
-                .upload_patches(&mut self.uploads, &mut encoder, frame.hud);
+                .upload_patches(&self.device, &mut self.uploads, &mut encoder, frame.hud);
             self.uploads.finish(&encoder);
             if has_section_copies {
                 self.section_copy_bytes = 0;
@@ -1416,6 +923,11 @@ impl Renderer {
         }
         // A scaled screenshot's frame never reached the window.
         rendered.map(|drawn| drawn && scaled.is_none())
+    }
+    /// The device's largest 2D texture side (`max_texture_dimension_2d`), the limit of a dynamic
+    /// texture.
+    pub fn max_texture_side(&self) -> u32 {
+        self.device.limits().max_texture_dimension_2d
     }
     /// Whether the device's loss callback has fired. A surface reconfigure
     /// alone cannot restore resources belonging to a lost device.
@@ -1500,11 +1012,8 @@ pub use view::test_frustum;
 /// fire_side's 0.01 pixel in front of its block, from z-fighting.
 /// The section the camera is in.
 fn camera_section(camera: DVec3, min_y: i32) -> SectionKey {
-    (
-        (camera.x.floor() as i32) >> 4,
-        (camera.y.floor() as i32 - min_y) >> 4,
-        (camera.z.floor() as i32) >> 4,
-    )
+    let (cx, cz) = resident::camera_column(camera);
+    (cx, resident::camera_section_y(camera, min_y), cz)
 }
 
 /// The near plane of the world's projection, in blocks.
@@ -1518,14 +1027,12 @@ pub(crate) fn world_projection(fov_degrees: f32, aspect: f32, far: f32) -> Mat4 
 /// face `eye` (`view::projection_center`), the mesh at the camera-relative
 /// `origin`; all of them when there is no eye.
 fn facing_runs(sides: &Sides, eye: Option<Vec3>, origin: [f32; 3], draw: impl FnMut(u32, u32)) {
-    facing_runs_from(sides, eye, None, origin, Quads::All, draw)
+    facing_runs_from(sides, eye, origin, Quads::All, draw)
 }
-/// `facing_runs` for the eye and, with `low`, every eye straight below it down to that
-/// camera-relative height (the water mirror's eye).
+/// `facing_runs` for one `part` of a mesh's solid quads.
 fn facing_runs_from(
     sides: &Sides,
     eye: Option<Vec3>,
-    low: Option<f32>,
     origin: [f32; 3],
     part: Quads,
     draw: impl FnMut(u32, u32),
@@ -1533,8 +1040,7 @@ fn facing_runs_from(
     match eye {
         Some(eye) => {
             let eye = eye - Vec3::from(origin);
-            let low = low.map_or(eye.y, |y| (y - origin[1]).min(eye.y));
-            sides.visible_from(eye.to_array(), low, part, draw)
+            sides.visible_from(eye.to_array(), eye.y, part, draw)
         }
         None => sides.every(part, draw),
     }
@@ -1552,45 +1058,94 @@ mod sprite_upload_tests;
 #[cfg(test)]
 mod shadow_tests;
 
+#[cfg(test)]
+mod pack_build_retire_tests;
+
+mod pack_builds;
+#[cfg(feature = "test-support")]
+pub use pack_builds::PackBuildWatch;
+pub use pack_builds::PackBuilds;
+pub(crate) use pack_builds::{BuildOrigin, PackBuild, Retired, RetiredPackBuilds};
+
+/// What a pack's thread builds (`Renderer::load_shader_pack`): the pack or why it is refused,
+/// its block ids, and the mod pipelines' state for its targets.
+type PackBuilt = (
+    std::result::Result<pack_post::PackPost, pack_post::Refused>,
+    Vec<i32>,
+    Option<mod_pipelines::BuiltPackState>,
+);
+
 /// A `shaders/` pack building on its own thread (`Renderer::load_shader_pack`): the dimension it
 /// is for, the thread (a panic in it contained), and what the game named it with and when.
 /// Dropping it (another pack, none, or another dimension) cancels the build: the thread stops at
-/// the next program instead of compiling the rest for nothing.
-struct PackLoading {
+/// the next program instead of compiling the rest for nothing, and goes to the renderer's
+/// [`RetiredPackBuilds`], which joins it once it ends, and before the renderer drops.
+pub(crate) struct PackLoading {
     dimension: i32,
-    /// Held to be dropped with it: that cancels the build.
-    _cancel: CancelOnDrop,
-    #[allow(clippy::type_complexity)]
-    thread: std::thread::JoinHandle<
-        std::result::Result<std::result::Result<pack_post::PackPost, pack_post::Refused>, String>,
-    >,
+    /// Set when it drops: `PackPost::new` checks it per program.
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// `None` once `poll_shader_pack` joined it.
+    thread: Option<PackBuild>,
+    /// Where the thread goes when this drops before it was joined, and where it runs.
+    retired: RetiredPackBuilds,
+    origin: BuildOrigin,
     label: String,
     started: std::time::Instant,
+    /// What its terrain and shadow programs will draw from the game's sections, as the built
+    /// pack's `has_terrain` and `has_shadow` will say (`PackLoading::draws_of`), for the layouts
+    /// the frames drawn meanwhile keep (`Renderer::pack_pending`).
+    draws: PackDraws,
+    /// Sunrise's HDR as served to it (`Post::hdr`).
+    served: Option<sunrise_shaders::Tonemap>,
+    /// Block ids given while it builds (`Renderer::set_pack_block_ids`), which it runs with in
+    /// place of those it was built with.
+    block_ids: Option<Vec<i32>>,
 }
 
-/// Sets its flag when dropped: `PackLoading`'s cancel, which `PackPost::new` checks per program.
-struct CancelOnDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
-
-impl Drop for Renderer {
-    /// Once the device is lost, the window's surfaces are left alive: wgpu refuses to present
-    /// or discard a frame on a lost device and keeps that frame acquired, and destroying the
-    /// swapchain under an acquired frame panics (while a panic unwinds, an abort).
+impl Drop for PackLoading {
     fn drop(&mut self) {
-        if !self.device_lost() {
-            return;
+        self.cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            self.retired.retire(Retired {
+                thread,
+                origin: self.origin.clone(),
+            });
         }
-        std::mem::forget(self.surface.take());
-        std::mem::forget(
-            self.spare_surface
-                .get_mut()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take(),
-        );
     }
 }
 
-impl Drop for CancelOnDrop {
-    fn drop(&mut self) {
-        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+/// A running `shaders/` pack's block ids (`Renderer::pack_block_ids`).
+#[derive(Debug)]
+pub(crate) struct PackBlockIds(pub(crate) Vec<i32>);
+
+/// What a pack's programs will draw, as the built pack's `has_terrain`, `has_shadow` and
+/// `draws_sections` will say.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PackDraws {
+    pub(crate) terrain: bool,
+    pub(crate) shadow: bool,
+    pub(crate) sections: bool,
+}
+
+impl PackLoading {
+    /// What `post`'s programs draw once built, with terrain geometry (`atlas`, the pack's block
+    /// atlas) or without: `PackPost::has_terrain` (a solid or cutout terrain program, built with
+    /// that geometry, or terrain the pack leaves undrawn), `has_shadow` (the shadow pass, with a
+    /// terrain or translucent shadow program built with it) and `draws_sections` (a solid,
+    /// cutout or translucent terrain program, or that shadow pass). A program the device then
+    /// refuses to build is not foreseen: the layouts follow the built pack once it runs.
+    pub(crate) fn draws_of(post: &sunrise_shaders::Post, atlas: bool) -> PackDraws {
+        let shadow = atlas
+            && post.shadow_pass
+            && (post.shadow.is_some()
+                || post.shadow_water.is_some()
+                || post.shadow_water_plain.is_some());
+        let programs = post.terrain.is_some() || post.terrain_cutout.is_some();
+        PackDraws {
+            terrain: atlas && programs || post.terrain_undrawn,
+            shadow,
+            sections: atlas && (programs || post.water.is_some()) || shadow,
+        }
     }
 }

@@ -8,12 +8,14 @@ pub trait Hooks {
     /// A cancelled tick schedules nothing; a mod taking over must re-schedule itself.
     /// It's asked once per tick, so keep it cheap. Server-side.
     #[hook(
+        receiver = "read",
+        dispatch = "flat",
         side = "server",
         contract = "cancel",
         out = "cancel",
         neoforge = "none (NeoForge has no such event)",
         cancellable = true,
-        target = "sunrise_client::game::native_hooks::fluid_tick::GameLevel<'_>::native_fluid_tick"
+        target = "sunrise_gameplay_common::game::native_hooks::fluid_tick::GameLevel<'_>::native_fluid_tick"
     )]
-    fn fluid_tick();
+    fn fluid_tick(dimension: LevelDimension, pos: BlockPos, fluid: &str, cancel: &mut bool);
 }

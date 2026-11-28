@@ -19,6 +19,8 @@ pub trait Hooks {
     /// A disabled owner's subscribed soil rule supports plants
     /// of this type already above it or settling there, but does not authorize a new planting.
     #[hook(
+        receiver = "read",
+        dispatch = "flat",
         side = "both",
         version = 2,
         contract = "replace",
@@ -26,8 +28,15 @@ pub trait Hooks {
         scope = "block",
         inert = "signal",
         key = "ground",
-        target = "sunrise_client::game::native_hooks::can_sustain_plant::LevelView<'_>::native_can_sustain_plant",
+        target = "sunrise_gameplay_common::game::native_hooks::can_sustain_plant::LevelView<'_>::native_can_sustain_plant",
         neoforge = "IBlockExtension.canSustainPlant"
     )]
-    fn can_sustain_plant();
+    fn can_sustain_plant(
+        dimension: LevelDimension,
+        state: BlockState,
+        ground: BlockState,
+        ground_pos: BlockPos,
+        sustains: &mut Option<bool>,
+        #[engine] inert: &mut bool,
+    );
 }

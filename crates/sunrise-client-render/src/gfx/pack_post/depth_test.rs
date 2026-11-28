@@ -1,22 +1,27 @@
 //! Original depth-buffer GPU regressions from public format documentation; no pack assets.
 use super::*;
 use crate::{gfx::Frame, hud::HudBatch};
+use sunrise_shaders::Group;
 use wgpu::{TextureFormat as T, util::DeviceExt};
 
 pub(super) const SIZE: [u32; 2] = [16, 16];
 
 pub(super) struct Gpu {
-    adapter: wgpu::Adapter,
+    pub(super) adapter: wgpu::Adapter,
     pub(super) device: wgpu::Device,
     pub(super) queue: wgpu::Queue,
 }
 impl Gpu {
     pub(super) fn new() -> Option<Self> {
-        let instance = crate::gfx::test_gpu::instance();
-        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
+        Self::with_features(wgpu::Features::empty())
+    }
+    /// [`Self::new`], also turning on those of `features` the adapter has, as the game's device
+    /// does.
+    pub(super) fn with_features(features: wgpu::Features) -> Option<Self> {
+        let adapter = crate::gfx::test_gpu::adapter()?;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             required_limits: adapter.limits(),
-            required_features: adapter.features() & wgpu::Features::FLOAT32_FILTERABLE,
+            required_features: adapter.features() & (wgpu::Features::FLOAT32_FILTERABLE | features),
             ..Default::default()
         }))
         .expect("GPU device required: setup failure is not a contract pass");
@@ -53,6 +58,18 @@ impl Gpu {
         world: World<'_>,
         inputs: sunrise_shaders::GameInputs,
     ) -> PackPost {
+        self.load_with(files, world, inputs, sunrise_shaders::Macros::standard())
+            .0
+    }
+    /// [`Self::load`] with `macros` as the game's load starts with them, and the notes
+    /// `read_properties` gives for the pack's feature flags.
+    pub(super) fn load_with(
+        &self,
+        files: Vec<(String, String)>,
+        world: World<'_>,
+        inputs: sunrise_shaders::GameInputs,
+        mut macros: sunrise_shaders::Macros,
+    ) -> (PackPost, Vec<String>) {
         use std::io::{Cursor, Write};
         let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
         for (name, contents) in files {
@@ -68,8 +85,7 @@ impl Gpu {
             zip.finish().unwrap().into_inner(),
         )
         .unwrap();
-        let mut macros = sunrise_shaders::Macros::standard();
-        let (properties, _) = sunrise_shaders::read_properties(&pack, &mut macros);
+        let (properties, feature_notes) = sunrise_shaders::read_properties(&pack, &mut macros);
         let post = sunrise_shaders::load_post(&pack, "", &properties, &macros, &inputs);
         assert!(
             post.programs.iter().any(|p| p.name == "final"),
@@ -91,7 +107,7 @@ impl Gpu {
             "{:?}",
             built.notes
         );
-        built
+        (built, feature_notes)
     }
     pub(super) fn clear(
         &self,
@@ -154,11 +170,15 @@ impl Gpu {
             &screen,
             frame,
             &Default::default(),
+            Default::default(),
             SIZE,
             SIZE,
             &[],
             terrain,
+            Default::default(),
+            |_, _| false,
             &std::sync::atomic::AtomicBool::new(false),
+            super::super::in_flight::poll_live,
         )
         .unwrap();
         encoder.copy_texture_to_buffer(
@@ -325,7 +345,9 @@ fn check(sampler: &str, stage: Stage, scene: Scene, expected: [u8; 4]) {
     let water = matches!(scene, Scene::Terrain { water: true, .. } | Scene::WaterOnly);
     let inputs=sunrise_shaders::GameInputs {
         terrain:terrain.then(|| sunrise_shaders::GbuffersInputs { declarations:"layout(location=0)in vec3 fixture_position;\n".into(),body:"hz_Vertex=vec4(fixture_position,1.0);hz_Color=vec4(1.0);hz_MultiTexCoord0=vec4(0.0);hz_MultiTexCoord1=vec4(240.0);hz_MultiTexCoord2=vec4(240.0);hz_Normal=vec3(0.0,0.0,1.0);\n".into(),attributes:vec![],after:String::new(),alpha_test:None,parts:None,item_id_declared:false,far_depth:false,paged_maps:false,water_mask:false,water_patches:false }),
-        hand:hand.then(crate::gfx::pack_hand::inputs),..Default::default()
+        hand:hand.then(|| {
+            crate::gfx::pack_hand::adapt_hand_inputs(crate::gfx::pack_entities::inputs())
+        }),..Default::default()
     };
     let mut post = gpu.load(
         shaders(sampler, stage, scene),
@@ -341,6 +363,7 @@ fn check(sampler: &str, stage: Stage, scene: Scene, expected: [u8; 4]) {
                 material_maps: false,
                 ids: None,
                 cull: false,
+                pages: false,
             }),
             block_ids: &[],
             sprite_rects: &[],
@@ -427,6 +450,7 @@ fn check(sampler: &str, stage: Stage, scene: Scene, expected: [u8; 4]) {
 }
 
 #[test]
+#[ignore = "daily"]
 fn hand_is_in_depth1_and_excluded_from_depth2() {
     let _gpu = crate::gfx::test_gpu::lock();
     check(
@@ -440,6 +464,7 @@ fn hand_is_in_depth1_and_excluded_from_depth2() {
     );
 }
 #[test]
+#[ignore = "daily"]
 fn depth2_only_without_hand_excludes_water() {
     let _gpu = crate::gfx::test_gpu::lock();
     check(
@@ -453,6 +478,7 @@ fn depth2_only_without_hand_excludes_water() {
     );
 }
 #[test]
+#[ignore = "daily"]
 fn depth1_only_without_hand_excludes_water_control() {
     let _gpu = crate::gfx::test_gpu::lock();
     check(
@@ -466,6 +492,7 @@ fn depth1_only_without_hand_excludes_water_control() {
     );
 }
 #[test]
+#[ignore = "daily"]
 fn water_only_program_populates_both_opaque_snapshots() {
     let _gpu = crate::gfx::test_gpu::lock();
     check(
@@ -476,6 +503,7 @@ fn water_only_program_populates_both_opaque_snapshots() {
     );
 }
 #[test]
+#[ignore = "daily"]
 fn deferred_depth2_only_excludes_hand() {
     let _gpu = crate::gfx::test_gpu::lock();
     check(
@@ -489,6 +517,7 @@ fn deferred_depth2_only_excludes_hand() {
     );
 }
 #[test]
+#[ignore = "daily"]
 fn deferred_depth1_contains_hand_control() {
     let _gpu = crate::gfx::test_gpu::lock();
     check(
@@ -502,6 +531,7 @@ fn deferred_depth1_contains_hand_control() {
     );
 }
 #[test]
+#[ignore = "daily"]
 fn direct_fragment_gets_world_depth_control() {
     let _gpu = crate::gfx::test_gpu::lock();
     check(
@@ -512,6 +542,7 @@ fn direct_fragment_gets_world_depth_control() {
     );
 }
 #[test]
+#[ignore = "daily"]
 fn attached_compute_gets_world_depth() {
     let _gpu = crate::gfx::test_gpu::lock();
     check(
@@ -522,6 +553,7 @@ fn attached_compute_gets_world_depth() {
     );
 }
 #[test]
+#[ignore = "daily"]
 fn compute_only_gets_world_depth_control() {
     let _gpu = crate::gfx::test_gpu::lock();
     check(
@@ -532,6 +564,7 @@ fn compute_only_gets_world_depth_control() {
     );
 }
 #[test]
+#[ignore = "daily"]
 fn earlier_compute_child_gets_world_depth() {
     let _gpu = crate::gfx::test_gpu::lock();
     check(
@@ -542,6 +575,7 @@ fn earlier_compute_child_gets_world_depth() {
     );
 }
 #[test]
+#[ignore = "daily"]
 fn attached_compute_depth1_without_hand_excludes_water() {
     let _gpu = crate::gfx::test_gpu::lock();
     check(
@@ -555,6 +589,7 @@ fn attached_compute_depth1_without_hand_excludes_water() {
     );
 }
 #[test]
+#[ignore = "daily"]
 fn attached_compute_depth2_without_hand_excludes_water() {
     let _gpu = crate::gfx::test_gpu::lock();
     check(
@@ -568,6 +603,7 @@ fn attached_compute_depth2_without_hand_excludes_water() {
     );
 }
 #[test]
+#[ignore = "daily"]
 fn attached_compute_preserves_distinct_hand_snapshots() {
     let _gpu = crate::gfx::test_gpu::lock();
     check(
@@ -589,22 +625,26 @@ pub(super) fn fixture_frame(hud: &HudBatch) -> Frame<'_> {
         first_person: true,
         shadow_scene_revision: (0, 0),
         shadow_cache: false,
-        water_plane: None,
         weather: &[],
         weather_time: crate::weather::Time::new(0, 0.0),
         camera: glam::DVec3::new(0.5, 100.0, 0.5),
         yaw: 0.0,
         pitch: 0.0,
+        roll: 0.0,
         fov_degrees: 90.0,
+        cull_fov_degrees: 90.0,
         bob: glam::Mat4::IDENTITY,
+        view_transform: glam::Mat4::IDENTITY,
         spin: glam::Mat4::IDENTITY,
         sky: crate::environment::Sky::default(),
         distance: 12.0,
         detail_distance: 12.0,
+        shadow_distance: None,
         depth_far: 1000.0,
         underwater: false,
         cave_culling: false,
         title: true,
+        sky_pass: false,
         sky_blocked: false,
         skybox: false,
         end_sky: false,
@@ -617,7 +657,6 @@ pub(super) fn fixture_frame(hud: &HudBatch) -> Frame<'_> {
         outline: Vec::new(),
         outline_after_terrain: false,
         outline_high_contrast: false,
-        pvp: Default::default(),
         debug_lines: &[],
         debug_lines_on_top: &[],
         debug_crosshair: &[],
@@ -626,6 +665,7 @@ pub(super) fn fixture_frame(hud: &HudBatch) -> Frame<'_> {
         glint_ticks: 0.0,
         nether_lighting: false,
         entities: &[],
+        explicit_particles: None,
         static_block_entities: &[],
         visible_static_block_entity_sections: &[],
         static_block_entity_stats: crate::block_entity_render::StaticCacheFrameStats::default(),
@@ -772,6 +812,7 @@ fn shadow_depth_map_reads(
                 atlas: None,
                 ids: None,
                 cull: false,
+                pages: false,
                 material_maps: false,
             }),
             block_ids: &[],
@@ -804,6 +845,7 @@ fn shadow_depth_map_reads(
 }
 
 #[test]
+#[ignore = "daily"]
 fn shadow_depth_is_read_linearly_through_a_plain_sampler() {
     let _gpu = crate::gfx::test_gpu::lock();
     // Iris 1.11.7 filters both (probe packs of our own; the PR has the readings).
@@ -813,6 +855,7 @@ fn shadow_depth_is_read_linearly_through_a_plain_sampler() {
 }
 
 #[test]
+#[ignore = "daily"]
 fn shadow_depth_reads_filter_directly_and_with_a_texel_offset() {
     let _gpu = crate::gfx::test_gpu::lock();
     // texture2D on the sampler itself, and textureOffset one texel to the right: both a quarter
@@ -832,6 +875,7 @@ fn shadow_depth_reads_filter_directly_and_with_a_texel_offset() {
 }
 
 #[test]
+#[ignore = "daily"]
 fn shadow_depth_filter_weights_are_256ths_as_in_our_iris_readings() {
     let _gpu = crate::gfx::test_gpu::lock();
     // The map is at the far plane but for texel (8, 8), which is nearer. Reads between texels
@@ -867,6 +911,7 @@ fn shadow_depth_filter_weights_are_256ths_as_in_our_iris_readings() {
 }
 
 #[test]
+#[ignore = "daily"]
 fn shadowtex_nearest_settings_read_the_nearest_texel() {
     let _gpu = crate::gfx::test_gpu::lock();
     for (line, expected) in [

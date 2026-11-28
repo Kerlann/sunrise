@@ -263,7 +263,7 @@ fn build_tag(root: JsonInput<'_>, parent_depth: usize) -> Result<Tag, JsonNbtErr
     Ok(done.pop().expect("one root was built"))
 }
 
-fn validate_tag(root: &Tag) -> Result<(), JsonNbtError> {
+fn validate_tag(root: &Tag, bounded: bool) -> Result<(), JsonNbtError> {
     let valid_string = |s: &JavaString| {
         if char::decode_utf16(s.0.iter().copied()).any(|c| c.is_err()) {
             Err(JsonNbtError::InvalidString)
@@ -282,13 +282,13 @@ fn validate_tag(root: &Tag) -> Result<(), JsonNbtError> {
             }
             Tag::String(s) => valid_string(s)?,
             Tag::List(values) => {
-                if depth >= MAX_DEPTH {
+                if bounded && depth >= MAX_DEPTH {
                     return Err(JsonNbtError::TooDeep);
                 }
                 pending.extend(values.iter().rev().map(|v| (v, depth + 1)));
             }
             Tag::Compound(values) => {
-                if depth >= MAX_DEPTH {
+                if bounded && depth >= MAX_DEPTH {
                     return Err(JsonNbtError::TooDeep);
                 }
                 for key in values.keys() {
@@ -325,7 +325,12 @@ pub struct JsonTag<'a> {
 impl<'a> JsonTag<'a> {
     /// Check without cloning payloads or constructing JSON.
     pub fn new(root: &'a Tag) -> Result<Self, JsonNbtError> {
-        validate_tag(root)?;
+        validate_tag(root, true)?;
+        Ok(Self { root })
+    }
+    /// Check that the tag can be projected onto an in-memory JSON value, without a wire depth limit.
+    pub fn for_projection(root: &'a Tag) -> Result<Self, JsonNbtError> {
+        validate_tag(root, false)?;
         Ok(Self { root })
     }
     /// Construct JSON from the validated, immutably borrowed tag.

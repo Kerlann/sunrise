@@ -28,7 +28,9 @@ pub fn resource_files(root: &Path, kind: &str) -> io::Result<BTreeMap<String, Ve
             Err(e) => return Err(e),
         };
         for file in &folder.files {
-            files.insert(format!("{ns}:{}", file.name), file.bytes()?.to_vec());
+            if crate::json_folder::valid_resource_path(&ns, &file.name) {
+                files.insert(format!("{ns}:{}", file.name), file.bytes()?.to_vec());
+            }
         }
     }
     Ok(files)
@@ -43,6 +45,12 @@ pub fn resource_tags<T: Clone + Ord>(
     lookup: impl FnMut(&str, bool) -> Option<T>,
 ) -> io::Result<BTreeMap<String, Vec<T>>> {
     let mut files: BTreeMap<String, Vec<Vec<u8>>> = BTreeMap::new();
+    for (id, json) in crate::tag_layers::convention::json_entries("damage_type") {
+        files
+            .entry(id.clone())
+            .or_default()
+            .push(json.as_bytes().to_vec());
+    }
     let exported = root.join("damage-tags.json");
     if exported.exists() {
         let value: Value = serde_json::from_slice(&fs::read(exported)?)?;
@@ -86,7 +94,7 @@ pub fn resource_tags<T: Clone + Ord>(
             }
         }
     }
-    let built = tags.build(lookup).map_err(|e| invalid(e.to_string()))?;
+    let built = tags.bind(lookup);
     for id in built.missing.keys() {
         log::warn!("Sunrise: damage tag {id} has unresolved required entries");
     }
@@ -191,6 +199,14 @@ impl Catalog {
             .map(|id| self.definitions[id.0].name.as_str())
     }
 
+    /// Names of every bound damage-type tag holding at least one entry, for `neoforge:tag_empty`.
+    pub fn non_empty_tags(&self) -> impl Iterator<Item = &str> {
+        self.tags
+            .iter()
+            .filter(|(_, members)| !members.is_empty())
+            .map(|(tag, _)| tag.as_str())
+    }
+
     /// RegistryDataLoader's world-load snapshot. Existing local definition
     /// indices stay stable; new names append in sorted order. Wire IDs remain
     /// the separately synchronized registry's, looked up by name.
@@ -232,10 +248,7 @@ impl Catalog {
         let tags = resource_tags(root, overlay, |id, _| catalog.ids.get(id).copied())?;
         // TagLoader.loadPendingTags leaves the registry alone if no tag bound.
         if !tags.is_empty() {
-            catalog.tags = tags
-                .into_iter()
-                .map(|(id, values)| (id, values.into_iter().collect()))
-                .collect();
+            catalog.tags = tags;
         }
         Ok(catalog)
     }

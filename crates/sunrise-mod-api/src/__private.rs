@@ -16,6 +16,10 @@ pub fn install_parts(
 pub mod native_log;
 #[path = "profiler.rs"]
 pub mod profiler;
+#[cfg(feature = "engine-test-platform")]
+#[doc(hidden)]
+#[path = "test_platform.rs"]
+pub mod test_platform;
 
 /// Install platform instrumentation before any mod registration or dispatch.
 /// A first guard entry seals the socket; late initialization is refused without
@@ -33,19 +37,13 @@ pub fn install(mods: crate::Mods) {
 }
 
 #[doc(hidden)]
-pub use crate::load_state::{install_dependencies, install_packages, install_registration_data};
+pub use crate::load_state::{
+    RegistrationGuard, install_dependencies, install_packages, install_registration_data,
+    with_registration_open,
+};
 #[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
 pub use crate::load_state::{
     with_test_dependencies, with_test_package_inventory, with_test_packages,
     with_test_registration_data,
 };
-
-pub use crate::equip_reads::{
-    EquipReadGuard, EquipReadSet, cached_equip_alive, cached_equip_equipment,
-    cached_equip_hand_item, cached_equip_health, cached_equip_kind, cached_equip_living,
-    cached_equip_max_health, cached_equip_position, enter_equip_reads,
-};
-
-#[doc(hidden)]
-pub use crate::parts::attachment_declarations;

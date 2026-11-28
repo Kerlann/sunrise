@@ -12,7 +12,6 @@ use sunrise_client::{
     assets::Assets,
     collisions,
     motion::{MotionResources, MotionWorld, PlayerMotion},
-    world::World,
 };
 use sunrise_core::geometry::Vec3;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -31,10 +30,11 @@ pub fn main() -> Result<()> {
     };
     let root = PathBuf::from(root);
     let assets = Assets::load(&root)?;
-    let render = assets.reload(&sunrise_assets::resource_source::ResourceRoot::directory(
-        root.to_path_buf(),
-    ))?;
-    let mut scene = World::test_scene(&assets, &render, 1)?;
+    let render = sunrise_client::assets::RenderAssets::load(
+        &sunrise_assets::resource_source::ResourceRoot::directory(root.to_path_buf()),
+        &assets,
+    )?;
+    let mut scene = sunrise_client::assets::test_scene_world(&assets, &render, 1)?;
     let binding = collisions::load(&root, assets.registry)?;
     let resources = MotionResources::load(&root, &assets)?;
     fs::write(
@@ -77,7 +77,7 @@ pub fn main() -> Result<()> {
         }
         let p = &c["player"];
         let position = Vec3::new(db(&p["pos"][0]), db(&p["pos"][1]), db(&p["pos"][2]));
-        let mut player = PlayerMotion::new(&resources, position)?;
+        let mut player = PlayerMotion::new(&resources, position);
         player.ground.on_ground = p["ground"].as_bool().unwrap();
         player.shift_key_down = p["shift"].as_bool().unwrap();
         player.yaw = fl(&p["yr"]);

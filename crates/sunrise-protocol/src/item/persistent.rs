@@ -6,7 +6,9 @@ use sunrise_core::nbt::Tag;
 use sunrise_world::component_value::{Patch, Template as ValueTemplate, Value};
 
 mod source;
-pub use source::{component_from_tag, component_from_value, template_from_parts};
+pub use source::{
+    component_from_admitted_tag, component_from_tag, component_from_value, template_from_parts,
+};
 
 /// The output direction only needs names to ids, not a bidirectional registry.
 pub trait Ids {
@@ -19,13 +21,28 @@ impl<F: Fn(&str, &str) -> Option<i32>> Ids for F {
 }
 /// Adapter for a name-only lookup callback.
 #[non_exhaustive]
-pub struct NameLookup<'a>(pub &'a dyn Fn(&str, i32) -> Option<String>);
+pub struct NameLookup<'a>(
+    pub &'a dyn Fn(&str, i32) -> Option<String>,
+    Option<&'a crate::registry::Dynamic>,
+);
 impl<'a> NameLookup<'a> {
     pub fn new(lookup: &'a dyn Fn(&str, i32) -> Option<String>) -> Self {
-        Self(lookup)
+        Self(lookup, None)
+    }
+    pub fn with_registries(mut self, registries: &'a crate::registry::Dynamic) -> Self {
+        self.1 = Some(registries);
+        self
     }
 }
 impl Names for NameLookup<'_> {
+    fn consume_effect_kind(&self, id: i32) -> Option<super::consume_effects::Kind> {
+        match self.1 {
+            Some(registries) => registries.consume_effect_kind(id),
+            None => super::consume_effects::builtin_name(id)
+                .map(|_| super::consume_effects::Kind::Builtin(id)),
+        }
+    }
+
     fn name(&self, registry: &str, id: i32) -> Option<String> {
         (self.0)(registry, id)
     }
@@ -121,11 +138,27 @@ pub(crate) fn special_value(
     } else if let Component::Raw(bytes) = value {
         // Typed components may also arrive from a caller as pinned raw values.
         // Interpret them through the existing typed stream codec, not another parser.
-        if matches!(kind, 0..=4 | 6 | 9..=13 | 17..=19 | 21 | 30 | 45 | 47 | 48 | 51..=53 | 55..=57 | 65 | 69..=72 | 75)
-            || super::custom::contains(kind)
+        if matches!(
+            kind,
+            0..=4
+                | 6
+                | 9..=13
+                | 17..=19
+                | 21
+                | 30
+                | 35
+                | 45
+                | 47
+                | 48
+                | 51..=53
+                | 55..=57
+                | 65
+                | 69..=72
+                | 75
+        ) || super::custom::contains(kind)
         {
             Some((|| {
-                let mut reader = Reader::new(bytes);
+                let mut reader = Reader::new(bytes).with_names(names);
                 let decoded = Component::read(kind, &mut reader)?;
                 if reader.remaining() != 0 {
                     return Err(Error::new("trailing component bytes"));
@@ -160,10 +193,8 @@ fn transient_value(kind: i32, value: &Component) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        buf::{Codec, Writer},
-        item::Template,
-    };
+    use crate::{buf::Codec, item::Template};
+    use sunrise_core::vanilla_bytes::Writer;
 
     struct Registry;
     impl Names for Registry {

@@ -1,5 +1,7 @@
 from pathlib import Path
 import argparse
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -11,7 +13,7 @@ import unittest
 from unittest import mock
 
 from tools import parity, parity_shard
-from tools.ci import parity_shards
+from tools.ci import parity_shards, parity_verdict
 
 
 class ParityRunnerTests(unittest.TestCase):
@@ -27,6 +29,12 @@ class ParityRunnerTests(unittest.TestCase):
         self.assertEqual(parity.artifacts_of(["cargo", "run", "--profile", "fast", "--example", "c", "--", "--example", "x"]),
                          [["example", "c", "fast", [], True]])
         self.assertEqual(parity.artifacts_of(["cargo", "build", "--example", "d"]), [["example", "d", "dev", [], True]])
+
+    def test_the_test_profile_builds_into_devs_folder(self):
+        # lab.parity_fixtures() builds sunrise-parity-fixtures with --profile test: its dep-info is under debug/.
+        self.assertEqual(parity.artifact_path("bin", "sunrise-parity-fixtures", "test"),
+                         parity.TARGET / "debug" / "sunrise-parity-fixtures")
+        self.assertEqual(parity.artifact_path("example", "probe", "fast"), parity.TARGET / "fast" / "examples" / "probe")
 
     def test_artifacts_keep_the_package_and_feature_selection(self):
         self.assertEqual(parity.artifacts_of(["cargo", "build", "--locked", "--profile=fast", "-j", "4", "--package",
@@ -157,6 +165,25 @@ class ParityRunnerTests(unittest.TestCase):
             self.assertTrue(parity.stale("x", state, hasher, "other toolchain"))
             source.write_text("two!")
             self.assertTrue(parity.stale("x", state, hasher, "env"))
+
+    def test_an_unreadable_trace_is_an_error_and_a_missing_one_is_an_unkeyed_pass(self):
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(parity, "ROOT", Path(temp)):
+            script = Path(temp, "tools", "test_x_parity.py")
+            missing = parity.outcome("x", script, True, 1.0, Path(temp, "none.json"))
+            self.assertEqual((missing["status"], missing["dependencies"], missing["artifacts"]), ("pass", [], []))
+            cut = Path(temp, "cut.json")
+            cut.write_text('{"modules": [', encoding="utf-8")
+            with self.assertRaises(ValueError):
+                parity.outcome("x", script, True, 1.0, cut)
+
+    def test_a_damaged_reach_cache_is_an_error(self):
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(parity, "ROOT", Path(temp)), \
+                mock.patch.object(parity, "SHARED", Path(temp, "shared")):
+            Path(temp, "shared").mkdir()
+            Path(temp, "shared", "reach-cache.json").write_text("{not json", encoding="utf-8")
+            found = {"food": Path(temp, "tools", "test_food_parity.py")}
+            with self.assertRaises(ValueError):
+                parity.affected_harnesses(found, {"food": {"dependencies": ["crates/a.rs"]}}, {"crates/a.rs"})
 
     def test_a_change_affects_the_harnesses_that_depend_on_it(self):
         with tempfile.TemporaryDirectory() as temp, mock.patch.object(parity, "ROOT", Path(temp)), \
@@ -383,6 +410,61 @@ class DependencyPathTests(unittest.TestCase):
             self.assertEqual(records, {"local": record, "empty": {"dependencies": []}})
             self.assertEqual((local.read_bytes(), shared.read_bytes()), before)
 
+    def test_fixture_fallback_selects_and_runs_past_old_and_incomplete_passes(self):
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(parity, "ROOT", Path(temp)), \
+                mock.patch.object(parity, "SHARED", Path(temp, "shared")), \
+                mock.patch.object(parity, "STATE_DIR", Path(temp, "state")):
+            root = Path(temp)
+            marker = root / "crates/sunrise-mod-api-gen/source-layout"
+            marker.parent.mkdir(parents=True)
+            marker.write_text("split")
+            owners = ["fixture-common", "fixture-server", "fixture-client"]
+            paths = {owner: f"crates/{owner}/src/lib.rs" for owner in owners}
+            dispatcher = "crates/sunrise-parity-fixtures/src/main.rs"
+            for path in (*paths.values(), dispatcher):
+                (root / path).parent.mkdir(parents=True)
+                (root / path).write_text("fn run() {}")
+            mapping = root / parity.FIXTURE_ROOTS
+            mapping.parent.mkdir(parents=True)
+            roles = {
+                "lean": {"packages": owners[:2], "dispatcher": dispatcher, "inputs": [],
+                         "fixtures": {"legacy::serve": paths["fixture-server"]}},
+                "client-defaults": {"packages": owners, "dispatcher": dispatcher, "inputs": [],
+                                    "fixtures": {"legacy::render": paths["fixture-client"]}},
+            }
+            mapping.write_text(json.dumps({"version": parity.FIXTURE_RECORD_VERSION, "variants": roles}))
+            found = {name: root / f"tools/test_{name}.py" for name in roles}
+            hasher = lambda path: path.read_text() if path.is_file() else "missing"
+            records = {}
+            for variant, suffix, selector in (("lean", "no-default-features", "legacy::serve"),
+                                              ("client-defaults", "client-defaults", "legacy::render")):
+                record = {"status": "pass", "fixture_record_version": parity.FIXTURE_RECORD_VERSION,
+                          "fixture_ownership": True, "fixture_runs": parity.fixture_runs([
+                              [f"sunrise-parity-fixtures-{suffix}", selector, "--exact"],
+                          ]), "dependencies": [], "artifacts": []}
+                coverage = parity.fixture_coverage(record, roles)
+                self.assertIn(roles[variant]["fixtures"][selector], coverage[1])
+                record["dependencies"] = sorted(parity.fixture_inputs(coverage))
+                record["key"] = parity.key(record, hasher, "fixture")
+                records[variant] = record
+                self.assertFalse(parity.stale(variant, {"harnesses": records}, hasher, "fixture"))
+
+            added = "crates/fixture-common/src/new_mount.rs"
+            (root / added).write_text("pub fn reached_indirectly() {}")
+            self.assertEqual(parity.affected_harnesses(found, records, {added}, reach=False), set(found))
+            for variant in found:
+                self.assertTrue(parity.stale(variant, {"harnesses": records}, hasher, "fixture"))
+
+            old = {"status": "pass", "dependencies": [paths["fixture-common"]], "artifacts": []}
+            old["key"] = parity.key(old, hasher, "fixture")
+            parity.publish("lean", old)
+            self.assertTrue(parity.stale("lean", {"harnesses": {}}, hasher, "fixture"))
+            records["lean"] = old
+            self.assertEqual(parity.affected_harnesses(found, records, {added}, reach=False), set(found))
+            client_change = {paths["fixture-client"]}
+            self.assertEqual(parity.affected_harnesses(found, records, client_change, reach=False),
+                             {"client-defaults", "lean"})
+
     def test_changed_probes_and_oracles_accept_legacy_separators(self):
         with tempfile.TemporaryDirectory() as temp, mock.patch.object(parity, "ROOT", Path(temp)):
             found = {"probe": Path(temp, "tools/test_probe_parity.py")}
@@ -565,6 +647,45 @@ class OracleReuseTests(unittest.TestCase):
                                      capture_output=True, text=True, stdin=self.subprocess.DEVNULL, check=True)
         self.assertEqual(result.stdout, "done\n")
         return int((self.input.parent / "runs").read_text())
+
+    def test_cold_cache_setup_holds_the_setup_lock(self):
+        import hashlib
+        import sqlite3
+        from tools import file_lock, parity_shim
+
+        cache = Path(self.env["PARITY_SHIM_CACHE"])
+
+        def held():
+            # A second open file description conflicts with the shim's flock even in this process.
+            with (cache / "hashes.lock").open("a+b") as other:
+                return not file_lock.lock(other, wait=False)
+
+        during = []
+
+        class Probed:
+            def __init__(self, db):
+                self.db = db
+
+            def execute(self, *args):
+                during.append(held())
+                return self.db.execute(*args)
+
+            def __getattr__(self, name):
+                return getattr(self.db, name)
+
+        connect = sqlite3.connect
+
+        def probed_connect(*args, **kwargs):
+            during.append(held())
+            return Probed(connect(*args, **kwargs))
+
+        with mock.patch.object(parity_shim, "CACHE", cache), mock.patch.object(sqlite3, "connect", probed_connect):
+            hashes = parity_shim.Hashes()
+        # The connect, the switch to WAL and the create table all run under the lock.
+        self.assertEqual(during, [True, True, True])
+        self.assertFalse(held())
+        with contextlib.closing(hashes.db.db):
+            self.assertEqual(hashes.file(str(self.input)), hashlib.sha256(b"a").hexdigest())
 
     def test_reuses_until_an_input_or_output_changes(self):
         self.assertEqual(self.oracle(), 1)
@@ -761,23 +882,31 @@ class OracleKeepTests(unittest.TestCase):
             lately = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 5 * 86400))
             (keep / "fresh-only.json").write_text(json.dumps({"expired": long_ago, "inherited": lately}))
             parity.remember_fresh_only(keep, {
-                "loot": {"status": "pass", "retried": "reused oracle results", "oracle_reuse": False},
+                "loot": {"status": "fail", "retried": "reused oracle results", "fresh_rerun": "pass",
+                         "oracle_reuse": False},
                 "inherited": {"status": "pass", "oracle_reuse": False},
-                "failed": {"status": "fail", "retried": "reused oracle results", "oracle_reuse": True},
+                "failed": {"status": "fail", "retried": "reused oracle results", "fresh_rerun": "fail",
+                           "oracle_reuse": True},
                 "light": {"status": "pass", "oracle_reuse": True}})
             self.assertEqual(parity.fresh_only(keep), {"loot": time.strftime("%Y-%m-%d", time.gmtime()),
                                                        "inherited": lately})
             # Two shares of one daily on one host, each adding its own: the second keeps the first's.
-            parity.remember_fresh_only(keep, {"sculk": {"status": "pass", "retried": "reused oracle results"}})
+            parity.remember_fresh_only(keep, {"sculk": {"status": "fail", "retried": "reused oracle results",
+                                                        "fresh_rerun": "pass"}})
             self.assertEqual(set(parity.fresh_only(keep)), {"loot", "inherited", "sculk"})
             # A share with nothing to add doesn't write: a peer's list written meanwhile stays as it is.
             (keep / "fresh-only.json").write_text(json.dumps({"peer": lately}))
             parity.remember_fresh_only(keep, {"light": {"status": "pass", "oracle_reuse": True}})
             self.assertEqual(parity.fresh_only(keep), {"peer": lately})
-            (keep / "fresh-only.json").write_text("[1, 2]")
-            self.assertEqual(parity.fresh_only(keep), {})
-            (keep / "fresh-only.json").write_text(json.dumps({"loot": 3, "light": lately}))
-            self.assertEqual(parity.fresh_only(keep), {"light": lately})
+
+    def test_a_fresh_only_list_of_the_wrong_shape_is_an_error(self):
+        import json
+        with tempfile.TemporaryDirectory() as tmp:
+            keep = Path(tmp)
+            for text in ("[1, 2]", json.dumps({"loot": 3, "light": "2026-11-20"})):
+                (keep / "fresh-only.json").write_text(text)
+                with self.assertRaises(ValueError):
+                    parity.fresh_only(keep)
 
     def kept_run(self, root, outputs):
         import json
@@ -924,56 +1053,72 @@ class FakeExecutor:
         return finished
 
 
-class KnownFlakyTests(unittest.TestCase):
-    def run_harnesses(self, scripts, flaky, rounds=None):
-        executor = FakeExecutor()
+class RerunTests(unittest.TestCase):
+    """A failure with reused oracle results runs once more from scratch, and never becomes a pass."""
+
+    def run_harnesses(self, scripts, rounds=None):
+        executor, output = FakeExecutor(), io.StringIO()
         state = {"harnesses": {name: {"status": "pass", "oracle_reuse": True} for name in scripts}}
         with tempfile.TemporaryDirectory() as tmp, mock.patch.multiple(parity, STATE_DIR=Path(tmp), SHARED=Path(tmp)), \
-                mock.patch.object(parity, "save_state"), mock.patch.object(parity, "time") as clock:
+                mock.patch.object(parity, "save_state"), mock.patch.object(parity, "time") as clock, \
+                contextlib.redirect_stdout(output):
             clock.monotonic.return_value = 0.0
-            results, _ = parity.run(scripts, state, None, "env", [executor], True, rounds, flaky)
-        return results, executor.started
+            results, _ = parity.run(scripts, state, None, "env", [executor], True, rounds)
+        return results, executor.started, output.getvalue()
 
-    def test_a_known_flaky_failure_runs_once_more_from_scratch_and_says_so(self):
-        results, started = self.run_harnesses({"dedicated_server": ["fail", "pass"]}, {"dedicated_server": "timer"})
-        self.assertEqual(results["dedicated_server"]["status"], "pass")
-        self.assertEqual(results["dedicated_server"]["retried"], "known flaky")
-        # The first run reused oracle results; a known flaky harness doesn't lose that by flaking.
-        self.assertTrue(results["dedicated_server"]["oracle_reuse"])
-        self.assertEqual(started, [("dedicated_server", True), ("dedicated_server", False)])
+    def test_a_fresh_pass_after_a_reuse_failure_still_fails_and_stops_reuse(self):
+        results, started, _ = self.run_harnesses({"food": ["fail", "pass"]})
+        self.assertEqual(started, [("food", True), ("food", False)])
+        record = results["food"]
+        self.assertEqual((record["status"], record["retried"], record["fresh_rerun"]),
+                         ("fail", "reused oracle results", "pass"))
+        self.assertFalse(record["oracle_reuse"])
+
+    def test_the_daily_verdict_reads_the_first_failure_not_the_fresh_pass(self):
+        results, _, output = self.run_harnesses({"food": ["fail", "pass"], "loot": ["pass"]})
+        failed = sorted(name for name, record in results.items() if record["status"] != "pass")
+        # The footer as main() prints it, after the runner's own lines.
+        log = output + f"\n{len(results) - len(failed)} passed, {len(failed)} failed in 0.0 min.\n"
+        report, _ = parity_verdict.verdict(log, {"food", "loot"}, "1")
+        self.assertEqual(report, {"passed": ["loot"], "failed": ["food"], "complete": True})
 
     def test_only_once(self):
-        results, started = self.run_harnesses({"dedicated_server": ["fail", "fail"]}, {"dedicated_server": "timer"})
-        self.assertEqual(results["dedicated_server"]["status"], "fail")
-        self.assertEqual(len(started), 2)
+        results, started, _ = self.run_harnesses({"food": ["fail", "fail"]})
+        self.assertEqual((results["food"]["status"], results["food"]["fresh_rerun"], len(started)), ("fail", "fail", 2))
 
-    def test_other_harnesses_keep_only_the_reused_oracle_retry(self):
-        results, started = self.run_harnesses({"food": ["fail", "pass"]}, {"dedicated_server": "timer"})
-        self.assertEqual((results["food"]["status"], results["food"]["retried"]), ("pass", "reused oracle results"))
-        self.assertEqual(started, [("food", True), ("food", False)])
-        self.assertFalse(results["food"]["oracle_reuse"])
+    def test_repeated_runs_get_no_rerun(self):
+        results, started, _ = self.run_harnesses({"food": ["pass", "fail"]}, rounds={"food": 2})
+        self.assertEqual((results["food"]["status"], len(started)), ("fail", 2))
+        self.assertNotIn("fresh_rerun", results["food"])
 
-    def test_repeated_runs_get_no_retry(self):
-        results, started = self.run_harnesses({"dedicated_server": ["pass", "fail"]}, {"dedicated_server": "timer"},
-                                              rounds={"dedicated_server": 2})
-        self.assertEqual((results["dedicated_server"]["status"], len(started)), ("fail", 2))
+    def test_a_failed_first_round_keeps_its_fresh_rerun_apart_from_the_later_rounds(self):
+        # Round 1 fails with reuse, its fresh rerun passes, and round 2 fails.
+        results, started, _ = self.run_harnesses({"food": ["fail", "pass", "fail"]}, rounds={"food": 2})
+        record = results["food"]
+        self.assertEqual(started, [("food", True), ("food", False), ("food~2", True)])
+        self.assertEqual((record["status"], record["rounds"], record["fresh_rerun"]), ("fail", 2, "pass"))
+        self.assertNotIn("flaky", record)  # both scheduled rounds failed
+        with tempfile.TemporaryDirectory() as tmp:
+            parity.remember_fresh_only(Path(tmp), results)
+            self.assertEqual(set(parity.fresh_only(Path(tmp))), {"food"})
 
-    def test_retries_reach_the_job_summary(self):
+    def test_a_fresh_pass_is_remembered_as_fresh_only_though_it_failed(self):
+        results, _, _ = self.run_harnesses({"food": ["fail", "pass"], "loot": ["fail", "fail"]})
+        with tempfile.TemporaryDirectory() as tmp:
+            parity.remember_fresh_only(Path(tmp), results)
+            self.assertEqual(set(parity.fresh_only(Path(tmp))), {"food"})
+
+    def test_reruns_reach_the_job_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
             summary = Path(tmp) / "summary.md"
             with mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary)}), \
                     mock.patch("builtins.print"):
-                parity.report_retries({"dedicated_server": {"status": "pass", "retried": "known flaky"},
-                                       "food": {"status": "pass"}}, {"dedicated_server": "timer"})
+                parity.report_retries({"food": {"status": "fail", "retried": "reused oracle results",
+                                                "fresh_rerun": "pass"},
+                                       "loot": {"status": "pass"}})
             text = summary.read_text()
-        self.assertIn("RETRIED dedicated_server: failed, then passed on its one retry (known flaky: timer", text)
-        self.assertNotIn("food", text)
-
-    def test_the_known_flaky_list_has_a_reason_per_harness(self):
-        flaky = parity.known_flaky(parity.host_config())
-        self.assertTrue(all(isinstance(reason, str) and len(reason) > 20 for reason in flaky.values()))
-        self.assertTrue(set(flaky) <= {parity.base_name(name) for name in parity.harnesses()})
-
+        self.assertIn("food", text)
+        self.assertNotIn("loot", text)
 
 
 class SoloTests(unittest.TestCase):

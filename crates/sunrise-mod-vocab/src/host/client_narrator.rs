@@ -16,6 +16,5 @@ pub trait ClientNarratorClientHost {
     /// Nothing reaches the server. Refused with nothing said, by name, as
     /// [`NarrateError`] lists: an empty line, the option Off or Chat only, or
     /// no speech. Available from client setup onward.
-    #[access(ClientSetup)]
     fn narrate(&mut self, text: &Text, when: Narration) -> Result<(), NarrateError>;
 }

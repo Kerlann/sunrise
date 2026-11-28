@@ -15,8 +15,9 @@ import shutil
 import subprocess
 import sys
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import prebuilt_game as sdk_tools
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from tools import prebuilt_game as sdk_tools
 
 TEMPLATE = sdk_tools.ROOT / "crates/cargo-sunrise-mod/template/native"
 MIXINS_REV = re.search(r'REV: &str = "(\w+)"', (sdk_tools.ROOT / "crates/sunrise-mod-package/src/mixins_tool.rs").read_text())[1]
@@ -41,13 +42,13 @@ def main():
     mods = work / "mods"
     mod = mods / "route_probe"
     (mod / "src").mkdir(parents=True)
-    fill = lambda text: text.replace("{id}", "route_probe").replace("{name}", "Route probe").replace("{metadata}", "")
+    fill = lambda text: text.replace("{id}", "route_probe")
     (mod / "Cargo.toml").write_text(fill((TEMPLATE / "api.toml").read_text()))
     (mod / "src/lib.rs").write_text(fill((TEMPLATE / "lib.rs").read_text()))
     (mod / "sunrise-mod.toml").write_text(
-        fill((TEMPLATE / "sunrise-mod.toml").read_text())
+        fill((TEMPLATE / "sunrise-mod.toml").read_text()).replace("{name}", json.dumps("Route probe"))
         + f'\n[native]\ngame = "26.3"\nsunrise = "{identity["commit"]}"\nmixins = "{MIXINS_REV}"\n'
-        + '\n[[internals]]\npath = "sunrise_client::game::Game"\n')
+        + '\n[[internals]]\npath = "sunrise_gameplay_common::game::CommonGame"\n')
 
     command = [str(args.tool), "sunrise-mod"]
     reply, code = tool([*command, "native-layout"], {

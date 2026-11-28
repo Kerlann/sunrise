@@ -102,43 +102,57 @@ impl<'a> Lookup<'a> {
     }
     /// The sprite at `layer` of all the layers.
     pub fn sprite(&self, layer: u32) -> SpriteRef {
-        let render = &self.context.render;
-        SpriteRef {
-            array: layer / self.split,
-            layer: layer % self.split,
-            animated: render.animations.iter().any(|a| a.layer == layer),
-            cutout: render
-                .sprite_mips
-                .get(layer as usize)
-                .is_some_and(|m| m.has_transparent),
-        }
+        sprite_at(&self.context.mesh.render, self.split, layer)
     }
 
-    /// A texture by name (`minecraft:block/stone`, `block/stone`); none for one no model uses (the arrays hold only
-    /// the textures models and the game's own drawing name).
+    /// A texture by name in this lookup.
     pub fn texture(&self, name: &str) -> Option<SpriteRef> {
-        let layers = &self.context.render.sprite_layers;
-        let layer = layers
-            .get(name)
-            .or_else(|| layers.get(&format!("minecraft:{name}")))?;
-        Some(self.sprite(*layer))
+        texture_at(&self.context.mesh.render, self.split, name)
     }
+}
 
+fn sprite_at(render: &crate::assets::RenderAssets, split: u32, layer: u32) -> SpriteRef {
+    SpriteRef {
+        array: layer / split,
+        layer: layer % split,
+        animated: render.animations.iter().any(|a| a.layer == layer),
+        cutout: render
+            .sprite_mips
+            .get(layer as usize)
+            .is_some_and(|m| m.has_transparent),
+    }
+}
+
+/// A texture by name in the uploaded block atlas, independently of model publication.
+pub fn texture_at(
+    render: &crate::assets::RenderAssets,
+    split: u32,
+    name: &str,
+) -> Option<SpriteRef> {
+    let layers = &render.sprite_layers;
+    let layer = layers
+        .get(name)
+        .or_else(|| layers.get(&format!("minecraft:{name}")))?;
+    Some(sprite_at(render, split.max(1), *layer))
+}
+
+impl Lookup<'_> {
     /// What block `name` (`minecraft:oak_log[axis=x]`; properties left out take the default) draws on each side;
     /// none for a block the game does not know.
     pub fn block(&self, name: &str) -> Option<BlockSprites> {
-        let state = parse_state(self.context.assets.registry, name)?;
+        let state = parse_state(self.context.chunk.assets.registry, name)?;
         Some(self.state(state))
     }
 
     /// What `state` draws on each side. A fluid has its still texture on all six; a block drawn only as a block
     /// entity (a chest, a sign) or not at all (air) has empty sides, and its particle sprite if any.
     pub fn state(&self, state: BlockStateId) -> BlockSprites {
-        let render = &self.context.render;
+        let render = &self.context.mesh.render;
         let catalog = &render.model_catalog;
         let mut sides: [Vec<FaceSprite>; 6] = Default::default();
         let block = self
             .context
+            .chunk
             .assets
             .registry
             .state(state)
@@ -231,7 +245,7 @@ impl<'a> Lookup<'a> {
                 rect: [a0, b0, a1, b1].map(snap),
                 inset: snap((depth - plane).abs()),
                 uv: uv.map(snap),
-                tint: self.context.tables.tint_source(state, q.tint_index),
+                tint: self.context.mesh.tables.tint_source(state, q.tint_index),
                 translucent: face.translucent,
             },
         ))
@@ -297,16 +311,21 @@ mod tests {
     #[ignore = "daily"]
     fn real_blocks_name_their_sprites() -> crate::Result<()> {
         use crate::{
-            assets::Assets, biome::Biomes, blocks::BlockFacts, light::LightTables,
+            assets::Assets,
+            biome::Biomes,
+            blocks::BlockFacts,
+            light::LightTables,
             mesher::MeshTables,
+            streaming::{ChunkWorkerContext, MeshWorkerContext},
         };
         use std::sync::Arc;
         let root = std::path::PathBuf::from(
             std::env::var_os("SUNRISE_TEST_RESOURCES").expect("SUNRISE_TEST_RESOURCES"),
         );
         let assets = Arc::new(Assets::load(&root)?);
-        let render = Arc::new(assets.reload(
+        let render = Arc::new(crate::assets::RenderAssets::load(
             &sunrise_assets::resource_source::ResourceRoot::directory(root.to_path_buf()),
+            &assets,
         )?);
         let facts = BlockFacts::load(&root, assets.registry)?;
         let tables = Arc::new(MeshTables::new(
@@ -317,17 +336,21 @@ mod tests {
             None,
         )?);
         let context = WorkerContext {
-            light: Arc::new(LightTables::load(&root, assets.registry, &facts)?),
-            tables,
-            assets: assets.clone(),
-            render,
-            biomes: Arc::new(Biomes::load(
-                &sunrise_assets::resource_source::ResourceRoot::directory(root.to_path_buf()),
-            )?),
-            hidden_states: Arc::from([]),
-            part_tables: Default::default(),
+            chunk: ChunkWorkerContext {
+                light: Arc::new(LightTables::load(&root, assets.registry, &facts)?),
+                assets: assets.clone(),
+                biomes: Arc::new(Biomes::load(
+                    &sunrise_assets::resource_source::ResourceRoot::directory(root.to_path_buf()),
+                )?),
+            },
+            mesh: MeshWorkerContext {
+                tables,
+                render,
+                hidden_states: Arc::from([]),
+                part_tables: Default::default(),
+            },
         };
-        let names = texture_names(&context.render.sprite_layers);
+        let names = texture_names(&context.mesh.render.sprite_layers);
         let lookup = Lookup::new(&context, 2048, &names);
         let whole = [0.0, 0.0, 1.0, 1.0];
         let upright = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0];

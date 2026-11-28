@@ -10,13 +10,14 @@ pub trait Hooks {
     /// The normal setBlock effects and flags 3 (+64 when moved by a piston)
     /// apply to the written state. The level is read-only during this call.
     #[hook(
+        receiver = "read",
         side = "server",
-        version = 2,
+        version = 3,
         contract = "replace",
         out = "answer",
         scope = "block",
         key = "state",
-        target = "sunrise_client::game::native_hooks::remove_block::GameLevel<'_>::native_remove_block",
+        target = "sunrise_gameplay_common::game::native_hooks::remove_block::GameLevel<'_>::native_remove_block",
         neoforge = "none (vanilla Level.removeBlock; no NeoForge event covers this call)"
     )]
     fn remove_block(

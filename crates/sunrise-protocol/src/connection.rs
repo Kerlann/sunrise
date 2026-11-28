@@ -8,7 +8,7 @@
 //! (vanilla's `LocalChannel`, which an integrated server's player uses).
 use crate::{Error, Result, buf::Reader, crypto::Cfb8, frame};
 use std::{
-    io::{Read, Write},
+    io::{ErrorKind, Read, Write},
     net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs},
     sync::{
         Arc,
@@ -94,6 +94,8 @@ pub enum Socket {
 #[derive(Debug, Default)]
 pub struct Counters {
     pub received: AtomicI64,
+    #[cfg(feature = "test-receive-progress")]
+    pub play_ingress_received: AtomicI64,
     pub sent: AtomicI64,
     pub bytes_in: AtomicI64,
     pub bytes_out: AtomicI64,
@@ -153,7 +155,7 @@ fn configure_stream(stream: &TcpStream) -> Result<()> {
     let _ = sock.set_tcp_keepalive(&keepalive);
     #[cfg(target_os = "linux")]
     {
-        let _ = sock.set_quickack(true);
+        let _ = sock.set_tcp_quickack(true);
     }
     Ok(())
 }
@@ -331,6 +333,10 @@ enum Next {
     Partial(usize),
 }
 impl ConnReader {
+    /// Whether this reader sits on an in-process memory pipe rather than a network socket.
+    pub fn is_memory(&self) -> bool {
+        self.memory
+    }
     fn header(&self) -> Result<Option<(usize, usize)>> {
         let bytes = &self.buffer[self.start..self.end];
         if !self.memory {
@@ -487,6 +493,29 @@ impl ConnReader {
         self.end += n;
         Ok(n)
     }
+    /// Whether the peer has closed its side, as far as can be seen without consuming input: a
+    /// memory pipe's close, or a TCP socket at its end with no unread byte before it.
+    pub fn peer_closed(&self) -> bool {
+        match &self.stream {
+            Stream::Tcp(tcp) => {
+                if tcp.set_nonblocking(true).is_err() {
+                    return true;
+                }
+                let peeked = tcp.peek(&mut [0]);
+                let restored = tcp.set_nonblocking(false);
+                match peeked {
+                    Ok(0) => true,
+                    Ok(_) => restored.is_err(),
+                    Err(err) => {
+                        !matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted)
+                    }
+                }
+            }
+            Stream::Memory(pipe) => pipe.is_closed(),
+            Stream::Detached => true,
+        }
+    }
+
     /// A [`Closer`] for this connection.
     pub fn closer(&self) -> Result<Closer> {
         Ok(Closer(self.stream.try_clone()?))
@@ -576,7 +605,7 @@ impl ConnWriter {
         if self.memory {
             out.extend_from_slice(&(contents.len() as u64).to_le_bytes());
         } else {
-            crate::buf::write_varint(out, contents.len() as i32);
+            ::sunrise_core::vanilla_bytes::write_varint(out, contents.len() as i32);
         }
         out.extend_from_slice(contents);
         if let Some(c) = &mut self.encrypt {
@@ -953,6 +982,25 @@ mod tests {
         drop(b);
         assert!(c.recv().is_err());
         assert!(c.send(&[1]).is_err());
+    }
+
+    #[test]
+    fn a_peer_that_closes_behind_its_hello_is_closed() {
+        use crate::packets::login::{ServerHello, Serverbound};
+
+        let hello = Serverbound::Hello(ServerHello {
+            name: "Peer".into(),
+            uuid: 1,
+        });
+        let (server, client) = Pipe::pair();
+        let mut server = Connection::local(server);
+        let mut client = Connection::local(client);
+        client.send(&hello.encode()).unwrap();
+        assert!(!server.reader.peer_closed());
+        drop(client);
+        let (id, payload) = server.recv().unwrap();
+        assert_eq!(Serverbound::decode(id, &payload).unwrap(), hello);
+        assert!(server.reader.peer_closed());
     }
 
     #[test]

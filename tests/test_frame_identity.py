@@ -110,10 +110,11 @@ class SessionCheckTests(unittest.TestCase):
         encode(self.dir / name, 4, 4, 8, rows or self.rows, 0)
 
     def loaded(self, *sessions):
-        """Each session's log with its pack's load line, as the game prints it."""
+        """Each session's log with its pack's load line and the LabPBR maps' line, as the game prints them."""
         for name in sessions:
             pack = identity.SESSIONS[name][1]['SUNRISE_SHADER_PACK']
-            (self.dir / f'{name}.log').write_text(f'INFO shader pack {pack} 1.0.0: Warm sunrise in 12 ms\n')
+            (self.dir / f'{name}.log').write_text(
+                f'INFO Sunrise: LabPBR maps at 16 px, 900 layers\nINFO shader pack {pack}: 2 programs (a b) in 12 ms\n')
 
     def test_a_missing_scene_cannot_pass_when_other_screenshots_exist(self):
         scenes = identity.SESSIONS['vanilla'][2]
@@ -123,24 +124,25 @@ class SessionCheckTests(unittest.TestCase):
                          [f'vanilla.{scenes[0]}: screenshot missing'])
 
     def test_a_pack_that_changes_nothing_and_hdr_that_stays_off_are_reported(self):
-        scenes = identity.SESSIONS['golden_hour'][2]
+        # 🤖 Agent: the scenes the pack's sessions share with the sessions without it.
+        scenes = [s for s in identity.SESSIONS['terrain_pack'][2] if s in identity.SESSIONS['vanilla'][2]]
+        hdr_scenes = [s for s in identity.SESSIONS['terrain_pack_hdr'][2] if s in identity.SESSIONS['hdr_toggle'][2]]
         for scene in identity.SESSIONS['vanilla'][2]:
             self.shot(f'vanilla.{scene}.png')
-        for scene in scenes:
-            self.shot(f'golden_hour.{scene}.png')
+        for scene in identity.SESSIONS['terrain_pack'][2]:
+            self.shot(f'terrain_pack.{scene}.png', None if scene in scenes else [bytes(4)] * 4)
         for scene in identity.SESSIONS['hdr_toggle'][2]:
             self.shot(f'hdr_toggle.{scene}.png')
             self.shot(f'hdr_toggle.off.{scene}.png')
             self.shot(f'hdr_toggle.off.{scene}-hdr.png')
-        hdr_scenes = identity.SESSIONS['golden_hour_hdr'][2]
-        for scene in hdr_scenes:
-            self.shot(f'golden_hour_hdr.{scene}.png')
-            self.shot(f'golden_hour_hdr.{scene}-hdr.png')
-        self.loaded('golden_hour', 'golden_hour_hdr')
-        problems = identity.session_checks(self.dir, ['vanilla', 'golden_hour', 'golden_hour_hdr', 'hdr_toggle'])
+        for scene in identity.SESSIONS['terrain_pack_hdr'][2]:
+            self.shot(f'terrain_pack_hdr.{scene}.png')
+            self.shot(f'terrain_pack_hdr.{scene}-hdr.png')
+        self.loaded('terrain_pack', 'terrain_pack_hdr')
+        problems = identity.session_checks(self.dir, ['vanilla', 'terrain_pack', 'terrain_pack_hdr', 'hdr_toggle'])
         self.assertEqual(sorted(problems), sorted(
-            [f'golden_hour.{s}: the same as without the pack: it didn\'t run' for s in scenes]
-            + [f'golden_hour_hdr.{s}: the same as without the pack: it didn\'t run' for s in hdr_scenes]
+            [f'terrain_pack.{s}: the same as without the pack: it didn\'t run' for s in scenes]
+            + [f'terrain_pack_hdr.{s}: the same as without the pack: it didn\'t run' for s in hdr_scenes]
             + [f'hdr_toggle.{s}: HDR output was off' for s in identity.SESSIONS['hdr_toggle'][2]]
             + [f'hdr_toggle.off.{s}: HDR output was on' for s in identity.SESSIONS['hdr_toggle'][2]]))
 
@@ -148,50 +150,44 @@ class SessionCheckTests(unittest.TestCase):
         other = [bytes(255 - v for v in r) for r in self.rows]
         for scene in identity.SESSIONS['vanilla'][2]:
             self.shot(f'vanilla.{scene}.png')
-        for scene in identity.SESSIONS['golden_hour'][2]:
-            self.shot(f'golden_hour.{scene}.png', other)
-        for scene in identity.SESSIONS['golden_hour_hdr'][2]:
-            self.shot(f'golden_hour_hdr.{scene}.png', other)
-            self.shot(f'golden_hour_hdr.{scene}-hdr.png', other)
+        for scene in identity.SESSIONS['terrain_pack'][2]:
+            self.shot(f'terrain_pack.{scene}.png', other)
+        for scene in identity.SESSIONS['terrain_pack_hdr'][2]:
+            self.shot(f'terrain_pack_hdr.{scene}.png', other)
+            self.shot(f'terrain_pack_hdr.{scene}-hdr.png', other)
         for scene in identity.SESSIONS['hdr_toggle'][2]:
             self.shot(f'hdr_toggle.{scene}.png')
             self.shot(f'hdr_toggle.{scene}-hdr.png')
             self.shot(f'hdr_toggle.off.{scene}.png')
-        self.loaded('golden_hour', 'golden_hour_hdr')
+        self.loaded('terrain_pack', 'terrain_pack_hdr')
         self.assertEqual(identity.session_checks(
-            self.dir, ['vanilla', 'golden_hour', 'golden_hour_hdr', 'hdr_toggle']), [])
+            self.dir, ['vanilla', 'terrain_pack', 'terrain_pack_hdr', 'hdr_toggle']), [])
 
     def test_a_terrain_pack_session_needs_its_pack_and_labpbr_maps_in_the_log(self):
         # 🤖 Agent: relief is shot only with the pack, so no picture without it shows whether the pack ran.
         for scene in identity.SESSIONS['terrain_pack'][2]:
             self.shot(f'terrain_pack.{scene}.png')
         log = self.dir / 'terrain_pack.log'
-        log.write_text('INFO shader pack golden_hour_0_2 1.0.0: Warm sunrise in 12 ms\n')
+        log.write_text('INFO shader pack another_pack: 2 programs (a b) in 12 ms\n')
         self.assertEqual(identity.session_checks(self.dir, ['terrain_pack']), [
             'terrain_pack: the log has no load line of shader pack frame_identity_terrain',
             'terrain_pack: no LabPBR maps were loaded'])
         log.write_text('INFO Sunrise: LabPBR maps at 16 px, 900 layers\n'
-                       'INFO shader pack frame_identity_terrain 1.0.0: Terrain, Colour in 40 ms\n')
+                       'INFO shader pack frame_identity_terrain: 1 programs (gbuffers_terrain) in 40 ms\n')
         self.assertEqual(identity.session_checks(self.dir, ['terrain_pack']), [])
 
-    def test_a_world_pack_is_held_to_the_plain_float_frame_and_its_timed_session_to_timed_passes(self):
+    def test_a_world_pack_is_held_to_the_plain_float_frame(self):
         # 🤖 Agent: vanilla shoots none of world_plain's scenes, so those are what shows the pack ran.
         other = [bytes(255 - v for v in r) for r in self.rows]
-        plain = identity.SESSIONS['world_plain'][2]
-        for scene in plain:
+        for scene in identity.SESSIONS['world_plain'][2]:
             self.shot(f'world_plain.{scene}.png')
-        for name in ('world_pack', 'world_pack_timed'):
-            for scene in identity.SESSIONS[name][2]:
-                self.shot(f'{name}.{scene}.png', self.rows if scene == 'night_sky' else other)
-        self.loaded('world_pack', 'world_pack_timed')
-        sessions = ['world_plain', 'world_pack', 'world_pack_timed']
-        self.assertEqual(sorted(identity.session_checks(self.dir, sessions)), [
-            "world_pack.night_sky: the same as without the pack: it didn't run",
-            "world_pack_timed.night_sky: the same as without the pack: it didn't run",
-            'world_pack_timed: no GPU pass was timed'])
+        for scene in identity.SESSIONS['world_pack'][2]:
+            self.shot(f'world_pack.{scene}.png', self.rows if scene == 'night_sky' else other)
+        (self.dir / 'world_pack.log').write_text('INFO shader pack frame_identity_world: 5 programs (a) in 12 ms\n')
+        sessions = ['world_plain', 'world_pack']
+        self.assertEqual(identity.session_checks(self.dir, sessions),
+                         ["world_pack.night_sky: the same as without the pack: it didn't run"])
         self.shot('world_pack.night_sky.png', other)
-        self.shot('world_pack_timed.night_sky.png', other)
-        (self.dir / 'world_pack_timed.stats.json').write_text(json.dumps({'gpu_passes': {'World': 0.1}}))
         self.assertEqual(identity.session_checks(self.dir, sessions), [])
 
     def test_float_oit_must_change_the_float_picture(self):
@@ -323,6 +319,118 @@ class HdrGateTests(unittest.TestCase):
         for scene in ('sun', 'hud_sun'):
             self.assertIn(f'float_unlit.{scene}: the SDR screenshot isn\'t HDR off\'s within rounding', lifted)
             self.assertIn(f'float_unlit.{scene}: the HDR shot isn\'t its SDR screenshot\'s picture: 4 pixels', lifted)
+
+
+
+class ExtensionGateTests(unittest.TestCase):
+    """What the HDR extension's fixture must draw, against the codes the game drew (lavapipe, 203/1000 nits, a black
+    level of 0.1 nits with HDR on), and what a picture that isn't it reports."""
+
+    W, H = 64, 40
+    # 🤖 Agent: The sample points of each session's day_water shot, ramp then strip, as the game drew them.
+    GREY = [522, 594, 638, 669, 694, 714, 731, 746, 759] + [769] * 7
+    DRAWN = {
+        'hdr_extension': [(c,) * 3 for c in GREY + [594, 543, 594, 594, 522]] + [(480, 585, 361), (769,) * 3],
+        'hdr_extension_curve': [(c,) * 3 for c in GREY[:6] + [729, 740, 748, 753, 757, 761, 763, 764, 766, 767]
+                                + [594, 543, 594, 594, 522]] + [(480, 585, 361), (761,) * 3],
+        'hdr_extension_sdr': [(186,) * 3] + [(255,) * 3] * 15 + [(c,) * 3 for c in (0, 99, 167, 81, 0)]
+                             + [(0, 255, 0), (255,) * 3],
+        'hdr_extension_off': [(186,) * 3] + [(255,) * 3] * 15 + [(0,) * 3] * 6 + [(255,) * 3],
+    }
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+
+    def write(self, name, scene, values):
+        """A shot of session `name` whose sample pixels hold `values` (HDR10 codes, or 8-bit values), grey elsewhere."""
+        hdr = 'hdr:true' in identity.SESSIONS[name][0]
+        ramp, strip = identity.extension_points(self.W, self.H)
+        at = dict(zip(ramp + strip, values))
+        rows = []
+        for y in range(self.H):
+            row = b''
+            for x in range(self.W):
+                pixel = at.get((x, y), (100, 100, 100))
+                row += b''.join((c << 6 | c >> 4).to_bytes(2, 'big') for c in pixel) if hdr else bytes(pixel)
+            rows.append(row)
+        encode(self.dir / f'{name}.{scene}{"-hdr" if hdr else ""}.png', self.W, self.H, 16 if hdr else 8, rows, 0)
+
+    def drawn(self, name, changes=None):
+        """Every scene of `name` as the game drew it, the day_water shot with `changes` (sample index: value)."""
+        for scene in identity.SESSIONS[name][2]:
+            values = list(self.DRAWN[name])
+            if scene == 'day_water':
+                for i, value in (changes or {}).items():
+                    values[i] = value
+            self.write(name, scene, values)
+        return [p.split(' is ')[0] for p in identity.extension_gates(self.dir, [name])]
+
+    def test_what_the_game_drew_passes(self):
+        for name in self.DRAWN:
+            self.assertEqual(self.drawn(name), [], name)
+
+    def test_the_curve_is_the_reference_curve_once(self):
+        # 🤖 Agent: shader_pack_hdr_tests.rs's reference puts 5.0 at 753 through the curve once; 747 is another curve.
+        self.assertEqual(round(identity.shown([5.0] * 3, 203, 1000, 0.0, True, 'near')[0]), 753)
+        self.assertEqual(self.drawn('hdr_extension_curve', {9: (747,) * 3}), ['hdr_extension_curve.day_water: band 9'])
+        # 🤖 Agent: no curve, the light held at the peak, as where the pack owns it.
+        self.assertEqual(self.drawn('hdr_extension_curve', {9: (769,) * 3, 15: (769,) * 3}),
+                         ['hdr_extension_curve.day_water: band 9', 'hdr_extension_curve.day_water: band 15'])
+        # 🤖 Agent: the curve run twice lands lower.
+        twice = identity.half(identity.half(5 ** (1 / 2.2), 'near') * identity.eased(
+            identity.half(5 ** (1 / 2.2), 'near') ** 2.2, 203, 1000 / 203) ** (1 / 2.2), 'near') ** 2.2
+        code = round(1023 * identity.pq(203 * twice * identity.eased(twice, 203, 1000 / 203)))
+        self.assertLess(code, 752)
+        self.assertEqual(self.drawn('hdr_extension_curve', {9: (code,) * 3}), ['hdr_extension_curve.day_water: band 9'])
+
+    def test_the_display_parts_are_each_checked(self):
+        # 🤖 Agent: the black level unbound (0 lifted to the black level only), the headroom a code off, the peak off.
+        black = round(1023 * identity.pq(0.1))
+        self.assertEqual(self.drawn('hdr_extension', {20: (black,) * 3, 17: (545,) * 3, 19: (600,) * 3}),
+                         [f'hdr_extension.day_water: display part {i}' for i in (1, 3, 4)])
+        # 🤖 Agent: past the pack's hold, Sunrise holds 6.0 at the peak: brighter fails.
+        self.assertEqual(self.drawn('hdr_extension', {22: (790,) * 3}), ['hdr_extension.day_water: display part 6'])
+        # 🤖 Agent: in SDR the black level is 0 and 6.0 clips at white.
+        self.assertEqual(self.drawn('hdr_extension_sdr', {20: (40,) * 3, 22: (200,) * 3}),
+                         ['hdr_extension_sdr.day_water: display part 4', 'hdr_extension_sdr.day_water: display part 6'])
+
+    def test_not_served_is_the_sdr_path(self):
+        # 🤖 Agent: a strip that shows served values, and a ramp that isn't clipped at white.
+        self.assertEqual(self.drawn('hdr_extension_off', {17: (99,) * 3, 0: (255,) * 3}),
+                         ['hdr_extension_off.day_water: band 0', 'hdr_extension_off.day_water: display part 1'])
+        # 🤖 Agent: and the served SDR session drawn as the SDR path: a black strip, but for 6.0 still white.
+        self.assertEqual(self.drawn('hdr_extension_sdr', {i: (0, 0, 0) for i in range(16, 22)}),
+                         [f'hdr_extension_sdr.day_water: display part {i}' for i in (1, 2, 3, 5)])
+
+    def test_a_load_served_another_answer_is_reported(self):
+        self.drawn('hdr_extension')
+        (self.dir / 'hdr_extension.log').write_text(
+            'WARN shader pack hdr_extension: shaders.properties asks for Sunrise\'s HDR as Some(Pack) with the '
+            'renderer\'s macros, but it is served None: the served answer counts\n')
+        self.assertEqual(identity.extension_gates(self.dir, ['hdr_extension']),
+                         ['hdr_extension: the pack was not served the HDR it asked for'])
+
+    def test_the_curve_session_picks_the_pack_s_option(self):
+        folder = self.dir / 'games' / 'hdr_extension_curve-test'
+        original, run = identity.Game, identity.RUN
+        identity.RUN = self.dir
+        launched = []
+
+        class Stop(Exception):
+            pass
+
+        def game(bin_dir, folder, env, args):
+            launched.append(folder)
+            raise Stop
+        identity.Game = game
+        try:
+            with self.assertRaises(Stop):
+                identity.run_session('hdr_extension_curve', 'test', Path('.'), self.dir / 'out', {}, None)
+        finally:
+            identity.Game, identity.RUN = original, run
+        self.assertEqual(launched, [folder])
+        self.assertEqual((folder / 'shaderpacks' / 'hdr_extension.txt').read_text(), 'SUNRISE_CURVE=true\n')
+        self.assertTrue((folder / 'shaderpacks' / 'hdr_extension' / 'shaders' / 'final.fsh').is_file())
 
 
 class ReliefPackTests(unittest.TestCase):

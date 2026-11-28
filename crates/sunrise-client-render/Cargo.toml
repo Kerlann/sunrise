@@ -7,7 +7,6 @@ rust-version.workspace = true
 description = "The client's world data, rendering and screens: chunks, meshing, light, streaming, the renderer, the HUD, menus and settings; no gameplay"
 
 [dependencies]
-sunrise-guest-stack = { path = "../sunrise-guest-stack" }
 # The settings stores of the crates above the engine (docs/layers.md, "Platform registries").
 sunrise-hooks = { path = "../sunrise-hooks" }
 sunrise-mod-runtime = { path = "../sunrise-mod-runtime" }
@@ -16,14 +15,14 @@ sunrise-mod-api-macros = { path = "../sunrise-mod-api-macros" }
 # The GUI atlas's pixels, kept compressed once uploaded (hud/atlas.rs `pack_pixels`).
 lz4_flex = { version = "0.14", default-features = false, features = ["std", "safe-encode", "safe-decode", "checked-decode"] }
 sunrise-assets = { path = "../sunrise-assets" }
-sunrise-client-core = { path = "../sunrise-client-core" }
+sunrise-game-data = { path = "../sunrise-game-data" }
 sunrise-client-input = { path = "../sunrise-client-input" }
 sunrise-command = { path = "../sunrise-command" }
 sunrise-core = { path = "../sunrise-core" }
 sunrise-hdr = { path = "../sunrise-hdr" }
 sunrise-items = { path = "../sunrise-items" }
 sunrise-java-properties = { path = "../sunrise-java-properties" }
-sunrise-mod-package = { path = "../sunrise-mod-package" }
+sunrise-mod-package = { path = "../sunrise-mod-package", default-features = false }
 # The narrator option's status and whether the narrator is there (Options.narrator).
 sunrise-narrator = { path = "../sunrise-narrator" }
 # OptiFine-format pack files: random entity textures (hud/atlas_pack.rs), connected textures
@@ -35,11 +34,15 @@ sunrise-polytone = { path = "../sunrise-polytone" }
 sunrise-border = { path = "../sunrise-border" }
 sunrise-protocol = { path = "../sunrise-protocol" }
 sunrise-render-core = { path = "../sunrise-render-core" }
-sunrise-shader-api = { path = "../sunrise-shader-api" }
+sunrise-render-shaderpack = { path = "../sunrise-render-shaderpack" }
+sunrise-mod-pipeline = { path = "../sunrise-mod-pipeline" }
+sunrise-glsl = { path = "../sunrise-glsl" }
 sunrise-shaders = { path = "../sunrise-shaders" }
 sunrise-system = { path = "../sunrise-system" }
 sunrise-threads = { path = "../sunrise-threads" }
 sunrise-world = { path = "../sunrise-world" }
+sunrise-level = { path = "../sunrise-level" }
+sunrise-server-profiles-http = { path = "../sunrise-server-profiles-http" }
 ab_glyph = "0.2.32"
 base64 = "0.22"
 bytemuck = { version = "1.24", features = ["derive"] }
@@ -53,14 +56,12 @@ miniz_oxide = "0.8"
 naga = { version = "30.0.1", features = ["wgsl-in", "glsl-in", "hlsl-out"] }
 half = "2"
 png = "0.18"
-# Project icons served by Modrinth are often WebP or JPEG rather than PNG, and
-# the pack browser showed nothing for those. Both are small pure-Rust decoders.
+# WebP and JPEG decoding for `hud::decode_image_bytes`: small pure-Rust decoders.
 image-webp = { version = "0.2", default-features = false }
 zune-jpeg = { version = "0.4", default-features = false, features = ["std"] }
 pollster = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["raw_value"] }
-sha1 = "0.10"
 sha2 = "0.10.9"
 smallvec = { version = "1", features = ["const_new"] }
 symphonia = { version = "0.5", default-features = false, features = ["ogg", "vorbis"] }
@@ -68,10 +69,20 @@ unicode-bidi = "0.3.18"
 ureq = { version = "2", default-features = false, features = ["tls"] }
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "vulkan", "metal", "wgsl", "naga-ir"] }
 winit = "0.30.13"
-zip = { version = "9.1.3", default-features = false, features = ["deflate"] }
+zip = { version = "9.1.3", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", default-features = false, features = ["std", "time"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "netbsd"))'.dependencies]
+# CPAL 0.16's ALSA enumeration drops failed opens and hides the PCM addresses.
+alsa = { version = "0.9", optional = true }
+libc = { version = "0.2", optional = true }
+
+# The microphone's native APIs (audio/mic.rs): ALSA's capture controls on Linux and the BSDs, CoreAudio's input
+# streams on macOS. Windows' microphone goes through cpal alone.
+[target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "netbsd", target_os = "macos"))'.dependencies]
+sunrise-audio-input = { path = "../sunrise-audio-input", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 wgpu = { version = "30.0.1", default-features = false, features = ["dx12"] }
@@ -80,10 +91,10 @@ wgpu = { version = "30.0.1", default-features = false, features = ["dx12"] }
 wgpu = { version = "30.0.1", default-features = false, features = ["gles"] }
 
 [features]
-# Sound output: sunrise-client's `audio` feature.
-audio = ["dep:cpal"]
+# Sound output and input: sunrise-client's `audio` feature.
+audio = ["dep:cpal", "dep:alsa", "dep:libc", "dep:sunrise-audio-input"]
 # Helpers sunrise-client's tests build their fixtures with.
-test-support = []
+test-support = ["sunrise-level/test-support"]
 
 [lints]
 workspace = true
@@ -106,13 +117,18 @@ name = "standard_pack_gpu_entities"
 path = "examples/standard_pack_gpu_entities.rs"
 
 [dev-dependencies]
+sunrise-core = { path = "../sunrise-core", features = ["test-support"] }
 tempfile = "3"
 mod_platform = { package = "sunrise-mod-api", path = "../sunrise-mod-api", features = ["testing"] }
 sunrise-perf = { path = "../sunrise-perf" }
 # Tests: a TrueType font to load, and the design system the menus' motion curves match.
 sunrise-theme = { path = "../sunrise-theme" }
 sunrise-items = { path = "../sunrise-items", features = ["test-support"] }
+sunrise-game-data = { path = "../sunrise-game-data", features = ["test-effect-registry"] }
+sunrise-mod-package = { path = "../sunrise-mod-package", default-features = false, features = ["folder"] }
 naga = { version = "30.0.1", features = ["wgsl-in", "hlsl-out", "glsl-out", "msl-out", "spv-out"] }
+sunrise-level = { path = "../sunrise-level", features = ["test-support"] }
+
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # Independently calibrate CPU timer delivery for live sampling assertions.

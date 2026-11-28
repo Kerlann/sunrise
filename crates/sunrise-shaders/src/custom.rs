@@ -108,8 +108,10 @@ const NOT_GIVEN_YET: [&str; 1] = ["currentRenderedItemId"];
 /// The `int` built-ins of Iris 1.11.7's custom uniforms (an int vector for `eyeBrightness`,
 /// `eyeBrightnessSmooth` and the `...PositionInt`s). Our probe packs of #9126 wrote each name
 /// alone into an `int`, a `float` and a `bool` uniform: Iris kept these in `int` and `float`.
-const INT_NAMES: [&str; 21] = [
+/// `bossBattle` was not probed: it is here because spec 5.2 gives it as an `int`.
+const INT_NAMES: [&str; 22] = [
     "bedrockLevel",
+    "bossBattle",
     "biome",
     "biome_category",
     "biome_precipitation",
@@ -132,9 +134,12 @@ const INT_NAMES: [&str; 21] = [
     "worldTime",
 ];
 
-/// The `bool` built-ins (the same probes: Iris kept these only in `bool`). Every other built-in
-/// is a float there, kept only in `float`.
-const BOOL_NAMES: [&str; 16] = [
+/// The `bool` built-ins (the same probes: Iris kept these only in `bool`), with the player
+/// booleans only custom uniforms read (spec 3.4: `is_alive`, `is_child`, `is_glowing`,
+/// `is_in_lava`, `is_in_water`, `is_ridden`, `is_riding`, `is_wet`). Those eight were not
+/// probed: they are bool like the six that were, by inference (decision D-2,
+/// `docs/cleanroom/decisions.md`). Every other built-in is a float there, kept only in `float`.
+const BOOL_NAMES: [&str; 24] = [
     "feetInWater",
     "firstPersonCamera",
     "hasCeiling",
@@ -145,12 +150,20 @@ const BOOL_NAMES: [&str; 16] = [
     "isRiding",
     "isRightHanded",
     "isSpectator",
+    "is_alive",
     "is_burning",
+    "is_child",
+    "is_glowing",
     "is_hurt",
+    "is_in_lava",
+    "is_in_water",
     "is_invisible",
     "is_on_ground",
+    "is_ridden",
+    "is_riding",
     "is_sneaking",
     "is_sprinting",
+    "is_wet",
 ];
 
 /// The functions of Iris 1.11.7's custom uniforms that give a float whatever numbers they take

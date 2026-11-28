@@ -12,13 +12,17 @@ pub trait EntityPhysicsBackend {
     /// entity Sunrise doesn't simulate (a display, a painting) has none, so
     /// zero. On a client, another entity's is the motion the server last
     /// sent it (`Entity.lerpMotion`). API 379.
-    #[access(WorldOnly)]
     fn entity_velocity(&self, entity: EntityRef) -> Option<[f64; 3]>;
+    /// Side: server.
+    /// The server's accumulated `Entity.fallDistance`, in blocks. For a player this is
+    /// the distance tracked from accepted moves. Zero for a kind that does not keep a fall
+    /// distance; None when the handle is stale or its body is unavailable.
+    fn entity_fall_distance(&self, entity: EntityRef) -> Option<f64>;
     /// Side: both.
     /// How the entity reacts to a piston (`Entity.getPistonPushReaction`), including
     /// the current marker flag of an armor stand. `Ok(None)` for a stale handle;
     /// `Err(LevelReadError::Unavailable)` if the host does not support that read.
-    #[access(WorldOnly)]
+
     fn entity_piston_push_reaction(
         &self,
         entity: EntityRef,
@@ -28,33 +32,34 @@ pub trait EntityPhysicsBackend {
     /// Leash knots and cushions are block-attached but do not inherit `HangingEntity`.
     /// `Ok(None)` for a stale handle; `Err(LevelReadError::Unavailable)` if the host
     /// does not support that read.
-    #[access(WorldOnly)]
+
     fn entity_is_hanging(&self, entity: EntityRef) -> Result<Option<bool>, LevelReadError>;
     /// Side: both.
     /// The entity's box (`Entity.getBoundingBox`): its lowest and highest
-    /// corner. Displays and markers have zero-sized physical boxes; interactions use
-    /// their saved dimensions. End crystals have their 2 x 2 box. None for the dragon; a dragon part's is its own. On a client, reads
-    /// its own copy of a tracked entity, or the local player's predicted box.
-    #[access(WorldOnly)]
+    /// corner. A display's physical box on either side is two coincident corners at its
+    /// position. On the client this is the current tick position after movement
+    /// interpolation, not the packet destination or the render culling box.
+    /// Markers also have zero-sized boxes; interactions use their saved dimensions.
+    /// End crystals have a 2 x 2 box and dragon parts have their own boxes. Returns
+    /// `None` for the dragon itself or an unresolved handle. The local client player
+    /// uses its predicted box.
     fn entity_bounding_box(&self, entity: EntityRef) -> Option<[[f64; 3]; 2]>;
     /// Side: server.
     /// The entity's width and height (`Entity.getBbWidth`, `getBbHeight`):
     /// its box's, so a baby's or a scaled entity's own.
-    #[access(WorldOnly)]
     fn entity_dimensions(&self, entity: EntityRef) -> Option<[f64; 2]>;
     /// Side: server.
     /// `Entity.noPhysics`: a player's is whether it spectates (`Player.tick`
-    /// sets it from `isSpectator`); a mob's is false (a vex sets it only for
+    /// sets it from `isSpectator`); a mob's or a general entity row's is false until written (a
+    /// vex sets it only for
     /// the length of its own tick); an arrow's or a trident's is its
     /// `AbstractArrow.noPhysics`, set once a loyal trident turns back. The
     /// ender dragon, an area-effect cloud, an ominous item spawner and a
     /// shulker bullet set it in their constructors and never clear it.
-    #[access(WorldOnly)]
     fn entity_no_physics(&self, entity: EntityRef) -> Option<bool>;
     /// Side: server.
     /// The collider the entity carries (`set_collider`), or None for none, a stale handle, or a
     /// client.
-    #[access(WorldOnly)]
     fn entity_collider(&self, entity: EntityRef) -> Option<Collider>;
 }
 /// The handles' writes of the `entity_physics` area, implemented by the game and reached through [`BackendMut`].
@@ -67,20 +72,17 @@ pub trait EntityPhysicsBackendMut {
     /// landing hurts it as a step does (a fan's or a launcher's push, a mod's soft block).
     /// Players too, the acting one and guests. False for a stale handle or an entity not in
     /// the level in place; true for a kind that keeps no fall distance, which has none to forget.
-    #[access(WorldOnly)]
     fn entity_reset_fall_distance(&mut self, entity: EntityRef) -> bool;
     /// Side: server.
-    /// Sets the entity's velocity (`Entity.setDeltaMovement`); clients see it
-    /// as they see the entity move. False for a player (its client moves
-    /// it), an entity Sunrise doesn't simulate, a value that isn't finite,
-    /// or on a client. API 379.
-    #[access(WorldOnly)]
+    /// Replaces the entity's velocity in blocks per tick (`Entity.setDeltaMovement`).
+    /// A player's own client receives a motion packet and replaces its velocity too.
+    /// False without changing motion for an unavailable body (including a player whose turn
+    /// is suspended), a stale handle, an entity Sunrise doesn't simulate, or a non-finite value.
     fn entity_set_velocity(&mut self, entity: EntityRef, velocity: [f64; 3]) -> bool;
     /// Side: server.
     /// Adds `delta` to the entity's velocity (`Entity.push`,
     /// `addDeltaMovement`). False for an unavailable player, an entity
     /// Sunrise doesn't simulate, or a value that isn't finite.
-    #[access(WorldOnly)]
     fn entity_push(&mut self, entity: EntityRef, delta: [f64; 3]) -> bool;
     /// Side: server.
     /// Sets the player's collision exclusions, boxes of its own level
@@ -92,9 +94,8 @@ pub trait EntityPhysicsBackendMut {
     /// the last set; an empty slice clears it, and so do a change of level, a respawn and
     /// leaving. Nothing is saved, and nothing reaches the player's client: its own half sets the
     /// same boxes with `ClientHost::set_collision_exclusions`. Refused, keeping the set there
-    /// was: more than 64 boxes, a value that isn't finite, a minimum above its maximum, an
-    /// entity that isn't a player, a stale handle.
-    #[access(WorldOnly)]
+    /// was: a value that isn't finite, a minimum above its maximum, an entity that isn't a
+    /// player, a stale handle.
     fn entity_set_collision_exclusions(
         &mut self,
         entity: EntityRef,
@@ -102,34 +103,33 @@ pub trait EntityPhysicsBackendMut {
     ) -> Result<(), CollisionExclusionsError>;
     /// Side: server.
     /// Gives the entity boxes that every other entity collides with, or removes them with None.
-    /// The boxes are in the entity's frame (its position is the origin), turned by the
-    /// collider's rotation; see [`Collider`] for what collides, who is exempt, the limits and
-    /// that a vanilla client does not see them. Contact effects (step sounds, sprint particles,
-    /// friction, bounce) are not applied yet: a box is solid ground and walls only
-    /// (sunrise-org/sunrise#1909). The collider is saved with the entity, sent to
-    /// the Sunrise clients that track it when they start to (and then only what changed), and
-    /// dropped with the entity. Replacing a collider sends the boxes that were added or removed
-    /// by index. An entity the new boxes overlap is treated as vanilla treats a block that
-    /// appears inside it, with no push-out. Refused by name, with the old collider kept, when
-    /// the handle is stale, a value is not finite, the rotation is not a unit quaternion,
-    /// there are too many boxes, or a box lies too far from the entity (see
-    /// [`ColliderError`]).
-    #[access(WorldOnly)]
+    /// The boxes are in the entity's frame, positioned and turned by [`ColliderPose`]
+    /// (`entity_position + pivot + rotation * (local - pivot)`); see [`Collider`] for what
+    /// collides, who is exempt, the payload limit and that a vanilla client does not see them.
+    /// Contact effects (step sounds, sprint particles, friction, bounce) are not applied yet: a
+    /// box is solid ground and walls only (sunrise-org/sunrise#1909). The collider is saved with
+    /// the entity, sent to the Sunrise clients that track it when they start to (and then only
+    /// what changed), and dropped with the entity. Replacing a collider sends the boxes that were
+    /// added or removed by index. A body the boxes overlap is not pushed out: vanilla pushes a
+    /// player only out of suffocating blocks (`LocalPlayer.suffocatesAt`), never out of another
+    /// entity's box. Refused by name, with the old collider kept, when the handle is stale, a box
+    /// or pivot coordinate is not finite, the rotation is zero, NaN or infinite, or the collider's
+    /// wire encoding exceeds one clientbound custom payload
+    /// (`ClientboundCustomPayloadPacket.MAX_PAYLOAD_SIZE`, 1,048,576 bytes; see [`ColliderError`]).
     fn entity_set_collider(
         &mut self,
         entity: EntityRef,
         collider: Option<Collider>,
     ) -> Result<(), ColliderError>;
     /// Side: server.
-    /// Turns the entity's collider (a unit quaternion `[x, y, z, w]`) without sending its boxes
-    /// again: only the rotation reaches the clients that track it. Refused by name for a stale
-    /// handle, a rotation that is not finite or not a unit quaternion, or an entity with no
-    /// collider.
-    #[access(WorldOnly)]
-    fn entity_set_collider_transform(
+    /// Updates the entity's collider pose (rotation quaternion `[x, y, z, w]` normalized when set,
+    /// and local pivot `[x, y, z]` in blocks from the entity's position) without sending its boxes
+    /// again: only the pose reaches the clients that track it. Refused by name for a stale handle,
+    /// a non-finite pivot, a zero, NaN or infinite rotation, or an entity with no collider.
+    fn entity_set_collider_pose(
         &mut self,
         entity: EntityRef,
-        rotation: [f32; 4],
+        pose: ColliderPose,
     ) -> Result<(), ColliderError>;
     /// Side: server.
     /// Sets the entity's no-physics flag (`Entity.noPhysics`), the value
@@ -145,6 +145,5 @@ pub trait EntityPhysicsBackendMut {
     /// too, from the `true` their constructors set. An entity Sunrise keeps
     /// unsimulated keeps the flag in its saved compound. False for those three
     /// kinds, a kind with no writable flag, a stale handle, or on a client.
-    #[access(WorldOnly)]
     fn entity_set_no_physics(&mut self, entity: EntityRef, no_physics: bool) -> bool;
 }

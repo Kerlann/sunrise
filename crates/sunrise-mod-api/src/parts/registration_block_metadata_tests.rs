@@ -14,24 +14,31 @@ mod tests {
         }
         fn block_metadata_property(
             &self,
-            state: BlockStateRecord,
+            state: BlockState,
             name: &str,
         ) -> Result<Option<&str>, BlockStateError> {
             self.0.property(state, name)
         }
         fn block_metadata_with(
             &self,
-            state: BlockStateRecord,
+            state: BlockState,
             name: &str,
             value: &str,
-        ) -> Result<BlockStateRecord, BlockStateError> {
+        ) -> Result<BlockState, BlockStateError> {
             self.0.with(state, name, value)
+        }
+        fn block_metadata_visit_properties(
+            &self,
+            state: BlockState,
+            visit: &mut dyn FnMut(&str, &str),
+        ) -> Result<(), BlockStateError> {
+            self.0.visit_properties(state, visit)
         }
         fn block_metadata_of(
             &self,
             block: BlockKey,
             properties: &[StateConstraint],
-        ) -> Result<BlockStateRecord, BlockStateError> {
+        ) -> Result<BlockState, BlockStateError> {
             self.0.of(block, properties)
         }
     }
@@ -46,7 +53,79 @@ mod tests {
     crate::impl_host_areas!(Empty);
 
     #[test]
-    fn metadata_service_reads_edits_and_refuses_invalid_transport() {
+    fn metadata_enumerates_a_states_properties_in_name_order() {
+        crate::__private::part_tests::install_parts_fixture(&[]).unwrap();
+        let state = |facing: &str, lit: &str| {
+            std::collections::BTreeMap::from([
+                ("facing".to_string(), facing.to_string()),
+                ("lit".to_string(), lit.to_string()),
+            ])
+        };
+        let states = [
+            state("north", "false"),
+            state("north", "true"),
+            state("south", "false"),
+            state("south", "true"),
+        ];
+        let plain = std::collections::BTreeMap::new();
+        crate::__private::resolve_block_keys(["probe:furnace", "probe:plain"], |name| {
+            let states: Vec<_> = if name == "probe:plain" {
+                vec![&plain]
+            } else {
+                states.iter().collect()
+            };
+            sunrise_mod_runtime::block_definitions::BlockDefinition::new(&states, 0)
+                .map_err(|e| format!("{e:?}"))
+        })
+        .unwrap();
+        let host = MetadataHost(crate::__private::block_definitions().unwrap());
+        let metadata = host.block_states();
+        let furnace = crate::__private::block_key("probe:furnace").unwrap();
+        let lit_south = metadata
+            .of(
+                furnace,
+                &[
+                    StateConstraint::new("facing", "south"),
+                    StateConstraint::new("lit", "true"),
+                ],
+            )
+            .unwrap();
+        let mut seen = Vec::new();
+        lit_south
+            .visit_properties(&metadata, &mut |name, value| {
+                seen.push((name.to_string(), value.to_string()))
+            })
+            .unwrap();
+        assert_eq!(
+            seen,
+            [
+                ("facing".to_string(), "south".to_string()),
+                ("lit".to_string(), "true".to_string())
+            ]
+        );
+        let plain = metadata
+            .of(crate::__private::block_key("probe:plain").unwrap(), &[])
+            .unwrap();
+        let mut visited = 0;
+        plain
+            .visit_properties(&metadata, &mut |_, _| visited += 1)
+            .unwrap();
+        assert_eq!(visited, 0);
+        assert_eq!(
+            lit_south.visit_properties(&Empty.block_states(), &mut |_, _| {}),
+            Err(BlockStateError::Unavailable)
+        );
+        assert_eq!(
+            metadata.visit_properties(
+                crate::__private::block_state_from_ordinal(furnace, 9),
+                &mut |_, _| {}
+            ),
+            Err(BlockStateError::UnknownState)
+        );
+    }
+
+    #[test]
+    fn metadata_service_reads_edits_and_refuses_invalid_states() {
         crate::__private::part_tests::install_parts_fixture(&[]).unwrap();
         let states = [
             std::collections::BTreeMap::from([("lit".into(), "false".into())]),
@@ -73,9 +152,9 @@ mod tests {
             Err(BlockStateError::Unavailable)
         );
         let off = metadata.of(block, &[]).unwrap();
-        assert_eq!(off.state, 0);
+        assert_eq!(off.ordinal(), 0);
         let on = metadata.with(off, "lit", "true").unwrap();
-        assert_eq!(on.state, 1);
+        assert_eq!(on.ordinal(), 1);
         assert_eq!(metadata.property(on, "lit"), Ok(Some("true")));
         assert_eq!(metadata.property(off, "lit"), Ok(Some("false")));
         let borrowed = crate::__private::backend_read(&host, |backend| {
@@ -117,12 +196,15 @@ mod tests {
             Err(BlockStateError::InvalidValue(0))
         );
         assert_eq!(
-            metadata.property(BlockStateRecord::new(block, 2), "lit"),
+            metadata.property(crate::__private::block_state_from_ordinal(block, 2), "lit"),
             Err(BlockStateError::UnknownState)
         );
         assert_eq!(
             metadata.property(
-                BlockStateRecord::new(mod_vocab::__private::parts_installation::block_key(999), 0),
+                crate::__private::block_state_from_ordinal(
+                    mod_vocab::__private::parts_installation::block_key(999),
+                    0
+                ),
                 "lit"
             ),
             Err(BlockStateError::UnknownBlock)

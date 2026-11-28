@@ -7,12 +7,20 @@ pub trait Hooks {
     /// `cancel` and no portal forms: the fire stays where it can survive, as
     /// without a frame. Server-side.
     #[hook(
+        receiver = "read",
+        dispatch = "flat",
         side = "server",
         contract = "cancel",
         out = "cancel",
         neoforge = "BlockEvent.PortalSpawnEvent",
         cancellable = true,
-        target = "sunrise_client::game::native_hooks::portal_spawn::GameLevel<'_>::native_portal_spawn"
+        target = "sunrise_gameplay_common::game::native_hooks::portal_spawn::GameLevel<'_>::native_portal_spawn"
     )]
-    fn portal_spawn();
+    fn portal_spawn(
+        dimension: LevelDimension,
+        pos: BlockPos,
+        state: BlockState,
+        shape: PortalShape,
+        cancel: &mut bool,
+    );
 }

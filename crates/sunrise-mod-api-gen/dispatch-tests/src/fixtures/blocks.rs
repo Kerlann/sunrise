@@ -16,8 +16,19 @@ mod stubs {
                 &mut self.id
             }
         }
+        pub(in crate::tests) type DeclarationRefusal = ();
+        pub(in crate::tests) type DeclarationSink<'a, D> =
+            dyn FnMut(Answered<D>) -> Result<(), DeclarationError> + 'a;
+        pub(in crate::tests) type DeclarationStage<'a, D> =
+            dyn FnMut(&mut dyn FnMut(&mut DeclarationSink<'_, D>) -> bool) + 'a;
+        pub(in crate::tests) fn declaration_listener(
+            _: &RegistrationContext,
+            run: impl FnOnce(&mut Vec<DeclarationRefusal>) -> bool,
+        ) -> bool {
+            run(&mut Vec::new())
+        }
         pub(in crate::tests) fn submit_declaration<T: Declaration>(
-            context: &RegistrationContext,
+            _: &mut Vec<DeclarationRefusal>,
             mod_id: &'static str,
             output: &mut dyn FnMut(Answered<T>) -> Result<(), DeclarationError>,
             mut answer: T,
@@ -29,7 +40,7 @@ mod stubs {
             if id == "reject" {
                 return Err(DeclarationError::Rejected {
                     id: id.clone(),
-                    reason: context.0.into(),
+                    reason: "bad ID".into(),
                 });
             }
             *id = format!("{mod_id}/checked/{id}");
@@ -48,11 +59,12 @@ fn block_dispatch_keeps_owner_context_and_valid_output() {
     struct Declares(&'static str);
     #[mod_api::__subscriptions]
     impl Hooks for Declares {
-        fn blocks(&self, _: &RegistrationContext, event: &mut BlocksEvent<'_>) {
+        fn blocks(&self, context: &RegistrationContext, event: &mut BlocksEvent<'_>) {
+            assert_eq!(context.0, "bootstrap");
             let result = event.register(mod_api::mod_api::Block { id: self.0.into() });
             if self.0 == "reject" {
                 assert!(
-                    matches!(result, Err(DeclarationError::Rejected { id, reason }) if id == "reject" && reason == "bootstrap")
+                    matches!(result, Err(DeclarationError::Rejected { id, reason }) if id == "reject" && reason == "bad ID")
                 );
             } else {
                 result.unwrap();
@@ -73,9 +85,11 @@ fn block_dispatch_keeps_owner_context_and_valid_output() {
         },
         mod_id: "existing",
     }];
-    dispatch_blocks(&RegistrationContext("bootstrap"), &mut |block| {
-        blocks.push(block);
-        Ok(())
+    dispatch_blocks(&RegistrationContext("bootstrap"), &mut |listen| {
+        assert!(listen(&mut |block| {
+            blocks.push(block);
+            Ok(())
+        }));
     });
     assert_eq!(
         blocks

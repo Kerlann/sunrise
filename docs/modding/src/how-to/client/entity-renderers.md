@@ -40,11 +40,16 @@ impl EntityRenderer for Bolt {
 | `partial` | The frame's partial tick, 0 to 1. |
 | `age` | Ticks lived plus the partial tick (`ageInTicks`). |
 | `yaw`, `pitch` | The way it faces, in degrees, interpolated to the frame, except for primed TNT and experience orbs, which supply their current rotation (0 is south, positive pitch looks down). |
+| `position` | The world-space position interpolated to the frame (`EntityRenderState.x/y/z`). |
+| `size` | The bounding box's width and height, in blocks. |
+| `eye_height` | The eye height above `position[1]`, in blocks. |
+| `distance_to_camera_sq` | The squared distance from `position` to the active view's camera. |
 | `living` | A living entity's own frame (`LivingRenderState`, below); none for any other entity. |
 | `tnt_fuse` | Primed TNT's remaining fuse, in ticks, as vanilla draws it (`fuse - partial + 1`); none for any other entity. |
 | `orb_value` | An experience orb's value (`ExperienceOrb.DATA_VALUE`); none for any other entity. |
 | `painting` | A painting's own frame (`PaintingRenderState`, below); none for any other entity. |
 | `item_frame` | An item frame or glow item frame's own frame (`ItemFrameRenderState`, below); none for any other entity. |
+| `attachments` | A general entity's frozen synced attachments (below); none for other entity families. |
 
 The pose stack starts at the entity's interpolated position, in blocks, and is not turned. `draw`
 also has the partial tick, the game time and the entity's light. What `submit` draws replaces the
@@ -58,20 +63,24 @@ here.
 
 A general entity type (`declare_general_entity`) has no vanilla look. Its render state carries the
 row's identity, age, pose and a frozen snapshot of its synced attachments
-([attachments](../../concepts/attachments.md)).
+([attachments](../../concepts/attachments.md)). A type declared with zero tracking chunks stays in
+the server simulation, but its rows are not sent to clients for rendering.
 
 ```rust,ignore
-static FUEL: AttachmentType<i32> = /* declared with sync: true */;
-
-struct Missile;
+// Registered in Hooks::register with AttachmentDescriptor::new("example:fuel", || 0i32).sync(FUEL_CODEC)
+struct Missile {
+    fuel: AttachmentKey<i32>,
+}
 impl EntityRenderer for Missile {
     fn submit(
         &self,
         entity: &EntityRenderState,
         draw: &mut dyn BlockEntityDrawContext,
     ) -> Result<(), String> {
-        let attachments = entity.attachments.as_ref().ok_or("expected a general entity")?;
-        let fuel = attachments.get(&FUEL).map_err(|error| format!("{error:?}"))?;
+        let fuel = match &entity.attachments {
+            Some(snapshot) => snapshot.get(&self.fuel).map_err(|error| format!("{error:?}"))?,
+            None => None,
+        };
         draw.translate([0.0, fuel.copied().unwrap_or_default() as f32, 0.0]);
         // Submit the missile's model at this pose.
         Ok(())
@@ -79,10 +88,27 @@ impl EntityRenderer for Missile {
 }
 ```
 
-A row is eligible for extraction after its first attachment snapshot arrives. A field that could
-not fit into the bounded render snapshot reads as `None`; it does not stop the row from being
-submitted. `yaw`, `pitch` and `age` are interpolated to the frame. The pose stack starts at the row's
-interpolated position.
+A row is eligible for extraction immediately upon spawn (starting with an empty attachment
+snapshot when the entity has no synced attachments). When the entity has synced attachments at
+pairing time, the server bundles the initial attachment sync atomically with the entity spawn
+packet (`ServerEntity.addPairing` / `ClientPacketListener.handleBundlePacket`, matching NeoForge
+`AttachmentSync`), so the first rendered frame already sees them. This includes negotiated
+clients held during a proxy handoff, which can see the level but are not yet visible to others.
+Once paired, held viewers receive changes and removals for tracked entities and other players
+without waiting for placement. The packet decoder validates the attachment message before
+publishing the bundle; a malformed message discards the bundle without applying any of it.
+Sync for an unknown entity, including an untracked foreign player, is logged and ignored, not
+stored for a future spawn. The engine publishes a new generation at spawn and on each attachment
+sync, and a frame keeps that generation even if a later update replaces or removes values.
+Use a draw default when `get` returns `Ok(None)` for a
+missing key. The first typed read of an undecoded binding can allocate to decode the value;
+already-decoded bindings are shared directly without re-running the codec. Two snapshots compare
+by key and canonical NBT value, not by their identity, compound iteration order, or decode cache.
+
+`EntityRenderState`, its family-specific state types, and `EntityRenderAttachments` are native
+render input, not `Wire` payloads. The attachment's save and sync codecs still apply. `yaw`,
+`pitch` and `age` are interpolated to the frame. The pose stack starts at the row's interpolated
+position.
 
 ### A living entity's frame
 
@@ -141,9 +167,14 @@ A living renderer replaces the type's whole renderer: its model and its vanilla 
 items, a worn head), as a NeoForge `LivingEntityRenderer` does. Vanilla's turn, scale and death
 tip-over aren't applied for it: the pose stack starts at the feet, not turned, so the renderer turns by
 `body_rot` and scales by `scale` itself. Around it the entity keeps everything else:
-`render_living_pre` (a cancel skips the renderer), the layers mods added to the type, with no posed
-parts ([entity layers](entity-layers.md)), `render_living_post`, and the frame's later passes (name
-tag, leash, flames, shadow), in the order the type's own model has ([model drawing](model-drawing.md)).
+`render_living_pre` (a cancel skips the renderer), the layers mods added to the type
+([entity layers](entity-layers.md)), `render_living_post`, and the frame's later passes (its name tag,
+its leash, and its flames and shadow), in the order the type's own model has ([model drawing](model-drawing.md)).
+Living Pre borrows the selected vanilla or pack body in bind pose, independently of whether the
+registered renderer runs. Its visibility edits apply only if that body draws. When the
+replacement succeeds, no such pose was produced: registered layers still run in order and they
+and Post receive `model: None`, not the unused bind pose. If the replacement fails, the regular
+draw can still supply the final body pose.
 
 ## Register it
 
@@ -162,12 +193,16 @@ registrations and resolves each type's renderer on every resource load, the firs
 reload (F3+T, a resource pack change), so a frame dispatches by slot, with no lookup by name and no
 scan over the mods.
 
-- A later registration for a type replaces the earlier one silently, whichever mod made it, as in
-  NeoForge, also for a vanilla type.
+- A later successful registration for a type replaces the earlier one silently, whichever mod made
+  it, as in NeoForge, also for a vanilla type. A [failed registration callback](../../concepts/load-phases.md#registration-and-setup)
+  does not replace the earlier renderer.
 - A type the game does not know is logged with its id and left out; nothing panics.
-- `submit` returns `Ok(())` to keep what it drew. A renderer that returns an `Err` or panics is logged once and asked no more until the next resource
-  load (a reload resolves it again); what it drew that frame is dropped, and until then its type draws
-  as it would without one.
+- `submit` returns `Ok(())` to keep what it drew. A renderer that returns an `Err` rolls back what
+  it drew that frame, logs a warning, falls back for that draw to what the type would draw without
+  a registered renderer, and stays active for later draws. A renderer that panics rolls back what
+  it drew that frame and disables only that renderer for the rest of the session (including across
+  reloads), with an error log and an in-game error toast naming the mod; until the session ends its
+  type draws as it would without one.
 
 ## What draws through registered renderers
 

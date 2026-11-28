@@ -1,6 +1,15 @@
 //! Client-only gameplay: what vanilla's client jar adds to the logical side.
 #![forbid(unsafe_code)]
+
+#[cfg(test)]
+mod_platform::__install_engine_test_platform!();
+
+#[macro_use]
+extern crate sunrise_gameplay_common;
 extern crate sunrise_client_lib as sunrise_client;
+pub(crate) use sunrise_client::world_geometry;
+#[cfg(feature = "client")]
+pub use sunrise_theme as theme;
 pub mod agent_navigation;
 pub mod atlas_slots;
 pub mod closest_space;
@@ -24,3 +33,15 @@ pub mod tick_script;
 pub mod transient_blocks;
 pub mod tutorial;
 pub mod upload_pace;
+
+extern crate self as sunrise_client_gameplay;
+pub mod game;
+#[cfg(all(test, feature = "client"))]
+#[path = "../../sunrise-core/src/prepared_test_root.rs"]
+pub(crate) mod prepared_test_root;
+#[cfg(test)]
+mod test_game_dir;
+
+#[cfg(test)]
+#[path = "game/mobs/creatures/pearl_tests.rs"]
+mod pearl_tests;

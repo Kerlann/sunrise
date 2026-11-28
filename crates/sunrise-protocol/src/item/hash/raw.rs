@@ -107,7 +107,7 @@ fn optional_with<O: Ops>(
         Some(None)
     }
 }
-pub(super) fn template_code_with<O: Ops>(r: &mut Reader, names: &dyn Names) -> Option<O::Value> {
+fn template_code_with<O: Ops>(r: &mut Reader, names: &dyn Names) -> Option<O::Value> {
     let stack = <Template as Codec<Stack>>::read(r).ok()?;
     O::template(&stack, names)
 }
@@ -307,9 +307,41 @@ fn banner_pattern_with<O: Ops>(r: &mut Reader) -> Option<O::Value> {
 /// has no codec form for it (no persistent codec in vanilla, a direct holder, an
 /// id with no name, a component still to be ported).
 pub(super) fn code_with<O: Ops>(kind: i32, bytes: &[u8], names: &dyn Names) -> Option<O::Value> {
-    let mut r = Reader::new(bytes);
+    let mut r = Reader::new(bytes).with_names(names);
     let r = &mut r;
+    // These codecs can enter this function again while resolving a nested template.
+    // Keep the much larger leaf decoder's stack frame out of that path.
     let code = match kind {
+        kind::USE_REMAINDER | kind::SULFUR_CUBE_CONTENT => template_code_with::<O>(r, names)?,
+        // `PotDecorations`: back, left, right, front.
+        kind::POT_DECORATIONS => {
+            let mut rec = Record::<O>::new();
+            for side in ["back", "left", "right", "front"] {
+                rec = rec.optional(
+                    side,
+                    optional_with::<O>(r, |r| template_code_with::<O>(r, names))?,
+                );
+            }
+            rec.build()
+        }
+        // `ItemContainerContents`: the occupied slots as `{slot, item}`.
+        kind::CONTAINER => {
+            let n = r.count(256).ok()?;
+            let mut slots = O::container_new(n);
+            for slot in 0..n {
+                let item = optional_with::<O>(r, |r| template_code_with::<O>(r, names))?;
+                O::container_slot(&mut slots, slot, item)?;
+            }
+            O::container_build(slots)
+        }
+        _ => code_leaf::<O>(kind, r, names)?,
+    };
+    (r.remaining() == 0).then_some(code)
+}
+
+#[inline(never)]
+fn code_leaf<O: Ops>(kind: i32, r: &mut Reader, names: &dyn Names) -> Option<O::Value> {
+    Some(match kind {
         // `Unit.CODEC`: an empty map.
         34 | 120 => O::empty_map(),
         // Persistent codecs only: the stream form is the codec's NBT.
@@ -320,8 +352,8 @@ pub(super) fn code_with<O: Ops>(kind: i32, bytes: &[u8], names: &dyn Names) -> O
         }
         // `Codec.FLOAT`: minimum_attack_charge, potion_duration_scale.
         7 | 54 => float_with::<O>(r)?,
-        // `Identifier.CODEC`: tooltip_style, note_block_sound.
-        35 | 73 => identifier_with::<O>(&r.string(32767).ok()?)?,
+        // `Identifier.CODEC`: note_block_sound.
+        73 => identifier_with::<O>(&r.string(32767).ok()?)?,
         // `Enchantable`, `VillagerFood`.
         31 => int_record_with::<O>("value", r)?,
         44 => int_record_with::<O>("nutrition", r)?,
@@ -426,29 +458,6 @@ pub(super) fn code_with<O: Ops>(kind: i32, bytes: &[u8], names: &dyn Names) -> O
                     .build(),
             )
         })?,
-        // `SulfurCubeContent`: one template.
-        80 => template_code_with::<O>(r, names)?,
-        // `PotDecorations`: back, left, right, front.
-        76 => {
-            let mut rec = Record::<O>::new();
-            for side in ["back", "left", "right", "front"] {
-                rec = rec.optional(
-                    side,
-                    optional_with::<O>(r, |r| template_code_with::<O>(r, names))?,
-                );
-            }
-            rec.build()
-        }
-        // `ItemContainerContents`: the occupied slots as `{slot, item}`.
-        77 => {
-            let n = r.count(256).ok()?;
-            let mut slots = O::container_new(n);
-            for slot in 0..n {
-                let item = optional_with::<O>(r, |r| template_code_with::<O>(r, names))?;
-                O::container_slot(&mut slots, slot, item)?;
-            }
-            O::container_build(slots)
-        }
         // `Bees`: occupants.
         79 => list_with::<O>(r, |r| {
             let data = typed_data_with::<O>("minecraft:entity_type", names, r)?;
@@ -482,8 +491,7 @@ pub(super) fn code_with<O: Ops>(kind: i32, bytes: &[u8], names: &dyn Names) -> O
                 .build()
         }
         _ => super::gameplay::code_with::<O>(kind, r, names)?,
-    };
-    (r.remaining() == 0).then_some(code)
+    })
 }
 
 #[cfg(test)]

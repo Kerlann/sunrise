@@ -1,11 +1,22 @@
 //! Test support with API-owned registration and vocabulary-owned fakes.
 pub use mod_vocab::testing::*;
 
+/// Install the platform's instrumentation for this test process, with no mods or test scope.
+///
+/// A fixture whose mod callbacks run on a thread it does not scope (a worker it starts) calls
+/// this before the first callback or worker start: [`with_mods`] scopes only the calling thread,
+/// while the instrumentation is process-wide, and a callback entered first would seal it off for
+/// every later registration test. Idempotent. Fixtures whose callbacks all run on the test
+/// thread use [`with_mods`] instead, which calls this.
+pub fn initialize_platform() {
+    crate::__private::initialize().expect("test registration requires the mod API runtime");
+}
+
 /// Run with these mods and their controller and pose registrations on this thread.
 /// The registration probe starts without frozen test Parts. The body can see explicitly
 /// installed Parts from its caller; any replacement is restored on scope exit or unwind.
 pub fn with_mods<R>(mods: crate::Mods, f: impl FnOnce() -> R) -> R {
-    crate::__private::initialize().expect("test registration requires the mod API runtime");
+    initialize_platform();
     mod_vocab::testing::with_parts_registration_probe(
         mods,
         crate::parts::registered_controllers,
@@ -47,6 +58,54 @@ pub fn with_recipe_types<R>(ids: &[&'static str], f: impl FnOnce() -> R) -> R {
         crate::__private::part_tests::install_parts_fixture(&entries()).unwrap();
         f()
     })
+}
+
+#[cfg(test)]
+#[test]
+fn custom_test_host_lends_a_profile_fixture() {
+    use crate::{
+        Backend, BackendRef, GameProfile, Host, PlayerRef,
+        prelude::{PlayerSessionBackend, PlayersHost},
+    };
+
+    struct ProfileHost(GameProfileFixture);
+    impl PlayerSessionBackend for ProfileHost {
+        fn player_profile(&self, _: PlayerRef) -> Option<GameProfile<'_>> {
+            Some(self.0.profile())
+        }
+    }
+    impl Backend for ProfileHost {}
+    impl Host for ProfileHost {
+        fn backend(&self) -> Option<BackendRef<'_>> {
+            Some(crate::__private::backend_ref(self))
+        }
+    }
+    crate::impl_host_areas!(ProfileHost);
+    crate::impl_backend_areas!(ProfileHost, except(player_session));
+
+    let mut fake = FakeHost::new();
+    fake.join(42, 4);
+    let player = fake.player(42).unwrap();
+    let host = ProfileHost(GameProfileFixture::new(
+        42,
+        "Alex",
+        [
+            ("textures".into(), "skin".into(), Some("signature".into())),
+            ("fixture".into(), "unsigned".into(), None),
+        ],
+    ));
+    let profile = player.profile(&host).unwrap();
+    assert_eq!((profile.uuid, profile.name), (42, "Alex"));
+    assert_eq!(
+        profile
+            .properties()
+            .map(|row| (row.name, row.value, row.signature))
+            .collect::<Vec<_>>(),
+        [
+            ("textures", "skin", Some("signature")),
+            ("fixture", "unsigned", None),
+        ]
+    );
 }
 
 #[cfg(test)]

@@ -58,7 +58,7 @@ pub fn filtered_message(
 /// `CommandHistory.PERSISTED_COMMANDS_FILE_NAME` and its size cap.
 const COMMAND_HISTORY_FILE: &str = "command_history.txt";
 const MAX_PERSISTED_COMMAND_HISTORY: usize = 50;
-/// GuiMessageTag.systemSinglePlayer's indicator colour.
+/// The indicator colour shared by `GuiMessageTag.system` and `systemSinglePlayer`.
 pub const SYSTEM_INDICATOR: u32 = 0xD0D0D0;
 /// `GuiMessageTag.CHAT_MODIFIED_INDICATOR_COLOR`.
 const MODIFIED_INDICATOR: u32 = 0x60_6060;
@@ -213,9 +213,9 @@ impl ChatOptions {
 #[derive(Clone, Debug)]
 struct Message {
     added: u64,
-    /// Local hour and minute it came in (PvP & HUD's chat timestamps).
+    /// Local hour and minute it came in (chat timestamps).
     time: (u8, u8),
-    /// How many times in a row it came (PvP & HUD's compact chat), 1 for once.
+    /// How many times in a row it came (compact chat), 1 for once.
     repeats: u32,
     /// The lines it wrapped to the last time it was laid out (0 while hidden).
     wrapped: usize,
@@ -233,11 +233,11 @@ struct Line {
     added: u64,
     content: Text,
     tag: Option<std::sync::Arc<Tag>>,
-    /// The whole message's text, for PvP & HUD's copy on click.
+    /// The whole message's text, for copy on click.
     message: std::sync::Arc<str>,
 }
 
-/// PvP & HUD's chat options (`pvp::ChatQol`): each changes the lines, so a change rewraps them.
+/// chat options (`ChatQol`): each changes the lines, so a change rewraps them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ChatQol {
     /// Each message starts with the local time it came in.
@@ -271,6 +271,14 @@ pub struct Tag {
     pub text: Text,
 }
 impl Tag {
+    /// `GuiMessageTag.system`: disguised chat and deleted-message markers.
+    pub fn system() -> Self {
+        Self {
+            color: SYSTEM_INDICATOR,
+            icon: false,
+            text: Text::translate("chat.tag.system", &[]),
+        }
+    }
     /// `GuiMessageTag.systemSinglePlayer`, in `color`.
     pub fn system_single_player(color: u32) -> Self {
         Self {
@@ -350,14 +358,21 @@ pub struct Chat {
     /// too new to replace, with the tick from which they may be.
     deletions: Vec<(Box<Signature>, u64)>,
     qol: ChatQol,
-    /// PvP & HUD's chat search is on: the screen shows its prompt.
+    /// chat search is on: the screen shows its prompt.
     pub search_prompt: bool,
-    /// PvP & HUD's chat search: only messages holding this (lower case) show.
+    /// chat search: only messages holding this (lower case) show.
     search: Option<String>,
+    /// A mod's chat history cap in place of `MAX_CHAT_HISTORY` ([`Chat::history_limit`]).
+    history_limit: Option<usize>,
     /// The tests' clock in place of the local time.
     #[cfg(test)]
     clock: Option<(u8, u8)>,
 }
+/// `ChatComponent.MAX_CHAT_HISTORY`: the messages, wrapped lines and sent lines vanilla keeps.
+pub const DEFAULT_CHAT_HISTORY_LIMIT: usize = 100;
+/// The most a mod may raise the chat history cap to, so a mistaken value can't hold the whole
+/// session's chat in memory.
+pub const MAX_CHAT_HISTORY_LIMIT: usize = 16_384;
 /// `ChatComponent.QUEUE_EXPAND_ID`: the queue row's click event, handled by
 /// the chat screen itself (`ChatListener.acceptNextDelayedMessage`).
 pub const QUEUE_EXPAND_ID: &str = "minecraft:internal/expand_chat_queue";
@@ -378,6 +393,23 @@ pub fn queue_line(queued: usize) -> Text {
     })
 }
 impl Chat {
+    /// How many messages, wrapped lines and sent lines (`recentChat`) the chat keeps:
+    /// `ChatComponent.MAX_CHAT_HISTORY`, 100, unless a mod set another cap.
+    pub fn history_limit(&self) -> usize {
+        self.history_limit.unwrap_or(DEFAULT_CHAT_HISTORY_LIMIT)
+    }
+    /// Sets the chat history cap, clamped to `1..=`[`MAX_CHAT_HISTORY_LIMIT`]: a lower cap trims
+    /// the oldest messages, lines and sent lines now; a higher one lets later ones gather up to
+    /// it. The saved command history keeps its own cap.
+    pub fn set_history_limit(&mut self, limit: usize) {
+        let limit = limit.clamp(1, MAX_CHAT_HISTORY_LIMIT);
+        self.history_limit = Some(limit);
+        self.messages.truncate(limit);
+        self.lines.truncate(limit);
+        let excess = self.recent.len().saturating_sub(limit);
+        self.recent.drain(..excess);
+        self.scroll = self.scroll.min(self.lines.len());
+    }
     pub fn lines_per_page(&self, focused: bool) -> usize {
         (self.options.height_px(focused) / self.options.line_height().max(1)) as usize
     }
@@ -385,7 +417,7 @@ impl Chat {
     fn max_width(&self) -> i32 {
         (f64::from(self.options.width_px()) / self.options.scale).floor() as i32
     }
-    /// ChatComponent.addMessage: wrap, prepend and trim to 100 lines. A
+    /// ChatComponent.addMessage: wrap, prepend and trim to the history cap (100). A
     /// message the Chat option hides is dropped, unlogged.
     #[sunrise_mod_api_macros::replaceable]
     pub fn add(
@@ -512,7 +544,7 @@ impl Chat {
         message.wrapped = self.add_lines(font, &message, focused);
         self.inline_images_pending = true;
         self.messages.insert(0, message);
-        self.messages.truncate(100);
+        self.messages.truncate(self.history_limit());
     }
     fn now(&self) -> (u8, u8) {
         #[cfg(test)]
@@ -556,7 +588,7 @@ impl Chat {
                 },
             );
         }
-        self.lines.truncate(100);
+        self.lines.truncate(self.history_limit());
         count
     }
     /// What a message's lines wrap (ComponentRenderUtils.wrapComponents):
@@ -569,7 +601,7 @@ impl Chat {
             content.strip_legacy()
         }
     }
-    /// A message's lines before wrapping: [`Chat::displayed`], with PvP & HUD's time before it
+    /// A message's lines before wrapping: [`Chat::displayed`], with time before it
     /// and count after it, in grey.
     fn message_text(&self, message: &Message) -> Text {
         let content = message
@@ -634,7 +666,7 @@ impl Chat {
         }
     }
 
-    /// PvP & HUD's chat options; a change lays the lines out again.
+    /// chat options; a change lays the lines out again.
     pub fn set_qol(&mut self, atlas: &HudAtlas, qol: ChatQol) {
         if self.qol != qol {
             self.qol = qol;
@@ -643,7 +675,7 @@ impl Chat {
             self.rewrap(&atlas.font);
         }
     }
-    /// PvP & HUD's chat search: only the messages holding `query` (any case) show; `None` or
+    /// chat search: only the messages holding `query` (any case) show; `None` or
     /// an empty query shows them all again.
     pub fn set_search(&mut self, atlas: &HudAtlas, query: Option<&str>) {
         self.set_search_with(&atlas.font, query);
@@ -760,9 +792,7 @@ impl Chat {
             wrapped: 0,
             content: Self::deleted_marker(),
             inline_images: None,
-            tag: Some(std::sync::Arc::new(Tag::system_single_player(
-                SYSTEM_INDICATOR,
-            ))),
+            tag: Some(std::sync::Arc::new(Tag::system())),
             source: ChatSource::Server,
             signature: None,
         };
@@ -790,7 +820,7 @@ impl Chat {
     /// `ChatComponent.addRecentChat`: a command also goes to the saved history.
     pub fn add_recent(&mut self, message: &str) {
         if self.recent.last().map(String::as_str) != Some(message) {
-            if self.recent.len() >= 100 {
+            if self.recent.len() >= self.history_limit() {
                 self.recent.remove(0);
             }
             self.recent.push(message.to_owned());
@@ -1062,7 +1092,7 @@ impl Chat {
         });
         self.prompt_above(font, height, prompt, 1)
     }
-    /// PvP & HUD's chat search: a yellow "Search chat:" line above the lines while the box holds
+    /// chat search: a yellow "Search chat:" line above the lines while the box holds
     /// the query.
     fn search_prompt(&self, font: &crate::font::Font, height: i32, row: i32) -> Vec<GuiDraw> {
         let label = Text::translate_with_fallback("sunrise.chat.search", "Search chat:", &[]);
@@ -1134,8 +1164,7 @@ impl Chat {
     ) -> Option<ClickEvent> {
         self.style_at(font, height, x, y)?.click
     }
-    /// The whole text of the message under a GUI-space cursor while chat is focused (PvP &
-    /// HUD's copy on click), without its time or count.
+    /// The whole text of the message under a GUI-space cursor while chat is focused (copy on click), without its time or count.
     pub fn message_at(&self, height: i32, x: f64, y: f64) -> Option<&str> {
         let (line, x) = self.line_at(height, x, y)?;
         (x >= 0.0).then_some(&*line.message)
@@ -1604,6 +1633,10 @@ impl ChatScreen {
     pub fn value(&self) -> &str {
         &self.input.value
     }
+    /// `ChatScreen.isDraft`: true while the restored draft has not been edited.
+    pub fn is_draft(&self) -> bool {
+        self.is_draft
+    }
     /// Take the most recently accepted suggestion, at most once. Call after
     /// each key or click to observe every acceptance, including Tab cycling.
     pub fn take_suggestion_completion(&mut self) -> Option<SuggestionCompletion> {
@@ -1985,35 +2018,44 @@ impl ChatScreen {
         shift: bool,
         ctrl: bool,
     ) -> ChatAction {
+        self.key_input(m, c, history, key, shift, ctrl).1
+    }
+    /// The screen's key result, separate from actions the game must apply.
+    pub fn key_input(
+        &mut self,
+        m: &Measure,
+        c: &Commands,
+        history: &[String],
+        key: winit::keyboard::KeyCode,
+        shift: bool,
+        ctrl: bool,
+    ) -> (bool, ChatAction) {
         use winit::keyboard::KeyCode as K;
         if self.suggestions_key(m, c, key, shift) {
-            return ChatAction::None;
+            return (true, ChatAction::None);
         }
-        // ChatScreen.keyPressed: while the box holds an unedited draft, the
-        // first Backspace clears all of it rather than one character.
+        // An unedited draft is cleared all at once.
         if self.is_draft && key == K::Backspace {
             self.input.set_value(m, "");
             self.is_draft = false;
             self.edited(m, c);
-            return ChatAction::None;
+            return (true, ChatAction::None);
         }
         match key {
-            K::Escape => return ChatAction::Close,
+            K::Escape => return (true, ChatAction::Close),
             K::Enter | K::NumpadEnter => {
-                // ChatScreen.keyPressed: without `hasAllowedInput` the input
-                // stays, unsent, and the screen stays open.
-                if !self.abilities.allows(&self.input.value) {
-                    return ChatAction::None;
-                }
-                return ChatAction::Submit(self.normalized());
+                let action = if self.abilities.allows(&self.input.value) {
+                    ChatAction::Submit(self.normalized())
+                } else {
+                    ChatAction::None
+                };
+                return (true, action);
             }
             K::ArrowUp => self.move_in_history(m, c, history, -1),
             K::ArrowDown => self.move_in_history(m, c, history, 1),
-            _ => {
-                self.field_key(m, c, key, shift, ctrl);
-            }
+            _ => return (self.field_key(m, c, key, shift, ctrl), ChatAction::None),
         }
-        ChatAction::None
+        (true, ChatAction::None)
     }
     /// The input box's own keys (`EditBox.keyPressed`), the suggestions
     /// following an edit: whether the box took the key.

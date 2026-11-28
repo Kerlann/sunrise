@@ -1,0 +1,34 @@
+[package]
+name = "sunrise-parity-fixtures"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "The parity harnesses' sunrise-client fixtures, without the lib test (CI only)"
+publish = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+
+[[bin]]
+name = "sunrise-parity-fixtures"
+path = "src/main.rs"
+required-features = ["fixtures"]
+test = false
+bench = false
+doc = false
+
+[lints]
+workspace = true
+
+[dependencies]
+sunrise-client = { path = "../sunrise-client", optional = true, default-features = false }
+sunrise-client-gameplay = { path = "../sunrise-client-gameplay", optional = true, default-features = false }
+sunrise-gameplay = { path = "../sunrise-gameplay", optional = true, default-features = false }
+sunrise-gameplay-common = { path = "../sunrise-gameplay-common", optional = true, default-features = false }
+
+[features]
+client-defaults = ["fixtures", "dep:sunrise-client-gameplay", "dep:sunrise-client", "sunrise-client-gameplay/parity-fixtures", "sunrise-client/parity-fixtures", "sunrise-client/client", "sunrise-client/audio", "sunrise-client/controllers", "sunrise-client/sunrise-extras"]
+fixtures = ["dep:sunrise-gameplay-common", "dep:sunrise-gameplay", "sunrise-gameplay-common/parity-fixtures", "sunrise-gameplay/parity-fixtures"]

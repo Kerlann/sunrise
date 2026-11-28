@@ -5,6 +5,10 @@ const GAME: &str = r#"use std::fmt;
 pub struct Game<'a> {
     ticks: &'a u32,
 }
+pub struct Generic<T>(T);
+impl<T> Generic<T> {
+    pub fn generic_owner(&self) {}
+}
 pub trait Tick {
     fn tick(&self) -> u32;
 }
@@ -31,7 +35,11 @@ impl fmt::Display for Game<'_> {
 pub fn twice() {}
 #[cfg(not(unix))]
 pub fn twice() {}
-#[cfg(test)]
+#[cfg_attr(true, cfg_attr(not(false,), cfg(test,),),)]
+mod inner {
+    pub fn nested() -> u8 { 9 }
+}
+#[cfg(test,)]
 mod tests {
     fn hidden() {}
 }
@@ -68,6 +76,35 @@ fn fixture() -> tempfile::TempDir {
 }
 
 #[test]
+fn method_digests_separate_impl_context_from_the_block() {
+    let root = fixture();
+    let file = root.path().join("crates/sunrise-client/src/game.rs");
+    let indexed = |source| {
+        fs::write(&file, source).unwrap();
+        index(root.path(), &BTreeSet::new())
+            .unwrap()
+            .functions
+            .remove("sunrise_client::game::Game::ticks")
+            .unwrap()
+    };
+    let original = indexed(GAME.to_owned());
+    let formatting = indexed(GAME.replace("*self.ticks", "/* a comment */ * self . ticks"));
+    assert_ne!(formatting.sha256, original.sha256);
+    assert_eq!(formatting.digests, original.digests);
+
+    let unrelated = indexed(GAME.replace("        t\n", "        panic!()\n"));
+    assert_eq!(unrelated.digests, original.digests);
+
+    let new_context =
+        indexed(GAME.replace("impl Game<'_> {", "#[allow(dead_code)] impl Game<'_> {"));
+    assert_eq!(new_context.sha256, original.sha256);
+    let original = original.digests.unwrap();
+    let new_context = new_context.digests.unwrap();
+    assert_ne!(new_context.declaration, original.declaration);
+    assert_eq!(new_context.body, original.body);
+}
+
+#[test]
 fn the_index_lists_each_function_with_its_text_or_its_refusal() {
     let root = fixture();
     let index = index(root.path(), &BTreeSet::new()).unwrap();
@@ -98,6 +135,9 @@ fn the_index_lists_each_function_with_its_text_or_its_refusal() {
         "{}",
         generic.why
     );
+    let generic_owner = refused("sunrise_client::game::Generic::generic_owner");
+    assert_eq!(generic_owner.code, Code::NotReplaceable);
+    assert!(generic_owner.why.contains("it is generic over types"));
     // The stager's own trait rule: a trait of another crate has no installer.
     let display = refused("sunrise_client::game::<Game as Display>::fmt");
     assert_eq!(
@@ -122,7 +162,9 @@ fn the_index_lists_each_function_with_its_text_or_its_refusal() {
         game,
         &[ModuleFile {
             path: "crates/sunrise-client/src/game.rs".into(),
+            cfg: Vec::new(),
             sha256: sha256(GAME.as_bytes()),
+            include_cfg: None,
         }]
     );
     assert_eq!(ticks.module, "sunrise_client::game");
@@ -404,6 +446,323 @@ fn through_public_alias() { public_alias(); }
 }
 
 #[test]
+fn bare_type_paths_are_checked_in_signatures_and_bodies() {
+    let root = fixture();
+    fs::write(
+        root.path().join("crates/sunrise-client/src/game.rs"),
+        r#"
+mod types {
+    mod imp { pub type Tag = (); }
+    pub(super) use imp::Tag;
+    pub type PublicTag = ();
+}
+mod copy {
+    use super::types::*;
+    fn signature(_: Option<Tag>) {}
+    fn body() {
+        let Tag = ();
+        let _: Option<Tag> = None;
+    }
+    fn public(_: Option<PublicTag>) {
+        let _: Option<PublicTag> = None;
+    }
+    fn local_type() {
+        type Tag = ();
+        let _: Option<Tag> = None;
+    }
+}
+"#,
+    )
+    .unwrap();
+    let index = index(root.path(), &BTreeSet::new()).unwrap();
+    let check = |name| index.check(root.path(), &format!("sunrise_client::game::copy::{name}"));
+    for name in ["signature", "body"] {
+        let (code, why) = check(name).unwrap_err();
+        assert_eq!(code, "E_MIXIN_NOT_REPLACEABLE");
+        assert!(why.contains("`Tag`"), "{why}");
+    }
+    check("public").unwrap();
+    check("local_type").unwrap();
+}
+
+#[test]
+fn qualified_projections_check_the_trait_prefix() {
+    let root = fixture();
+    fs::write(
+        root.path().join("crates/sunrise-client/src/game.rs"),
+        r#"
+mod types {
+    mod imp {
+        pub trait Tag { type Value; const VALUE: (); }
+        impl Tag for () { type Value = (); const VALUE: () = (); }
+    }
+    pub(super) use imp::Tag;
+    pub trait PublicTag { type Value; const VALUE: (); }
+    impl PublicTag for () { type Value = (); const VALUE: () = (); }
+}
+mod copy {
+    use super::types::*;
+    fn restricted_type(_: <() as Tag>::Value) {}
+    fn restricted_value() { let Tag = (); let _ = <() as Tag>::VALUE; }
+    fn public(_: <() as PublicTag>::Value) { let _ = <() as PublicTag>::VALUE; }
+}
+"#,
+    )
+    .unwrap();
+    let index = index(root.path(), &BTreeSet::new()).unwrap();
+    let check = |name| index.check(root.path(), &format!("sunrise_client::game::copy::{name}"));
+    for name in ["restricted_type", "restricted_value"] {
+        let (code, why) = check(name).unwrap_err();
+        assert_eq!(code, "E_MIXIN_NOT_REPLACEABLE");
+        assert!(why.contains("`Tag`"), "{why}");
+    }
+    check("public").unwrap();
+}
+
+#[test]
+fn local_value_bindings_mask_imports_only_where_in_scope() {
+    let root = fixture();
+    fs::write(
+        root.path().join("crates/sunrise-client/src/game.rs"),
+        r#"
+mod hooks {
+    mod imp { pub fn queue() {} }
+    pub(super) use imp::queue;
+    pub fn public() {}
+}
+mod copy {
+    use super::hooks::*;
+    fn before_binding() {
+        let queue = { queue(); || {} };
+        queue();
+    }
+    fn outside_block() {
+        { let queue = || {}; queue(); }
+        queue();
+    }
+    fn in_let_else() {
+        let Some(queue) = None::<fn()> else { queue(); return; };
+        queue();
+    }
+    fn outside_if_let() {
+        if let Some(queue) = Some(|| {}) { queue(); } else { queue(); }
+    }
+    fn outside_match_arm() {
+        match None::<fn()> {
+            Some(queue) if { queue(); true } => queue(),
+            _ => queue(),
+        }
+    }
+    fn after_nested_item() {
+        fn nested(queue: fn()) { queue(); }
+        queue();
+    }
+    fn in_for_iterator() {
+        for queue in { queue(); [|| {}] } { queue(); }
+    }
+    fn public_and_shadowed() {
+        public();
+        { let queue = || {}; queue(); }
+        let closure = |queue: fn()| queue();
+        closure(public);
+        for queue in [public] { queue(); }
+        if let Some(queue) = Some(|| true) && queue() { queue(); }
+        while let Some(queue) = Some(|| {}) { queue(); break; }
+        match Some(|| true) {
+            Some(queue) if queue() => { queue(); }
+            _ => (),
+        }
+    }
+}
+"#,
+    )
+    .unwrap();
+    let index = index(root.path(), &BTreeSet::new()).unwrap();
+    let check = |name| index.check(root.path(), &format!("sunrise_client::game::copy::{name}"));
+    for name in [
+        "before_binding",
+        "outside_block",
+        "in_let_else",
+        "outside_if_let",
+        "outside_match_arm",
+        "after_nested_item",
+        "in_for_iterator",
+    ] {
+        let (code, why) = check(name).unwrap_err();
+        assert_eq!(code, "E_MIXIN_NOT_REPLACEABLE");
+        assert!(why.contains("`queue`"), "{why}");
+    }
+    check("public_and_shadowed").unwrap();
+}
+
+#[test]
+fn cfg_gates_on_nested_parameters_and_trait_items_do_not_refuse_the_copy() {
+    let root = fixture();
+    fs::write(
+        root.path().join("crates/sunrise-client/src/lib.rs"),
+        "pub mod game; fn hidden() {}",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("crates/sunrise-client/src/game.rs"),
+        r#"
+mod types {
+    mod imp { pub type Tag = (); }
+    pub(super) use imp::Tag;
+}
+mod copy {
+    use super::types::*;
+    fn disabled_parameter() {
+        fn helper(#[cfg(any())] _: Option<Tag>) {}
+        helper();
+    }
+    fn active_parameter() {
+        fn helper(_: Option<Tag>) {}
+        helper(None);
+    }
+    fn disabled_trait_item() {
+        trait Local { #[cfg_attr(all(), cfg(any()))] fn helper() { crate::hidden(); } }
+    }
+    fn active_trait_item() {
+        trait Local { fn helper() { crate::hidden(); } }
+    }
+}
+"#,
+    )
+    .unwrap();
+    let index = index(root.path(), &BTreeSet::new()).unwrap();
+    let check = |name| index.check(root.path(), &format!("sunrise_client::game::copy::{name}"));
+    check("disabled_parameter").unwrap();
+    check("disabled_trait_item").unwrap();
+    for (name, path) in [
+        ("active_parameter", "Tag"),
+        ("active_trait_item", "crate::hidden"),
+    ] {
+        let (code, why) = check(name).unwrap_err();
+        assert_eq!(code, "E_MIXIN_NOT_REPLACEABLE");
+        assert!(why.contains(&format!("`{path}`")), "{why}");
+    }
+}
+
+#[test]
+fn a_private_crate_root_call_refuses_the_target() {
+    let root = fixture();
+    fs::write(
+        root.path().join("crates/sunrise-client/src/lib.rs"),
+        "pub mod game; fn hidden() {} pub(crate) fn restricted() {} pub fn exposed() {}",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("crates/sunrise-client/src/game.rs"),
+        r#"
+fn private_call() { crate::hidden(); }
+fn restricted_call() { super::restricted(); }
+fn public_call() { crate::exposed(); }
+"#,
+    )
+    .unwrap();
+    let index = index(root.path(), &BTreeSet::new()).unwrap();
+    let check = |name| index.check(root.path(), &format!("sunrise_client::game::{name}"));
+    for (name, path) in [
+        ("private_call", "crate::hidden"),
+        ("restricted_call", "super::restricted"),
+    ] {
+        let (code, why) = check(name).unwrap_err();
+        assert_eq!(code, "E_MIXIN_NOT_REPLACEABLE");
+        assert!(why.contains(path), "{why}");
+    }
+    check("public_call").unwrap();
+}
+
+#[test]
+fn cfg_gated_fields_and_variants_in_inline_modules_do_not_refuse_the_copy() {
+    let root = fixture();
+    fs::write(
+        root.path().join("crates/sunrise-client/src/lib.rs"),
+        "pub mod game; const fn hidden() -> usize { 1 }",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("crates/sunrise-client/src/game.rs"),
+        r#"
+fn gated_field() {
+    mod local { pub struct S { #[cfg(any())] pub f: [u8; crate::hidden()] } }
+}
+fn gated_variant() {
+    mod local { pub enum E { #[cfg(any())] A = crate::hidden() as isize } }
+}
+fn active_field() {
+    mod local { pub struct S { pub f: [u8; crate::hidden()] } }
+}
+"#,
+    )
+    .unwrap();
+    let index = index(root.path(), &BTreeSet::new()).unwrap();
+    let check = |name| index.check(root.path(), &format!("sunrise_client::game::{name}"));
+    check("gated_field").unwrap();
+    check("gated_variant").unwrap();
+    let (code, why) = check("active_field").unwrap_err();
+    assert_eq!(code, "E_MIXIN_NOT_REPLACEABLE");
+    assert!(why.contains("crate::hidden"), "{why}");
+}
+
+#[test]
+fn inline_modules_check_crate_paths_without_using_the_enclosing_scope() {
+    let root = fixture();
+    fs::write(
+        root.path().join("crates/sunrise-client/src/lib.rs"),
+        r#"
+pub mod game;
+fn hidden() {}
+pub fn exposed() {}
+fn recursive(depth: u8) { if depth != 0 { crate::recursive(depth - 1); } }
+"#,
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("crates/sunrise-client/src/game.rs"),
+        r#"
+mod hooks {
+    mod imp { pub fn exposed() {} }
+    pub(super) use imp::exposed;
+}
+use self::hooks::*;
+fn hidden_in_inline_module() {
+    mod local { pub fn call() { crate::hidden(); } }
+    local::call();
+}
+fn public_in_inline_module() {
+    mod local {
+        use crate::exposed;
+        pub fn call() { exposed(); crate::exposed(); }
+    }
+    local::call();
+}
+fn restricted_after_inline_module() {
+    mod local { pub fn call() { crate::exposed(); } }
+    local::call();
+    exposed();
+}
+"#,
+    )
+    .unwrap();
+    let index = index(root.path(), &BTreeSet::new()).unwrap();
+    let check = |name| index.check(root.path(), &format!("sunrise_client::game::{name}"));
+    for (name, path) in [
+        ("hidden_in_inline_module", "crate::hidden"),
+        ("restricted_after_inline_module", "exposed"),
+    ] {
+        let (code, why) = check(name).unwrap_err();
+        assert_eq!(code, "E_MIXIN_NOT_REPLACEABLE");
+        assert!(why.contains(&format!("`{path}`")), "{why}");
+    }
+    check("public_in_inline_module").unwrap();
+    index
+        .check(root.path(), "sunrise_client::recursive")
+        .unwrap();
+}
+
+#[test]
 fn a_target_is_checked_by_its_key_and_its_text() {
     let root = fixture();
     let index = index(root.path(), &BTreeSet::new()).unwrap();
@@ -554,7 +913,154 @@ fn a_target_key_drops_generics_spaces_and_the_traits_path() {
         "sunrise_client::game::level_access::<GameLevel as LevelAccess>::block_state"
     );
     assert_eq!(
-        key("sunrise_client::game::autosave::Game<'_>::next_autosave_interval"),
-        "sunrise_client::game::autosave::Game::next_autosave_interval"
+        key("sunrise_client::game::server_side::autosave_server::Game<'_>::next_autosave_interval"),
+        "sunrise_client::game::server_side::autosave_server::Game::next_autosave_interval"
     );
+}
+
+#[test]
+fn refusal_counts_group_templated_and_exact_reasons() {
+    let mut index = FunctionIndex::default();
+    let add = |index: &mut FunctionIndex, key: &str, why: &str| {
+        index.refused.insert(
+            key.to_owned(),
+            Refused {
+                code: Code::NotReplaceable,
+                why: why.to_owned(),
+            },
+        );
+    };
+    add(
+        &mut index,
+        "a",
+        "its trait implementation has no replacement installer (foreign trait)",
+    );
+    add(
+        &mut index,
+        "b",
+        "its trait implementation has no replacement installer (foreign trait)",
+    );
+    add(
+        &mut index,
+        "c",
+        "its trait implementation has no replacement installer: owner type name `Boat` is ambiguous in the crate: more than one module declares it, and the `impl`'s module neither declares it nor imports it from one of them",
+    );
+    add(
+        &mut index,
+        "d",
+        "its body uses `with_entity!`, a macro defined outside its module's path",
+    );
+    add(
+        &mut index,
+        "e",
+        "it names `super::persist::SpawnTree`, which crosses a non-public `use` in `sunrise_client::game::server_side::persist`",
+    );
+    add(
+        &mut index,
+        "f",
+        "it names `crate::hidden`, which reaches the non-public crate-root function `hidden`",
+    );
+    assert_eq!(
+        index.refusal_counts(),
+        BTreeMap::from([
+            ("it names a non-public crate-root function".to_owned(), 1),
+            (
+                "it names a path that crosses a non-public use".to_owned(),
+                1
+            ),
+            (
+                "its body uses a macro defined outside its module's path".to_owned(),
+                1
+            ),
+            (
+                "its trait implementation has no replacement installer (ambiguous trait owner)"
+                    .to_owned(),
+                1
+            ),
+            (
+                "its trait implementation has no replacement installer (foreign trait)".to_owned(),
+                2
+            ),
+        ])
+    );
+}
+
+#[test]
+fn a_method_below_the_game_crate_is_named_by_its_types_module() {
+    let root = fixture();
+    let low = root.path().join("crates/sunrise-low/src");
+    fs::write(low.join("lib.rs"), "pub mod clock;\npub struct Clock;\n").unwrap();
+    fs::write(
+        low.join("clock.rs"),
+        "use super::Clock;\nimpl Clock {\n    #[sunrise_mod_api_macros::replaceable]\n    pub fn advance(&self) {}\n}\n",
+    )
+    .unwrap();
+    let named = "sunrise_low::Clock::advance";
+    let by_file = "sunrise_low::clock::Clock::advance";
+    let marked = crate::replace::marked(root.path(), crate::source::LEGACY_LAYOUT).unwrap();
+    assert_eq!(
+        marked
+            .iter()
+            .map(|(_, path)| path.as_str())
+            .collect::<Vec<_>>(),
+        [named]
+    );
+    let index = index(root.path(), &BTreeSet::new()).unwrap();
+    let advance = &index.functions[named];
+    assert_eq!(advance.module, "sunrise_low::clock");
+    assert_eq!(advance.file, "crates/sunrise-low/src/clock.rs");
+    assert_eq!(index.check(root.path(), named), Ok(()));
+    let found = index
+        .found(
+            &mut Source::new(root.path(), crate::source::LEGACY_LAYOUT).unwrap(),
+            named,
+        )
+        .unwrap();
+    assert_eq!(found.module, "sunrise_low::clock");
+    // The path of the file the `impl` is in is refused, naming the target.
+    let (code, why) = index.check(root.path(), by_file).unwrap_err();
+    assert_eq!(code, "E_MIXIN_TARGET_MISSING");
+    assert!(why.contains(&format!("`{named}`")), "{why}");
+    // A bridge looks it up by name the same way.
+    let bridged = crate::patch::find(
+        &mut Source::new(root.path(), crate::source::LEGACY_LAYOUT).unwrap(),
+        named,
+    )
+    .unwrap();
+    assert_eq!(bridged.module, "sunrise_low::clock");
+    let (code, why) = crate::patch::find(
+        &mut Source::new(root.path(), crate::source::LEGACY_LAYOUT).unwrap(),
+        by_file,
+    )
+    .err()
+    .expect("refused");
+    assert_eq!(code, "E_MIXIN_TARGET_MISSING");
+    assert!(why.contains(&format!("`{named}`")), "{why}");
+    let copy = crate::patch::generate_for_main_sdk(
+        root.path(),
+        "fixture",
+        &[named.into()],
+        &Default::default(),
+        &index,
+    )
+    .unwrap();
+    assert_eq!(copy.patched.len(), 1);
+    assert_eq!(copy.patched[0].target, named);
+    // The staging pass gives it its slot under the same name.
+    fs::write(
+        root.path().join("Cargo.lock"),
+        "version = 4
+
+[[package]]
+name = \"sunrise-client\"
+version = \"0.1.0\"
+
+[[package]]
+name = \"sunrise-low\"
+version = \"0.1.0\"
+",
+    )
+    .unwrap();
+    let staged = crate::replace::stage(root.path()).unwrap();
+    assert!(staged.slots.contains(named), "{:?}", staged.slots);
 }

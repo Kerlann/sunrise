@@ -90,8 +90,8 @@ fn content_keys() {
 
         let content = Content::read(path, &package.manifest).unwrap();
         assert_eq!(content.server_only_refusal(&package.manifest), None);
-        let mut reader = content.reader().unwrap();
-        for file in &content.files {
+        let reader = content.reader();
+        for file in content.files.iter() {
             let mut parts = file.splitn(5, '/');
             if parts.next() != Some("data") {
                 continue;
@@ -146,8 +146,9 @@ fn content_keys() {
         extension_files.extend(
             content
                 .files
-                .into_iter()
-                .filter(|p| p.starts_with("data/sunrise/tags/")),
+                .iter()
+                .filter(|p| p.starts_with("data/sunrise/tags/"))
+                .cloned(),
         );
     }
 
@@ -396,10 +397,16 @@ impl<'de> Deserializer<'de> for Probe<'de> {
 
     fn deserialize_newtype_struct<V: Visitor<'de>>(
         self,
-        _: &'static str,
+        name: &'static str,
         visitor: V,
     ) -> Result<V::Value, Self::Error> {
-        visitor.visit_newtype_struct(self)
+        if let Input::Value(value @ Value::Number(_)) = self.input {
+            // Numbers have no keys to walk. Let serde_json expose its scalar representation
+            // here, including the raw token requested by exact float decoders.
+            value.deserialize_newtype_struct(name, visitor)
+        } else {
+            visitor.visit_newtype_struct(self)
+        }
     }
 
     serde::forward_to_deserialize_any! {

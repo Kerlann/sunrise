@@ -1,6 +1,6 @@
-//! The registry repository (`horizon-rust/horizon-mods`, docs/modding/src/reference/registry-index.md):
-//! one `mods/<id>.toml` per project, written by the submission form or by
-//! hand and reviewed in a pull request, plus `revoked.toml`. Its CI turns
+//! The registry repository (`sunrise-org/sunrise-mods`, docs/modding/src/reference/registry-index.md):
+//! one `mods/<id>.toml` per project, written by hand
+//! and reviewed in a pull request, plus `revoked.toml`. Its CI turns
 //! them into `index.json` with [`build`], reading every listed file, and
 //! checks a pull request's changes with [`review`].
 //!
@@ -12,15 +12,17 @@ use super::{
     SunriseRelease, Version, check_stable_tag, find_release, hex64, inspect, page as rules,
     stable_tag, valid_id,
 };
+use crate::checkout::{checkout_path, read_regular};
 use crate::manifest::{parse_version, revision};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::borrow::Cow;
 use std::collections::BTreeMap;
-use std::io::{self, Read};
-use std::path::{Component, Path, PathBuf};
+use std::io;
+use std::path::{Path, PathBuf};
 
 pub mod builds;
 mod collections;
+mod requirements;
 pub use collections::{COLLECTIONS, CollectionEntry, review_collections};
 
 /// The folder of entries in the registry repository.
@@ -104,23 +106,8 @@ pub struct NightlySource {
     pub path: Option<String>,
 }
 
-pub(super) fn check_nightly_source(repo: &str, path: Option<&str>) -> Result<(), String> {
-    if !valid_repo(repo) {
-        return Err(format!(
-            "nightly.repo {repo:?} must be owner/name on GitHub"
-        ));
-    }
-    if let Some(path) = path
-        && (path.contains(['\\', ':'])
-            || path.chars().any(char::is_control)
-            || path.split('/').any(|part| matches!(part, "" | "." | "..")))
-    {
-        return Err(format!(
-            "nightly.path {path:?} must be a relative directory in the repository"
-        ));
-    }
-    Ok(())
-}
+pub(super) use super::check_nightly_source;
+pub use super::valid_repo;
 
 /// The page fields a project's repository may hold, in its [`PAGE_FILE`]. Only these: who owns the
 /// project, its key and its kind are decided when it is listed.
@@ -176,20 +163,6 @@ impl Cache {
     }
 }
 
-/// `owner/name` of a GitHub repository.
-pub fn valid_repo(repo: &str) -> bool {
-    let part = |p: &str, max: usize| {
-        !p.is_empty()
-            && p.len() <= max
-            && p != "."
-            && p != ".."
-            && p.bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
-    };
-    repo.split_once('/')
-        .is_some_and(|(owner, name)| part(owner, 39) && part(name, 100))
-}
-
 impl Entry {
     fn source_url(&self) -> Cow<'_, str> {
         if self.source.is_empty()
@@ -222,7 +195,11 @@ impl Entry {
                 "a stable source must use the full SemVer version from its manifest".into(),
             );
         }
-        let name = format!("{}-{}.smod", self.id, version.version);
+        let extension = self
+            .kind
+            .extension()
+            .ok_or_else(|| format!("a {} has no stable source file", self.kind.name()))?;
+        let name = format!("{}-{}.{extension}", self.id, version.version);
         let invalid = || {
             format!("file for a stable source must be a GitHub release asset URL ending in /{name}")
         };
@@ -387,7 +364,7 @@ pub struct EntryVersion {
     pub published: String,
     /// The Minecraft version it is for.
     pub game: String,
-    /// The stable Sunrise release tag it was made for, when declared.
+    /// The stable Sunrise release tag it was made for. Absent only on legacy rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sunrise: Option<String>,
     /// A bare asset name, or the author's GitHub release URL when `sunrise` is set.
@@ -414,8 +391,8 @@ pub struct Sources<'a> {
     pub registry: &'a Path,
     /// Every listed file, named by its SHA-256 (CI downloads them there).
     pub files: &'a Path,
-    /// Where the files are published: `<files>/<id>-<version>/<file>`
-    /// ([`super::FILE_HOST`]; `file:///` for a local test registry).
+    /// The base URL for mirrored release assets, including its trailing `/`:
+    /// [`super::FILE_HOST`] for Sunrise, or an explicit base such as `file:///` for tests.
     pub release: &'a str,
     /// Where the registry's site is (its icons): `https://.../sunrise-mods/`.
     pub site: &'a str,
@@ -699,72 +676,6 @@ fn load_entries<T: DeserializeOwned>(
         }
     }
     entries
-}
-
-/// Only descend through real directories under the trusted checkout root. The same policy
-/// covers entry directories, caches, and images at any depth.
-fn checkout_path(root: &Path, relative: &Path, directory: bool) -> io::Result<PathBuf> {
-    let invalid_path = || {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "expected a relative checkout path",
-        )
-    };
-    let mut path = root.to_owned();
-    let mut components = relative.components().peekable();
-    if components.peek().is_none() {
-        return Err(invalid_path());
-    }
-    while let Some(component) = components.next() {
-        let Component::Normal(name) = component else {
-            return Err(invalid_path());
-        };
-        // Push only a single relative name, not a prefix reinterpreted by the host filesystem.
-        if !matches!(
-            Path::new(name).components().next(),
-            Some(Component::Normal(_))
-        ) {
-            return Err(invalid_path());
-        }
-        path.push(name);
-        let meta = std::fs::symlink_metadata(&path)?;
-        let want_dir = directory || components.peek().is_some();
-        if (want_dir && !meta.is_dir()) || (!want_dir && !meta.is_file()) {
-            let expected = if want_dir { "directory" } else { "file" };
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("{} is not a regular {expected}", path.display()),
-            ));
-        }
-    }
-    Ok(path)
-}
-
-fn read_regular(root: &Path, relative: &Path, max: u64) -> io::Result<Vec<u8>> {
-    let path = checkout_path(root, relative, false)?;
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
-    }
-    let file = options.open(path)?;
-    if !file.metadata()?.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "not a regular file",
-        ));
-    }
-    let mut bytes = Vec::new();
-    file.take(max + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > max {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("exceeds {max} byte limit"),
-        ));
-    }
-    Ok(bytes)
 }
 
 fn utf8(bytes: Vec<u8>) -> io::Result<String> {
@@ -1159,7 +1070,7 @@ pub fn page(entry: &Entry, text: &str) -> Result<Page, String> {
 }
 
 impl Entry {
-    /// The entry as `mods/<id>.toml` holds it (the submission form writes it).
+    /// The entry as `mods/<id>.toml` holds it.
     pub fn to_toml(&self) -> Result<String, String> {
         toml::to_string(self).map_err(|e| e.to_string())
     }
@@ -1309,6 +1220,8 @@ fn owned_by(owners: &[String], author: &str) -> bool {
 pub struct Review {
     /// Changes the registry refuses whoever reviews them.
     pub errors: Vec<String>,
+    /// Findings that do not block the registry review.
+    pub warnings: Vec<String>,
     /// What reviewers should look at: new projects, new owners or keys, a
     /// change by someone who isn't an owner.
     pub notes: Vec<String>,
@@ -1456,17 +1369,17 @@ pub fn review_checkout(base: &Checkout, head: &Checkout, author: &str) -> Review
 }
 
 /// Compares the entries of a pull request (`head`) with `main`'s (`base`):
-/// a published file never changes and is never removed (take it down in
-/// `revoked.toml`), a project's kind never changes, and changes by someone who
-/// isn't an owner, or to owners and keys, are pointed out.
+/// new and changed version rows must name a stable Sunrise release. A published
+/// file never changes, a project's kind never changes, and changes by someone
+/// who isn't an owner, or to owners and keys, are pointed out.
 pub fn review(base: &[Entry], head: &[Entry], author: &str) -> Review {
     review_with_revoked(base, head, &[], author)
 }
 
-/// [`review`], where a version may leave its entry once `revoked` (the pull
-/// request's `revoked.toml`) takes its file down by hash: a project whose
-/// signing key was lost lists its next version under a new key and drops the
-/// versions the new key can't verify.
+/// [`review`], where a version may leave its entry if it never named a stable
+/// Sunrise release or `revoked` (the pull request's `revoked.toml`) takes its
+/// file down by hash. A project whose signing key was lost can drop the versions
+/// its new key can't verify once those files are taken down.
 pub fn review_with_revoked(
     base: &[Entry],
     head: &[Entry],
@@ -1545,6 +1458,10 @@ pub fn review_with_revoked(
                     "{} {}: leaves the entry, taken down in {REVOKED}",
                     old.id, v.version
                 )),
+                None if v.sunrise.is_none() => r.notes.push(format!(
+                    "{} {}: leaves the entry, it never named a stable release",
+                    old.id, v.version
+                )),
                 None => r.errors.push(format!(
                     "{} {}: removed; take it down in {REVOKED} instead",
                     old.id, v.version
@@ -1560,7 +1477,7 @@ pub fn review_with_revoked(
                             old.id, v.version
                         ));
                     }
-                    if v.sunrise.is_some() && w.sunrise != v.sunrise {
+                    if v.sunrise.is_some() && w.sunrise.is_some() && w.sunrise != v.sunrise {
                         r.errors.push(format!(
                             "{} {}: the stable release a published version names never changes: publish a new version",
                             old.id, v.version
@@ -1650,15 +1567,34 @@ pub fn review_with_revoked(
         }
     }
     for new in head {
+        let old = base.iter().find(|e| e.id == new.id);
+        if old != Some(new) {
+            // Only unchanged legacy rows may omit the release. Match each base row at most once.
+            let mut legacy: Vec<_> = old
+                .into_iter()
+                .flat_map(|e| &e.versions)
+                .filter(|v| v.sunrise.is_none())
+                .collect();
+            for v in new.versions.iter().filter(|v| v.sunrise.is_none()) {
+                if let Some(i) = legacy.iter().position(|&w| w == v) {
+                    legacy.swap_remove(i);
+                } else {
+                    r.errors.push(format!(
+                        "{} {}: a new or changed version row needs sunrise = \"<stable release tag>\"",
+                        new.id, v.version
+                    ));
+                }
+            }
+        }
         // Every version is a submission, checked and reviewed: the registry no longer follows a
         // repository's releases (entries from before keep theirs until they are pinned).
-        if new.repo.is_some() && base.iter().all(|e| e.id != new.id || e.repo.is_none()) {
+        if new.repo.is_some() && old.is_none_or(|e| e.repo.is_none()) {
             r.errors.push(format!(
                 "{}: the registry doesn't follow repositories any more: list each version's file (the form, or [[versions]])",
                 new.id
             ));
         }
-        if !base.iter().any(|e| e.id == new.id) {
+        if old.is_none() {
             if new.nightly.is_some() {
                 let (status, reason) = if new.versions.is_empty()
                     && new.repo.is_none()

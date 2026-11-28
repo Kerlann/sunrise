@@ -15,8 +15,8 @@ use std::collections::BTreeSet;
 use crate::config::{self, Config};
 use crate::custom::Custom;
 use crate::{
-    ComputeProgram, eval_condition, preprocess, translate_composite, translate_compute,
-    translate_gbuffers, translate_shadow,
+    ComputeProgram, eval_condition, preprocess, translate_composite, translate_gbuffers,
+    translate_shadow,
 };
 use crate::{GbuffersInputs, Macros, Pack, Preprocessed, Program, Properties, Target};
 
@@ -238,6 +238,202 @@ const GROUPS: [(Group, &str); 6] = [
     (Group::Final, "final"),
 ];
 
+/// The path of program `name`'s `ext` stage in `folder` (`""`: the base folder): how the loader
+/// and the identity scan (`identity::asked`) name a stage file, whose presence both test with
+/// `Pack::exists`.
+pub(crate) fn stage_path(folder: &str, name: &str, ext: &str) -> String {
+    match folder {
+        "" => format!("{name}.{ext}"),
+        f => format!("{f}/{name}.{ext}"),
+    }
+}
+
+/// How `Loader::load` reads a program, by the stage files there are (`has` tells whether a path
+/// is there, as `Pack::exists` does); whether `program.<name>.enabled` turns it off is the
+/// loader's to look at. The loader takes its course from here, and the identity scan the stages
+/// it reads (`program_stages`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProgramRead {
+    /// Nothing: no vertex or fragment stage, in a group with no compute programs alone.
+    Nothing,
+    /// Its compute programs alone (`compute_paths`): a `setup` program, or one of a
+    /// composite-style group without both its vertex and fragment stages.
+    Compute,
+    /// Skipped unread for its tessellation stage.
+    Tessellated,
+    /// Skipped unread for a geometry stage where the pass reads no geometry.
+    NoGeometry,
+    /// Its vertex, geometry and fragment stages.
+    Geometry,
+    /// Its vertex and fragment stages, then its compute programs in a composite-style group or
+    /// `final` (`computes_after_drawing`).
+    Drawn,
+}
+
+/// The groups whose programs may be compute programs alone.
+fn compute_only(group: Group) -> bool {
+    matches!(
+        group,
+        Group::Setup
+            | Group::Begin
+            | Group::Prepare
+            | Group::Deferred
+            | Group::Composite
+            | Group::ShadowComp
+    )
+}
+
+/// The groups whose drawn programs also run their compute programs.
+fn computes_after_drawing(group: Group) -> bool {
+    compute_only(group) || group == Group::Final
+}
+
+/// How `Loader::load` reads program `name` of `group` in `folder` (`ProgramRead`), `geometry`
+/// whether the pass reads a geometry stage (the shadow pass, with the renderer's geometry inputs).
+pub(crate) fn program_read(
+    has: impl Fn(&str) -> bool,
+    folder: &str,
+    name: &str,
+    group: Group,
+    geometry: bool,
+) -> ProgramRead {
+    let has = |ext: &str| has(&stage_path(folder, name, ext));
+    if group == Group::Setup || !has("fsh") || !has("vsh") {
+        return if compute_only(group) {
+            ProgramRead::Compute
+        } else {
+            ProgramRead::Nothing
+        };
+    }
+    if has("tcs") || has("tes") {
+        ProgramRead::Tessellated
+    } else if has("gsh") && !geometry {
+        ProgramRead::NoGeometry
+    } else if has("gsh") {
+        ProgramRead::Geometry
+    } else {
+        ProgramRead::Drawn
+    }
+}
+
+/// The compute stages `Loader::compute` reads for program `name` in `folder`: `<name>.csh` and
+/// `<name>_a.csh` to `<name>_z.csh`, those `has` finds.
+pub(crate) fn compute_paths(
+    has: impl Fn(&str) -> bool,
+    folder: &str,
+    name: &str,
+) -> Vec<(String, String)> {
+    let names = std::iter::once(name.to_owned()).chain(('a'..='z').map(|c| format!("{name}_{c}")));
+    names
+        .map(|n| {
+            let path = stage_path(folder, &n, "csh");
+            (n, path)
+        })
+        .filter(|(_, path)| has(path))
+        .collect()
+}
+
+/// The stage files `load_post` may read in `folder`, as paths in the pack, sorted: for each
+/// program it loads (the composite-style groups and their numbered programs, `final`,
+/// `shadowcomp` and its numbered programs, the gbuffers programs and their fallbacks, the
+/// shadow programs and the programs mods request, `mod_programs`), the stages `program_read`
+/// and `compute_paths` give, as `Loader::load` reads them; and for the shadow programs and
+/// `shadowcomp`, also the fragment stage `Loader::read_formats` reads when the shadow pass is
+/// off. Files are found as `Pack::exists` finds them (`Pack::files_in`). What depends on the
+/// pack's code or settings is not looked at, so every stage the loader may read is listed:
+/// whether `program.<name>.enabled` turns a program off, whether the shadow pass runs and with
+/// geometry inputs, which program of a fallback list draws, and whether a drawn program
+/// translates before its compute programs are read.
+pub fn program_stages(pack: &Pack, folder: &str, mod_programs: &[String]) -> Vec<String> {
+    let files: std::collections::HashSet<String> = (pack.files_in(folder).into_iter())
+        .map(|f| match folder {
+            "" => f,
+            d => format!("{d}/{f}"),
+        })
+        .collect();
+    let has = |path: &str| files.contains(path);
+    let numbered = |group: Group, base: &'static str| {
+        std::iter::once(base.to_owned())
+            .chain((1..=99).map(move |n| format!("{base}{n}")))
+            .map(move |name| (name, group))
+    };
+    let composite = (GROUPS.iter())
+        .flat_map(|&(group, base)| match group {
+            Group::Final => vec![(base.to_owned(), group)],
+            _ => numbered(group, base).collect(),
+        })
+        .chain(numbered(Group::ShadowComp, "shadowcomp"));
+    let gbuffers = (GBUFFERS.iter().flat_map(|list| list.iter()))
+        .filter(|name| !SHADOW_PROGRAMS.contains(name))
+        .map(|name| ((*name).to_owned(), Group::Gbuffers))
+        .chain(
+            mod_programs
+                .iter()
+                .map(|name| (name.clone(), Group::Gbuffers)),
+        );
+    let shadow = SHADOW_PROGRAMS.map(|name| (name.to_owned(), Group::Shadow));
+    let mut stages = Vec::new();
+    for (name, group) in composite.chain(gbuffers).chain(shadow) {
+        let path = |ext: &str| stage_path(folder, &name, ext);
+        let compute = || {
+            compute_paths(has, folder, &name)
+                .into_iter()
+                .map(|(_, p)| p)
+        };
+        match program_read(has, folder, &name, group, group == Group::Shadow) {
+            ProgramRead::Compute => stages.extend(compute()),
+            ProgramRead::Drawn => {
+                stages.extend([path("vsh"), path("fsh")]);
+                if computes_after_drawing(group) {
+                    stages.extend(compute());
+                }
+            }
+            ProgramRead::Geometry => stages.extend([path("vsh"), path("gsh"), path("fsh")]),
+            ProgramRead::Nothing | ProgramRead::Tessellated | ProgramRead::NoGeometry => {}
+        }
+        // `read_formats`, with the shadow pass off.
+        let formats = matches!(group, Group::Shadow | Group::ShadowComp);
+        if formats && has(&path("vsh")) && has(&path("fsh")) {
+            stages.push(path("fsh"));
+        }
+    }
+    stages.sort();
+    stages.dedup();
+    stages
+}
+
+/// The gbuffers and shadow programs, each list a program and the ones it falls back to.
+const GBUFFERS: [&[&str]; 18] = [
+    &WATER,
+    &TERRAIN,
+    &TERRAIN_SOLID,
+    &TERRAIN_CUTOUT,
+    &LINES,
+    &SKY,
+    &SKY_TEXTURED,
+    &ENTITIES,
+    &BLOCK,
+    &CLOUDS,
+    &HAND,
+    &HAND_WATER,
+    &WEATHER,
+    &ENTITIES_TRANSLUCENT,
+    &BEACON_BEAM,
+    &PARTICLES,
+    &DRAWN_ALONE,
+    &SHADOW_PROGRAMS,
+];
+
+/// The gbuffers programs with no fallback.
+const DRAWN_ALONE: [&str; 3] = [
+    "gbuffers_damagedblock",
+    "gbuffers_block_translucent",
+    "gbuffers_particles_translucent",
+];
+
+/// The shadow pass's programs (2.5).
+const SHADOW_PROGRAMS: [&str; 4] = ["shadow", "shadow_water", "shadow_entities", "shadow_block"];
+
 /// The stars' blend: added to the sky, their own alpha replacing the buffer's, as vanilla draws
 /// them (`RenderPipelines.STARS`, `BlendFunction.OVERLAY`). Iris 1.11.7 drew them so with a probe
 /// pack of ours (#10490): colour 0.25 × 0.5 over the disc's 1.0 read 1.125, alpha 0.5.
@@ -310,6 +506,54 @@ impl BufferSize {
 
     /// The largest side a buffer may have, the size every device takes for a 2D texture.
     pub const MAX: u32 = 8192;
+}
+
+/// `indirect.<pass>` (spec 3.2): the compute shader `<pass>` takes its work-group counts, three
+/// `uint`s, from storage buffer `buffer` at byte `offset`, as written there when it runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Indirect {
+    pub buffer: u32,
+    pub offset: u32,
+}
+
+impl Indirect {
+    /// The bytes the three counts take.
+    pub const BYTES: u64 = 12;
+
+    /// `value` (`<buffer> <byte offset>`) against the pack's `objects`: an error names what is
+    /// wrong with it. A buffer of fixed size must hold the three counts at `offset`; one sized
+    /// by the render size is checked as each frame runs (decision D-10).
+    fn parse(
+        value: &str,
+        objects: &std::collections::BTreeMap<u32, BufferObject>,
+    ) -> Result<Self, String> {
+        let words: Vec<&str> = value.split_whitespace().collect();
+        let [buffer, offset] = words[..] else {
+            return Err("not a buffer object and a byte offset".to_owned());
+        };
+        let (Ok(buffer), Ok(offset)) = (buffer.parse::<u32>(), offset.parse::<u32>()) else {
+            return Err("not a buffer object and a byte offset".to_owned());
+        };
+        let Some(object) = objects.get(&buffer) else {
+            return Err(format!("`bufferObject.{buffer}` is not declared"));
+        };
+        // The counts are 4-byte words, and wgpu reads an indirect dispatch at a multiple of 4.
+        if offset % 4 != 0 {
+            return Err(format!("byte offset {offset} is not a multiple of 4"));
+        }
+        let fixed = match object {
+            BufferObject::Bytes(bytes) | BufferObject::File { bytes, .. } => Some(*bytes),
+            BufferObject::PerPixel { .. } => None,
+        };
+        if let Some(bytes) = fixed
+            && u64::from(offset) + Self::BYTES > bytes
+        {
+            return Err(format!(
+                "the three counts at byte {offset} end past `bufferObject.{buffer}`'s {bytes} bytes"
+            ));
+        }
+        Ok(Self { buffer, offset })
+    }
 }
 
 /// `bufferObject.<n>`: an SSBO's size in bytes, or bytes per pixel of the render size scaled.
@@ -579,6 +823,10 @@ pub struct Post {
     pub shadow_only_lit_blocks: bool,
     /// `shadowcomp`..`shadowcomp99`, after the shadow pass (2.1).
     pub shadow_comp: Vec<PostProgram>,
+    /// Mod-declared render pipelines resolved against this pack (`GameInputs::mod_programs`),
+    /// in request order. `program: None` means no candidate in the pipeline's fallback chain
+    /// existed or translated cleanly, so the pipeline falls back to its own shader.
+    pub mod_programs: Vec<ModPackProgram>,
     /// Translucent entities draw after deferred (`separateEntityDraws`, 3.2).
     pub translucent_late: bool,
     /// Particles draw after deferred (`particles.ordering`, `particles.before.deferred`, 3.2).
@@ -602,12 +850,16 @@ pub struct Post {
     pub config: Config,
     /// Programs skipped and why, as `program: message` or `file:line: message`.
     pub notes: Vec<String>,
+    /// Sunrise's HDR extension as this pack was served it (`GameInputs::hdr`): its `final`,
+    /// or the colortex0 copy that stands for it, writes linear light, and who owns the tone
+    /// curve. `None`: not served, the picture is the pack's as on any loader.
+    pub hdr: Option<crate::Tonemap>,
 }
 
 impl Post {
     /// Every program that loaded: the passes', what draws the game's geometry, the shadow
-    /// pass's and its composites.
-    fn every_program(&self) -> impl Iterator<Item = &PostProgram> {
+    /// pass's and its composites, and bound mod pipeline programs.
+    pub fn every_program(&self) -> impl Iterator<Item = &PostProgram> {
         let draws = [
             &self.terrain,
             &self.terrain_cutout,
@@ -620,12 +872,16 @@ impl Post {
             &self.entities_translucent,
             &self.particles,
             &self.particles_translucent,
+            &self.beacon_beam,
             &self.damaged_block,
             &self.clouds,
+            &self.lines,
             &self.weather,
             &self.hand,
+            &self.hand_water,
             &self.shadow,
             &self.shadow_water,
+            &self.shadow_water_plain,
             &self.shadow_entities,
             &self.shadow_block,
         ];
@@ -633,6 +889,7 @@ impl Post {
             .iter()
             .chain(draws.into_iter().flatten())
             .chain(&self.shadow_comp)
+            .chain(self.mod_programs.iter().filter_map(|m| m.program.as_ref()))
     }
 
     /// The fewest bytes each storage buffer (`bufferObject.<n>`, set 4) needs for every stage
@@ -706,6 +963,50 @@ pub fn dimension_folder_named(pack: &Pack, id: &str, legacy_id: i32) -> String {
     }
 }
 
+/// The stage interface limits to translate with where there is no device: core shaders, which
+/// load with the resource packs, before and apart from any device, and the shader fuzzer. It is
+/// no device's own limit but the largest that wgpu-hal 30's backends give for real devices: a
+/// bound on the translation's work, while pipeline creation still applies the device's own limit.
+/// - Inter-stage variables: D3D12 31 (`D3D12_VS_OUTPUT_REGISTER_COUNT - 1`,
+///   `dx12/adapter.rs:933`); Metal 31 or 30 (`metal/adapter.rs:989`); Vulkan
+///   `min(maxVertexOutputComponents, maxFragmentInputComponents) / 4 - 1`
+///   (`vulkan/adapter.rs:1731`), 31 for Mesa 26.3 RADV's 128; GLES `MAX_VARYING_COMPONENTS / 4`
+///   (`gles/adapter.rs:856`), 32 for Mesa 26.3 radeonsi's 128. The largest: 32.
+/// - Vertex attributes: D3D12 30 (`dx12/adapter.rs:928`); Metal 31 (`metal/adapter.rs:1441`);
+///   Vulkan `maxVertexInputAttributes` (`vulkan/adapter.rs:1729`), 32 for RADV; GLES
+///   `MAX_VERTEX_ATTRIBS` (`gles/adapter.rs:817`), 16 for radeonsi. The largest: 32.
+pub const DEVICELESS_INTERFACE_LIMITS: naga::front::glsl::InterfaceLimits =
+    naga::front::glsl::InterfaceLimits {
+        inter_stage_variables: 32,
+        vertex_attributes: 32,
+    };
+
+/// A mod-declared render pipeline asking [`load_post`] to resolve the first available
+/// program from its ordered fallback chain (`programs`) for a pack pass `group`.
+#[derive(Clone, Debug)]
+pub struct ModPackProgramRequest {
+    /// Mod pipeline slot index echoed back in [`ModPackProgram::slot`].
+    pub slot: usize,
+    /// Ordered candidate program stems (`RenderPipeline::effective_pack_programs`).
+    pub programs: Vec<String>,
+    /// Pack pass group (`Group::Gbuffers`, `Group::Translucent`, or `Group::Shadow`).
+    pub group: Group,
+    /// Default blend state when `shaders.properties` sets no `blend.<program>`.
+    pub default_blend: Option<Blend>,
+    /// Vertex-stage inputs matching the pipeline's vertex format and GLSL bindings.
+    pub inputs: GbuffersInputs,
+}
+
+/// Resolution result for one [`ModPackProgramRequest`].
+#[derive(Clone)]
+pub struct ModPackProgram {
+    /// Mod pipeline slot index from [`ModPackProgramRequest::slot`].
+    pub slot: usize,
+    /// First program in the request's chain that existed and translated cleanly, or `None` when
+    /// none matched or all failed to translate.
+    pub program: Option<PostProgram>,
+}
+
 /// The game's geometry a pack may draw with its gbuffers programs: each kind's vertex inputs,
 /// when the game can draw it with a pack.
 #[derive(Clone, Debug, Default)]
@@ -733,6 +1034,51 @@ pub struct GameInputs {
     pub terrain_geometry: Option<crate::GeometryInputs>,
     /// Entities and block entities read vertex by vertex, for the same.
     pub entity_geometry: Option<crate::GeometryInputs>,
+    /// Mod-declared pipelines requesting pack program discovery and translation.
+    pub mod_programs: Vec<ModPackProgramRequest>,
+    /// The device's stage interface limits (`wgpu::Limits::max_inter_stage_shader_variables` and
+    /// `max_vertex_attributes`): a program whose varyings or vertex inputs take more is refused
+    /// with a note, as the device could never build its pipeline. Default: wgpu's defaults.
+    pub interface_limits: naga::front::glsl::InterfaceLimits,
+    /// Sunrise's HDR extension served to this pack (`Macros::define_sunrise_hdr`): `final`
+    /// writes linear light, translated as `Target::LinearWindow`, and the copy of colortex0
+    /// that stands for a missing `final` reads it so too (`Post::hdr`). `None`: not served.
+    pub hdr: Option<crate::Tonemap>,
+}
+
+/// `inputs` with `mc_chunkFade` (spec 5.1) at `-1.0` on every draw that isn't terrain: sky,
+/// celestial bodies, entities and block entities (with their particles, translucent and shadow
+/// draws), clouds, weather, lines, the hand, entities read vertex by vertex and mods' pipelines.
+/// Terrain's own inputs give the section's fade, and a terrain draw without it stays an error.
+/// A draw that gives its own value keeps it, and a program that declares the name keeps its
+/// declaration (`implicit_inputs`).
+fn off_terrain_fade(inputs: &GameInputs) -> GameInputs {
+    let mut out = inputs.clone();
+    let fade = |i: &mut GbuffersInputs| {
+        if !i.attributes.iter().any(|(n, _)| n == "mc_chunkFade") {
+            i.attributes
+                .push(("mc_chunkFade".to_owned(), "-1.0".to_owned()));
+        }
+    };
+    let draws = [
+        &mut out.sky,
+        &mut out.celestial,
+        &mut out.entities,
+        &mut out.clouds,
+        &mut out.weather,
+        &mut out.lines,
+        &mut out.hand,
+    ];
+    for i in draws.into_iter().flatten() {
+        fade(i);
+    }
+    if let Some(g) = &mut out.entity_geometry {
+        fade(&mut g.inputs);
+    }
+    for request in &mut out.mod_programs {
+        fade(&mut request.inputs);
+    }
+    out
 }
 
 /// Loads the post-processing programs of `folder` and, for the geometry `inputs` describes, the
@@ -765,6 +1111,8 @@ pub fn load_post(
     macros: &Macros,
     inputs: &GameInputs,
 ) -> Post {
+    let inputs = &off_terrain_fade(inputs);
+    let limits = inputs.interface_limits;
     let mut post = Post {
         folder: folder.to_owned(),
         programs: Vec::new(),
@@ -801,6 +1149,7 @@ pub fn load_post(
         shadow_only_player: false,
         shadow_only_lit_blocks: false,
         shadow_comp: Vec::new(),
+        mod_programs: Vec::new(),
         translucent_late: false,
         particles_late: false,
         custom: Custom::parse(properties),
@@ -820,9 +1169,17 @@ pub fn load_post(
         },
         config: Config::default(),
         notes: Vec::new(),
+        hdr: inputs.hdr,
     };
-    let options = crate::with_options(pack, macros);
+    // One file's work for every size's options, as for the file itself.
+    let options = crate::with_options(pack, macros).for_file();
+    // `indirect.<pass>`, by pass, read as each compute shader loads.
+    let mut indirect = std::collections::BTreeMap::new();
     for e in &properties.entries {
+        if let Some(pass) = e.key.strip_prefix("indirect.") {
+            indirect.insert(pass, e.value.as_str());
+            continue;
+        }
         if let Some(n) = e.key.strip_prefix("bufferObject.") {
             match (n.parse(), BufferObject::parse(&e.value)) {
                 (Ok(n), Some(b)) => match buffer_object_file(pack, b) {
@@ -834,16 +1191,30 @@ pub fn load_post(
             continue;
         }
         if let Some(name) = e.key.strip_prefix("image.") {
-            match CustomImage::parse(name, &options.expand(&e.value)) {
-                Some(i) => post.images.push(i),
-                None => post.notes.push(format!("`{}`: not an image", e.key)),
+            // `Properties::parse` expanded the file's own macros at the line; the options again
+            // here, for a file read without them.
+            match options
+                .try_expand(&e.value)
+                .map(|v| CustomImage::parse(name, &v))
+            {
+                Ok(Some(i)) => post.images.push(i),
+                Ok(None) => post.notes.push(format!("`{}`: not an image", e.key)),
+                Err(why) => post.notes.push(format!("`{}`: {why}", e.key)),
             }
             continue;
         }
         let Some(name) = e.key.strip_prefix("size.buffer.") else {
             continue;
         };
-        match (crate::buffer_index(name), BufferSize::parse(&e.value)) {
+        // As for `image.*`: the options again, for a file read without them.
+        let value = match options.try_expand(&e.value) {
+            Ok(value) => value,
+            Err(why) => {
+                post.notes.push(format!("`{}`: {why}", e.key));
+                continue;
+            }
+        };
+        match (crate::buffer_index(name), BufferSize::parse(&value)) {
             (Some(b), Some(size)) => post.sizes[b] = Some(size),
             _ => post
                 .notes
@@ -861,6 +1232,8 @@ pub fn load_post(
         switches: crate::switches_on(pack),
         options,
         geometry: None,
+        limits: inputs.interface_limits,
+        indirect,
         post: &mut post,
     };
     for (group, base) in GROUPS {
@@ -872,12 +1245,14 @@ pub fn load_post(
                 .collect()
         };
         let target = match group {
+            Group::Final if inputs.hdr.is_some() => Target::LinearWindow,
             Group::Final => Target::Window,
             _ => Target::Buffers,
         };
         for name in names {
-            if let Some(mut p) = loader.load(name, group, |v, f| translate_composite(v, f, target))
-            {
+            if let Some(mut p) = loader.load(name, group, |v, f| {
+                translate_composite(v, f, target, limits)
+            }) {
                 // `blend.<program>` blends every buffer the program writes. Iris 1.11.7, probed:
                 // it applies to begin, prepare, deferred and composite programs, and
                 // `blend.<program>.<buffer>` doesn't apply to deferred and composite ones; the
@@ -908,7 +1283,7 @@ pub fn load_post(
                 }
             }
             loader.load(name.to_string(), group, |v, f| {
-                translate_gbuffers(v, f, Target::Buffers, &inputs)
+                translate_gbuffers(v, f, Target::Buffers, &inputs, limits)
             })
         })
     };
@@ -950,7 +1325,7 @@ pub fn load_post(
     let damaged_block = inputs
         .entities
         .as_ref()
-        .and_then(|i| gbuffers(&["gbuffers_damagedblock"], Group::Gbuffers, i))
+        .and_then(|i| gbuffers(&DRAWN_ALONE[..1], Group::Gbuffers, i))
         .map(|mut p| {
             p.blend = blend(properties, &p.name).unwrap_or(Some([
                 Factor::DstColor,
@@ -982,10 +1357,10 @@ pub fn load_post(
     let particles = translucent(&PARTICLES, 0.1, &mut gbuffers_dyn);
     // Optional slots deliberately have no fallback chain: an absent, disabled or rejected
     // variant must leave the legacy material grouping and state intact.
-    let block_translucent = translucent(&["gbuffers_block_translucent"], 0.0, &mut gbuffers_dyn);
+    let block_translucent = translucent(&DRAWN_ALONE[1..2], 0.0, &mut gbuffers_dyn);
     let mixed = properties.get("particles.ordering").map(str::trim) == Some("mixed");
     let particles_translucent = mixed
-        .then(|| translucent(&["gbuffers_particles_translucent"], 0.1, &mut gbuffers_dyn))
+        .then(|| translucent(&DRAWN_ALONE[2..], 0.1, &mut gbuffers_dyn))
         .flatten();
     let beacon_beam = translucent(&BEACON_BEAM, 0.0, &mut gbuffers_dyn);
     // Clouds blend, as vanilla's do (OQ-23).
@@ -1033,6 +1408,27 @@ pub fn load_post(
             p.blend = blend(properties, &p.name).unwrap_or(Some(TRANSLUCENT_BLEND));
             p
         });
+    // Resolve non-shadow mod pipeline requests against the pack's gbuffers/translucent programs.
+    // Shadow-slot mod requests resolve inside `load_shadow` only when `shadow_pass` is active.
+    let mod_programs: Vec<ModPackProgram> = inputs
+        .mod_programs
+        .iter()
+        .map(|req| {
+            let program = if req.group.shadow() {
+                None
+            } else {
+                let names: Vec<&str> = req.programs.iter().map(String::as_str).collect();
+                gbuffers(&names, req.group, &req.inputs).map(|mut p| {
+                    p.blend = blend(properties, &p.name).unwrap_or(req.default_blend);
+                    p
+                })
+            };
+            ModPackProgram {
+                slot: req.slot,
+                program,
+            }
+        })
+        .collect();
     if let Some(terrain) = &inputs.terrain {
         // Cutout terrain's alpha test, unless `alphaTest.*` says otherwise (3.2): alpha above
         // 0.5, which `alphaTestRef` reads. Iris 1.11.7 with probe packs of ours (#9307), through
@@ -1128,6 +1524,11 @@ pub fn load_post(
             }
         }
         loader.post.terrain = solid;
+        // Translucent terrain blends every buffer it writes with the translucent default (3.2),
+        // encoded data included. A pack keeps a buffer exact with its own
+        // `blend.<program>.<buffer>=off`, keyed by the program that draws water
+        // (`gbuffers_water`, or the `gbuffers_terrain` chain it falls back to); see
+        // sunrise-client-render's `gfx::pack_post::water_blend_tests`.
         loader.post.water = water.map(|mut p| {
             p.blend = blend(properties, &p.name).unwrap_or(Some(TRANSLUCENT_BLEND));
             p
@@ -1163,11 +1564,13 @@ pub fn load_post(
         Some(_) => true,
         None => !flag("particles.before.deferred").unwrap_or(false),
     };
+    loader.post.mod_programs = mod_programs;
     load_shadow(
         &mut loader,
         inputs.terrain.as_ref(),
         inputs.entities.as_ref(),
         [&inputs.terrain_geometry, &inputs.entity_geometry].map(Option::as_ref),
+        &inputs.mod_programs,
     );
     post
 }
@@ -1182,6 +1585,7 @@ fn load_shadow(
     terrain: Option<&GbuffersInputs>,
     entities: Option<&GbuffersInputs>,
     geometry: [Option<&crate::GeometryInputs>; 2],
+    mod_requests: &[ModPackProgramRequest],
 ) {
     let post = &*loader.post;
     let gbuffers = [
@@ -1207,6 +1611,7 @@ fn load_shadow(
     // for a probe pack of ours whose only reader of it was `prepare.csh` (#10490).
     let reads = (post.programs.iter())
         .chain(gbuffers.into_iter().flatten())
+        .chain(post.mod_programs.iter().filter_map(|m| m.program.as_ref()))
         .flat_map(|p| {
             let stages = p.program.iter().map(|q| &q.interface);
             stages.chain(p.compute.iter().map(|(_, c)| &c.interface))
@@ -1231,7 +1636,7 @@ fn load_shadow(
         // (`shadowDistance` and `sunPathRotation` probed, #10490), and nothing else of them
         // (nothing else was probed). The other shadow programs' files were not probed; they are
         // read as `shadow`, formats only.
-        let names = ["shadow", "shadow_water", "shadow_entities", "shadow_block"]
+        let names = SHADOW_PROGRAMS
             .map(str::to_owned)
             .into_iter()
             .chain(std::iter::once("shadowcomp".to_owned()))
@@ -1245,9 +1650,10 @@ fn load_shadow(
     }
     let names =
         std::iter::once("shadowcomp".to_owned()).chain((1..=99).map(|n| format!("shadowcomp{n}")));
+    let limits = loader.limits;
     for name in names {
         let program = loader.load(name, Group::ShadowComp, |v, f| {
-            translate_composite(v, f, Target::Buffers)
+            translate_composite(v, f, Target::Buffers, limits)
         });
         loader.post.shadow_comp.extend(program);
     }
@@ -1275,7 +1681,7 @@ fn load_shadow(
                     g
                 });
                 let p = loader.load(name.to_string(), Group::Shadow, |v, f| {
-                    translate_shadow(v, f, &inputs)
+                    translate_shadow(v, f, &inputs, limits)
                 });
                 p.map(|mut p| {
                     p.blend = blend(properties, &p.name).flatten();
@@ -1315,12 +1721,29 @@ fn load_shadow(
     let shadow_block = (keep("shadowBlockEntities") || only_lit)
         .then(|| load(&["shadow_block", "shadow"], entities, false, true))
         .flatten();
-    let water_plain = water
-        .as_ref()
-        .and_then(|_| load(&["shadow_water", "shadow"], terrain, true, false));
+    // Loaded with the patched one, for a GPU that refuses that at pipeline creation; and without
+    // it, when the patched one takes more of the stage interface than the device has (the
+    // patches' output is one more than a pack writing as many as the GPU takes has room for).
+    let water_plain = (keep("shadowTranslucent"))
+        .then(|| load(&["shadow_water", "shadow"], terrain, true, false))
+        .flatten();
     // The plain one's notes are the patched one's again: each once.
     let mut seen = std::collections::HashSet::new();
     loader.post.notes.retain(|n| seen.insert(n.clone()));
+    // Said as what it is, not as a program skipped: the plain one draws translucent terrain.
+    if let Some(name) = water_plain
+        .as_ref()
+        .filter(|_| water.is_none())
+        .map(|p| &p.name)
+    {
+        let skipped = format!("{name}: skipped");
+        if let Some(n) = loader.post.notes.iter_mut().rev().find(|n| **n == skipped) {
+            *n = format!(
+                "{name}: translucent terrain without the boats' water patches, as the device's stage \
+                 interface has no room for them"
+            );
+        }
+    }
     if shadow.is_none() && terrain.is_some() {
         loader
             .post
@@ -1335,6 +1758,30 @@ fn load_shadow(
     loader.post.shadow_block = shadow_block;
     loader.post.shadow_only_player = only_player;
     loader.post.shadow_only_lit_blocks = only_lit;
+    for (idx, req) in mod_requests.iter().enumerate() {
+        if !req.group.shadow() {
+            continue;
+        }
+        let resolved = req.programs.iter().find_map(|name| {
+            let test = match properties.get(&format!("alphaTest.{name}")) {
+                Some(v) => crate::AlphaTest::parse(v.trim()).flatten(),
+                None => req.inputs.alpha_test,
+            };
+            let mut mod_inputs = req.inputs.clone();
+            mod_inputs.alpha_test = test;
+            loader
+                .load(name.clone(), Group::Shadow, |v, f| {
+                    translate_shadow(v, f, &mod_inputs, limits)
+                })
+                .map(|mut p| {
+                    p.blend = blend(properties, &p.name).unwrap_or(req.default_blend);
+                    p
+                })
+        });
+        if let Some(entry) = loader.post.mod_programs.get_mut(idx) {
+            entry.program = resolved;
+        }
+    }
 }
 
 struct Loader<'a> {
@@ -1347,6 +1794,10 @@ struct Loader<'a> {
     options: Macros,
     /// The game's geometry read vertex by vertex, while loading shadow programs.
     geometry: Option<crate::GeometryInputs>,
+    /// The device's stage interface limits ([`GameInputs::interface_limits`]).
+    limits: naga::front::glsl::InterfaceLimits,
+    /// `indirect.<pass>` values by pass, as `properties` holds them.
+    indirect: std::collections::BTreeMap<&'a str, &'a str>,
     post: &'a mut Post,
 }
 
@@ -1354,32 +1805,40 @@ impl Loader<'_> {
     /// The pack has both stages of the program `name` in this folder, and doesn't turn it off
     /// (`program.<name>.enabled`), as `load` reads them.
     fn has(&self, name: &str) -> bool {
-        ["vsh", "fsh"].iter().all(|ext| match self.folder {
-            "" => self.pack.exists(&format!("{name}.{ext}")),
-            f => self.pack.exists(&format!("{f}/{name}.{ext}")),
-        }) && enabled(
-            self.properties,
-            self.folder,
-            name,
-            &self.options,
-            &self.switches,
-        )
+        ["vsh", "fsh"]
+            .iter()
+            .all(|ext| self.pack.exists(&stage_path(self.folder, name, ext)))
+            && enabled(
+                self.properties,
+                self.folder,
+                name,
+                &self.options,
+                &self.switches,
+            )
     }
 
     /// The program `name` translated by `translate`, or `None` when it is missing, disabled or
-    /// fails (with a note).
+    /// fails (with a note naming the authored position and stage when known).
     fn load(
         &mut self,
         name: String,
         group: Group,
         translate: impl FnOnce(&Preprocessed, &Preprocessed) -> Result<Program, Vec<crate::Error>>,
     ) -> Option<PostProgram> {
-        let path = |ext: &str| match self.folder {
-            "" => format!("{name}.{ext}"),
-            f => format!("{f}/{name}.{ext}"),
-        };
+        let path = |ext: &str| stage_path(self.folder, &name, ext);
         let (vsh, fsh) = (path("vsh"), path("fsh"));
-        if group == Group::Setup || !self.pack.exists(&fsh) || !self.pack.exists(&vsh) {
+        let read = program_read(
+            |p| self.pack.exists(p),
+            self.folder,
+            &name,
+            group,
+            self.geometry.is_some(),
+        );
+        if read == ProgramRead::Nothing {
+            return None;
+        }
+        if read == ProgramRead::Compute {
+            // A program of compute stages only (`.csh` without `.vsh` and `.fsh`).
             let on = enabled(
                 self.properties,
                 self.folder,
@@ -1387,17 +1846,7 @@ impl Loader<'_> {
                 &self.options,
                 &self.switches,
             );
-            // A program of compute stages only (`.csh` without `.vsh` and `.fsh`).
-            let composite = matches!(
-                group,
-                Group::Setup
-                    | Group::Begin
-                    | Group::Prepare
-                    | Group::Deferred
-                    | Group::Composite
-                    | Group::ShadowComp
-            );
-            if !on || !composite {
+            if !on {
                 return None;
             }
             let compute = self.compute(&name);
@@ -1425,21 +1874,24 @@ impl Loader<'_> {
         ) {
             return None;
         }
-        let tessellated = self.pack.exists(&path("tcs")) || self.pack.exists(&path("tes"));
-        if tessellated {
-            self.post.notes.push(format!(
-                "{name}: uses a tessellation stage (unsupported); skipped"
-            ));
-            return None;
-        }
-        if self.pack.exists(&path("gsh")) {
-            let Some(inputs) = self.geometry.clone() else {
+        match read {
+            ProgramRead::Tessellated => {
+                self.post.notes.push(format!(
+                    "{name}: uses a tessellation stage (unsupported); skipped"
+                ));
+                return None;
+            }
+            ProgramRead::NoGeometry => {
                 self.post.notes.push(format!(
                     "{name}: uses a geometry stage (supported for the shadow pass's terrain and entities only); skipped"
                 ));
                 return None;
-            };
-            return self.load_geometry(name.clone(), group, &vsh, &path("gsh"), &fsh, &inputs);
+            }
+            ProgramRead::Geometry => {
+                let inputs = self.geometry.clone()?;
+                return self.load_geometry(name.clone(), group, &vsh, &path("gsh"), &fsh, &inputs);
+            }
+            ProgramRead::Nothing | ProgramRead::Compute | ProgramRead::Drawn => {}
         }
         let vertex = self.preprocess(&vsh);
         let fragment = self.preprocess(&fsh);
@@ -1457,21 +1909,12 @@ impl Loader<'_> {
         let program = match translate(&vertex, &fragment) {
             Ok(p) => p,
             Err(errors) => {
-                notes.extend(
-                    errors
-                        .iter()
-                        .map(|e| format!("{}:{}: {}", e.file, e.line, e.message)),
-                );
+                notes.extend(errors.iter().map(ToString::to_string));
                 notes.push(format!("{name}: skipped"));
                 return None;
             }
         };
-        notes.extend(
-            program
-                .notes
-                .iter()
-                .map(|e| format!("{}:{}: {}", e.file, e.line, e.message)),
-        );
+        notes.extend(program.notes.iter().map(ToString::to_string));
         self.post.config.read_vertex(&vertex);
         self.post.config.read(&fragment);
         let mut buffers =
@@ -1494,15 +1937,10 @@ impl Loader<'_> {
                     .fold(0, |m, (i, _)| m | 1 << i)
             }
         };
-        let compute = match group {
-            Group::Setup
-            | Group::Begin
-            | Group::Prepare
-            | Group::Deferred
-            | Group::Composite
-            | Group::Final
-            | Group::ShadowComp => self.compute(&name),
-            _ => Vec::new(),
+        let compute = if computes_after_drawing(group) {
+            self.compute(&name)
+        } else {
+            Vec::new()
         };
         Some(PostProgram {
             buffer_blends: buffer_blends(self.properties, &name),
@@ -1524,10 +1962,7 @@ impl Loader<'_> {
     /// enabled: those of its fragment shader, as [`Self::load`] reads them; with `shadow`, its
     /// shadow settings too.
     fn read_formats(&mut self, name: &str, shadow: bool) {
-        let path = |ext: &str| match self.folder {
-            "" => format!("{name}.{ext}"),
-            f => format!("{f}/{name}.{ext}"),
-        };
+        let path = |ext: &str| stage_path(self.folder, name, ext);
         let (vsh, fsh) = (path("vsh"), path("fsh"));
         let on = enabled(
             self.properties,
@@ -1550,11 +1985,13 @@ impl Loader<'_> {
     /// Stage file `path` through the preprocessor; the pack's images declared without a format
     /// (GLSL lets a write-only image omit it) get the one `image.*` gives them.
     fn preprocess(&self, path: &str) -> Preprocessed {
-        let mut pp = preprocess(self.pack, path, self.macros);
-        if self.post.images.is_empty() || !pp.code.contains("image") {
+        #[cfg(test)]
+        tests::STAGES_READ.with_borrow_mut(|read| read.push(path.to_owned()));
+        let pp = preprocess(self.pack, path, self.macros);
+        if self.post.images.is_empty() || !pp.code().contains("image") {
             return pp;
         }
-        let source: Vec<&str> = pp.code.split('\n').collect();
+        let source: Vec<&str> = pp.code().split('\n').collect();
         let lines: Vec<String> = source
             .iter()
             .enumerate()
@@ -1590,11 +2027,11 @@ impl Loader<'_> {
                 }
             })
             .collect();
-        pp.code = lines.join("\n");
-        pp
+        pp.with_code(lines.join("\n"))
     }
 
-    /// A program with a geometry stage, folded into its vertex stage.
+    /// A program with a geometry stage, folded into its vertex stage. A refusal notes the
+    /// authored position and stage when known.
     fn load_geometry(
         &mut self,
         name: String,
@@ -1612,26 +2049,19 @@ impl Loader<'_> {
             notes.push(format!("{name}: skipped"));
             return None;
         }
+        // Conditions read as false, as the other programs' (`load`).
+        notes.extend(stages.iter().flat_map(warnings));
         let [vertex, geometry, fragment] = &stages;
         let (program, triangles) =
-            match crate::translate_geometry(vertex, geometry, fragment, inputs) {
+            match crate::translate_geometry(vertex, geometry, fragment, inputs, self.limits) {
                 Ok(p) => p,
                 Err(errors) => {
-                    notes.extend(
-                        errors
-                            .iter()
-                            .map(|e| format!("{}:{}: {}", e.file, e.line, e.message)),
-                    );
+                    notes.extend(errors.iter().map(ToString::to_string));
                     notes.push(format!("{name}: skipped"));
                     return None;
                 }
             };
-        notes.extend(
-            program
-                .notes
-                .iter()
-                .map(|e| format!("{}:{}: {}", e.file, e.line, e.message)),
-        );
+        notes.extend(program.notes.iter().map(ToString::to_string));
         self.post.config.read_vertex(vertex);
         self.post.config.read(fragment);
         let mut buffers =
@@ -1669,24 +2099,18 @@ impl Loader<'_> {
     }
 
     /// The compute programs of composite-style program `name` that are on and translate.
+    /// Translation refusals are noted with their authored position and stage when known.
     fn compute(&mut self, name: &str) -> Vec<(String, ComputeProgram)> {
         let mut out = Vec::new();
-        let names =
-            std::iter::once(name.to_owned()).chain(('a'..='z').map(|c| format!("{name}_{c}")));
-        for name in names {
-            let path = match self.folder {
-                "" => format!("{name}.csh"),
-                f => format!("{f}/{name}.csh"),
-            };
-            if !self.pack.exists(&path)
-                || !enabled(
-                    self.properties,
-                    self.folder,
-                    &name,
-                    &self.options,
-                    &self.switches,
-                )
-            {
+        let paths = compute_paths(|p| self.pack.exists(p), self.folder, name);
+        for (name, path) in paths {
+            if !enabled(
+                self.properties,
+                self.folder,
+                &name,
+                &self.options,
+                &self.switches,
+            ) {
                 continue;
             }
             let pp = self.preprocess(&path);
@@ -1697,22 +2121,30 @@ impl Loader<'_> {
                 notes.push(format!("{name}: skipped"));
                 continue;
             }
-            match translate_compute(&pp) {
+            // Conditions read as false, as the other programs' (`load`).
+            notes.extend(warnings(&pp));
+            let indirect = match self.indirect.get(name.as_str()) {
+                None => None,
+                Some(value) => match self
+                    .options
+                    .try_expand(value)
+                    .and_then(|v| Indirect::parse(&v, &self.post.buffer_objects))
+                {
+                    Ok(indirect) => Some(indirect),
+                    Err(why) => {
+                        notes.push(format!("`indirect.{name}`: {why}"));
+                        notes.push(format!("{name}: skipped"));
+                        continue;
+                    }
+                },
+            };
+            match crate::translate::translate_compute_with(&pp, indirect) {
                 Ok(program) => {
-                    notes.extend(
-                        program
-                            .notes
-                            .iter()
-                            .map(|e| format!("{}:{}: {}", e.file, e.line, e.message)),
-                    );
+                    notes.extend(program.notes.iter().map(ToString::to_string));
                     out.push((name, program));
                 }
                 Err(errors) => {
-                    notes.extend(
-                        errors
-                            .iter()
-                            .map(|e| format!("{}:{}: {}", e.file, e.line, e.message)),
-                    );
+                    notes.extend(errors.iter().map(ToString::to_string));
                     notes.push(format!("{name}: skipped"));
                 }
             }
@@ -1741,13 +2173,7 @@ fn warnings(pp: &Preprocessed) -> Vec<String> {
 
 fn located(pp: &Preprocessed, list: &[crate::preprocess::Diagnostic]) -> Vec<String> {
     list.iter()
-        .map(|d| {
-            let file = pp
-                .files
-                .get(d.origin.file as usize)
-                .map_or("?", String::as_str);
-            format!("{file}:{}: {}", d.origin.line, d.message)
-        })
+        .map(|d| format!("{}:{}: {}", pp.file_of(d.origin), d.origin.line, d.message))
         .collect()
 }
 
@@ -1839,13 +2265,7 @@ fn scale(properties: &Properties, program: &str, group: Group) -> [f32; 3] {
 
 /// Whether the pack names the `HIGHER_SHADOWCOLOR` feature, required or optional, in any case.
 fn higher_shadowcolor(properties: &Properties) -> bool {
-    ["iris.features.required", "iris.features.optional"]
-        .iter()
-        .filter_map(|k| properties.get(k))
-        .any(|v| {
-            v.split_whitespace()
-                .any(|w| w.eq_ignore_ascii_case("HIGHER_SHADOWCOLOR"))
-        })
+    crate::macros::listed_features(properties).any(|f| f == "HIGHER_SHADOWCOLOR")
 }
 
 /// `flip.<program>.<buffer>=<bool>` keys of one program.
@@ -2111,6 +2531,121 @@ mod tests {
         let post = load_post(&pack, "", &properties, &macros, &GameInputs::default());
         assert!(post.images.is_empty());
         assert!(!post.notes.is_empty());
+    }
+
+    /// `image.*` sizes written as macros `shaders.properties` defines above them, inside and
+    /// outside `#if` blocks (#675), read as the game reads the pack. A `#define` reaches the
+    /// lines after it only, so the macros an image line sees are the ones at that line.
+    #[test]
+    fn image_dimensions_expand_the_macros_the_properties_file_defines_above_them() {
+        let properties = "\
+            #if MC_VERSION >= 10000\n#define WIDTH 192\n#define HEIGHT 128\n#endif\n\
+            image.sky = none RGBA RGBA16F HALF_FLOAT false false WIDTH HEIGHT\n\
+            #ifdef NOT_DEFINED\n#define DEPTH 5\n#else\n#define DEPTH 7\n#endif\n\
+            image.volume = none RGBA RGBA8 BYTE false false WIDTH 3 DEPTH\n\
+            #define WIDE SIZE\n\
+            image.option = none RGBA RGBA8 BYTE false false WIDE 24\n\
+            #define SHORT 40\n\
+            image.at_its_line = none RGBA RGBA8 BYTE false false 9 SHORT\n\
+            #undef SHORT\n#define SHORT 41\n\
+            image.late = none RGBA RGBA8 BYTE false false LATER 2\n\
+            #define LATER 6\n\
+            #define GONE 11\n#undef GONE\n\
+            image.gone = none RGBA RGBA8 BYTE false false GONE 2\n";
+        let bytes = zip(&[
+            ("shaders/options.glsl", "#define SIZE 16 // [8 16]\n"),
+            ("shaders/shaders.properties", properties),
+        ]);
+        for (chosen, option) in [(None, 16), (Some("8"), 8)] {
+            let mut pack = Pack::from_zip_bytes("image.zip", bytes.clone()).unwrap();
+            if let Some(value) = chosen {
+                pack = pack.with_chosen(std::collections::BTreeMap::from([(
+                    "SIZE".into(),
+                    value.into(),
+                )]));
+            }
+            let mut macros = Macros::standard();
+            let (properties, _) = crate::read_properties(&pack, &mut macros);
+            let post = load_post(&pack, "", &properties, &macros, &GameInputs::default());
+            let images: Vec<_> = post
+                .images
+                .iter()
+                .map(|i| (i.name.as_str(), i.size))
+                .collect();
+            assert_eq!(
+                images,
+                [
+                    ("sky", ImageSize::Absolute([192, 128])),
+                    ("volume", ImageSize::Volume([192, 3, 7])),
+                    ("option", ImageSize::Absolute([option, 24])),
+                    ("at_its_line", ImageSize::Absolute([9, 40])),
+                ]
+            );
+            // Only the two lines left unresolved are noted, each naming its key.
+            let named = |n: &String, key: &str| n.contains(&format!("`{key}`"));
+            assert!(
+                post.notes.len() == 2
+                    && named(&post.notes[0], "image.late")
+                    && named(&post.notes[1], "image.gone"),
+                "{:?}",
+                post.notes
+            );
+        }
+    }
+    /// `size.buffer.*` sizes written as macros, as `image.*` ones (#675; spec 1.5 item 2 names
+    /// buffer sizes first): each value sees the macros of its line.
+    #[test]
+    fn buffer_sizes_expand_the_macros_the_properties_file_defines_above_them() {
+        let properties = "\
+            #if MC_VERSION >= 10000\n#define WIDTH 64\n#define HEIGHT 48\n#endif\n\
+            size.buffer.colortex4 = WIDTH HEIGHT\n\
+            #define SIDE SIZE\n\
+            size.buffer.colortex5 = SIDE SIDE\n\
+            #define SHORT 40\n\
+            size.buffer.colortex6 = 9 SHORT\n\
+            #undef SHORT\n#define SHORT 41\n\
+            size.buffer.colortex7 = LATER 2\n\
+            #define LATER 6\n\
+            #define GONE 11\n#undef GONE\n\
+            size.buffer.colortex8 = GONE 2\n\
+            #ifdef NOT_DEFINED\n#define TALL 5\n#else\n#define TALL 7\n#endif\n\
+            size.buffer.colortex9 = 3 TALL\n";
+        let bytes = zip(&[
+            ("shaders/options.glsl", "#define SIZE 16 // [8 16]\n"),
+            ("shaders/shaders.properties", properties),
+        ]);
+        for (chosen, option) in [(None, 16), (Some("8"), 8)] {
+            let mut pack = Pack::from_zip_bytes("sizes.zip", bytes.clone()).unwrap();
+            if let Some(value) = chosen {
+                pack = pack.with_chosen(std::collections::BTreeMap::from([(
+                    "SIZE".into(),
+                    value.into(),
+                )]));
+            }
+            let mut macros = Macros::standard();
+            let (properties, _) = crate::read_properties(&pack, &mut macros);
+            let post = load_post(&pack, "", &properties, &macros, &GameInputs::default());
+            assert_eq!(
+                post.sizes[4..10],
+                [
+                    Some(BufferSize::Absolute([64, 48])),
+                    Some(BufferSize::Absolute([option, option])),
+                    Some(BufferSize::Absolute([9, 40])),
+                    None,
+                    None,
+                    Some(BufferSize::Absolute([3, 7])),
+                ]
+            );
+            // Only the two lines left unresolved are noted, each naming its key.
+            let named = |n: &String, key: &str| n.contains(&format!("`{key}`"));
+            assert!(
+                post.notes.len() == 2
+                    && named(&post.notes[0], "size.buffer.colortex7")
+                    && named(&post.notes[1], "size.buffer.colortex8"),
+                "{:?}",
+                post.notes
+            );
+        }
     }
     use crate::pack::tests::zip;
 
@@ -2502,7 +3037,10 @@ blend.composite1.colortex3 = ONE ONE ONE ONE
             notes.contains("composite6: uses a tessellation stage (unsupported); skipped"),
             "{notes}"
         );
-        assert!(notes.contains("composite5.fsh:2:"), "{notes}");
+        assert!(
+            notes.contains("composite5.fsh:2: fragment shader: "),
+            "{notes}"
+        );
         assert!(notes.contains("composite5: skipped"), "{notes}");
 
         let mut macros = Macros::standard();
@@ -2711,6 +3249,91 @@ blend.composite1.colortex3 = ONE ONE ONE ONE
             "{:?}",
             post.notes
         );
+    }
+
+    /// With `FADE_VARIABLE` answered, a pack's entity, block, hand and sky programs that read
+    /// `mc_chunkFade` without declaring it translate: off terrain it is `-1.0` (spec 5.1). One
+    /// that declares the name keeps its own declaration.
+    #[test]
+    fn non_terrain_programs_read_the_fade_as_minus_one() {
+        let vsh = "#version 130\nout float fade;\nvoid main() {\n\
+                   gl_Position = gl_Vertex;\n\
+                   #ifdef IRIS_FEATURE_FADE_VARIABLE\nfade = mc_chunkFade;\n#else\nfade = 0.5;\n#endif\n}\n";
+        let fsh = "#version 130\nin float fade;\nvoid main() { gl_FragData[0] = vec4(fade); }\n";
+        let declared = "#version 130\nuniform float mc_chunkFade;\nout float fade;\n\
+                        void main() { gl_Position = gl_Vertex; fade = mc_chunkFade; }\n";
+        let pack = Pack::from_zip_bytes(
+            "fade.zip",
+            zip(&[
+                (
+                    "shaders/shaders.properties",
+                    "iris.features.optional = FADE_VARIABLE\n",
+                ),
+                ("shaders/gbuffers_entities.vsh", vsh),
+                ("shaders/gbuffers_entities.fsh", fsh),
+                ("shaders/gbuffers_hand.vsh", vsh),
+                ("shaders/gbuffers_hand.fsh", fsh),
+                ("shaders/gbuffers_skybasic.vsh", vsh),
+                ("shaders/gbuffers_skybasic.fsh", fsh),
+                ("shaders/gbuffers_block.vsh", declared),
+                ("shaders/gbuffers_block.fsh", fsh),
+            ]),
+        )
+        .unwrap();
+        let mut macros = Macros::standard();
+        let (properties, _) = crate::read_properties(&pack, &mut macros);
+        assert!(macros.is_defined("IRIS_FEATURE_FADE_VARIABLE"));
+        let game = crate::GbuffersInputs {
+            declarations: "layout(location = 0) in vec3 hz_v_pos;".into(),
+            body: "    hz_Vertex = vec4(hz_v_pos, 1.0);\n    hz_Color = vec4(1.0);\n".into(),
+            ..Default::default()
+        };
+        let inputs = GameInputs {
+            entities: Some(game.clone()),
+            hand: Some(game.clone()),
+            sky: Some(game),
+            ..Default::default()
+        };
+        let post = load_post(&pack, "", &properties, &macros, &inputs);
+        // The vertex stage holds the `-1.0` it reads.
+        let minus_one = |p: &Option<PostProgram>| {
+            let program = p.as_ref().and_then(|p| p.program.as_ref());
+            program.is_some_and(|program| {
+                (program.vertex.entry_points.iter()).any(|e| {
+                    e.function.expressions.iter().any(|(_, x)| {
+                        matches!(x, naga::Expression::Literal(naga::Literal::F32(v)) if *v == -1.0)
+                    })
+                }) || (program.vertex.global_expressions.iter()).any(|(_, x)| {
+                    matches!(x, naga::Expression::Literal(naga::Literal::F32(v)) if *v == -1.0)
+                }) || program.vertex.functions.iter().any(|(_, f)| {
+                    f.expressions.iter().any(|(_, x)| {
+                        matches!(x, naga::Expression::Literal(naga::Literal::F32(v)) if *v == -1.0)
+                    })
+                })
+            })
+        };
+        let read: Vec<(&str, bool)> = [
+            ("entities", &post.entities),
+            ("hand", &post.hand),
+            ("sky", &post.sky),
+        ]
+        .into_iter()
+        .map(|(name, p)| (name, minus_one(p)))
+        .collect();
+        assert_eq!(
+            read,
+            [("entities", true), ("hand", true), ("sky", true)],
+            "{:?}",
+            post.notes
+        );
+        let block = post.block.as_ref().and_then(|p| p.program.as_ref());
+        let own = block.is_some_and(|p| {
+            p.interface
+                .uniforms
+                .iter()
+                .any(|u| u.name == "mc_chunkFade")
+        });
+        assert!(own, "{:?}", post.notes);
     }
 
     /// The shadow pass runs when a program reads a shadow buffer or `shadow.enabled` says so;
@@ -3305,6 +3928,208 @@ blend.composite1.colortex3 = ONE ONE ONE ONE
         );
     }
 
+    /// A `program.<name>.enabled` expression nested past `MAX_CONDITION_DEPTH` is read on a
+    /// thread of half the 2 MiB Rust gives a spawned thread, as one nested to it is; like any
+    /// expression that can't be evaluated, it leaves the program on.
+    #[test]
+    fn an_enabled_expression_nested_past_the_bound_leaves_the_program_on() {
+        use sunrise_glsl::condition::MAX_CONDITION_DEPTH;
+        let key = |depth: usize| {
+            let value = format!("{}false{}", "(".repeat(depth), ")".repeat(depth));
+            format!("program.final.enabled = {value}\n")
+        };
+        let read = |text: String| {
+            std::thread::Builder::new()
+                .stack_size(1 << 20)
+                .spawn(move || {
+                    let properties = Properties::parse(&text, &Macros::standard());
+                    enabled(
+                        &properties,
+                        "",
+                        "final",
+                        &Macros::standard(),
+                        &BTreeSet::new(),
+                    )
+                })
+                .unwrap()
+                .join()
+                .unwrap()
+        };
+        assert!(!read(key(MAX_CONDITION_DEPTH)));
+        assert!(read(key(MAX_CONDITION_DEPTH + 1)));
+        // Names read as `defined(name)`: 400 calls are 400 parentheses, refused the same way.
+        let calls = format!("{}false{}", "F(".repeat(400), ")".repeat(400));
+        assert!(read(format!("program.final.enabled = {calls}\n")));
+    }
+
+    /// The options' second expansion of an `image.*` or `size.buffer.*` value stops at
+    /// `MAX_ARGUMENT_DEPTH` on a thread of half the 2 MiB Rust gives a spawned thread: 400 nested
+    /// calls of a macro are noted by key and dropped, the other entries read.
+    #[test]
+    fn sizes_nested_past_the_depth_are_noted_by_key() {
+        use sunrise_glsl::macros::{MAX_ARGUMENT_DEPTH, calls_too_deep};
+        let nested = |depth: usize, value: &str| {
+            format!("{}{value}{}", "F(".repeat(depth), ")".repeat(depth))
+        };
+        let entry = |key: &str, value: String, line: u32| crate::properties::Entry {
+            key: key.into(),
+            value,
+            line,
+        };
+        let properties = Properties {
+            entries: vec![
+                entry(
+                    "size.buffer.colortex4",
+                    format!("{} 4", nested(MAX_ARGUMENT_DEPTH, "8")),
+                    1,
+                ),
+                entry(
+                    "size.buffer.colortex5",
+                    format!("{} 4", nested(400, "8")),
+                    2,
+                ),
+                entry(
+                    "image.deep",
+                    format!("deep_sampler {} RGBA8 BYTE false false 4", nested(400, "R")),
+                    3,
+                ),
+            ],
+            notes: Vec::new(),
+        };
+        let post = std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(move || {
+                let pack = Pack::from_zip_bytes("deep.zip", zip(&[("shaders/x.txt", "")])).unwrap();
+                let mut macros = Macros::standard();
+                macros.define_line("F(x) x").unwrap();
+                load_post(&pack, "", &properties, &macros, &GameInputs::default())
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(post.sizes[4], Some(BufferSize::Absolute([8, 4])));
+        assert_eq!(post.sizes[5], None);
+        assert!(post.images.is_empty());
+        let notes: Vec<&str> = post.notes.iter().map(String::as_str).collect();
+        let size = format!("`size.buffer.colortex5`: {}", calls_too_deep());
+        let image = format!("`image.deep`: {}", calls_too_deep());
+        assert!(
+            notes.contains(&size.as_str()) && notes.contains(&image.as_str()),
+            "{notes:?}"
+        );
+    }
+
+    /// The options' second expansion of the `image.*` and `size.buffer.*` values spends one
+    /// file's `MAX_EXPANSION_WORK` (#4135): a doubling call is noted by key and dropped, the size
+    /// before it read.
+    #[test]
+    fn sizes_past_the_work_are_noted_by_key() {
+        let entry = |key: &str, value: String, line: u32| crate::properties::Entry {
+            key: key.into(),
+            value,
+            line,
+        };
+        let properties = Properties {
+            entries: vec![
+                entry("size.buffer.colortex4", "F(8) 4".into(), 1),
+                entry("size.buffer.colortex5", "D23(8) 4".into(), 2),
+                entry(
+                    "image.bomb",
+                    "bomb_sampler D23(R) RGBA8 BYTE false false 4".into(),
+                    3,
+                ),
+            ],
+            notes: Vec::new(),
+        };
+        let pack = Pack::from_zip_bytes("bomb.zip", zip(&[("shaders/x.txt", "")])).unwrap();
+        let mut macros = Macros::standard();
+        macros.define_line("F(x) x").unwrap();
+        for n in 4..=23 {
+            macros
+                .define_line(&format!("D{n}(x) D{m}(x) D{m}(x)", m = n - 1))
+                .unwrap();
+        }
+        let post = load_post(&pack, "", &properties, &macros, &GameInputs::default());
+        assert_eq!(post.sizes[4], Some(BufferSize::Absolute([8, 4])));
+        assert_eq!(post.sizes[5], None);
+        assert!(post.images.is_empty());
+        let why = sunrise_glsl::macros::work_ran_out(crate::macros::MAX_EXPANSION_WORK);
+        let notes: Vec<&str> = post.notes.iter().map(String::as_str).collect();
+        let size = format!("`size.buffer.colortex5`: {why}");
+        let image = format!("`image.bomb`: {why}");
+        assert!(
+            notes.contains(&size.as_str()) && notes.contains(&image.as_str()),
+            "{notes:?}"
+        );
+    }
+
+    /// A geometry program and a compute program note their conditions read as false, as the
+    /// other programs do: an `#elif` past the file's `MAX_EXPANSION_WORK` (#4135) is a note at
+    /// its file and line, and the program loads with the branch skipped.
+    #[test]
+    fn geometry_and_compute_programs_note_conditions_past_the_work() {
+        let mut doubling = "#define FZ_E0 1\n".to_owned();
+        for n in 1..=39 {
+            doubling += &format!("#define FZ_E{n} (FZ_E{m} + FZ_E{m})\n", m = n - 1);
+        }
+        // Lines 42 to 45, after `#version` and the 40 definitions.
+        let elif = "#if 0\n#elif FZ_E39 > 0\nfloat never;\n#endif\n";
+        let gsh = format!(
+            "#version 330\n{doubling}{elif}layout(triangles) in;\n\
+             layout(triangle_strip, max_vertices = 3) out;\n\
+             in vec2 vUv[];\nout vec2 gUv;\nvoid main() {{\n    for (int i = 0; i < 3; i++) {{\n        \
+             gl_Position = gl_in[i].gl_Position;\n        gUv = vUv[i];\n        EmitVertex();\n    }}\n    \
+             EndPrimitive();\n}}\n"
+        );
+        let vsh = "#version 330\nout vec2 vUv;\nvoid main() { gl_Position = ftransform(); vUv = vec2(0.0); }\n";
+        let fsh = "#version 330\nin vec2 gUv;\nlayout(location = 0) out vec4 c;\nvoid main() { c = vec4(gUv, 0.0, 1.0); }\n";
+        let reads = "#version 120\nuniform sampler2D shadowtex0;\nvarying vec2 uv;\n\
+                     void main() { gl_FragColor = texture2D(shadowtex0, uv); }\n";
+        let csh = format!(
+            "#version 430\n{doubling}{elif}layout(local_size_x = 1) in;\n\
+             layout(std430, binding = 0) buffer Sums {{ vec4 a; }} sums;\n\
+             void main() {{ sums.a = vec4(1.0); }}\n"
+        );
+        let files = [
+            ("shaders/composite.vsh", VSH),
+            ("shaders/composite.fsh", reads),
+            ("shaders/composite.csh", csh.as_str()),
+            ("shaders/shadow.vsh", vsh),
+            ("shaders/shadow.gsh", gsh.as_str()),
+            ("shaders/shadow.fsh", fsh),
+        ];
+        let pack = Pack::from_zip_bytes("t", zip(&files)).unwrap();
+        let game = crate::GbuffersInputs {
+            declarations: "layout(location = 0) in vec3 hz_v_pos;\n\
+                           layout(set = 1, binding = 0) readonly buffer V { uint v[]; };\n"
+                .into(),
+            body: "    hz_Vertex = vec4(hz_v_pos, 1.0);\n".into(),
+            ..Default::default()
+        };
+        let geometry = crate::GeometryInputs {
+            inputs: game.clone(),
+            pull: "        hz_v_pos = uintBitsToFloat(uvec3(v[hz_vertex_index], v[hz_vertex_index], v[hz_vertex_index]));\n"
+                .into(),
+            index: "uint(@)".into(),
+        };
+        let inputs = GameInputs {
+            terrain: Some(game),
+            terrain_geometry: Some(geometry),
+            ..Default::default()
+        };
+        let macros = Macros::standard();
+        let properties = Properties::parse("bufferObject.0 = 16\n", &macros);
+        let post = load_post(&pack, "", &properties, &macros, &inputs);
+        let triangles = post.shadow.as_ref().map(|p| p.geometry_triangles);
+        assert_eq!(triangles, Some(1), "{:?}", post.notes);
+        assert_eq!(post.programs[0].compute.len(), 1, "{:?}", post.notes);
+        let why = sunrise_glsl::macros::work_ran_out(crate::macros::MAX_EXPANSION_WORK);
+        let note = |file: &str| format!("{file}:43: `#if FZ_E39 > 0`: {why}; read as false");
+        for file in ["shadow.gsh", "composite.csh"] {
+            assert!(post.notes.contains(&note(file)), "{file}: {:?}", post.notes);
+        }
+    }
+
     /// The cutout part's storage blocks count towards the buffers' sizes, like every other
     /// program's.
     #[test]
@@ -3401,6 +4226,9 @@ blend.composite1.colortex3 = ONE ONE ONE ONE
             terrain_one_pass: None,
             terrain_geometry: None,
             entity_geometry: None,
+            mod_programs: Vec::new(),
+            interface_limits: Default::default(),
+            hdr: None,
         };
         let post = load_post(&pack, "", &Properties::default(), &macros, &inputs);
         let (terrain, water) = (post.terrain.unwrap(), post.water.unwrap());
@@ -3571,12 +4399,145 @@ blend.composite1.colortex3 = ONE ONE ONE ONE
         assert!(post.config.buffers[12].clear);
     }
 
+    thread_local! {
+        /// The stage files the loader preprocessed on this thread (`Loader::preprocess`).
+        pub(super) static STAGES_READ: std::cell::RefCell<Vec<String>> =
+            std::cell::RefCell::default();
+    }
+
+    /// The stage files the identity scan reads (`program_stages`) are those the loader reads,
+    /// with the shadow pass on and off and with geometry inputs and without (`load_post`, its
+    /// stages recorded as it preprocesses them): no more, no less. Among them, each the scan once
+    /// got wrong one way or the other: a drawn program's compute stage read (`composite_a.csh`,
+    /// `final.csh` beside `final.vsh` and `final.fsh`) and a lone `final.csh`'s not; a `setup`
+    /// program read as compute programs alone, its `setup.vsh` and `setup.fsh` not; a lone
+    /// compute program (`deferred.csh`, `deferred_b.csh`); a shadow program with a tessellation
+    /// stage, whose fragment stage the loader reads for its buffer formats while the shadow pass
+    /// is off, and a tessellated composite program read not at all; a shadow program's geometry
+    /// stage, a gbuffers program's not (skipped whole); a gbuffers program's `csh`, a root file
+    /// no program reads, a mod's requested program, and `shadowcomp`.
+    #[test]
+    fn program_stages_are_the_stages_the_loader_reads() {
+        let vsh = "#version 330\nvoid main() { gl_Position = vec4(0.0); }\n";
+        let fsh =
+            "#version 330\nlayout(location = 0) out vec4 c;\nvoid main() { c = vec4(1.0); }\n";
+        let gsh = "#version 330\nlayout(triangles) in;\nlayout(triangle_strip, max_vertices = 3) out;\n\
+                   void main() {}\n";
+        let csh = "#version 430\nlayout(local_size_x = 1) in;\nvoid main() {}\n";
+        let mut files: Vec<(String, &str)> = Vec::new();
+        for name in [
+            "composite",
+            "final",
+            "setup",
+            "shadow",
+            "composite2",
+            "gbuffers_terrain",
+            "gbuffers_water",
+            "shadow_water",
+            "shadowcomp",
+            "gbuffers_mod_glow",
+        ] {
+            files.push((format!("{name}.vsh"), vsh));
+            files.push((format!("{name}.fsh"), fsh));
+        }
+        for (file, text) in [
+            ("composite_a.csh", csh),
+            ("final.csh", csh),
+            ("setup.csh", csh),
+            ("deferred.csh", csh),
+            ("deferred_b.csh", csh),
+            ("prepare1.fsh", fsh),
+            ("shadow.tcs", vsh),
+            ("composite2.tcs", vsh),
+            ("composite2.csh", csh),
+            ("gbuffers_terrain.gsh", gsh),
+            ("shadow_water.gsh", gsh),
+            ("gbuffers_water.csh", csh),
+            ("unused.vsh", vsh),
+            ("world1/final.csh", csh),
+        ] {
+            files.push((file.to_owned(), text));
+        }
+        let pack = |properties: &str| {
+            let mut all: Vec<(String, &str)> = files
+                .iter()
+                .map(|(p, t)| (format!("shaders/{p}"), *t))
+                .collect();
+            all.push(("shaders/shaders.properties".into(), properties));
+            let all: Vec<(&str, &str)> = all.iter().map(|(p, t)| (p.as_str(), *t)).collect();
+            Pack::from_zip_bytes("P.zip", crate::pack::tests::zip(&all)).unwrap()
+        };
+        let mods = ["gbuffers_mod_glow".to_owned()];
+        let gbuffers = GbuffersInputs::default();
+        let mut read = std::collections::BTreeSet::new();
+        for shadow in ["true", "false"] {
+            for geometry in [true, false] {
+                let pack = pack(&format!("shadow.enabled = {shadow}\n"));
+                let macros = Macros::standard();
+                let (properties, _) = crate::read_properties(&pack, &mut macros.clone());
+                let inputs = GameInputs {
+                    terrain: Some(gbuffers.clone()),
+                    entities: Some(gbuffers.clone()),
+                    terrain_geometry: geometry.then(crate::GeometryInputs::default),
+                    entity_geometry: geometry.then(crate::GeometryInputs::default),
+                    mod_programs: vec![ModPackProgramRequest {
+                        slot: 0,
+                        programs: mods.to_vec(),
+                        group: Group::Gbuffers,
+                        default_blend: None,
+                        inputs: gbuffers.clone(),
+                    }],
+                    ..Default::default()
+                };
+                STAGES_READ.with_borrow_mut(Vec::clear);
+                load_post(&pack, "", &properties, &macros, &inputs);
+                read.extend(STAGES_READ.with_borrow_mut(std::mem::take));
+            }
+        }
+        let read: Vec<String> = read.into_iter().collect();
+        let scanned = program_stages(&pack(""), "", &mods);
+        assert_eq!(scanned, read);
+        assert_eq!(
+            scanned,
+            [
+                "composite.fsh",
+                "composite.vsh",
+                "composite_a.csh",
+                "deferred.csh",
+                "deferred_b.csh",
+                "final.csh",
+                "final.fsh",
+                "final.vsh",
+                "gbuffers_mod_glow.fsh",
+                "gbuffers_mod_glow.vsh",
+                "gbuffers_water.fsh",
+                "gbuffers_water.vsh",
+                "setup.csh",
+                "shadow.fsh",
+                "shadow_water.fsh",
+                "shadow_water.gsh",
+                "shadow_water.vsh",
+                "shadowcomp.fsh",
+                "shadowcomp.vsh",
+            ]
+        );
+        // A lone `final.csh` (in `world1`, where `final` has no other stage) isn't read.
+        assert!(program_stages(&pack(""), "world1", &[]).is_empty());
+        assert!(
+            !program_stages(&pack(""), "", &[])
+                .iter()
+                .any(|f| f.contains("mod_glow"))
+        );
+    }
+
     #[test]
     fn sunrises_test_pack_loads() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/packs/post-test");
         let pack = Pack::open(&dir).unwrap();
-        let macros = Macros::standard();
-        let properties = Properties::parse(&pack.read_text("shaders.properties").unwrap(), &macros);
+        // As the game reads it: `read_properties`, then the programs with the macros it leaves.
+        let mut macros = Macros::standard();
+        let (properties, notes) = crate::read_properties(&pack, &mut macros);
+        assert!(notes.is_empty(), "{notes:?}");
         let post = load_post(
             &pack,
             &dimension_folder(&pack, 0),
@@ -3594,6 +4555,103 @@ blend.composite1.colortex3 = ONE ONE ONE ONE
             crate::Format::parse("RGBA16F").unwrap()
         );
     }
+
+    #[test]
+    fn mod_program_requests_resolve_chain_fallback_and_defines_without_panicking() {
+        let mod_vsh = "#version 120\n\
+            void main() {\n\
+                gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;\n\
+            }\n";
+        let mod_fsh_defined = "#version 120\n\
+            #ifdef MOD_CUSTOM_FEATURE\n\
+            void main() { gl_FragData[0] = vec4(0.25, 0.75, 0.5, 1.0); }\n\
+            #else\n\
+            void main() { gl_FragData[0] = vec4(1.0, 0.0, 0.0, 1.0); }\n\
+            #endif\n";
+        let broken_fsh = "#version 120\nvoid main() { gl_FragData[0] = undeclared_symbol; }\n";
+        let pack = Pack::from_zip_bytes(
+            "mod-pack-programs",
+            crate::pack::tests::zip(&[
+                ("shaders/custom_terrain.vsh", mod_vsh),
+                ("shaders/custom_terrain.fsh", mod_fsh_defined),
+                ("shaders/broken_custom.vsh", mod_vsh),
+                ("shaders/broken_custom.fsh", broken_fsh),
+                ("shaders/gbuffers_terrain.vsh", mod_vsh),
+                (
+                    "shaders/gbuffers_terrain.fsh",
+                    "#version 120\nvoid main() { gl_FragData[0] = vec4(0.5, 0.5, 0.5, 1.0); }\n",
+                ),
+            ]),
+        )
+        .unwrap();
+        let mut macros = Macros::standard();
+        macros.define("MOD_CUSTOM_FEATURE", "");
+        let base_inputs = GbuffersInputs {
+            declarations: "layout(location = 0) in vec3 hz_v_pos;\n".into(),
+            body: "    hz_Vertex = vec4(hz_v_pos, 1.0);\n\
+                   hz_Color = vec4(1.0);\n\
+                   hz_MultiTexCoord0 = vec4(0.0, 0.0, 0.0, 1.0);\n\
+                   hz_MultiTexCoord1 = vec4(240.0, 240.0, 0.0, 1.0);\n\
+                   hz_MultiTexCoord2 = hz_MultiTexCoord1;\n\
+                   hz_Normal = vec3(0.0, 1.0, 0.0);\n"
+                .into(),
+            ..GbuffersInputs::default()
+        };
+        let inputs = GameInputs {
+            mod_programs: vec![
+                // Custom program exists and compiles with injected define.
+                ModPackProgramRequest {
+                    slot: 0,
+                    programs: vec!["custom_terrain".into(), "gbuffers_terrain".into()],
+                    group: Group::Gbuffers,
+                    default_blend: None,
+                    inputs: base_inputs.clone(),
+                },
+                // Prepended program fails to translate -> falls down chain to gbuffers_terrain.
+                ModPackProgramRequest {
+                    slot: 1,
+                    programs: vec!["broken_custom".into(), "gbuffers_terrain".into()],
+                    group: Group::Gbuffers,
+                    default_blend: None,
+                    inputs: base_inputs.clone(),
+                },
+                // Every candidate missing or broken -> resolves to None (falls back to mod shader).
+                ModPackProgramRequest {
+                    slot: 2,
+                    programs: vec!["missing_prog".into(), "broken_custom".into()],
+                    group: Group::Translucent,
+                    default_blend: Some(TRANSLUCENT_BLEND),
+                    inputs: base_inputs,
+                },
+            ],
+            ..GameInputs::default()
+        };
+        let post = load_post(&pack, "", &Properties::default(), &macros, &inputs);
+        assert_eq!(post.mod_programs.len(), 3);
+        assert_eq!(post.mod_programs[0].slot, 0);
+        assert_eq!(
+            post.mod_programs[0]
+                .program
+                .as_ref()
+                .map(|p| p.name.as_str()),
+            Some("custom_terrain")
+        );
+        assert_eq!(post.mod_programs[1].slot, 1);
+        assert_eq!(
+            post.mod_programs[1]
+                .program
+                .as_ref()
+                .map(|p| p.name.as_str()),
+            Some("gbuffers_terrain")
+        );
+        assert_eq!(post.mod_programs[2].slot, 2);
+        assert!(post.mod_programs[2].program.is_none());
+        assert!(
+            post.notes.iter().any(|n| n.contains("broken_custom")),
+            "broken program should be noted without panicking: {:?}",
+            post.notes
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3603,7 +4661,13 @@ mod lifecycle_tests;
 mod buffer_blend_tests;
 
 #[cfg(test)]
+mod blend_key_tests;
+
+#[cfg(test)]
 mod material_variant_tests;
 
 #[cfg(test)]
 mod sky_switch_tests;
+
+#[cfg(test)]
+mod indirect_tests;

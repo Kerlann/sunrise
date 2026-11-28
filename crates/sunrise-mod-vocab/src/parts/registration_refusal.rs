@@ -1,7 +1,8 @@
 // exports: none (reached inside the crate only)
-//! Registration refusals and bounded loading messages.
+//! Registration refusals and loading messages.
 
-/// Why a native declaration was not accepted.
+/// Why a native declaration was not accepted. An explicit namespace is part of the key,
+/// not a claim to package ownership.
 #[derive(Clone, Debug, PartialEq, Eq, sunrise_mod_api_macros::Wire)]
 #[non_exhaustive]
 pub enum DeclarationError {
@@ -14,13 +15,6 @@ pub enum DeclarationError {
     InvalidId {
         /// Rejected identifier, including any inferred namespace.
         id: String,
-    },
-    /// The mod's manifest does not own the identifier's namespace.
-    UnownedNamespace {
-        /// Rejected identifier.
-        id: String,
-        /// Namespace not available to the declaring mod.
-        namespace: String,
     },
     /// A declaration failed another registry-specific check.
     Rejected {
@@ -37,7 +31,6 @@ impl DeclarationError {
         match self {
             Self::RegistrationClosed { id }
             | Self::InvalidId { id }
-            | Self::UnownedNamespace { id, .. }
             | Self::Rejected { id, .. } => id,
         }
     }
@@ -48,9 +41,6 @@ impl std::fmt::Display for DeclarationError {
         match self {
             Self::RegistrationClosed { id } => write!(f, "registration is closed for {id:?}"),
             Self::InvalidId { id } => write!(f, "invalid identifier {id:?}"),
-            Self::UnownedNamespace { id, namespace } => {
-                write!(f, "{id:?} in unowned namespace {namespace:?}")
-            }
             Self::Rejected { id, reason } => write!(f, "{id:?}: {reason}"),
         }
     }
@@ -94,11 +84,6 @@ pub enum DeclarationKind {
     Item,
 }
 
-/// The most loading warnings one mod keeps; later ones are dropped.
-// hidden: registration contexts enforce the cap.
-#[doc(hidden)]
-pub const MAX_LOADING_WARNINGS: usize = 16;
-
 /// A loading message as a translation key and its arguments, resolved against the
 /// selected language when the game shows it (NeoForge's `ModLoadingIssue`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -109,14 +94,11 @@ pub struct LoadingMessage {
 }
 
 impl LoadingMessage {
-    /// A message from `key` and its `%s` arguments, each cut to 4096 bytes as `refuse` cuts.
+    /// A message from `key` and its `%s` arguments, stored verbatim.
     pub fn new(key: &str, args: &[&str]) -> Self {
         Self {
-            key: bounded_text(key).to_owned(),
-            args: args
-                .iter()
-                .map(|arg| bounded_text(arg).to_owned())
-                .collect(),
+            key: key.to_owned(),
+            args: args.iter().map(|arg| (*arg).to_owned()).collect(),
         }
     }
     /// The translation key; also the text shown when no language has it.
@@ -129,20 +111,27 @@ impl LoadingMessage {
     }
 }
 
-/// `text` cut to at most 4096 UTF-8 bytes, at a character boundary.
-pub(crate) fn bounded_text(text: &str) -> &str {
-    let mut end = text.len().min(4096);
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    &text[..end]
-}
+/// Registration diagnostics for the mod currently running
+/// [`Hooks::register`](crate::Hooks::register).
+pub trait DiagnosticsRegistrar {
+    /// Refuse this mod's registration without panicking.
+    ///
+    /// Every refusal reason recorded during the callback is preserved verbatim and reported,
+    /// including an empty reason. If the callback later panics, the reasons are logged with
+    /// the mod's ID before the pending batch is discarded. All of this mod's pending declarations
+    /// from the callback are discarded, including declarations made before or after the call,
+    /// without adding secondary validation errors. Other mods' declarations are unchanged.
+    /// Return from the callback after refusing registration.
+    fn refuse(&mut self, reason: &str);
 
-/// Drains the context's warnings after the registration callback.
-// hidden: the loader collects warnings before installing Parts.
-#[doc(hidden)]
-pub fn take_registration_warnings(cx: &crate::RegistrationContext) -> Vec<LoadingMessage> {
-    std::mem::take(&mut *cx.warnings.lock().unwrap_or_else(|p| p.into_inner()))
+    /// Record a loading problem without refusing this mod (NeoForge's
+    /// `ModLoader.addLoadingIssue` with `ModLoadingIssue.withAffectedMod`).
+    ///
+    /// `key` is a translation key in the mod's own `lang/` files and `args` its `%s`
+    /// arguments, stored verbatim in call order with no per-mod limit. The log names the
+    /// mod, key, and arguments; the Mods screen shows the first warning in the player's
+    /// language.
+    fn warn(&mut self, key: &str, args: &[&str]);
 }
 
 /// The loading warnings mod `id` gave during registration, in order, from the installed Parts.
@@ -153,64 +142,27 @@ pub fn registration_warnings(id: &str) -> Vec<LoadingMessage> {
         installed
             .warnings
             .iter()
-            .filter(|(owner, _)| owner == id)
-            .map(|(_, warning)| warning.clone())
+            .filter(|(owner, _)| *owner == id)
+            .flat_map(|(_, warnings)| warnings.iter().cloned())
             .collect()
     })
 }
 
-/// Drains the context's refusal after the registration callback.
-// hidden: the loader decides whether to admit the registered mod.
-#[doc(hidden)]
-pub fn take_registration_refusal(cx: &crate::RegistrationContext) -> Option<String> {
-    cx.self_refusal
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .take()
-}
-
 #[cfg(test)]
 mod tests {
-    use crate::RegistrationContext;
-    #[test]
-    fn bounded_reasons_preserve_utf8_and_empty_is_a_refusal() {
-        for (reason, expected) in [
-            ("a".repeat(4095) + "é!", "a".repeat(4095)),
-            ("é".repeat(2048), "é".repeat(2048)),
-            (String::new(), String::new()),
-        ] {
-            let cx = RegistrationContext::new();
-            cx.refuse(&reason);
-            cx.refuse("not the first reason");
-            assert_eq!(*cx.self_refusal.lock().unwrap(), Some(expected));
-        }
-    }
+    use super::*;
 
     #[test]
-    fn warnings_keep_key_and_arguments_up_to_the_cap() {
-        let cx = RegistrationContext::new();
-        for i in 0..=super::MAX_LOADING_WARNINGS {
-            cx.warn("test.warn.optional", &["jei", &i.to_string()]);
-        }
-        let warnings = super::take_registration_warnings(&cx);
-        assert_eq!(warnings.len(), super::MAX_LOADING_WARNINGS);
-        assert_eq!(warnings[0].key(), "test.warn.optional");
-        assert_eq!(warnings[0].args(), ["jei", "0"]);
-        assert_eq!(warnings[15].args(), ["jei", "15"]);
-        assert_eq!(*cx.self_refusal.lock().unwrap(), None);
-    }
-
-    #[test]
-    fn a_warning_cuts_key_and_arguments_at_a_character_boundary_and_keeps_every_argument() {
-        let fits = "a".repeat(4096);
-        let over = format!("{}é", "a".repeat(4095));
+    fn a_loading_message_keeps_key_and_arguments_verbatim() {
+        let long_key = format!("{}é!", "a".repeat(4096));
+        let long_arg = format!("{}é!", "b".repeat(4096));
         let many: Vec<String> = (0..20).map(|i| i.to_string()).collect();
-        let mut args: Vec<&str> = vec![&fits, &over];
+        let mut args: Vec<&str> = vec!["", &long_arg];
         args.extend(many.iter().map(String::as_str));
-        let warning = super::LoadingMessage::new(&format!("{fits}b"), &args);
-        assert_eq!(warning.key(), fits);
-        assert_eq!(warning.args()[0], fits);
-        assert_eq!(warning.args()[1], "a".repeat(4095));
+        let warning = LoadingMessage::new(&long_key, &args);
+        assert_eq!(warning.key(), long_key);
+        assert_eq!(warning.args()[0], "");
+        assert_eq!(warning.args()[1], long_arg);
         assert_eq!(warning.args().len(), 22);
         assert_eq!(warning.args()[21], "19");
     }

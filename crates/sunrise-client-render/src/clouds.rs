@@ -513,7 +513,7 @@ pub fn load(
 }
 
 /// What a pack's `core/clouds` shader reads (`CloudRenderer.prepare` and `buildMesh`): the faces
-/// it reads from `CloudFaces` and its `CloudInfo` block.
+/// it reads from `CloudFaces` and its `CloudInfo` block; and its programs.
 pub mod pack {
     use super::{Input, MeshKey};
 
@@ -527,6 +527,16 @@ pub mod pack {
     const SOUTH: i32 = 3;
     const WEST: i32 = 4;
     const EAST: i32 = 5;
+
+    /// A pack's `core/clouds` as vanilla compiles it: for `RenderPipelines.CLOUDS` and
+    /// `FLAT_CLOUDS`, and for `OIT_CLOUDS` and `OIT_FLAT_CLOUDS`, one program a stage
+    /// (`OitStage`'s order). Vanilla requires them all: a pack whose shader can't make one
+    /// fails the load (`hud::RequiredShaderRefused`).
+    #[derive(Debug)]
+    pub struct Programs {
+        pub classic: sunrise_glsl::Translated,
+        pub oit: Box<[sunrise_glsl::Translated; 3]>,
+    }
 
     /// What [`faces`] depends on: the camera's cell and side of the layer, the range and the
     /// style, and the cloud texture. `CloudRenderer.prepare` builds its mesh again only when the

@@ -20,6 +20,7 @@ Manifest {
         Registries,
     ],
     namespaces: [],
+    served_by: None,
     dependencies: {},
     incompatible: {},
     discouraged: {},

@@ -190,24 +190,16 @@ pub fn button_with_room(
     };
     ui::nine_slice(batch, atlas, sprite, x, y, w, h, WHITE);
     let color = if live { WHITE } else { muted() };
-    let ty = y + ((h - 8.0) / 2.0).floor();
     let left = x + 2.0 + room;
-    scrolling_label(
-        batch,
-        atlas,
-        label,
-        [left, ty, w - 4.0 - room],
-        (y, h),
-        color,
-    );
+    scrolling_label(batch, atlas, label, [left, w - 4.0 - room], (y, h), color);
 }
-/// A widget label of `[left, y, width]` inside the widget's `(top, height)`: centred when it fits,
+/// A widget label of `[left, width]` inside the widget's `(top, height)`: centred when it fits,
 /// else slid (vanilla `AbstractWidget.extractScrollingStringOverContents`) and clipped to the box.
 fn scrolling_label(
     batch: &mut HudBatch,
     atlas: &HudAtlas,
     text: &Text,
-    [left, y, width]: [f32; 3],
+    [left, width]: [f32; 2],
     (top, height): (f32, f32),
     color: u32,
 ) {
@@ -219,7 +211,6 @@ fn scrolling_label(
         left + width,
         top,
         top + height,
-        y,
         color,
     );
 }
@@ -251,9 +242,8 @@ pub fn slider(
     ui::nine_slice(batch, atlas, track, x, y, w, h, tint);
     let at = x + (position.clamp(0.0, 1.0) * (w - 8.0)).floor();
     ui::nine_slice(batch, atlas, handle, at, y, 8.0, h, tint);
-    let ty = y + ((h - 8.0) / 2.0).floor();
     let color = if live { WHITE } else { muted() };
-    scrolling_label(batch, atlas, value, [x + 2.0, ty, w - 4.0], (y, h), color);
+    scrolling_label(batch, atlas, value, [x + 2.0, w - 4.0], (y, h), color);
 }
 /// A value that a press steps through: a button showing the value, as vanilla's `CycleButton`.
 pub fn cycler(
@@ -562,17 +552,21 @@ mod tests {
             let mut batch = HudBatch::scratch([640, 480]);
             draw(&mut batch, &atlas, rect, &long);
             assert!(batch.vertices.len() > base, "{name}: long label drawn");
-            // The widget's own fill, track and handle also draw: only the label's vertices count.
+            // The widget's own fill, track and handle also draw: only the label's quads count.
+            let widget: Vec<_> = plain.quad_scissors().map(|(bounds, _)| bounds).collect();
             let label = batch
-                .vertices
-                .iter()
-                .filter(|v| !plain.vertices.iter().any(|p| p.pos == v.pos));
-            for v in label {
+                .quad_scissors()
+                .zip(batch.visible_quads())
+                .filter(|((bounds, _), _)| !widget.contains(bounds))
+                .filter_map(|(_, visible)| visible);
+            for [x0, y0, x1, y1] in label {
                 assert!(
-                    (rect[0]..=rect[0] + rect[2]).contains(&v.pos[0])
-                        && (rect[1]..=rect[1] + rect[3]).contains(&v.pos[1]),
+                    rect[0] <= x0
+                        && x1 <= rect[0] + rect[2]
+                        && rect[1] <= y0
+                        && y1 <= rect[1] + rect[3],
                     "{name}: {:?} outside the widget",
-                    v.pos
+                    [x0, y0, x1, y1]
                 );
             }
             // The label's own glyphs (past the widget's fill) start centred.

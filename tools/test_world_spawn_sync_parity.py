@@ -7,18 +7,17 @@ No game window, listening socket, server constructor or world bootstrap is used.
 This is not a full connected-client join/respawn test.
 """
 import argparse
-import json
 import os
 from pathlib import Path
 import subprocess
 import tempfile
-try:
-    from . import lab, test_rust_parity as base
-except ImportError:
-    import lab
-    import test_rust_parity as base
+import sys
 
-TESTS = 'game::lan::world_spawn_sync_tests::'
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, test_rust_parity as base
+
+TESTS = 'game::server_side::lan::world_spawn_sync_tests::'
 
 
 def main():
@@ -39,11 +38,11 @@ def main():
     lock, jars, libraries = base.verify_artifacts()
     source = lab.ROOT / 'mods/sunrise/src/test/java/dev/sunriselab/parity/VanillaWorldSpawnPacketOracle.java'
     sources = [Path(__file__), source, lab.ROOT / 'Cargo.lock',
-               lab.ROOT / 'crates/sunrise-client/src/game/administration/commands/mod.rs',
-               lab.ROOT / 'crates/sunrise-client/src/game/network/lan_actions/mod.rs',
-               lab.ROOT / 'crates/sunrise-client/src/lan/hub.rs',
-               lab.ROOT / 'crates/sunrise-client/src/game/network/lan/mod.rs',
-               lab.ROOT / 'crates/sunrise-client/src/game/world/server_travel.rs']
+               lab.ROOT / 'crates/sunrise-gameplay/src/game/administration/commands/mod.rs',
+               lab.ROOT / 'crates/sunrise-gameplay-common/src/game/network/lan_actions/mod.rs',
+               lab.ROOT / 'crates/sunrise-sim/src/lan/hub.rs',
+               lab.ROOT / 'crates/sunrise-gameplay/src/game/network/lan/mod.rs',
+               lab.ROOT / 'crates/sunrise-gameplay/src/game/world/server_travel.rs']
     hashes = base.source_hashes(sources)
     lab.write_json(build / 'input.json', dict(sources_sha256=hashes))
 
@@ -70,18 +69,7 @@ def main():
                       'java', cwd=scratch, env=env)
         rows = [r for r in vanilla.read_text(encoding='utf-8').splitlines() if r.startswith('world-spawn\t')]
         assert len(rows) == 7 and len(set(rows)) == 7, 'vanilla oracle did not emit all seven cases'
-        compiled = run(['cargo', 'test', '--locked', '-p', 'sunrise-client', '--lib', '--no-run',
-                        '--message-format=json'], 'compile', cwd=lab.ROOT, env=env)
-        binaries = []
-        for line in compiled.read_text(encoding='utf-8').splitlines():
-            if not line.startswith('{'):
-                continue
-            row = json.loads(line)
-            if (row.get('reason') == 'compiler-artifact' and row.get('executable')
-                    and row.get('target', {}).get('name') == 'sunrise_client'
-                    and row.get('profile', {}).get('test')):
-                binaries.append(Path(row['executable']))
-        assert len(binaries) == 1, 'expected one actual Game test binary'
+        binaries = [lab.parity_fixtures()]
         binary_hash = lab.digest(binaries[0], 'sha256')
         env['SUNRISE_TEST_RESOURCES'] = str(args.resources.resolve())
         result = run([binaries[0], TESTS, '--ignored', '--nocapture'], 'game', cwd=scratch, env=env)

@@ -1,5 +1,4 @@
 //! The `player_load_from_file` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0258
 
 pub trait Hooks {
     /// A player was loaded from the world's save (NeoForge's
@@ -11,10 +10,12 @@ pub trait Hooks {
     /// owner of an integrated server as for anyone else, on a server, with no
     /// player's state swapped in. Not cancellable.
     #[hook(
+        target = "sunrise_gameplay::game::native_hooks::base::ServerGame<'_>::native_player_load_from_file",
+        dispatch = "flat",
         side = "server",
         contract = "listen",
         neoforge = "PlayerEvent.LoadFromFile (not cancellable)",
         cancellable = false
     )]
-    fn player_load_from_file();
+    fn player_load_from_file(player: u128, name: &str, directory: &std::path::Path);
 }

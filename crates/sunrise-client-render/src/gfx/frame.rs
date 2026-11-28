@@ -27,6 +27,7 @@ pub(super) struct Globals {
     /// Sunrise Extras' dynamic lights: camera-relative position and level (`dynamic_light`).
     pub(super) dynamic_lights: [[f32; 4]; crate::dynamic_light::MAX],
     pub(super) colored_lights: [crate::dynamic_light::Colored; crate::dynamic_light::MAX],
+    /// x: coloured light count; yzw: padding.
     pub(super) colored_count: [u32; 4],
     pub(super) emissive_layers: [[u32; 4]; crate::native_emissive::MAX],
     pub(super) emissive_count: [u32; 4],
@@ -56,7 +57,6 @@ pub(super) struct Globals {
 pub(super) struct MeshFacts<'a> {
     pub(super) visibility: u64,
     pub(super) block_entities: &'a [([i32; 3], u32)],
-    pub(super) lights: &'a [([i32; 3], u32)],
     pub(super) bounds: Option<[glam::Vec3; 2]>,
     /// It has translucent quads.
     pub(super) translucent: bool,
@@ -68,24 +68,15 @@ impl<'a> MeshFacts<'a> {
         Self {
             visibility: mesh.visibility,
             block_entities: &mesh.block_entities,
-            lights: &mesh.lights,
             bounds: mesh.bounds,
             translucent: !mesh.translucent.is_empty(),
             empty: mesh.solid.is_empty() && mesh.translucent.is_empty(),
         }
     }
 }
-/// The water mirror's targets: the world as a camera mirrored about the water plane sees
-/// it, at half the world's resolution (the material stage's `reflection`).
-pub(super) struct MirrorTarget {
-    pub(super) size: [u32; 2],
-    pub(super) color: wgpu::TextureView,
-    pub(super) depth: wgpu::TextureView,
-}
-
 /// Not before then may a large translucent page start to shrink.
 #[derive(Default)]
-pub(super) struct ShrinkGate(pub(super) Option<Instant>);
+pub(crate) struct ShrinkGate(pub(super) Option<Instant>);
 impl ShrinkGate {
     /// Not before `wait` from `now`, nor before an earlier wait is over.
     pub(super) fn wait(&mut self, now: Instant, wait: std::time::Duration) {
@@ -113,7 +104,10 @@ pub struct Frame<'a> {
     pub camera: DVec3,
     pub yaw: f32,
     pub pitch: f32,
+    pub roll: f32,
     pub fov_degrees: f32,
+    /// `Camera.createProjectionMatrixForCulling`: `max(fov_degrees, option_fov)`.
+    pub cull_fov_degrees: f32,
     /// The camera entity's eye and view rotation (yaw, pitch): the camera's own except in a
     /// third-person view.
     pub eye: DVec3,
@@ -123,6 +117,9 @@ pub struct Frame<'a> {
     /// The `GameRenderer.bobHurt`/`bobView` pose multiplied into the
     /// projection (`crate::camera::bob_matrix`).
     pub bob: Mat4,
+    /// A mod's `render_view_transform` (identity when none listens): drawn after the bob, and
+    /// part of the culling transform, which the vanilla bob and spin stay out of.
+    pub view_transform: Mat4,
     /// The spinning effect multiplied into the level's projection only
     /// (`crate::camera::spinning_effect_matrix`), not the hand's.
     pub spin: Mat4,
@@ -134,21 +131,23 @@ pub struct Frame<'a> {
     pub shadow_cache: bool,
     /// Render distance in blocks (fog end).
     pub distance: f32,
-    /// Full-detail terrain distance in blocks; distant LODs bypass the cave graph.
+    /// Terrain render distance in blocks.
     pub detail_distance: f32,
+    /// Shadow caster selection distance in blocks; defaults to the effective eye distance
+    /// (`detail_distance`) when `None`.
+    pub shadow_distance: Option<f32>,
     /// `Camera.depthFar`: the far plane (`crate::camera::depth_far`).
     pub depth_far: f32,
     pub underwater: bool,
-    /// The y of the horizontal water plane around the camera, in world blocks, while one
-    /// of Sunrise's own packs reads the water mirror (`Game::water_plane`,
-    /// `Renderer::wants_water_plane`).
-    pub water_plane: Option<f32>,
     /// Skip sections the camera cannot see through open faces (vanilla's
     /// occlusion graph; off in spectator-like views inside blocks).
     pub cave_culling: bool,
     /// Title screen: only the dedicated panorama cube map and the HUD.
     pub title: bool,
-    /// Lava, powder snow, blindness, darkness or a boss bar's world fog leaves out the sky pass
+    /// Whether `LevelRenderer.addSkyPass` would add the pass that owns NeoForge's
+    /// `RenderLevelStageEvent.AfterSky`, independent of Sunrise's sky drawing flags.
+    pub sky_pass: bool,
+    /// Lava, powder snow, blindness, darkness or a boss bar's world fog suppresses sky drawing
     /// (`fog::sky_pass_skipped`).
     pub sky_blocked: bool,
     /// Dimensions without a skybox (the Nether) clear to the fog colour.
@@ -172,8 +171,6 @@ pub struct Frame<'a> {
     pub outline_after_terrain: bool,
     /// `BlockOutlineRenderState.highContrast`: a thick black outline under a bright one.
     pub outline_high_contrast: bool,
-    /// The PvP & HUD page's outline and hit colour (`pvp::Frame`; default: vanilla's).
-    pub pvp: crate::pvp::Frame,
     /// `lines` with a colour and pixel width (`gizmos::camera_relative`):
     /// the fishing line and debug gizmos, depth tested, then gizmos drawn
     /// over everything.
@@ -193,6 +190,8 @@ pub struct Frame<'a> {
     pub nether_lighting: bool,
     /// Camera-relative entity geometry textured from the shared atlas.
     pub entities: &'a [Vertex],
+    /// Explicit world particle-atlas geometry, drawn outside the combined entity buffer.
+    pub explicit_particles: Option<&'a crate::particles::ParticleQuads>,
     /// Per-section cacheable block-entity models. Positions are section-local.
     pub static_block_entities: &'a [StaticSectionSnapshot],
     /// Sections currently intersecting the coarse camera frustum.
@@ -285,6 +284,13 @@ pub struct Frame<'a> {
     pub chunk_fade: f32,
     /// `GameRenderer.requestedPostEffects`: the chains that run over the world.
     pub post_effects: crate::post_chain::Request<'a>,
+}
+
+impl Frame<'_> {
+    /// The pose the world and hand are drawn with: the vanilla bob, then the mod's transform.
+    pub fn posed_bob(&self) -> Mat4 {
+        self.bob * self.view_transform
+    }
 }
 /// A frame to save as a PNG: F2's screenshot, an agent's `game_screenshot`,
 /// or the icon the Select World list shows.

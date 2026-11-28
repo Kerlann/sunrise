@@ -15,7 +15,6 @@
   },
   "workspaces": [
     "Cargo.toml",
-    "crates/sunrise-mod-registry/Cargo.toml",
     "crates/sunrise-telemetry-server/Cargo.toml"
   ],
   "crates": {
@@ -23,7 +22,7 @@
     "sunrise-game-discovery": "engine",
     "sunrise-bench": "engine",
     "sunrise-client": "engine",
-    "sunrise-client-core": "engine",
+    "sunrise-game-data": "engine",
     "sunrise-client-input": "engine",
     "sunrise-border": "engine",
     "sunrise-client-lib": "engine",
@@ -33,17 +32,21 @@
     "sunrise-command": "engine",
     "sunrise-connected": "engine",
     "sunrise-core": "engine",
+    "sunrise-gameplay-common": "engine",
+    "sunrise-glsl": "engine",
     "sunrise-gameplay": "engine",
     "sunrise-items": "engine",
     "sunrise-narrator": "engine",
+    "sunrise-audio-input": "engine",
     "sunrise-perf-format": "engine",
     "sunrise-prepare": "engine",
     "sunrise-protocol": "engine",
+    "sunrise-proxy": "engine",
     "sunrise-server-files": "engine",
+    "sunrise-server-profiles-http": "engine",
     "sunrise-java-properties": "engine",
     "sunrise-system": "engine",
     "sunrise-threads": "engine",
-    "sunrise-guest-stack": "engine",
     "sunrise-deflate": "engine",
     "sunrise-world": "engine",
     "cargo-sunrise-mod": "tool",
@@ -56,14 +59,15 @@
     "sunrise-platform": "platform",
     "sunrise-polytone": "platform",
     "sunrise-port-pack": "platform",
-    "sunrise-shader-api": "platform",
+    "sunrise-jar-fetch": "platform",
+    "sunrise-render-shaderpack": "engine",
     "sunrise-shaders": "platform",
     "sunrise-theme": "platform",
     "sunrise-addresses": "sunrise",
+    "sunrise-attestation": "sunrise",
     "sunrise-discord": "sunrise",
     "sunrise-friends": "sunrise",
     "sunrise-heartbeat": "sunrise",
-    "sunrise-mod-registry": "sunrise",
     "sunrise-official": "sunrise",
     "sunrise-perf-share": "sunrise",
     "sunrise-perf-overlay": "sunrise",
@@ -73,7 +77,9 @@
     "sunrise-server": "sunrise",
     "sunrise-bots": "tool",
     "sunrise-perf": "tool",
+    "sunrise-parity-fixtures": "tool",
     "sunrise-mod-api-gen-tests": "tool",
+    "sunrise-stage": "tool",
     "xtask": "tool",
     "sunrise-internals": "platform",
     "sunrise-mod-api": "platform",
@@ -82,8 +88,10 @@
     "sunrise-mod-surface": "engine",
     "sunrise-mod-source": "engine",
     "sunrise-mod-render": "platform",
+    "sunrise-mod-pipeline": "engine",
     "sunrise-server-launch": "platform",
     "sunrise-mod-package": "engine",
+    "sunrise-dependency-rule": "engine",
     "sunrise-mod-runtime": "engine",
     "sunrise-mod-dimension-game": "tool",
     "sunrise-hot-paths-game": "tool",
@@ -93,7 +101,9 @@
     "sunrise-mod-host": "platform",
     "sunrise-telemetry": "sunrise",
     "sunrise-telemetry-server": "sunrise",
-    "sunrise-mod-vocab": "engine"
+    "sunrise-mod-vocab": "engine",
+    "sunrise-level": "engine",
+    "sunrise-sim": "engine"
   },
   "sides": {
     "_doc": "Gameplay's two sides (#2210): neither may depend on the other, directly or through another crate.",
@@ -106,7 +116,7 @@
     "_doc": "docs/layers.md#engine: vanilla's rules and data with no desktop in them, which a port builds on. They depend only on each other, and never on a forbidden library.",
     "crates": [
       "sunrise-assets",
-      "sunrise-client-core",
+      "sunrise-game-data",
       "sunrise-command",
       "sunrise-connected",
       "sunrise-core",
@@ -122,13 +132,18 @@
       "sunrise-mod-api-macros",
       "sunrise-game-discovery",
       "sunrise-threads",
-      "sunrise-guest-stack",
       "sunrise-deflate",
-      "sunrise-java-properties"
+      "sunrise-java-properties",
+      "sunrise-server-files",
+      "sunrise-border",
+      "sunrise-perf-format",
+      "sunrise-level",
+      "sunrise-sim",
+      "sunrise-system",
+      "sunrise-bench"
     ],
     "pending": {
-      "_doc": "Engine crates that still take a non-portable crate, until the types they need move down. Entries only go away.",
-      "sunrise-gameplay": ["sunrise-client-lib"]
+      "_doc": "Engine crates that still take a non-portable crate, until the types they need move down. Entries only go away."
     },
     "forbidden": [
       "arboard",
@@ -141,31 +156,30 @@
   },
   "optional": [
     {
-      "edge": "sunrise-mod-package -> sunrise-shader-api",
-      "reason": "The optional `index` feature validates shader packages in the registry index; the portable crates take sunrise-mod-package without it."
+      "edge": "sunrise-client-gameplay -> sunrise-optifine",
+      "reason": "OptiFine entity models and random textures are client-only behind the `client` feature; server-only builds omit them."
+    },
+    {
+      "edge": "sunrise-client-gameplay -> sunrise-theme",
+      "reason": "UI theme tokens and fonts are client-only behind the `client` feature; server-only builds omit them."
     }
   ],
   "allowed": [
-    "sunrise-client -> sunrise-dualsense",
-    "sunrise-client -> sunrise-friends",
-    "sunrise-client -> sunrise-optifine",
-    "sunrise-client -> sunrise-shader-api",
-    "sunrise-client -> sunrise-shaders",
-    "sunrise-client -> sunrise-theme",
-    "sunrise-client-lib -> sunrise-dualsense",
     "sunrise-client-lib -> sunrise-mcp",
     "sunrise-client-lib -> sunrise-optifine",
-    "sunrise-client-lib -> sunrise-shader-api",
     "sunrise-client-lib -> sunrise-shaders",
     "sunrise-client-lib -> sunrise-telemetry",
     "sunrise-client-render -> sunrise-hdr",
     "sunrise-client-render -> sunrise-optifine",
     "sunrise-client-render -> sunrise-polytone",
-    "sunrise-client-render -> sunrise-shader-api",
     "sunrise-client-render -> sunrise-shaders",
+    "sunrise-render-shaderpack -> sunrise-shaders",
     "sunrise-native-build -> sunrise-mod-package",
-    "sunrise-mod-registry -> sunrise-mod-package",
-    "sunrise-client -> sunrise-telemetry"
+    "sunrise-client -> sunrise-telemetry",
+    "sunrise-client-gameplay -> sunrise-dualsense",
+    "sunrise-client-gameplay -> sunrise-friends",
+    "sunrise-client-gameplay -> sunrise-shaders",
+    "sunrise-client-gameplay -> sunrise-telemetry"
   ],
   "_fork_baselines": {
     "sunrise-internals": "Existing fork mod/platform boundary; no engine ownership moved by this sync.",
@@ -179,7 +193,6 @@
     "sunrise-hot-paths-game": "Workspace development fixtures, not a shipped runtime dependency.",
     "sunrise-modding-examples": "Workspace development fixtures, not a shipped runtime dependency.",
     "sunrise-bench -> sunrise-system": "Existing fork dependency across the upstream layer split; recorded baseline, not a new dependency.",
-    "sunrise-mod-registry -> sunrise-mod-package": "Separate registry workspace: reads and writes the registry index format (feature index only); recorded baseline, not a new dependency.",
     "sunrise-client -> sunrise-telemetry": "Restored upstream Horizon layer: existing engine dependency pending the upstream layer extraction.",
     "sunrise-client-lib -> sunrise-telemetry": "Restored upstream Horizon layer: existing engine dependency pending the upstream layer extraction."
   }

@@ -2,6 +2,7 @@ id = "keys_manifest_forms"
 name = "Rule forms"
 version = "1.0.0"
 side = "client"
+served_by = "rule_host"
 
 [incompatible]
 client_overlay = { side = "client" }

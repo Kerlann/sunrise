@@ -1,109 +1,82 @@
-//! Native hook placement discovered from engine modules, used by source tooling.
-use crate::catalog::{Catalog, DECLARATIONS};
-use serde_json::{Value, json};
-use std::{collections::BTreeMap, fs, path::Path};
-use syn::{Item, spanned::Spanned};
+use crate::{SourceLayout, catalog::BindingKind, gameplay::Routing};
+use std::{
+    collections::{BTreeMap, HashSet},
+    path::Path,
+};
+use syn::{ImplItem, Item, TraitItem, Type};
 
-/// Return catalog areas and lossless item line ranges for the source splitter.
-pub fn native_hook_layout(root: &Path, source: &str) -> Result<Value, String> {
-    let mut engine_areas = BTreeMap::new();
-    for path in sunrise_game_discovery::native_hook_files(root)? {
-        let area = path.file_stem().unwrap().to_string_lossy().into_owned();
-        let file = syn::parse_file(&fs::read_to_string(&path).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
-        for item in file.items {
-            if let Item::Impl(item) = item {
-                for method in item.items {
-                    if let syn::ImplItem::Fn(method) = method {
-                        let name = method.sig.ident.to_string();
-                        if name.starts_with("native_")
-                            && let Some(previous) = engine_areas.insert(name.clone(), area.clone())
-                            && previous != area
-                        {
-                            return Err(format!("{name}: found in both {previous} and {area}"));
-                        }
+#[test]
+fn native_hooks_live_in_their_catalog_area() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let catalog = Routing::load(&root).unwrap().catalog(&root).unwrap();
+    let mut bindings = Vec::new();
+    let mut targets = HashSet::new();
+    let mut ancestors = HashSet::new();
+    for hook in catalog.hooks {
+        let Some(binding) = hook.gameplay_binding().unwrap() else {
+            continue;
+        };
+        let module = format!("{}::{}", binding.package.domain().key, binding.module);
+        let mut prefix = module.as_str();
+        loop {
+            if !ancestors.insert(prefix.to_owned()) {
+                break;
+            }
+            let Some((parent, _)) = prefix.rsplit_once("::") else {
+                break;
+            };
+            prefix = parent;
+        }
+        targets.insert(module.clone());
+        bindings.push((hook.target, binding, module));
+    }
+    let mut modules = BTreeMap::<String, Vec<Item>>::new();
+    SourceLayout::read(&root)
+        .unwrap()
+        .visit_files(
+            &root,
+            false,
+            |module| ancestors.contains(module),
+            |file, parsed| {
+                if targets.contains(&file.module) {
+                    if let Some(items) = modules.get_mut(&file.module) {
+                        items.extend(parsed.items);
+                    } else {
+                        modules.insert(file.module.clone(), parsed.items);
                     }
                 }
-            }
-        }
-    }
-    let mut areas = BTreeMap::new();
-    for area in Catalog::modules(&root.join(DECLARATIONS))? {
-        let path = root.join(DECLARATIONS).join(format!("{area}.rs"));
-        let catalog = Catalog::parse(&[(
-            path.display().to_string(),
-            fs::read_to_string(&path).map_err(|e| e.to_string())?,
-        )])?;
-        for target in catalog.hooks.iter().map(|h| &h.target) {
-            if target.starts_with("sunrise_client::game::native_hooks::") {
-                let name = target.rsplit("::").next().unwrap().to_owned();
-                let engine_area = engine_areas.get(&name).ok_or_else(|| {
-                    format!("{name}: catalog target is missing from engine modules")
-                })?;
-                areas.insert(name, engine_area.clone());
-            }
-        }
-    }
-    let file = syn::parse_file(source).map_err(|e| e.to_string())?;
-    let mut items = Vec::new();
-    for item in file.items {
-        let span = item.span();
-        if let Item::Impl(item) = &item {
-            let methods = item
-                .items
-                .iter()
-                .map(|method| {
-                    let name = match method {
-                        syn::ImplItem::Fn(method) => method.sig.ident.to_string(),
-                        _ => String::new(),
+            },
+        )
+        .unwrap();
+    assert!(!bindings.is_empty());
+    for (target, binding, module) in bindings {
+        let items = modules
+            .get(&module)
+            .unwrap_or_else(|| panic!("missing module {module}"));
+        assert!(
+            items.iter().any(|item| match (item, &binding.kind) {
+                (Item::Fn(function), BindingKind::Free | BindingKind::Borrowed(_)) => {
+                    function.sig.ident == binding.function
+                }
+                (Item::Trait(item), BindingKind::Shared) => {
+                    item.ident == "GameHooks" && item.items.iter().any(|member| {
+                        matches!(member, TraitItem::Fn(method) if method.sig.ident == binding.function && method.default.is_some())
+                    })
+                }
+                (Item::Impl(item), BindingKind::Nominal | BindingKind::Scoped(_)) => {
+                    let owner = match &binding.kind {
+                        BindingKind::Scoped(owner) => owner.ident.to_string(),
+                        _ => binding.package.game_type().to_owned(),
                     };
-                    let span = method.span();
-                    json!({"name": name, "start": span.start().line, "end": span.end().line})
-                })
-                .collect::<Vec<_>>();
-            items.push(
-                json!({"start": span.start().line, "end": span.end().line, "methods": methods}),
-            );
-        } else {
-            items.push(json!({"start": span.start().line, "end": span.end().line}));
-        }
-    }
-    Ok(json!({"areas": areas, "items": items}))
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn native_hooks_live_in_their_catalog_area() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let layout = super::native_hook_layout(&root, "").unwrap();
-        let areas = layout["areas"].as_object().unwrap();
-        let dir = root.join("crates/sunrise-client/src/game/native_hooks");
-        let mut found = std::collections::BTreeSet::new();
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.extension().is_none_or(|ext| ext != "rs") {
-                continue;
-            }
-            let file = syn::parse_file(&std::fs::read_to_string(&path).unwrap()).unwrap();
-            for item in file.items {
-                if let syn::Item::Impl(item) = item {
-                    for method in item.items {
-                        if let syn::ImplItem::Fn(method) = method {
-                            let name = method.sig.ident.to_string();
-                            if let Some(area) = areas.get(&name) {
-                                assert_eq!(
-                                    path.file_stem().unwrap().to_str().unwrap(),
-                                    area.as_str().unwrap(),
-                                    "{name}"
-                                );
-                                found.insert(name);
-                            }
-                        }
-                    }
+                    item.trait_.is_none()
+                        && matches!(&*item.self_ty, Type::Path(ty) if ty.path.segments.last().is_some_and(|segment| segment.ident == owner))
+                        && item.items.iter().any(|member| {
+                            matches!(member, ImplItem::Fn(method) if method.sig.ident == binding.function)
+                        })
                 }
-            }
-        }
-        assert_eq!(found.len(), areas.len(), "a catalog target is missing");
+                _ => false,
+            }),
+            "missing catalog target {target}",
+        );
     }
 }

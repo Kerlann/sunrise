@@ -69,29 +69,25 @@
 //! of every record of its page, the most a section has, so nothing is clamped.
 use super::{
     Frustum, SectionKey,
-    arena::{Arena, try_create},
+    arena::{Arena, Grown, try_create},
     occlusion::Reach,
     pack_timing::{PassTiming, compute_parts},
     resident,
+    section_fade::Fades,
     submit::Queue,
     upload::Uploads,
 };
 use crate::{graphics::GpuCullingOffer, mesher::Sides};
 use glam::{DVec3, DVec4, Mat4, Vec3};
-use std::{
-    cmp::Reverse,
-    collections::BinaryHeap,
-    sync::{
-        Arc,
-        atomic::{AtomicU8, Ordering},
-    },
-    time::Instant,
+use std::sync::{
+    Arc,
+    atomic::{AtomicU8, Ordering},
 };
 
 /// One section (`gpu_culling.wgsl`'s `Section`).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
-pub(super) struct Record {
+pub(crate) struct Record {
     /// Section x, y (from the level's bottom), z and arena page; -1: a free id.
     key: [i32; 4],
     /// The first vertex of its solid quads (a draw's base vertex, an i32: a
@@ -197,10 +193,14 @@ const RUN_WORDS: u64 = 1 + 2 * RUNS as u64 + 2;
 /// `rounded_box` for bounds past what a box's codes hold, or not finite: no
 /// frustum plane rejects it, so it is drawn wherever its column is within the
 /// render distance.
-const UNBOUNDED: u32 = 1 << 31;
+pub(super) const UNBOUNDED: u32 = 1 << 31;
+/// Packed full 16x16x16 section box (`rounded_box(None)`), used for outside-height octree leaves.
+const FULL_SECTION_BOX: u32 = 8 | (8 << 5) | (8 << 10) | (24 << 15) | (24 << 20) | (24 << 25);
 /// What a box's ends, -8 to 23 blocks from its section's origin, add to make
 /// their 5-bit codes.
 const CODE_OFFSET: i32 = 8;
+const BOX_CODES: i32 = 1 << 5;
+const FRUSTUM_PLANES: usize = 6;
 
 /// A record's box: its section's quad bounds (`SectionMesh::bounds`; `None` is
 /// the whole cell) rounded out to whole blocks, each low end at most 16 and
@@ -245,13 +245,13 @@ impl Update {
 /// `gpu_culling.wgsl`'s `Params`.
 #[repr(C)]
 #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
-struct Params {
+pub(super) struct Params {
     /// Ids the pass tests, and the `Update`s `apply` writes.
     ids: u32,
     updates: u32,
     /// Arena pages the counts and regions cover (at least one), and where the
     /// regions start in `tables`, in words.
-    pages: u32,
+    pub(super) pages: u32,
     regions: u32,
     /// Bits 3j, 3j + 1 and 3j + 2: frustum plane j's x, y and z are at least 0.
     signs: u32,
@@ -259,18 +259,18 @@ struct Params {
     near: i32,
     cam_x: i32,
     cam_z: i32,
-    /// The tables' first column: x, 0, z, 0.
+    /// The tables' first cell: x, y, z, 0.
     first: [i32; 4],
-    /// Their entries along x, y and z, and 0.
+    /// Their entries along x, y and z, and the f32 bits of the instances' UV step.
     cells: [u32; 4],
     /// Each frustum plane's w term, its margin in (`tables`), then 0, 0.
     w: [[i32; 4]; 2],
     /// Cave culling's graph (`Reach`): from x, from z, radius, lowest section y.
     reach: [i32; 4],
-    /// Its height in sections, and the level's (the sky band's top section).
+    /// Its height in sections, and with `TREE` where per-column branch states start in `tables`.
     reach_height: i32,
-    reach_sections: i32,
-    /// `REACH`, `SKY`, `EYE`, `OCCLUDE`, `PROBE`.
+    tree: u32,
+    /// `REACH`, `EYE`, `OCCLUDE`, `PROBE`, `TREE`.
     flags: u32,
     /// With `EYE`, where the eye's keys start in `tables`, in words.
     eyes: u32,
@@ -303,9 +303,8 @@ const FAILED: u8 = 3;
 /// In `Params::flags` (the shader's `REACH`): cave culling's graph is in
 /// `reach`.
 const REACH: u32 = 1;
-/// In `Params::flags` (the shader's `SKY`): its search reached the box's top
-/// layer, so the sky band above a clamped box is reached.
-const SKY: u32 = 2;
+/// A whole section's instance w, the shader's `origins`: 1 / `mesher::UV_STEPS`.
+const STEP_BITS: u32 = 0x3800_0000;
 /// In `Params::flags` (the shader's `EYE`): solid quads facing away from the
 /// eye are left out, its keys in `tables` from `Params::eyes`.
 const EYE: u32 = 4;
@@ -313,6 +312,8 @@ const EYE: u32 = 4;
 /// and it tests every box (cull.rs's probe frame).
 const OCCLUDE: u32 = 8;
 const PROBE: u32 = 16;
+/// In `Params::flags` (the shader's `TREE`): outside-height octree branch decisions are in `tables`.
+const TREE: u32 = 32;
 /// Ids per block (the shader's `BLOCK`), and the workgroup of the passes over ids.
 const WORKGROUP: u32 = 64;
 /// Workgroups along x when there are more (the shader's `ROW`).
@@ -338,7 +339,7 @@ const TEST_READ: wgpu::BufferUsages = if cfg!(test) {
 
 /// What a frame's pass works from.
 #[derive(Clone, Copy)]
-pub(super) struct FrameInputs<'a> {
+pub(crate) struct FrameInputs<'a> {
     pub(super) camera: DVec3,
     /// The level's lowest block y and its height in sections.
     pub(super) min_y: i32,
@@ -418,7 +419,7 @@ impl<'a> FrameInputs<'a> {
 
 /// What `GpuCulling::prepare` made of a frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Prepared {
+pub(crate) enum Prepared {
     /// The pass is ready: `dispatch` it, and `draw`.
     Gpu,
     /// The frame's frustum planes would leave the test's integers (`HEADROOM`),
@@ -468,7 +469,7 @@ fn step<'a>(
 /// walk keeps, and every box of a column the walk finds entirely inside the
 /// frustum, as each box reaches its cell (`rounded_box`). A plane that is not
 /// finite rejects nothing, as in `intersects`: its terms are 0, its w 1.
-fn tables(input: &FrameInputs<'_>, words: &mut Vec<u32>) -> Option<Params> {
+pub(super) fn tables(input: &FrameInputs<'_>, words: &mut Vec<u32>) -> Option<Params> {
     words.clear();
     // Before the origins: an infinite camera's column would take
     // `resident::origin` past i32.
@@ -477,24 +478,35 @@ fn tables(input: &FrameInputs<'_>, words: &mut Vec<u32>) -> Option<Params> {
     }
     let radius = input.radius.max(0);
     let side = 2 * radius + 1;
-    let height = input.sections.max(0);
+    let cam_sy = resident::camera_section_y(input.camera, input.min_y);
+    let (y0, ny_i32) = resident::vertical_section_range(cam_sy, radius, input.sections)
+        .map_or((0, 0), |(lo, hi)| (lo, hi - lo + 1));
     let (cx, cz) = resident::camera_column(input.camera);
     let (x0, z0) = (cx - radius, cz - radius);
     let origin = |key| resident::origin(key, input.min_y, input.camera).as_vec3();
     words.extend((x0..x0 + side).map(|x| origin((x, 0, 0)).x.to_bits()));
-    words.extend((0..height).map(|y| origin((0, y, 0)).y.to_bits()));
+    words.extend((y0..y0 + ny_i32).map(|y| origin((0, y, 0)).y.to_bits()));
     words.extend((z0..z0 + side).map(|z| origin((0, 0, z)).z.to_bits()));
-    let (nx, ny) = (side as usize, height as usize);
+    let (nx, ny) = (side as usize, ny_i32 as usize);
     let axes = [0..nx, nx..nx + ny, nx + ny..words.len()];
-    // Along each axis, the largest origin plus 24: more than any corner of a box
-    // (its ends reach 23) or of a column's box.
-    let reach = axes.clone().map(|axis| {
-        let sizes = words[axis]
+    // A box's corner is at most 24 blocks from its origin.
+    let reach = std::array::from_fn::<_, 3, _>(|i| {
+        let axis = axes[i].clone();
+        words[axis]
             .iter()
-            .map(|&o| f64::from(f32::from_bits(o)).abs());
-        sizes.fold(0.0, f64::max) + 24.0
+            .map(|&o| f64::from(f32::from_bits(o)).abs())
+            .fold(0.0, f64::max)
+            + 24.0
     });
-    let planes = input.frustum.planes().map(|p| {
+    let outside_tree =
+        resident::outside_height_tree(input.camera, input.min_y, input.sections, radius);
+    let offset_frustum = outside_tree.map(|_| {
+        input
+            .frustum
+            .offset_to_fully_include_camera_cube(input.camera, 8)
+    });
+    let active_frustum = offset_frustum.as_ref().unwrap_or(input.frustum);
+    let planes = active_frustum.planes().map(|p| {
         if p.is_finite() {
             p.as_dvec4()
         } else {
@@ -503,7 +515,7 @@ fn tables(input: &FrameInputs<'_>, words: &mut Vec<u32>) -> Option<Params> {
     });
     // Each plane's largest terms in magnitude, along each axis, which bound its
     // sums.
-    let mut largest = [0.0; 6];
+    let mut largest = [0.0; FRUSTUM_PLANES];
     for (j, p) in planes.iter().enumerate() {
         for (axis, origins) in axes.iter().enumerate() {
             let mut most: f64 = 0.0;
@@ -522,7 +534,7 @@ fn tables(input: &FrameInputs<'_>, words: &mut Vec<u32>) -> Option<Params> {
             // is at least 0 (alike in f64).
             signs |= u32::from(p[axis] >= 0.0) << (3 * j + axis);
             let mut most: f64 = 0.0;
-            for code in 0..32 {
+            for code in 0..BOX_CODES {
                 let term = (SCALE * p[axis] * f64::from(code - CODE_OFFSET)).ceil();
                 most = most.max(term.abs());
                 words.push(term as i32 as u32);
@@ -543,6 +555,22 @@ fn tables(input: &FrameInputs<'_>, words: &mut Vec<u32>) -> Option<Params> {
             }
         }
     }
+    let mut flags = if input.eye.is_some() { EYE } else { 0 };
+    let mut tree_offset = 0u32;
+    if let Some(tree) = outside_tree {
+        tree_offset = words.len() as u32;
+        let tree_words = (nx * nx).div_ceil(16);
+        words.resize(tree_offset as usize + tree_words, 0);
+        for dz in 0..nx {
+            for dx in 0..nx {
+                let state =
+                    tree.branch_state(x0 + dx as i32, z0 + dz as i32, input.camera, active_frustum);
+                let col = dz * nx + dx;
+                words[tree_offset as usize + (col >> 4)] |= (state & 3) << ((col & 15) * 2);
+            }
+        }
+        flags |= TREE;
+    }
     let w = planes.map(|p| {
         let rounding: f64 = (0..3).map(|axis| p[axis].abs() * reach[axis]).sum();
         let margin = (SCALE * (6.0 * UNIT * rounding + 2.0 * UNIT * p.w.abs())).ceil() + 1.0;
@@ -558,13 +586,83 @@ fn tables(input: &FrameInputs<'_>, words: &mut Vec<u32>) -> Option<Params> {
         near: radius,
         cam_x: cx,
         cam_z: cz,
-        first: [x0, 0, z0, 0],
-        cells: [side as u32, height as u32, side as u32, 0],
+        first: [x0, y0, z0, 0],
+        cells: [side as u32, ny_i32 as u32, side as u32, STEP_BITS],
         w: [[w[0], w[1], w[2], w[3]], [w[4], w[5], 0, 0]],
-        flags: if input.eye.is_some() { EYE } else { 0 },
+        tree: tree_offset,
+        flags,
         eyes,
         ..Default::default()
     })
+}
+
+/// `gpu_culling.wgsl`'s `near`, on the CPU.
+fn near(params: &Params, x: i32, z: i32) -> bool {
+    let r = params.near;
+    let gap = |d: i32| d.wrapping_abs().wrapping_sub(1).max(0);
+    let gx = gap(x.wrapping_sub(params.cam_x));
+    let gz = gap(z.wrapping_sub(params.cam_z));
+    if gx >= r || gz >= r {
+        return false;
+    }
+    gx.wrapping_mul(gx).wrapping_add(gz.wrapping_mul(gz)) < r.wrapping_mul(r)
+}
+
+/// `gpu_culling.wgsl`'s `in_frustum`, on the CPU and in its order: the box
+/// `b` of the section in cell `c` of the tables.
+fn in_frustum(params: &Params, words: &[u32], c: [u32; 3], b: u32) -> bool {
+    if (b & UNBOUNDED) != 0 {
+        return true;
+    }
+    let [nx, ny, nz, _] = params.cells;
+    let n = nx + ny + nz;
+    let term = |at: u32| words[at as usize] as i32;
+    (0..6u32).all(|j| {
+        let s = params.signs >> (3 * j);
+        // The box's code at the corner the plane looks at, along `axis`.
+        let code = |axis: u32| {
+            let high = ((s >> axis) & 1) != 0;
+            (b >> (5 * axis + if high { 15 } else { 0 })) & 31
+        };
+        let w = params.w[j as usize / 4][j as usize % 4];
+        let (origin_terms, code_terms) = (n + j * n, 7 * n + 96 * j);
+        let sum = w
+            .wrapping_add(term(origin_terms + c[0]))
+            .wrapping_add(term(origin_terms + nx + c[1]))
+            .wrapping_add(term(origin_terms + nx + ny + c[2]))
+            .wrapping_add(term(code_terms + code(0)))
+            .wrapping_add(term(code_terms + 32 + code(1)))
+            .wrapping_add(term(code_terms + 64 + code(2)));
+        sum >= 0
+    })
+}
+
+/// `gpu_culling.wgsl`'s `cull` on the CPU, the reference the pass is held
+/// to, but for cave culling's graph (its `reached` is `Reach::contains`):
+/// whether it draws `record` with the parameters and tables `tables` makes
+/// (and the pages `prepare` gives them).
+pub(super) fn keeps(params: &Params, words: &[u32], record: &Record) -> bool {
+    let (key, a) = (record.key, record.a);
+    if key[3] < 0 || a[1] == 0 || (a[3] & FADING) != 0 || !near(params, key[0], key[2]) {
+        return false;
+    }
+    let c: [u32; 3] = std::array::from_fn(|i| key[i].wrapping_sub(params.first[i]) as u32);
+    if (key[3] as u32) >= params.pages || !(0..3).all(|i| c[i] < params.cells[i]) {
+        return false;
+    }
+    let mut test_box = a[2];
+    if (params.flags & TREE) != 0 {
+        let col = (c[2] * params.cells[0] + c[0]) as usize;
+        let state = (words[params.tree as usize + (col >> 4)] >> ((col & 15) * 2)) & 3;
+        if state == 0 {
+            return false;
+        }
+        if state == 2 {
+            return true;
+        }
+        test_box = FULL_SECTION_BOX;
+    }
+    in_frustum(params, words, c, test_box)
 }
 
 /// Whether GPU culling is offered: where the device draws a count the GPU wrote
@@ -617,68 +715,10 @@ pub(super) fn offer(
     }
 }
 
-/// A buffer that is recreated larger when it must hold more.
-struct Grown {
-    buffer: wgpu::Buffer,
-    bytes: u64,
-    label: &'static str,
-    usage: wgpu::BufferUsages,
-}
-
-impl Grown {
-    fn new(
-        device: &wgpu::Device,
-        label: &'static str,
-        bytes: u64,
-        usage: wgpu::BufferUsages,
-    ) -> Option<Self> {
-        Some(Self {
-            buffer: try_create(device, label, bytes, usage)?,
-            bytes,
-            label,
-            usage,
-        })
-    }
-    /// Room for `bytes`, in a power of two within the device's limits:
-    /// `Some(true)` when the buffer was made anew (its contents lost), `None`
-    /// past the limits or when the memory for it is missing.
-    fn reserve(&mut self, device: &wgpu::Device, bytes: u64) -> Option<bool> {
-        if bytes <= self.bytes {
-            return Some(false);
-        }
-        let limits = device.limits();
-        let mut limit = limits.max_buffer_size;
-        if self.usage.contains(wgpu::BufferUsages::STORAGE) {
-            limit = limit.min(limits.max_storage_buffer_binding_size);
-        }
-        if bytes > limit {
-            return None;
-        }
-        let size = bytes.next_power_of_two().min(limit & !3);
-        self.buffer = try_create(device, self.label, size, self.usage)?;
-        self.bytes = size;
-        Some(true)
-    }
-    /// `reserve`, keeping what the buffer held (`runs`' stamps).
-    fn reserve_keeping(
-        &mut self,
-        device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
-        bytes: u64,
-    ) -> Option<bool> {
-        let (old, old_bytes) = (self.buffer.clone(), self.bytes);
-        let made = self.reserve(device, bytes)?;
-        if made {
-            encoder.copy_buffer_to_buffer(&old, 0, &self.buffer, 0, old_bytes);
-        }
-        Some(made)
-    }
-}
-
 /// The section table as the CPU keeps it, by id, and what changed since
 /// `GpuCulling::prepare` last wrote it.
 #[derive(Default)]
-pub(super) struct Records {
+pub(crate) struct Records {
     records: Vec<Record>,
     /// Free ids below the table's end, a bit each (64 a word, lowest bit first).
     free: Vec<u64>,
@@ -817,6 +857,7 @@ impl Records {
     pub fn at(&self, id: u32) -> Option<&Record> {
         self.records.get(id as usize).filter(|r| r.page().is_some())
     }
+    /// The live sections on each page; its length is the page count.
     #[cfg(any(test, debug_assertions))]
     pub fn page_sections(&self) -> &[u32] {
         &self.page_sections
@@ -842,42 +883,6 @@ impl Records {
         } else {
             self.dirty.push(id);
         }
-    }
-}
-
-/// The flagged sections by when their fade is over at the latest (gfx.rs
-/// `SectionGpu::fade_end`), for gfx.rs `mark_fades` to look at them again
-/// then, and the chunk fade-in time their flags were decided with: `None`
-/// until a frame has decided them, just after GPU culling was switched on.
-/// The ends of sections that went or were handed back are skipped as they come.
-#[derive(Default)]
-pub(super) struct Fades {
-    due: BinaryHeap<Reverse<(Instant, SectionKey)>>,
-    pub fade_ms: Option<u64>,
-}
-
-impl Fades {
-    /// The section at `key` is looked at again at `end`.
-    pub fn push(&mut self, end: Instant, key: SectionKey) {
-        self.due.push(Reverse((end, key)));
-    }
-    /// The section of the earliest end at or before `now`, taken out.
-    pub fn pop_due(&mut self, now: Instant) -> Option<SectionKey> {
-        let &Reverse((end, key)) = self.due.peek()?;
-        if end > now {
-            return None;
-        }
-        self.due.pop();
-        Some(key)
-    }
-    /// Every end goes; `fade_ms` stays.
-    pub fn clear(&mut self) {
-        self.due.clear();
-    }
-    /// The sections an end is waited for.
-    #[cfg(debug_assertions)]
-    pub fn pending(&self) -> impl Iterator<Item = SectionKey> {
-        self.due.iter().map(|r| r.0.1)
     }
 }
 
@@ -1036,7 +1041,9 @@ impl BoxTest {
 
 /// The pass, its buffers and the records it draws from: made when GPU culling
 /// is switched on, dropped when it is switched off.
-pub(super) struct GpuCulling {
+pub(crate) struct GpuCulling {
+    /// What its pass's timing is called.
+    label: &'static str,
     /// `gpu_culling.wgsl`'s entry points: apply, cull, scan, scatter.
     pipelines: [wgpu::ComputePipeline; 4],
     layout: wgpu::BindGroupLayout,
@@ -1148,6 +1155,15 @@ impl GpuCulling {
             return None;
         }
         let test = test.and_then(|color| BoxTest::new(device, color, &layout));
+        Self::with_buffers(device, pipelines, layout, test)
+    }
+
+    fn with_buffers(
+        device: &wgpu::Device,
+        pipelines: [wgpu::ComputePipeline; 4],
+        layout: wgpu::BindGroupLayout,
+        test: Option<BoxTest>,
+    ) -> Option<Self> {
         use wgpu::BufferUsages as U;
         let readbacks = (0..READBACKS)
             .map(|_| {
@@ -1166,6 +1182,7 @@ impl GpuCulling {
             })
             .collect::<Option<Vec<_>>>()?;
         Some(Self {
+            label: "GPU culling",
             pipelines,
             layout,
             params: try_create(
@@ -1420,8 +1437,8 @@ impl GpuCulling {
                 self.reach_generation = Some(r.generation);
             }
             params.reach = [r.from_x, r.from_z, r.radius, r.y0];
-            (params.reach_height, params.reach_sections) = (r.height, r.sections);
-            params.flags |= REACH | if r.sky_reached { SKY } else { 0 };
+            params.reach_height = r.height;
+            params.flags |= REACH;
         }
         uploads.buffer(encoder, &self.params, 0, bytemuck::bytes_of(&params));
         // A frame that occludes reads phase 2's blocks too; the boxes to test
@@ -1492,7 +1509,7 @@ impl GpuCulling {
         compute_parts(
             encoder,
             timing,
-            "GPU culling",
+            self.label,
             &mut [
                 ("apply", &mut apply),
                 ("cull", &mut cull),
@@ -1628,14 +1645,15 @@ impl GpuCulling {
         })
     }
 
-    /// The statistics that came back, their readbacks freed: the newest
-    /// frame's, as (frame, [sections drawn, section draws, draw calls]), the
-    /// pass's counts added to the CPU's part. Called as a frame starts, so a
-    /// copy no submission took (a frame that failed on the way) is dropped. The caller polls
+    /// The statistics that came back, their readbacks freed: every ready
+    /// frame's, oldest first, as (frame, [sections drawn, section draws, draw
+    /// calls]), the pass's counts
+    /// added to the CPU's part. Called as a frame starts, so a copy no
+    /// submission took (a frame that failed on the way) is dropped. The caller polls
     /// the device first (the frame's one poll, `Renderer::draw_frame`).
-    pub fn collect(&mut self) -> Option<(u64, [usize; 3])> {
+    pub fn collect(&mut self) -> Vec<(u64, [usize; 3])> {
         self.current = None;
-        let mut newest: Option<(u64, [usize; 3])> = None;
+        let mut ready = Vec::new();
         for r in &self.readbacks {
             if r.state.load(Ordering::Acquire) != MAPPED {
                 continue;
@@ -1658,22 +1676,21 @@ impl GpuCulling {
                     self.hidden = Some([words[HIDDEN] as usize, words[BOX as usize + 1] as usize]);
                 }
                 let [sections, cpu_draws, calls] = r.cpu;
-                if newest.is_none_or(|(frame, _)| r.frame > frame) {
-                    newest = Some((
-                        r.frame,
-                        [sections + kept as usize, cpu_draws + draws as usize, calls],
-                    ));
-                }
+                ready.push((
+                    r.frame,
+                    [sections + kept as usize, cpu_draws + draws as usize, calls],
+                ));
             }
             r.buffer.unmap();
             r.state.store(FREE, Ordering::Release);
         }
-        newest
+        ready.sort_unstable_by_key(|&(frame, _)| frame);
+        ready
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::streaming::in_view_distance;
     use glam::{Mat4, Vec4};
@@ -1702,62 +1719,6 @@ mod tests {
     /// Where a section's solid quads are: key, arena page, first vertex, quads,
     /// its box, and whether it fades (`FADING`).
     type Placed = (SectionKey, u32, u64, u32, u32, bool);
-
-    /// `gpu_culling.wgsl`'s `near`, on the CPU.
-    fn near(params: &Params, x: i32, z: i32) -> bool {
-        let r = params.near;
-        let gap = |d: i32| d.wrapping_abs().wrapping_sub(1).max(0);
-        let gx = gap(x.wrapping_sub(params.cam_x));
-        let gz = gap(z.wrapping_sub(params.cam_z));
-        if gx >= r || gz >= r {
-            return false;
-        }
-        gx.wrapping_mul(gx).wrapping_add(gz.wrapping_mul(gz)) < r.wrapping_mul(r)
-    }
-
-    /// `gpu_culling.wgsl`'s `in_frustum`, on the CPU and in its order: the box
-    /// `b` of the section in cell `c` of the tables.
-    fn in_frustum(params: &Params, words: &[u32], c: [u32; 3], b: u32) -> bool {
-        if (b & UNBOUNDED) != 0 {
-            return true;
-        }
-        let [nx, ny, nz, _] = params.cells;
-        let n = nx + ny + nz;
-        let term = |at: u32| words[at as usize] as i32;
-        (0..6u32).all(|j| {
-            let s = params.signs >> (3 * j);
-            // The box's code at the corner the plane looks at, along `axis`.
-            let code = |axis: u32| {
-                let high = ((s >> axis) & 1) != 0;
-                (b >> (5 * axis + if high { 15 } else { 0 })) & 31
-            };
-            let w = params.w[j as usize / 4][j as usize % 4];
-            let (origin_terms, code_terms) = (n + j * n, 7 * n + 96 * j);
-            let sum = w
-                .wrapping_add(term(origin_terms + c[0]))
-                .wrapping_add(term(origin_terms + nx + c[1]))
-                .wrapping_add(term(origin_terms + nx + ny + c[2]))
-                .wrapping_add(term(code_terms + code(0)))
-                .wrapping_add(term(code_terms + 32 + code(1)))
-                .wrapping_add(term(code_terms + 64 + code(2)));
-            sum >= 0
-        })
-    }
-
-    /// `gpu_culling.wgsl`'s `cull` on the CPU, the reference the pass is held
-    /// to, but for cave culling's graph (its `reached` is `Reach::contains`):
-    /// whether it draws `record` with the parameters and tables `tables` makes
-    /// (and the pages `prepare` gives them).
-    fn keeps(params: &Params, words: &[u32], record: &Record) -> bool {
-        let (key, a) = (record.key, record.a);
-        if key[3] < 0 || a[1] == 0 || (a[3] & FADING) != 0 || !near(params, key[0], key[2]) {
-            return false;
-        }
-        let c: [u32; 3] = std::array::from_fn(|i| key[i].wrapping_sub(params.first[i]) as u32);
-        (key[3] as u32) < params.pages
-            && (0..3).all(|i| c[i] < params.cells[i])
-            && in_frustum(params, words, c, a[2])
-    }
 
     /// A frame of the overworld's 24 sections, cave culling off, every solid
     /// quad drawn.
@@ -2178,7 +2139,7 @@ mod tests {
             ("w", offset_of!(Params, w)),
             ("reach", offset_of!(Params, reach)),
             ("reach_height", offset_of!(Params, reach_height)),
-            ("reach_sections", offset_of!(Params, reach_sections)),
+            ("tree", offset_of!(Params, tree)),
             ("flags", offset_of!(Params, flags)),
             ("eyes", offset_of!(Params, eyes)),
             ("occl", offset_of!(Params, occl)),
@@ -2216,18 +2177,19 @@ mod tests {
             }
         };
         // A whole section's instance w: `section_instance`'s bare UV step.
-        let step = super::super::section_instance([0.0; 3], 0, 1.0)[3];
+        let step = super::super::section_instance([0.0; 3], 1.0)[3];
         assert_eq!(step, 1.0 / crate::mesher::UV_STEPS);
+        assert_eq!(STEP_BITS, step.to_bits());
         for (name, value) in [
-            ("STEP_BITS", u64::from(step.to_bits())),
             ("ROW", u64::from(ROW)),
             ("BLOCK", u64::from(WORKGROUP)),
             ("STATS", STATS),
             ("UNBOUNDED", u64::from(UNBOUNDED)),
+            ("FULL_SECTION_BOX", u64::from(FULL_SECTION_BOX)),
             ("REACH", u64::from(REACH)),
-            ("SKY", u64::from(SKY)),
             ("FADING", u64::from(FADING)),
             ("EYE", u64::from(EYE)),
+            ("TREE", u64::from(TREE)),
             ("RUN_WORDS", RUN_WORDS),
         ] {
             assert_eq!(constant(name), value, "{name}");
@@ -2519,6 +2481,7 @@ mod tests {
             let height = match case % 8 {
                 0 => 1.0e5,
                 4 => -1.0e5,
+                1 | 5 => f64::from(rng.range(-64, 320)),
                 _ if ahead => 8.0,
                 _ => f64::from(rng.range(-2_100, 2_100)),
             };
@@ -2580,12 +2543,18 @@ mod tests {
             let mut params =
                 tables(&input, &mut words).unwrap_or_else(|| panic!("case {case}: the planes fit"));
             params.pages = 1;
-            assert_eq!(params.flags, EYE, "case {case}");
+            let outside_tree =
+                resident::outside_height_tree(camera, crate::chunk::MIN_Y, 24, radius);
+            let expected_flags = EYE | if outside_tree.is_some() { TREE } else { 0 };
+            assert_eq!(params.flags, expected_flags, "case {case}");
+            let offset_frustum =
+                outside_tree.map(|_| frustum.offset_to_fully_include_camera_cube(camera, 8));
+            let active_frustum = offset_frustum.as_ref().unwrap_or(&frustum);
             let [nx, ny, nz, _] = params.cells.map(|n| n as usize);
             // Every term rounds up: at least the plane's component times its
             // origin or box end, which f64 holds exactly.
             let n = nx + ny + nz;
-            let planes = frustum.planes().iter().enumerate();
+            let planes = active_frustum.planes().iter().enumerate();
             for (j, p) in planes.filter(|(_, p)| p.is_finite()) {
                 for i in 0..n {
                     let axis = usize::from(i >= nx) + usize::from(i >= nx + ny);
@@ -2605,7 +2574,7 @@ mod tests {
                 }
             }
             let mut out = Vec::new();
-            r.visible(camera, radius, &frustum, |_| true, |_, _| false, &mut out);
+            r.visible(camera, radius, &frustum, |_| true, &mut out);
             for v in &out {
                 let record = Record::new(v.key, 0, 0, 1, *r.get(v.slot));
                 assert!(
@@ -2615,7 +2584,7 @@ mod tests {
                 );
                 let c = [
                     v.key.0 - params.first[0],
-                    v.key.1,
+                    v.key.1 - params.first[1],
                     v.key.2 - params.first[2],
                 ];
                 let c = c.map(|c| c as usize);
@@ -2670,10 +2639,23 @@ mod tests {
                 );
                 let (cx, cz) = resident::camera_column(base);
                 let (x, z) = (cx + rng.range(-1, 1), cz + rng.range(-1, 1));
-                // Up to four sections of a column, each with whole-block bounds of
-                // its own (`rounded_box` keeps them as they are).
-                let low = rng.range(0, 20);
-                let high = low + rng.range(0, 3);
+                // Keep columns inside vanilla's vertical render-distance band across the ±4 block bisection.
+                // Radius 8 keeps the octree root aligned to the world column (`size = 32 >= 24`).
+                let (lo_min, hi_min) = resident::vertical_section_range(
+                    resident::camera_section_y(base - DVec3::Y * 4.0, min_y),
+                    8,
+                    24,
+                )
+                .unwrap();
+                let (lo_max, hi_max) = resident::vertical_section_range(
+                    resident::camera_section_y(base + DVec3::Y * 4.0, min_y),
+                    8,
+                    24,
+                )
+                .unwrap();
+                let (lo_y, hi_y) = (lo_min.max(lo_max), hi_min.min(hi_max));
+                let low = rng.range(lo_y, hi_y);
+                let high = (low + rng.range(0, 3)).min(hi_y);
                 let mut rows: Vec<(i32, [Vec3; 2])> = (low..=high)
                     .map(|y| {
                         let [ex, ey, ez] = [0, 1, 2].map(|_| {
@@ -2744,7 +2726,7 @@ mod tests {
                     }
                 }
                 let camera = base + normal * kept;
-                let mut params = tables(&inputs(camera, 3, &frustum), &mut words)
+                let mut params = tables(&inputs(camera, 8, &frustum), &mut words)
                     .unwrap_or_else(|| panic!("height {lift}, trial {trial}: the planes fit"));
                 params.pages = 1;
                 let tested = if column { &rows[..] } else { &rows[..1] };
@@ -2781,6 +2763,54 @@ mod tests {
         assert!(worst[2].max(worst[3]) > 1.0 / SCALE, "{worst:?}");
     }
 
+    #[test]
+    fn outside_height_octree_culls_off_axis_seeds() {
+        assert_eq!(FULL_SECTION_BOX, rounded_box(None));
+        let camera = DVec3::new(0.0, 400.0, 0.0);
+        let proj = super::super::world_projection(70.0, 1.0, 192.0);
+        let view = crate::camera::view_matrix(0.0, 90.0);
+        let frustum = Frustum::from_planes(super::super::frustum(proj * view));
+        let input = inputs(camera, 2, &frustum);
+        let mut words = Vec::new();
+        let mut params = tables(&input, &mut words).expect("tables fit");
+        params.pages = 1;
+        assert_ne!(params.flags & TREE, 0, "outside-height octree active");
+        let center = Record::new((0, 23, 0), 0, 0, 1, rounded_box(None));
+        let off_axis = Record::new((2, 23, 0), 0, 0, 1, rounded_box(None));
+        assert!(keeps(&params, &words, &center), "center seed kept");
+        assert!(!keeps(&params, &words, &off_axis), "off-axis seed culled");
+
+        // Intersecting outside-height branch tests FULL_SECTION_BOX, not tight mesh bounds:
+        // from (0, -160, 0) looking up at 39° with rd 2, (2, -4, 0) (y=0) stays kept even
+        // when its mesh is confined to X=46..47 (local x in [14, 15]).
+        let camera = DVec3::new(0.0, -160.0, 0.0);
+        let proj = super::super::world_projection(39.0, 1.0, 192.0);
+        let view = crate::camera::view_matrix(0.0, -90.0);
+        let frustum = Frustum::from_planes(super::super::frustum(proj * view));
+        let input = inputs(camera, 2, &frustum);
+        let mut params = tables(&input, &mut words).expect("tables fit");
+        params.pages = 1;
+        assert_ne!(params.flags & TREE, 0, "below-world octree active");
+        let tight = rounded_box(Some([
+            Vec3::new(14.0, 0.0, 0.0),
+            Vec3::new(15.0, 16.0, 16.0),
+        ]));
+        let c = [
+            (2 - params.first[0]) as u32,
+            (0 - params.first[1]) as u32,
+            (0 - params.first[2]) as u32,
+        ];
+        assert!(
+            !in_frustum(&params, &words, c, tight),
+            "tight X=46..47 box alone misses the offset frustum"
+        );
+        let tight_record = Record::new((2, 0, 0), 0, 0, 1, tight);
+        assert!(
+            keeps(&params, &words, &tight_record),
+            "intersecting outside-height branch keeps (2, -4, 0) using FULL_SECTION_BOX"
+        );
+    }
+
     /// A device on `adapter` that draws counts with first instances, if it
     /// can. Not Intel's Gen11 and Gen12 Vulkan driver, which gets first
     /// instances wrong and is never offered GPU culling (`supported`).
@@ -2798,16 +2828,18 @@ mod tests {
             return None;
         }
         eprintln!("GPU culling on {} ({name})", adapter.get_info().name);
-        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            required_features: needed | timing,
-            ..Default::default()
-        }))
-        .ok()
+        crate::gfx::test_gpu::optional_device_with(
+            adapter,
+            &wgpu::DeviceDescriptor {
+                required_features: needed | timing,
+                ..Default::default()
+            },
+        )
     }
 
     /// `test` on each device here that draws counts with first instances
     /// (`test_gpu::each_adapter`).
-    fn on_each_device(test: impl Fn(&wgpu::Device, &Queue)) {
+    pub(in crate::gfx) fn on_each_device(test: impl Fn(&wgpu::Device, &Queue)) {
         let mut tested = false;
         for (adapter, name) in crate::gfx::test_gpu::each_adapter() {
             if let Some((device, queue)) = device(&adapter, name) {
@@ -2816,11 +2848,11 @@ mod tests {
             }
         }
         if !tested {
-            eprintln!("no GPU with indirect count draws: skipped");
+            crate::gfx::test_gpu::missing_adapter("no GPU with indirect count draws");
         }
     }
 
-    fn read(
+    pub(in crate::gfx) fn read(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         buffer: &wgpu::Buffer,
@@ -2863,6 +2895,7 @@ mod tests {
     /// (`FADING`, sent as updates or with the whole table): the pass leaves
     /// them to the CPU.
     #[test]
+    #[ignore = "daily"]
     fn the_gpu_draws_what_the_integer_test_keeps() {
         let _gpu = crate::gfx::test_gpu::lock();
         on_each_device(draws_match);
@@ -2884,9 +2917,8 @@ mod tests {
         // Cave culling's graph while a case has one (its generation, from x and
         // z, radius, height and whether its search reached the sky) and its bits.
         let (mut graph, mut bits) = (None, Vec::new());
-        // Sections the frustum keeps with a graph, those it leaves out, and
-        // those above its box it leaves out and keeps.
-        let (mut graphed, mut unreached, mut band) = (0, 0, [0; 2]);
+        // Sections the frustum keeps with a graph, and those it leaves out.
+        let (mut graphed, mut unreached) = (0, 0);
         // Sections drawn from an eye, those with a bucket left out, those in
         // three runs or more; the record at the section's edge, and whether it
         // was drawn.
@@ -2932,26 +2964,26 @@ mod tests {
                 (shapes.below(3) > 0).then_some(center)
             };
             let (cx, cz) = resident::camera_column(camera);
-            // None in a quarter of the cases (cave culling off). Else around the
-            // camera's column, as wide as the walk's search (the distance and 2)
-            // or anything from 1 column to past the distance, full height or
-            // clamped as over low ground, its sky band reached in half the cases,
-            // three quarters of its cells reached. Cases 11 and 18 bring the
-            // graph of the case before: the pass reads the copy it holds, 18
-            // through a bind group made anew. Case 7's is new and comes first with
-            // a frame the CPU draws; case 20's, 131 KB, is past the copy's room.
+            let cam_sy = resident::camera_section_y(camera, min_y);
+            // None in a quarter of cases; else around camera XZ/Y, full height or clamped.
             if !matches!(case, 11 | 18) {
                 let given = matches!(case, 4 | 7 | 10 | 17 | 20) || rng.below(4) != 0;
                 graph = given.then(|| {
                     let span = match case {
                         20 => 100,
-                        _ if rng.below(2) == 0 => radius + 2,
+                        _ if rng.below(2) == 0 => radius,
                         _ => rng.range(1, radius + 3),
                     };
-                    let rows = if case % 4 < 2 && case != 20 {
-                        rng.range(3, 8)
+                    let (y0, rows) = if case % 4 < 2 && case != 20 {
+                        let (lo, hi) = resident::vertical_section_range(
+                            cam_sy + rng.range(-1, 1),
+                            rng.range(2, radius + 1),
+                            height,
+                        )
+                        .expect("positive height");
+                        (lo, hi - lo + 1)
                     } else {
-                        height + 2
+                        (0, height)
                     };
                     let cells = ((2 * span + 1).pow(2) * rows) as usize;
                     bits.clear();
@@ -2959,20 +2991,18 @@ mod tests {
                         (0..cells.div_ceil(32)).map(|_| rng.bits() as u32 | rng.bits() as u32),
                     );
                     let from = (cx + rng.range(-1, 1), cz + rng.range(-1, 1));
-                    (rng.bits(), from, span, rows, case % 8 < 4)
+                    (rng.bits(), from, span, y0, rows)
                 });
             }
             // Cave culling off at the edge: its section is drawn whatever a graph says.
             let graph_given = graph.filter(|_| !at_edge);
-            let reach = graph_given.map(|(generation, from, span, rows, sky_reached)| Reach {
+            let reach = graph_given.map(|(generation, from, span, y0, rows)| Reach {
                 generation,
                 from_x: from.0,
                 from_z: from.1,
                 radius: span,
-                y0: -1,
+                y0,
                 height: rows,
-                sections: height,
-                sky_reached,
                 bits: &bits,
             });
             if case == 12 {
@@ -2997,13 +3027,15 @@ mod tests {
                 let (placed, _) = held.get_mut(&id).expect("a live id");
                 (placed.1, placed.2) = (page, start);
             }
-            // New sections around the camera, within the distance and past it.
+            // New sections around the camera, within the distance and past it on all three axes.
+            let y_lo = (cam_sy - radius - 3).clamp(0, height - 1);
+            let y_hi = (cam_sy + radius + 3).clamp(0, height - 1);
             let place = |gpu: &mut GpuCulling,
                          held: &mut BTreeMap<u32, (Placed, Sides)>,
                          rng: &mut Rng,
                          shapes: &mut Rng| {
                 let near = |rng: &mut Rng| rng.range(-radius - 3, radius + 3);
-                let key = (cx + near(rng), rng.range(0, height - 1), cz + near(rng));
+                let key = (cx + near(rng), rng.range(y_lo, y_hi), cz + near(rng));
                 let (page, start) = (rng.below(3), u64::from(rng.below(40_000)) * 256);
                 let quads = 1 + rng.below(2_000);
                 let boxed = rounded_box(bounds(rng));
@@ -3047,8 +3079,13 @@ mod tests {
             }
             let whole = gpu.records.all_dirty;
             if let Some(t) = &mut timing {
-                t.begin(device, queue, &std::sync::atomic::AtomicBool::new(false))
-                    .unwrap();
+                t.begin(
+                    device,
+                    queue,
+                    &std::sync::atomic::AtomicBool::new(false),
+                    super::super::in_flight::poll_live,
+                )
+                .unwrap();
             }
             let mut encoder = device.create_command_encoder(&Default::default());
             let input = FrameInputs::new(camera, min_y, height, radius, &frustum)
@@ -3089,19 +3126,13 @@ mod tests {
                 let reached = reach.is_none_or(|r| r.contains(key));
                 // In view, but fading: the CPU's.
                 faded += usize::from(fading && reached && keeps(&params, &words, &record));
-                if kept && let Some(r) = reach {
+                if kept && reach.is_some() {
                     graphed += 1;
                     unreached += usize::from(!reached);
-                    // Above the box, over its columns: the sky band.
-                    let over = (key.0 - r.from_x).abs() <= r.radius
-                        && (key.2 - r.from_z).abs() <= r.radius;
-                    if over && key.1 >= r.y0 + r.height {
-                        band[usize::from(reached)] += 1;
-                    }
                 }
                 if kept && reached {
                     let origin = resident::origin(key, min_y, camera).as_vec3();
-                    let instance = super::super::section_instance(origin.to_array(), 0, 1.0);
+                    let instance = super::super::section_instance(origin.to_array(), 1.0);
                     let instance = instance.map(f32::to_bits);
                     // A draw per run of it the CPU frame draws, from the run's
                     // first vertex.
@@ -3175,7 +3206,7 @@ mod tests {
             let (kept, drawn) = (kept_sections as usize, draw_count as usize);
             assert_eq!(
                 gpu.collect(),
-                Some((case as u64, [cpu[0] + kept, cpu[1] + drawn, cpu[2]])),
+                vec![(case as u64, [cpu[0] + kept, cpu[1] + drawn, cpu[2]])],
                 "case {case}: statistics"
             );
             compared += kept_sections as usize;
@@ -3210,14 +3241,11 @@ mod tests {
             unreached * 10 > graphed && unreached < graphed,
             "{unreached} of {graphed} in view unreached"
         );
-        assert!(
-            band[0] > 0 && band[1] > 0,
-            "the sky band left out and kept {band:?}"
-        );
     }
 
     /// Detail times both phases and the uploads and leaves counts and draws as an untimed frame's.
     #[test]
+    #[ignore = "daily"]
     fn detail_times_both_phases_and_leaves_the_draws_alone() {
         let _gpu = crate::gfx::test_gpu::lock();
         on_each_device(|device, queue| {
@@ -3254,8 +3282,13 @@ mod tests {
                 let mut out = Vec::new();
                 for frame in 0..12 {
                     if let Some(t) = timing {
-                        t.begin(device, queue, &std::sync::atomic::AtomicBool::new(false))
-                            .unwrap();
+                        t.begin(
+                            device,
+                            queue,
+                            &std::sync::atomic::AtomicBool::new(false),
+                            super::super::in_flight::poll_live,
+                        )
+                        .unwrap();
                     }
                     let mut encoder = device.create_command_encoder(&Default::default());
                     let input = FrameInputs::new(DVec3::new(0.5, 70.0, 0.5), -64, 24, 5, &frustum)
@@ -3319,10 +3352,12 @@ mod tests {
     /// The statistics come back with their frame, in place and from the submit
     /// thread, submitted as gfx.rs submits frames (`submit_later`, or in place
     /// with its `after` handed back): three frames on their way fill the ring, a
-    /// fourth's are skipped, `collect` takes in the newest; and a readback whose
-    /// buffer the device lost after its mapping goes `FAILED`, never copied into
-    /// or unmapped again (as `timing::GpuTimer`'s), so the statistics stop.
+    /// fourth's are skipped, `collect` takes in all the ready ones; and a
+    /// readback whose buffer the device lost after its mapping goes `FAILED`,
+    /// never copied into or unmapped again (as `timing::GpuTimer`'s), so the
+    /// statistics stop.
     #[test]
+    #[ignore = "daily"]
     fn the_statistics_come_back_with_their_frame() {
         let _gpu = crate::gfx::test_gpu::lock();
         use super::super::submit::{AfterSubmit, Job};
@@ -3361,17 +3396,24 @@ mod tests {
                     assert!(frame(&mut gpu, f), "frame {f}, threaded {threaded}");
                 }
                 assert!(!frame(&mut gpu, 4), "a full ring, threaded {threaded}");
-                assert_eq!(landed(&mut gpu), Some((3, [3 + 5, 10 + 7, 3])));
-                assert_eq!(gpu.collect(), None);
+                assert_eq!(
+                    landed(&mut gpu),
+                    vec![
+                        (1, [1 + 5, 10 + 7, 3]),
+                        (2, [2 + 5, 10 + 7, 3]),
+                        (3, [3 + 5, 10 + 7, 3]),
+                    ]
+                );
+                assert!(gpu.collect().is_empty());
                 assert!(frame(&mut gpu, 5));
-                assert_eq!(landed(&mut gpu), Some((5, [5 + 5, 10 + 7, 3])));
+                assert_eq!(landed(&mut gpu), vec![(5, [5 + 5, 10 + 7, 3])]);
                 // Frame 6's buffer destroyed after its mapping (#6320).
                 let lost = gpu.next;
                 assert!(frame(&mut gpu, 6));
                 queue.landed();
                 device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
                 gpu.readbacks[lost].buffer.destroy();
-                assert_eq!(gpu.collect(), None);
+                assert!(gpu.collect().is_empty());
                 for f in 7..=12 {
                     let sent = frame(&mut gpu, f);
                     let back = landed(&mut gpu);
@@ -3379,7 +3421,7 @@ mod tests {
                     assert_eq!(state, FAILED, "frame {f}, threaded {threaded}");
                     // The two other readbacks, then none.
                     assert_eq!(sent, f <= 8, "frame {f}, threaded {threaded}");
-                    assert_eq!(back.is_some(), f <= 8, "frame {f}, threaded {threaded}");
+                    assert_eq!(back.is_empty(), f > 8, "frame {f}, threaded {threaded}");
                 }
             }
         });
@@ -3396,6 +3438,7 @@ mod tests {
     /// its origin's bits to a pixel of its own; a quad turned away leaves its
     /// pixel clear.
     #[test]
+    #[ignore = "daily"]
     fn the_count_draws_draw_each_kept_section_with_its_origin() {
         let _gpu = crate::gfx::test_gpu::lock();
         on_each_device(draws_land);
@@ -3554,10 +3597,26 @@ struct Quad {
             params.pages = gpu.pass_pages;
             let mut expected = vec![[0; 4]; (width * height) as usize];
             let (mut kept, mut hidden) = (0, 0);
+            let (mut clamped_y, mut in_band_y) = (0, 0);
             for (i, &(key, sides, record)) in sections.iter().enumerate() {
+                if frame == 0
+                    && record.page().is_some()
+                    && in_view_distance((0, 0), radius, key.0, key.2)
+                {
+                    // Camera Y=70.625 (0-based cam_sy=8), radius=4 -> inclusive vertical band 4..=12.
+                    if (4..=12).contains(&key.1) {
+                        in_band_y += 1;
+                    } else {
+                        clamped_y += 1;
+                        assert!(
+                            !keeps(&params, &words, &record),
+                            "frame 0: out-of-band section {key:?} must be vertically clamped"
+                        );
+                    }
+                }
                 if keeps(&params, &words, &record) {
                     let origin = resident::origin(key, min_y, camera).as_vec3();
-                    let instance = super::super::section_instance(origin.to_array(), 0, 1.0);
+                    let instance = super::super::section_instance(origin.to_array(), 1.0);
                     let at = i / 16 * width as usize + 4 * (i % 16);
                     hidden += sides.quads();
                     super::super::facing_runs(&sides, eye, origin.to_array(), |first, count| {
@@ -3567,6 +3626,12 @@ struct Quad {
                     });
                     kept += 1;
                 }
+            }
+            if frame == 0 {
+                assert!(
+                    clamped_y > 0 && in_band_y > 0,
+                    "frame 0 must exercise both clamped ({clamped_y}) and in-band ({in_band_y}) rows"
+                );
             }
             assert!(kept > 0 && kept < before, "frame {frame}: {kept} kept");
             assert_eq!(
@@ -3612,6 +3677,127 @@ struct Quad {
             for (p, (got, want)) in got.chunks(4).zip(&expected).enumerate() {
                 let (i, q) = (p / row * 16 + p % row / 4, p % 4);
                 assert_eq!(got, want, "frame {frame}, section {i}, quad {q}");
+            }
+        }
+
+        // Exercise vertical clamping and outside-height octree culling (including the
+        // intersecting-branch full-section-box rule) through real indirect draws and pixel
+        // readback, reusing page 0's already-uploaded quads at pixels (12 * k, 0).
+        let below_39 = Frustum::from_planes(super::super::frustum(
+            super::super::world_projection(39.0, 1.0, 192.0)
+                * crate::camera::view_matrix(0.0, -90.0),
+        ));
+        let above_70 = Frustum::from_planes(super::super::frustum(
+            super::super::world_projection(70.0, 1.0, 192.0)
+                * crate::camera::view_matrix(0.0, 90.0),
+        ));
+        let tight_x46_47 = rounded_box(Some([
+            Vec3::new(14.0, 0.0, 0.0),
+            Vec3::new(15.0, 16.0, 16.0),
+        ]));
+        let in_world_probes = [
+            ((0, 7, 0), FULL_SECTION_BOX, false),
+            ((0, 8, 0), FULL_SECTION_BOX, true),
+            ((0, 10, 0), FULL_SECTION_BOX, true),
+            ((0, 12, 0), FULL_SECTION_BOX, true),
+            ((0, 13, 0), FULL_SECTION_BOX, false),
+        ];
+        let below_probes = [
+            ((0, 0, 0), FULL_SECTION_BOX, true),
+            ((2, 0, 0), tight_x46_47, true),
+            ((0, 1, 0), FULL_SECTION_BOX, false),
+        ];
+        let above_probes = [
+            ((0, 23, 0), FULL_SECTION_BOX, true),
+            ((2, 23, 0), FULL_SECTION_BOX, false),
+            ((0, 22, 0), FULL_SECTION_BOX, false),
+        ];
+        let clamp_cases: [(&str, DVec3, i32, &Frustum, &[(SectionKey, u32, bool)]); 3] = [
+            (
+                "in-world vertical clamp (Y=111, rd=2, band y=8..=12)",
+                DVec3::new(8.0, 111.0, 8.0),
+                2,
+                &all,
+                &in_world_probes,
+            ),
+            (
+                "outside-height intersecting branch keeps tight X=46..47 mesh",
+                DVec3::new(0.0, -160.0, 0.0),
+                2,
+                &below_39,
+                &below_probes,
+            ),
+            (
+                "outside-height rejected branch culls off-axis seed",
+                DVec3::new(0.0, 400.0, 0.0),
+                2,
+                &above_70,
+                &above_probes,
+            ),
+        ];
+        for (label, camera, case_radius, frustum, probes) in clamp_cases {
+            gpu.records.clear();
+            let mut records = Vec::new();
+            for (k, &(key, boxed, drawn)) in probes.iter().enumerate() {
+                let record = Record::new(key, 0, k as u64 * grain, 1, boxed);
+                let id = gpu.records.insert(record);
+                assert_eq!(id, k as u32, "{label}: sequential id");
+                records.push((k, key, record, drawn));
+            }
+            let mut encoder = device.create_command_encoder(&Default::default());
+            let input = FrameInputs::new(camera, min_y, levels, case_radius, frustum);
+            let prepared = gpu.prepare(device, queue, &mut uploads, &mut encoder, &input, None);
+            assert_eq!(prepared, Prepared::Gpu, "{label}");
+            let mut params = tables(&input, &mut words).expect("the planes fit");
+            params.pages = gpu.pass_pages;
+            let mut expected = vec![[0; 4]; (width * height) as usize];
+            for &(k, key, record, drawn) in &records {
+                assert_eq!(
+                    keeps(&params, &words, &record),
+                    drawn,
+                    "{label}: CPU keeps disagrees at {key:?}"
+                );
+                if drawn {
+                    let origin = resident::origin(key, min_y, camera).as_vec3();
+                    let instance = super::super::section_instance(origin.to_array(), 1.0);
+                    expected[12 * k] = instance.map(f32::to_bits);
+                }
+            }
+            gpu.dispatch(&mut encoder, None);
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+            gpu.draw(&mut pass, &arena, |_| None, 0);
+            drop(pass);
+            encoder.copy_texture_to_buffer(
+                target.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &pixels,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(width * 16),
+                        rows_per_image: None,
+                    },
+                },
+                target.size(),
+            );
+            uploads.finish(&encoder);
+            queue.submit([encoder.finish()]);
+            let got = read(device, queue, &pixels, pixels.size());
+            for (p, (got, want)) in got.chunks(4).zip(&expected).enumerate() {
+                assert_eq!(got, want, "{label}: pixel {p}");
             }
         }
     }

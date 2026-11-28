@@ -17,6 +17,7 @@ const FLUIDS: usize = 5;
 
 fn air() -> Info {
     Info {
+        air: true,
         solid: false,
         full: false,
         permeable: true,
@@ -49,11 +50,20 @@ fn air() -> Info {
 /// `overlay` is true (glass, leaves).
 fn tables(overlay: bool) -> MeshTables {
     let water = Info {
+        air: false,
         fluid: FluidState::new(FluidKind::Water, 8, false),
         ..air()
     };
     MeshTables {
-        info: vec![air(), water, Info { overlay, ..air() }],
+        info: vec![
+            air(),
+            water,
+            Info {
+                air: false,
+                overlay,
+                ..air()
+            },
+        ],
         solid: vec![],
         full_faces: vec![],
         visibility: sunrise_world::block_render::FaceVisibility::empty(),

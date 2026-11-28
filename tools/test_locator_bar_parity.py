@@ -24,13 +24,10 @@ import shutil
 import subprocess
 import sys
 
-try:
-    from . import lab, test_rust_parity as base
-    from .test_dedicated_server_parity import Server, free_port, wait_ticks
-except ImportError:
-    import lab
-    import test_rust_parity as base
-    from test_dedicated_server_parity import Server, free_port, wait_ticks
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, test_rust_parity as base
+from tools.test_dedicated_server_parity import Server, free_port, wait_ticks
 
 NAME = 'locator-bar-parity'
 PROPERTIES = {
@@ -207,7 +204,7 @@ def generate_world(server_command, build):
     return directory / 'world'
 
 
-def run_side(label, server_command, client_command, build, world):
+def run_side(label, server_command, client_command, build, world, *, script=SCRIPT, step_ticks=None):
     directory = build / label
     port = server_dir(directory, world)
     out = build / f'{label}.txt'
@@ -219,7 +216,7 @@ def run_side(label, server_command, client_command, build, world):
             client = Client(client_command, port, out, log)
             joined = []
             try:
-                for step, console, actions in SCRIPT:
+                for step, console, actions in script:
                     client.tell(f'step {step}')
                     for command in console:
                         server.console(command)
@@ -232,7 +229,7 @@ def run_side(label, server_command, client_command, build, world):
                             joined.append(rest[0])
                         elif verb == 'quit':
                             joined.remove(rest[0])
-                    client.wait(server, joined, STEP_TICKS)
+                    client.wait(server, joined, (step_ticks or {}).get(step, STEP_TICKS))
                 client.end()
             finally:
                 client.kill()

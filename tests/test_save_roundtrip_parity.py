@@ -222,6 +222,28 @@ class SaveRoundtripTimersTests(unittest.TestCase):
 
 
 class SaveRoundtripLogTests(unittest.TestCase):
+    def test_ignores_offline_auth_discovery_but_retains_other_warnings(self):
+        discovery = '[12:00:00] [Minecraft Services Discovery/WARN]: '
+        unavailable = 'com.mojang.authlib.exceptions.MinecraftClientException: Services are unavailable'
+        key_warning = 'Services are unavailable, unable to fetch uri for AUTHENTICATION/getPublicKeys'
+        key_failure = 'Failed to request Minecraft Services public key'
+        server = roundtrip.Vanilla.__new__(roundtrip.Vanilla)
+        failures = [
+            '[12:00:01] [Server thread/WARN]: ' + key_warning,
+            discovery + key_warning.replace('getPublicKeys', 'otherEndpoint'),
+            '[12:00:02] [Server thread/WARN]: Failed to save chunk',
+            '[12:00:03] [Server thread/WARN]: World diagnostic',
+            unavailable,
+            key_failure + ' (unrecognized detail)',
+        ]
+        server.lines = [
+            discovery + 'Failed to connect', unavailable,
+            discovery + key_warning, unavailable,
+            key_failure,
+            *failures,
+        ]
+        self.assertEqual(server.problems(), failures)
+
     def test_the_containers_missing_network_interface_is_not_a_save_problem(self):
         server = object.__new__(roundtrip.Vanilla)
         server.lines = [

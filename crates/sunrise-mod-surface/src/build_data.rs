@@ -21,6 +21,16 @@ pub const FILES: [&str; 3] = [FUNCTIONS, INTERNALS, LOOPS];
 /// The release asset holding them.
 pub const ARCHIVE: &str = "build-data.tar.xz";
 
+/// Token-stream SHA-256 digests of a game function, independent of its source span.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FunctionDigests {
+    /// The function's declaration, including its enclosing impl when present.
+    pub declaration: String,
+    /// The function block.
+    pub body: String,
+}
+
 /// The build a file describes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Build {

@@ -563,6 +563,7 @@ mod tests {
         let fluid = register_mod_fluid(ModFluidType {
             id: "mesh_fixture:oil".into(),
             flowing_id: "mesh_fixture:flowing_oil".into(),
+            block_id: "mesh_fixture:oil".into(),
             bucket: None,
             rules: ModFluidRules {
                 tick_delay: 5,
@@ -573,6 +574,7 @@ mod tests {
         })
         .unwrap();
         let air = Info {
+            air: true,
             solid: false,
             full: false,
             permeable: true,
@@ -604,6 +606,7 @@ mod tests {
                 air,
                 air,
                 Info {
+                    air: false,
                     overlay: true,
                     ..air
                 },
@@ -711,6 +714,7 @@ mod tests {
         use super::super::{Tint, mod_tint::ModTints};
         use sunrise_world::fluid::FluidState;
         let air = Info {
+            air: true,
             solid: false,
             full: false,
             permeable: true,
@@ -741,10 +745,12 @@ mod tests {
             info: vec![
                 air,
                 Info {
+                    air: false,
                     fluid: FluidState::new(FluidKind::Water, 8, true),
                     ..air
                 },
                 Info {
+                    air: false,
                     solid: true,
                     full: true,
                     model: true,

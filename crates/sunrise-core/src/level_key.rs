@@ -45,6 +45,12 @@ impl LevelKey {
         Ok(Self(leaked))
     }
 
+    /// Reuse a canonical `namespace:path` name from a registry that already owns and interns
+    /// the id. Use [`Self::parse`] at boundaries that accept raw text.
+    pub const fn from_interned_id(id: &'static str) -> Self {
+        Self(id)
+    }
+
     /// The Nether or the End for their ids, the Overworld for anything else.
     pub fn builtin_or_overworld(id: &str) -> Self {
         match id {

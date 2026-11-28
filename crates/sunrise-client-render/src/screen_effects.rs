@@ -50,8 +50,10 @@ pub struct ScreenQuad {
     /// A tint of the whole view (the underwater overlay), not something in front of it: in HDR
     /// output the world shines through it (`Renderer::draw_overlay`).
     pub world_tint: bool,
+    /// A registered texture atlas page, or the base atlas.
+    pub atlas_page: Option<usize>,
 }
-/// What `block_screen_effect_draw` draws with: quads in camera space (`+x` right, `+y` up, the
+/// What a selected block overlay renderer draws with: quads in camera space (`+x` right, `+y` up, the
 /// camera at the origin looking down `-z`), under `GameRenderer.render3dHud`'s projection.
 pub struct CameraQuads {
     /// `camera::hand_projection`, column-major.
@@ -75,6 +77,18 @@ impl CameraQuads {
         argb: u32,
         sampling: u32,
     ) -> bool {
+        self.push_on_atlas(corners, uv, rect, argb, sampling, None)
+    }
+
+    pub fn push_on_atlas(
+        &mut self,
+        corners: [[f32; 3]; 4],
+        uv: [[f32; 2]; 4],
+        rect: [f32; 4],
+        argb: u32,
+        sampling: u32,
+        atlas_page: Option<usize>,
+    ) -> bool {
         if !corners.as_flattened().iter().all(|c| c.is_finite())
             || !uv.as_flattened().iter().all(|c| c.is_finite())
         {
@@ -94,6 +108,7 @@ impl CameraQuads {
             blend: Blend::Alpha,
             sampling,
             world_tint: false,
+            atlas_page,
         });
         true
     }
@@ -120,13 +135,10 @@ pub struct ScreenInputs<'a> {
     /// Eye in water: (lightmap brightness at the eye, yaw, pitch).
     pub water: Option<(f32, f32, f32)>,
     pub on_fire: bool,
-    /// How far the fire overlay moves down, in its own heights (PvP & HUD's lower fire; 0 is
-    /// vanilla's place).
-    pub fire_lower: f32,
     /// `Hud.extractCameraOverlays` draws: the full-screen blits become
     /// screen quads (the spyglass, its fills and the nausea swirl do not).
     pub gui_overlays: &'a [GuiDraw],
-    /// What mods drew in `block_screen_effect_draw` before the block overlay, the water
+    /// What the selected renderers submitted before the block overlay, the water
     /// overlay and the fire overlay, in that order, each shown or not.
     pub custom: [&'a [ScreenQuad]; 3],
 }
@@ -233,6 +245,7 @@ impl ScreenEffects {
             blend: Blend::Alpha,
             sampling,
             world_tint: false,
+            atlas_page: None,
         };
         let full = [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]];
         // ScreenEffectRenderer.submitBlockSprite: u1/v1 at (-1, -1), colour 0xFF191919.
@@ -273,7 +286,7 @@ impl ScreenEffects {
             for (dx, angle) in [(0.24f32, -10.0f32), (-0.24, 10.0)] {
                 let (s, c) = angle.to_radians().sin_cos();
                 // rotateY about the quad then translate; z = -0.5 feeds into x.
-                let corner = |x: f32, y: f32| [x * c + -0.5 * s + dx, y - 0.3 - input.fire_lower];
+                let corner = |x: f32, y: f32| [x * c + -0.5 * s + dx, y - 0.3];
                 let corners = [
                     corner(-0.5, -0.5),
                     corner(0.5, -0.5),
@@ -304,6 +317,7 @@ impl ScreenEffects {
             blend,
             sampling,
             world_tint: false,
+            atlas_page: None,
         };
         for d in input.gui_overlays {
             match d {
@@ -416,7 +430,6 @@ mod tests {
             block_overlay: None,
             water: Some((1.0, 0.0, 0.0)),
             on_fire: false,
-            fire_lower: 0.0,
             gui_overlays: &[crate::hud_overlays::vignette(320, 240, 1.0, 0.0)],
             custom: [&[]; 3],
         };
@@ -472,7 +485,6 @@ mod tests {
             block_overlay: Some("block/stone".to_owned()),
             water: Some((1.0, 0.0, 0.0)),
             on_fire: false,
-            fire_lower: 0.0,
             gui_overlays: &[crate::hud_overlays::vignette(320, 240, 1.0, 0.0)],
             custom: [&[]; 3],
         });
@@ -541,7 +553,6 @@ mod tests {
             block_overlay: Some("block/stone".to_owned()),
             water: None,
             on_fire: true,
-            fire_lower: 0.0,
             gui_overlays: &[],
             custom: [&block, &water, &fire],
         });

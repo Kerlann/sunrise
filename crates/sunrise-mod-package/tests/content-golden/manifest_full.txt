@@ -34,6 +34,7 @@ Manifest {
         "mineral-lab",
         "lab.notes",
     ],
+    served_by: None,
     dependencies: {
         "base": Version(
             VersionReq {

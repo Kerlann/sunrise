@@ -7,7 +7,6 @@ pub(super) enum FrameDraw {
     Calibration(crate::hdr_calibration::Layout),
     Shell(Page),
     RadialName,
-    Studio([f32; 4]),
     Mods,
     Packs,
     Standard(std::sync::Arc<OptionsLayout>),
@@ -20,8 +19,7 @@ impl OptionsUi {
     pub fn discard_draw(&mut self) {
         if let Some(FrameDraw::Shell(page)) = self.frame_draw.take() {
             let hosted: &mut dyn shell::Hosted = match page {
-                Page::Extras => &mut self.extras,
-                page if Self::graphics_page(page).is_some() => &mut self.graphics,
+                page if Self::sunrise_tab(page).is_some() => &mut self.sunrise,
                 Page::ControllerRadial => &mut self.radial,
                 Page::ControllerRadialPick => &mut self.radial_pick,
                 page if Self::controller_page(page).is_some() => &mut self.controller,
@@ -69,8 +67,6 @@ impl OptionsUi {
             shell.draw_background(s, batch, atlas, in_world, waiting);
             self.size = (w, h);
             FrameDraw::Shell(page)
-        } else if page == Page::Studio {
-            FrameDraw::Studio(self.studio.draw_background(batch, atlas, in_world))
         } else if matches!(page, Page::Mods | Page::Packs) {
             if page == Page::Packs {
                 self.watch_data_packs(atlas, (w, h));
@@ -82,9 +78,6 @@ impl OptionsUi {
                 _ => unreachable!(),
             }
         } else {
-            if page == Page::Pvp {
-                self.wide_extras = wide_extras(s, |t| atlas.font.width(t));
-            }
             let layout = self.built_layout(s, w, h);
             let (_, top, bottom, _) = layout.parts();
             self.size = (w, h);
@@ -133,10 +126,6 @@ impl OptionsUi {
                     .as_mut()
                     .expect("name entry remains open")
                     .draw_contents(batch, atlas, cursor);
-                FrameDraw::Complete
-            }
-            FrameDraw::Studio(rect) => {
-                self.studio.draw_contents(batch, atlas, cursor, rect);
                 FrameDraw::Complete
             }
             kind @ (FrameDraw::Mods | FrameDraw::Packs) => {
@@ -447,19 +436,13 @@ impl OptionsUi {
             }
             self.language_search = search;
         }
-        if matches!(
-            self.page(),
-            Page::Video | Page::Controls | Page::KeyBinds | Page::ModBrowser
-        ) {
+        if matches!(self.page(), Page::Video | Page::Controls | Page::KeyBinds) {
             let mut search = self.settings_search.clone();
             if self.focus == Some(FocusId::Search) {
                 search.focused = true;
             }
             search.draw(batch, atlas, None);
-            let hint = match self.page() {
-                Page::ModBrowser => "sunrise.mods.browse.search",
-                _ => "sunrise.options.search",
-            };
+            let hint = "sunrise.options.search";
             // Sunrise's search box sits in the header, before the list.
             crate::widgets::last_narratable(|n| {
                 n.order = -1;

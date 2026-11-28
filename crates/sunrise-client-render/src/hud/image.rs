@@ -9,8 +9,8 @@ pub fn decode(path: &Path) -> Result<(u32, u32, Vec<u8>)> {
 ///
 /// The game's own resources are PNG throughout, and so are a resource pack's
 /// (vanilla's `NativeImage.read` takes PNG only), so [`decode_bytes`] stays
-/// PNG-only. WebP and JPEG are for images fetched from the network (Modrinth
-/// project icons in the resource pack browser), which are commonly either.
+/// PNG-only. WebP and JPEG are for images that arrive from outside the game's
+/// own resources, which are commonly either.
 pub(super) enum ImageFormat {
     Png,
     /// `RIFF....WEBP`.
@@ -45,71 +45,6 @@ pub(super) fn check_fetched_size(width: u64, height: u64) -> Result<()> {
         return Err(format!("a {width}x{height} image is too large to decode").into());
     }
     Ok(())
-}
-
-/// A pack image may claim no side an atlas would refuse, nor more pixels than
-/// the largest atlas holds: the PNG reader alone would trust the header and
-/// allocate it, as its own limit covers one row.
-pub(crate) fn check_pack_size(width: u32, height: u32) -> Result<()> {
-    use crate::atlas_sources::MAX_SPRITE_SIDE;
-    if i64::from(width.max(height)) > MAX_SPRITE_SIDE {
-        return Err(OverSizeLimit(format!(
-            "a {width}x{height} image exceeds the {MAX_SPRITE_SIDE}-pixel sprite side"
-        ))
-        .into());
-    }
-    if u64::from(width) * u64::from(height) > u64::from(MAX_ATLAS_SIZE).pow(2) {
-        return Err(OverSizeLimit(format!(
-            "a {width}x{height} image has more pixels than a {MAX_ATLAS_SIZE}x{MAX_ATLAS_SIZE} atlas"
-        ))
-        .into());
-    }
-    Ok(())
-}
-
-/// The most bytes any one buffer of a pack image may take (the decoder's, its RGBA copy, its
-/// frames made square): 8192x8192 RGBA, 256 MiB. That is far past the panorama faces and
-/// animated strips packs ship, where the 16384x16384 pixels [`check_pack_size`] lets through
-/// would hold 1 GiB per buffer, two buffers per image and several images loading in parallel.
-pub(crate) const MAX_IMAGE_BYTES: usize = 256 << 20;
-
-/// A pack image refused for its size: past a side, pixel or byte limit, or a buffer the
-/// allocator would not give.
-#[derive(Debug)]
-pub struct OverSizeLimit(String);
-
-impl std::fmt::Display for OverSizeLimit {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for OverSizeLimit {}
-
-/// The bytes of a buffer the product of `factors` long, refused (an overflow too) past
-/// `budget`.
-pub(crate) fn image_bytes(factors: &[usize], budget: usize) -> Result<usize> {
-    factors
-        .iter()
-        .try_fold(1usize, |bytes, &factor| bytes.checked_mul(factor))
-        .filter(|&bytes| bytes <= budget)
-        .ok_or_else(|| {
-            OverSizeLimit(format!(
-                "an image buffer of {factors:?} is over the {budget}-byte size limit"
-            ))
-            .into()
-        })
-}
-
-/// An empty buffer with room for the product of `factors` values of `T`, refused past `budget`
-/// bytes or when the allocator refuses it: a load error rather than an abort.
-pub(crate) fn image_buffer<T>(factors: &[usize], budget: usize) -> Result<Vec<T>> {
-    let bytes = image_bytes(&[factors, &[size_of::<T>()]].concat(), budget)?;
-    let mut buffer = Vec::new();
-    buffer
-        .try_reserve_exact(bytes / size_of::<T>())
-        .map_err(|e| OverSizeLimit(format!("an image buffer of {bytes} bytes: {e}")))?;
-    Ok(buffer)
 }
 
 /// A WebP image as RGBA8. Still frames and animations both decode; an
@@ -271,6 +206,16 @@ pub(super) fn walk(source: &ResourceSource, directory: &str, out: &mut Vec<Strin
             .filter(|name| name.ends_with(".png")),
     );
 }
+/// `MissingTextureAtlasSprite.generateMissingImage`: 16x16, magenta and black quarters.
+pub(crate) fn missing_image() -> (u32, u32, Vec<u8>) {
+    let pixels = (0..256)
+        .flat_map(|i| match (i / 16 < 8) ^ (i % 16 < 8) {
+            true => [248, 0, 248, 255],
+            false => [0, 0, 0, 255],
+        })
+        .collect();
+    (16, 16, pixels)
+}
 pub(crate) fn decode_resource(source: &ResourceSource, name: &str) -> Result<(u32, u32, Vec<u8>)> {
     decode_bytes(&source.read(name)?)
 }
@@ -336,7 +281,29 @@ pub(super) fn first_frame(
 }
 /// `image` inside a one-texel border copied from its opposite edges, the
 /// texels repeat addressing reads past each edge.
-pub(super) fn wrap_border((name, w, h, data): &PackedImage) -> PackedImage {
+pub(super) fn wrap_border((name, w, h, data): &PackedImage) -> Result<PackedImage> {
+    let invalid = "sprite border exceeds the RGBA8 address space";
+    let (bw, bh) = (
+        w.checked_add(2).ok_or(invalid)?,
+        h.checked_add(2).ok_or(invalid)?,
+    );
+    let len = rgba_len([bw, bh]).ok_or(invalid)?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(len)?;
+    let w = *w as usize;
+    let h = *h as usize;
+    for y in 0..bh as usize {
+        let row = (y + h - 1) % h * w;
+        for x in 0..bw as usize {
+            let at = (row + (x + w - 1) % w) * 4;
+            out.extend_from_slice(&data[at..at + 4]);
+        }
+    }
+    Ok((name.clone(), bw, bh, out))
+}
+
+/// Raw RGBA8 `w x h` image padded by a 1-texel wrap border copied from opposite edges.
+pub(super) fn wrap_border_pixels(data: &[u8], w: u32, h: u32) -> Vec<u8> {
     let (bw, bh) = (w + 2, h + 2);
     let mut out = Vec::with_capacity((bw * bh * 4) as usize);
     for y in 0..bh {
@@ -346,7 +313,94 @@ pub(super) fn wrap_border((name, w, h, data): &PackedImage) -> PackedImage {
             out.extend_from_slice(&data[at..at + 4]);
         }
     }
-    (name.clone(), bw, bh, out)
+    out
+}
+
+/// `image` inside a one-texel border clamped from its own edge texels, matching
+/// vanilla 26.3's `Stitcher` padding + `ANIMATE_SPRITE_BLIT` `CLAMP_TO_EDGE` so
+/// boundary UV samples on GPUs never read the transparent atlas gutter and discard.
+pub(super) fn clamp_border((name, w, h, data): &PackedImage) -> Result<PackedImage> {
+    let invalid = "sprite border exceeds the RGBA8 address space";
+    let (bw, bh) = (
+        w.checked_add(2).ok_or(invalid)?,
+        h.checked_add(2).ok_or(invalid)?,
+    );
+    let len = rgba_len([bw, bh]).ok_or(invalid)?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(len)?;
+    let w = *w as usize;
+    let h = *h as usize;
+    for y in 0..bh as usize {
+        let row = y.saturating_sub(1).min(h - 1) * w;
+        for x in 0..bw as usize {
+            let col = x.saturating_sub(1).min(w - 1);
+            let at = (row + col) * 4;
+            out.extend_from_slice(&data[at..at + 4]);
+        }
+    }
+    Ok((name.clone(), bw, bh, out))
+}
+
+/// Raw RGBA8 `w x h` image padded by a 1-texel clamp-to-edge border on all four sides.
+pub(super) fn clamp_border_pixels(data: &[u8], w: u32, h: u32) -> Vec<u8> {
+    let (bw, bh) = (w + 2, h + 2);
+    let mut out = Vec::with_capacity((bw * bh * 4) as usize);
+    for y in 0..bh {
+        let row = y.saturating_sub(1).min(h - 1);
+        for x in 0..bw {
+            let col = x.saturating_sub(1).min(w - 1);
+            let at = ((row * w + col) * 4) as usize;
+            out.extend_from_slice(&data[at..at + 4]);
+        }
+    }
+    out
+}
+
+/// Strip a 1-texel border from `(w, h, data)` back to `(w - 2, h - 2)`.
+pub(super) fn strip_border(w: u32, h: u32, data: &[u8]) -> (u32, u32, Vec<u8>) {
+    let (iw, ih) = (w - 2, h - 2);
+    let mut out = Vec::with_capacity((iw * ih * 4) as usize);
+    for y in 0..ih {
+        let src = (((y + 1) * w + 1) * 4) as usize;
+        out.extend_from_slice(&data[src..src + (iw * 4) as usize]);
+    }
+    (iw, ih, out)
+}
+
+/// Populate the 1-texel border around a sprite placed at `(x, y)` of interior size `(w, h)`
+/// inside `pixels` (`atlas_w` wide), either wrapping opposite edges (`wrap`) or clamping.
+pub(super) fn write_atlas_border(
+    pixels: &mut [u8],
+    atlas_w: u32,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    wrap: bool,
+) {
+    if x == 0 || y == 0 || w == 0 || h == 0 {
+        return;
+    }
+    let copy_px = |pixels: &mut [u8], sx: u32, sy: u32, dx: u32, dy: u32| {
+        let s = ((sy * atlas_w + sx) * 4) as usize;
+        let d = ((dy * atlas_w + dx) * 4) as usize;
+        let px = [pixels[s], pixels[s + 1], pixels[s + 2], pixels[s + 3]];
+        pixels[d..d + 4].copy_from_slice(&px);
+    };
+    let (src_left, src_right) = if wrap { (x + w - 1, x) } else { (x, x + w - 1) };
+    let (src_top, src_bottom) = if wrap { (y + h - 1, y) } else { (y, y + h - 1) };
+    for dy in 0..h {
+        copy_px(pixels, src_left, y + dy, x - 1, y + dy);
+        copy_px(pixels, src_right, y + dy, x + w, y + dy);
+    }
+    for dx in 0..w {
+        copy_px(pixels, x + dx, src_top, x + dx, y - 1);
+        copy_px(pixels, x + dx, src_bottom, x + dx, y + h);
+    }
+    copy_px(pixels, src_left, src_top, x - 1, y - 1);
+    copy_px(pixels, src_right, src_top, x + w, y - 1);
+    copy_px(pixels, src_left, src_bottom, x - 1, y + h);
+    copy_px(pixels, src_right, src_bottom, x + w, y + h);
 }
 
 /// The texture of every `bitmap` font provider. A provider's `file` may name

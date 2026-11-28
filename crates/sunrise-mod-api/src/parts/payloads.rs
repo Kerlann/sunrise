@@ -11,9 +11,25 @@ mod tests;
 #[path = "payloads/typed_tests.rs"]
 mod typed_tests;
 
-/// Namespaces the engine owns: `minecraft:` (`brand`, `register`, ...) and every
-/// `sunrise:` channel. A raw declaration cannot claim them.
-const RESERVED_RAW_NAMESPACES: [&str; 2] = ["minecraft", "sunrise"];
+/// Validate an explicit namespaced payload channel ID once and refuse the `minecraft`
+/// namespace (NeoForge `NetworkRegistry`) and built-in engine `sunrise:` channels.
+fn validate_payload_id(id: &str) -> Result<(), String> {
+    if !id.contains(':') {
+        return Err("payload ids must be explicitly namespaced".to_owned());
+    }
+    let Some(parsed) = Identifier::parse_namespaced(id) else {
+        return Err(format!("invalid identifier {id:?}"));
+    };
+    if parsed.namespace() == "minecraft" {
+        return Err(
+            "the \"minecraft\" namespace is reserved for vanilla protocol channels".to_owned(),
+        );
+    }
+    if sunrise_mod_runtime::engine_channels::is_reserved_engine_channel(id) {
+        return Err("channel is reserved for an engine service or transport control".to_owned());
+    }
+    Ok(())
+}
 
 fn indices(protocol: PayloadProtocol) -> &'static [usize] {
     match protocol {
@@ -34,10 +50,7 @@ impl PartRegistrar {
         schema: Option<u64>,
     ) -> Option<(PayloadId, u32)> {
         let refused = (|| {
-            if !declaration.id.0.contains(':') {
-                return Err("payload ids must be explicitly namespaced".to_owned());
-            }
-            declaration.id.0 = self.owned_declaration_id(&declaration.id.0)?;
+            validate_payload_id(&declaration.id.0)?;
             if declaration.version.trim().is_empty() {
                 return Err("payload version must not be blank".to_owned());
             }
@@ -188,12 +201,19 @@ impl PayloadsRegistrar for PartRegistrar {
     fn add_typed_payload(
         &mut self,
         declaration: PayloadDeclaration,
-        schema: u64,
+        schema: Option<u64>,
         server: Option<Arc<dyn IPayloadHandler>>,
         client: Option<Arc<dyn IPayloadHandler>>,
     ) -> PayloadToken {
         let (protocol, direction) = (declaration.protocol, declaration.direction);
         let requested = declaration.id.clone();
+        let Some(schema) = schema else {
+            self.refused.push(format!(
+                "{} declared typed payload {} with an ordinary-only Wire form",
+                self.mod_id, requested.0
+            ));
+            return PayloadToken::new(requested, u32::MAX, 0, protocol, direction, 0);
+        };
         let (id, slot, load) = match self.declare_payload(declaration, server, client, Some(schema))
         {
             Some((id, slot)) => (
@@ -265,14 +285,7 @@ impl PayloadsRegistrar for PartRegistrar {
 
     fn add_raw_payload(&mut self, id: PayloadId, server: Option<Arc<dyn IPayloadHandler>>) {
         let refused = (|| {
-            let parsed = Identifier::parse_namespaced(&id.0)
-                .ok_or_else(|| "a raw channel needs an exact namespaced id".to_owned())?;
-            if RESERVED_RAW_NAMESPACES.contains(&parsed.namespace()) {
-                return Err(format!(
-                    "the {:?} namespace belongs to the engine",
-                    parsed.namespace()
-                ));
-            }
+            validate_payload_id(&id.0)?;
             let Some(payloads) = &self.parts.payloads else {
                 return Ok(());
             };

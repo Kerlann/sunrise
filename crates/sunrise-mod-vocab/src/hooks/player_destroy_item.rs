@@ -1,5 +1,4 @@
 //! The `player_destroy_item` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0250
 
 pub trait Hooks {
     /// The player's item was used up or broke. `original` is the complete
@@ -13,10 +12,16 @@ pub trait Hooks {
     /// inferred from an equipment status packet. Partial consumption, refused
     /// actions and creative use that preserves the stack do not fire.
     #[hook(
+        dispatch = "flat",
         side = "both",
         version = 2,
         contract = "listen",
         neoforge = "PlayerDestroyItemEvent"
     )]
-    fn player_destroy_item();
+    fn player_destroy_item(
+        player: u128,
+        player_entity_id: i32,
+        original: &ItemStack,
+        hand: Option<Hand>,
+    );
 }

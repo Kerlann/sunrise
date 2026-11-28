@@ -1,5 +1,4 @@
 //! The `can_survive` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0078
 
 pub trait Hooks {
     /// `BlockState.canSurvive` for `state` at `pos`
@@ -22,6 +21,8 @@ pub trait Hooks {
     /// A disabled owner's subscribed rule keeps that block type where it is already present
     /// or settling after a piston move or fall, but refuses a new placement.
     #[hook(
+        receiver = "read",
+        dispatch = "flat",
         side = "both",
         version = 2,
         contract = "replace",
@@ -29,8 +30,14 @@ pub trait Hooks {
         scope = "block",
         inert = "signal",
         key = "state",
-        target = "sunrise_client::game::native_hooks::base::LevelView<'_>::native_can_survive",
+        target = "sunrise_gameplay_common::game::native_hooks::base::LevelView<'_>::native_can_survive",
         neoforge = "none (vanilla BlockBehaviour.canSurvive; NeoForge adds no event or extension for it)"
     )]
-    fn can_survive();
+    fn can_survive(
+        dimension: LevelDimension,
+        pos: BlockPos,
+        state: BlockState,
+        survives: &mut Option<bool>,
+        #[engine] inert: &mut bool,
+    );
 }

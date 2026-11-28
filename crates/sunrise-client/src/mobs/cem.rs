@@ -21,7 +21,8 @@
 //! collar, a spider's eyes, the cracks on a wolf's armour): those keep their textures over the
 //! new geometry.
 
-use super::{Mob, MobType, Part, Polygon, Species};
+use super::{Mob, Part, Polygon, Species, render::BakedFrameModel};
+use crate::mobs_render::ClientMobModels;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     sync::Arc,
@@ -35,12 +36,14 @@ use sunrise_optifine::cem::{
 /// The CEM models of the enabled packs, by model layer (`zombie#main`).
 #[derive(Default)]
 pub struct CemModels {
-    layers: HashMap<String, CemLayer>,
+    layers: HashMap<String, Arc<CemLayer>>,
 }
 
 /// A model layer as a `.jem` reshapes it, or as a pack's pre-1.21.5 mob texture needs it.
 pub struct CemLayer {
     pub model: Arc<Part>,
+    /// The hierarchy of this replacement, including the pack's own bones.
+    pub frame_model: Arc<BakedFrameModel>,
     /// The `.jem`'s animations, run after the vanilla animation.
     pub animation: Option<super::cem_anim::Animation>,
     /// The atlas name of the `.jem`'s texture (`entity/zombie/zombie_green`), drawn instead of
@@ -73,11 +76,11 @@ impl CemLayer {
 const FALLBACK_STEPS: usize = 3;
 
 impl CemModels {
-    /// The `.jem` files under `root` applied to the layers of `types`, and the layers the
+    /// The `.jem` files under `root` applied to the layers of `models`, and the layers the
     /// packs' pre-1.21.5 mob textures paint ([`LEGACY`]).
-    pub fn load(root: &ResourceSource, types: &HashMap<String, Arc<MobType>>) -> Self {
+    pub fn load(root: &ResourceSource, models: &ClientMobModels) -> Self {
         let files = jem_files(root);
-        let (models, standing) = Self::from_files(root, &files, &vanilla_layers(types));
+        let (models, standing) = Self::from_files(root, &files, &vanilla_layers(models));
         set_rule_species(standing);
         models
     }
@@ -154,7 +157,7 @@ impl CemModels {
             if rules.iter().any(|r| !r.blocks.is_empty()) {
                 standing_species.push(kind.to_owned());
             }
-            let mut layer = CemLayer::build(part, jem, name, &rules);
+            let mut layer = CemLayer::build(part, jem, name, &rules, None);
             // A fallback onto another layer (the cat's collar from `cat`) takes the geometry
             // only: the layer keeps its own texture.
             let own_layers = layer_keys(name);
@@ -166,7 +169,7 @@ impl CemModels {
             } else if key == layer_key(name) {
                 own.insert(key.clone(), (name, path));
             }
-            layers.insert(key, layer);
+            layers.insert(key, Arc::new(layer));
         }
         let own: HashMap<String, (&str, &str, &EntityModel)> = own
             .into_iter()
@@ -181,19 +184,25 @@ impl CemModels {
     }
 
     pub fn layer(&self, key: &str) -> Option<&CemLayer> {
+        self.layer_ref(key).map(Arc::as_ref)
+    }
+
+    pub(super) fn layer_ref(&self, key: &str) -> Option<&Arc<CemLayer>> {
         self.layers.get(key)
     }
 }
 
-/// Every model layer of `types` by its key, with its owner's id (`minecraft:cow` owns
+/// Every model layer of `models` by its key, with its owner's id (`minecraft:cow` owns
 /// `cow#main` and `cold_cow#main` alike).
-fn vanilla_layers(types: &HashMap<String, Arc<MobType>>) -> HashMap<&str, (&Arc<Part>, &str)> {
-    types
-        .values()
-        .flat_map(|t| {
+fn vanilla_layers(models: &ClientMobModels) -> HashMap<&str, (&Arc<Part>, &str)> {
+    models
+        .types
+        .iter()
+        .filter(|(id, _)| id.as_str() != "minecraft:player")
+        .flat_map(|(id, t)| {
             t.layers
                 .iter()
-                .map(|(k, v)| (k.as_str(), (v, t.id.as_str())))
+                .map(move |(k, v)| (k.as_str(), (v, id.as_str())))
         })
         .collect()
 }
@@ -614,7 +623,13 @@ fn vanilla_part(model: &str, part: &str) -> String {
 impl CemLayer {
     /// `vanilla` reshaped by `jem`, the model `name`'s file, whose random-model `rules`
     /// feed the animations' `rule_index`.
-    fn build(vanilla: &Part, jem: &EntityModel, name: &str, rules: &[Rule]) -> Self {
+    fn build(
+        vanilla: &Part,
+        jem: &EntityModel,
+        name: &str,
+        rules: &[Rule],
+        legacy_uv_scale: Option<f32>,
+    ) -> Self {
         let model = name.replace("_baby", "");
         let mut out = vanilla.clone();
         let mut count = 0;
@@ -671,8 +686,13 @@ impl CemLayer {
             ids: &ids,
         };
         let animation = super::cem_anim::compile_animation(name, &names, &entries, rules);
+        if let Some(scale) = legacy_uv_scale {
+            old_layout(&mut out, scale);
+        }
+        let model = Arc::new(out);
         Self {
-            model: Arc::new(out),
+            frame_model: Arc::new(BakedFrameModel::bake(&model)),
+            model,
             animation,
             texture: jem.texture.as_deref().and_then(atlas_name),
             anchors,
@@ -743,7 +763,7 @@ impl Legacy {
         root: &ResourceSource,
         vanilla: &HashMap<&str, (&Arc<Part>, &str)>,
         own: &HashMap<String, (&str, &str, &EntityModel)>,
-        layers: &mut HashMap<String, CemLayer>,
+        layers: &mut HashMap<String, Arc<CemLayer>>,
     ) {
         // `root` holds vanilla's files too, which never had the old names.
         let legacy: Vec<_> = self
@@ -767,20 +787,26 @@ impl Legacy {
             if !vanilla.contains_key(key.as_str()) || key != adult && own.contains_key(&key) {
                 continue;
             }
-            let tree = (**part).clone();
             let mut layer = match (jem, &rules) {
-                (Some(&(name, _, jem)), Some(rules)) => CemLayer::build(&tree, jem, name, rules),
-                _ => CemLayer {
-                    model: Arc::new(tree),
-                    animation: None,
-                    texture: None,
-                    anchors: Vec::new(),
-                    legacy: Vec::new(),
-                },
+                (Some(&(name, _, jem)), Some(rules)) => {
+                    CemLayer::build(part, jem, name, rules, Some(self.taller))
+                }
+                _ => {
+                    let mut tree = (**part).clone();
+                    old_layout(&mut tree, self.taller);
+                    let model = Arc::new(tree);
+                    CemLayer {
+                        frame_model: Arc::new(BakedFrameModel::bake(&model)),
+                        model,
+                        animation: None,
+                        texture: None,
+                        anchors: Vec::new(),
+                        legacy: Vec::new(),
+                    }
+                }
             };
-            old_layout(Arc::make_mut(&mut layer.model), self.taller);
             layer.legacy = legacy.clone();
-            layers.insert(key, layer);
+            layers.insert(key, Arc::new(layer));
         }
     }
 }
@@ -881,6 +907,7 @@ fn part(
             .iter()
             .map(|c| part(c, count, ids, anchors))
             .collect(),
+        layer: None,
     }
 }
 
@@ -900,6 +927,7 @@ mod tests {
                 vertices: [[0.0; 5]; 4],
             }],
             children,
+            layer: None,
         }
     }
     fn get<'a>(part: &'a Part, name: &str) -> &'a Part {
@@ -1389,18 +1417,25 @@ mod tests {
         texture: &str,
         layers: &[&str],
         tree: &Part,
-    ) -> Arc<MobType> {
+    ) -> (Arc<super::super::MobType>, ClientMobModels) {
         let mut kind = (*super::super::sensor_scan_tests::kind()).clone();
         kind.id = id.into();
-        kind.texture = texture.into();
         kind.species = species;
         kind.anim = anim;
-        kind.model = Arc::new(tree.clone());
-        kind.layers = layers
-            .iter()
-            .map(|k| ((*k).to_owned(), Arc::new(tree.clone())))
-            .collect();
-        Arc::new(kind)
+        let mut models = ClientMobModels::default();
+        models.insert(
+            id.into(),
+            crate::mobs_render::ClientMobVisuals {
+                shadow: None,
+                model: Arc::new(tree.clone()),
+                layers: layers
+                    .iter()
+                    .map(|k| ((*k).to_owned(), Arc::new(tree.clone())))
+                    .collect(),
+                texture: texture.into(),
+            },
+        );
+        (Arc::new(kind), models)
     }
 
     /// How many vertices `render` draws of `mob` in each of `sprites`, laid far apart in the
@@ -1408,26 +1443,18 @@ mod tests {
     /// `.jem`'s texture, is in the atlas only with `custom`.
     fn sprite_counts(
         mob: &super::super::Mob,
+        visuals: &ClientMobModels,
         models: &Arc<CemModels>,
         sprites: &[&str],
         custom: bool,
     ) -> Vec<usize> {
-        let data = super::super::MobData {
-            states: Vec::new(),
-            placements: Default::default(),
-            heightmaps: Default::default(),
-            animations: Default::default(),
-            biome_tags: Default::default(),
-            entity_tags: Default::default(),
-            villager_hats: Default::default(),
+        let data = crate::mobs_render::ClientMobData {
             cem: std::sync::RwLock::new(models.clone()),
-            random_textures: Default::default(),
-            emissive: Default::default(),
-            blinks: Default::default(),
-            pois: Default::default(),
-            species_placements: Default::default(),
-            mod_spawns: Default::default(),
-            resolved: Default::default(),
+            ..Default::default()
+        };
+        let source = crate::mobs_render::ClientMobRender {
+            models: visuals,
+            data: &data,
         };
         // Sprite i spans u and v from 0.2 i to 0.2 i + 0.1.
         let atlas = |name: &str| -> Option<[f32; 4]> {
@@ -1442,7 +1469,7 @@ mod tests {
             glam::DVec3::ZERO,
             &atlas,
             0xf0f0,
-            &data,
+            &source,
             &mut vertices,
         );
         let mut counts = vec![0; sprites.len()];
@@ -1470,6 +1497,7 @@ mod tests {
             pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
             polygons: Vec::new(),
             children: vec![plane(part, vec![])],
+            layer: None,
         };
         let textured = |texture: &str| {
             format!(
@@ -1484,19 +1512,15 @@ mod tests {
             &["spider#main"],
             &tree("body1"),
         ));
-        let mob = Mob::new(
-            1,
-            mob_kind(
-                "minecraft:spider",
-                Species::Spider,
-                Anim::Spider,
-                "entity/spider/spider",
-                &["spider#main"],
-                &tree("body1"),
-            ),
-            sunrise_core::geometry::Vec3::ZERO,
-            0.0,
+        let (kind, visuals) = mob_kind(
+            "minecraft:spider",
+            Species::Spider,
+            Anim::Spider,
+            "entity/spider/spider",
+            &["spider#main"],
+            &tree("body1"),
         );
+        let mob = Mob::new(1, kind, sunrise_core::geometry::Vec3::ZERO, 0.0);
         let sprites = [
             "entity/spider/custom",
             "entity/spider/spider_eyes",
@@ -1504,8 +1528,14 @@ mod tests {
         ];
         // The custom box's six faces, four corners each, for the body and again for the eyes;
         // the replaced body part's own face is gone.
-        assert_eq!(sprite_counts(&mob, &cem, &sprites, true), [24, 24, 0]);
-        assert_eq!(sprite_counts(&mob, &cem, &sprites, false), [0, 24, 24]);
+        assert_eq!(
+            sprite_counts(&mob, &visuals, &cem, &sprites, true),
+            [24, 24, 0]
+        );
+        assert_eq!(
+            sprite_counts(&mob, &visuals, &cem, &sprites, false),
+            [0, 24, 24]
+        );
 
         let wool = textured("entity/sheep/custom_wool");
         let cem = Arc::new(models(
@@ -1514,27 +1544,29 @@ mod tests {
             &["sheep#main", "sheep#wool"],
             &tree("body"),
         ));
-        let mob = Mob::new(
-            1,
-            mob_kind(
-                "minecraft:sheep",
-                Species::Sheep,
-                Anim::Sheep,
-                "entity/sheep/sheep",
-                &["sheep#main", "sheep#wool"],
-                &tree("body"),
-            ),
-            sunrise_core::geometry::Vec3::ZERO,
-            0.0,
+        let (kind, visuals) = mob_kind(
+            "minecraft:sheep",
+            Species::Sheep,
+            Anim::Sheep,
+            "entity/sheep/sheep",
+            &["sheep#main", "sheep#wool"],
+            &tree("body"),
         );
+        let mob = Mob::new(1, kind, sunrise_core::geometry::Vec3::ZERO, 0.0);
         let sprites = [
             "entity/sheep/custom_wool",
             "entity/sheep/sheep_wool",
             "entity/sheep/sheep",
         ];
         // The wool's custom box in the `.jem`'s texture; the vanilla body's one face.
-        assert_eq!(sprite_counts(&mob, &cem, &sprites, true), [24, 0, 4]);
-        assert_eq!(sprite_counts(&mob, &cem, &sprites, false), [0, 24, 4]);
+        assert_eq!(
+            sprite_counts(&mob, &visuals, &cem, &sprites, true),
+            [24, 0, 4]
+        );
+        assert_eq!(
+            sprite_counts(&mob, &visuals, &cem, &sprites, false),
+            [0, 24, 4]
+        );
     }
 
     /// A wolf armour `.jem`'s texture paints the armour, the first layer on its model, and
@@ -1547,6 +1579,7 @@ mod tests {
             pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
             polygons: Vec::new(),
             children: vec![plane("body", vec![])],
+            layer: None,
         };
         let file = format!(
             r#"{{"texture": "textures/entity/wolf/custom_armor.png", "models": [
@@ -1559,19 +1592,15 @@ mod tests {
             &layers,
             &tree,
         ));
-        let mut mob = Mob::new(
-            1,
-            mob_kind(
-                "minecraft:wolf",
-                Species::Wolf,
-                Anim::Wolf,
-                "entity/wolf/wolf",
-                &layers,
-                &tree,
-            ),
-            sunrise_core::geometry::Vec3::ZERO,
-            0.0,
+        let (kind, visuals) = mob_kind(
+            "minecraft:wolf",
+            Species::Wolf,
+            Anim::Wolf,
+            "entity/wolf/wolf",
+            &layers,
+            &tree,
         );
+        let mut mob = Mob::new(1, kind, sunrise_core::geometry::Vec3::ZERO, 0.0);
         mob.extra.tame = true;
         mob.extra.set_body(Some("minecraft:wolf_armor".into()));
         // Worn through: the high cracks.
@@ -1584,8 +1613,14 @@ mod tests {
         ];
         // The armour's custom box in the `.jem`'s texture, the cracks' over the same box in
         // theirs, and the collar on the vanilla body (whose own texture isn't in the atlas).
-        assert_eq!(sprite_counts(&mob, &cem, &sprites, true), [24, 0, 24, 4]);
-        assert_eq!(sprite_counts(&mob, &cem, &sprites, false), [0, 24, 24, 4]);
+        assert_eq!(
+            sprite_counts(&mob, &visuals, &cem, &sprites, true),
+            [24, 0, 24, 4]
+        );
+        assert_eq!(
+            sprite_counts(&mob, &visuals, &cem, &sprites, false),
+            [0, 24, 24, 4]
+        );
     }
 
     /// Every layer of [`LAYERS`] and [`FALLBACKS`] is in Sunrise's own models, every baby layer
@@ -1595,13 +1630,8 @@ mod tests {
     #[ignore = "daily"]
     fn names_reach_sunrises_models() {
         let root = std::env::var_os("SUNRISE_TEST_RESOURCES").expect("SUNRISE_TEST_RESOURCES");
-        let types: HashMap<String, Arc<MobType>> = super::super::MobTypes::load(Path::new(&root))
-            .unwrap()
-            .types
-            .into_iter()
-            .map(|(k, v)| (k, Arc::new(v)))
-            .collect();
-        let vanilla = vanilla_layers(&types);
+        let models = ClientMobModels::load(Path::new(&root)).unwrap();
+        let vanilla = vanilla_layers(&models);
         let mut missing = Vec::new();
         for (name, key) in LAYERS {
             if !vanilla.contains_key(key) {

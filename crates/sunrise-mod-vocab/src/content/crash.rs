@@ -28,19 +28,19 @@ pub fn native_frame() -> Option<u64> {
         .flatten()
 }
 #[inline]
-pub(crate) fn push(call: ModCall) -> (u64, Option<ModCall>) {
+pub(crate) fn push(call: Option<ModCall>) -> (u64, Option<ModCall>) {
     CURRENT_CRASH_OWNER
         .try_with(|owner| {
             let mut current = owner.get();
             let outer = (current.frame, current.call);
-            current.frame = match current.next_frame.checked_add(1) {
-                Some(next) => {
-                    current.next_frame = next;
-                    next
-                }
-                None => 0,
+            current.frame = if let Some(next) = call.and_then(|_| current.next_frame.checked_add(1))
+            {
+                current.next_frame = next;
+                next
+            } else {
+                0
             };
-            current.call = Some(call);
+            current.call = call;
             owner.set(current);
             outer
         })

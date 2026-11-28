@@ -3,7 +3,7 @@ import importlib.util
 from pathlib import Path
 import unittest
 import sys
-from unittest.mock import patch
+from unittest.mock import call, patch
 import os
 import re
 import tempfile
@@ -108,21 +108,33 @@ class BoatHealthTests(unittest.TestCase):
                 for name in ("lint", "verify")]
         waiting = dict(job(name="verify-static"), created_at="2026-11-10T11:59:00Z")
         stale = job(name="verify-static")
-        with tempfile.TemporaryDirectory() as directory:
-            env = dict(GITHUB_REPOSITORY="repo", GITHUB_RUN_ID="123", GITHUB_RUN_ATTEMPT="1",
-                       RECOVERY_REF="topic", GITHUB_STEP_SUMMARY=str(Path(directory) / "summary"))
-            with patch.dict(os.environ, env), patch.object(watch, "api", side_effect=[
-                    {"jobs": done + [waiting]}, {"jobs": done + [stale]}]) as api, \
-                    patch.object(watch.time, "monotonic", return_value=0), \
-                    patch.object(watch.time, "sleep") as sleep, \
-                    patch.object(watch, "datetime") as clock, patch.object(watch.subprocess, "run") as run:
-                clock.now.return_value = NOW
-                watch.main()
-            self.assertEqual(api.call_count, 2)
-            sleep.assert_called_once_with(30)
-            self.assertEqual(len(run.call_args_list), 2)
-            self.assertTrue(run.call_args_list[0].args[0][4].endswith("/dispatches"))
-            self.assertTrue(run.call_args_list[1].args[0][4].endswith("/cancel"))
+        for ref, pr, refused in (("topic", "", False), ("main", "6297", False), ("ci-branch", "6297", True)):
+            with self.subTest(ref=ref, pr=pr, refused=refused), tempfile.TemporaryDirectory() as directory:
+                env = dict(GITHUB_REPOSITORY="repo", GITHUB_RUN_ID="123", GITHUB_RUN_ATTEMPT="1",
+                           RECOVERY_REF=ref, RECOVERY_PR=pr, GITHUB_STEP_SUMMARY=str(Path(directory) / "summary"))
+                dispatch = ["gh", "api", "--method", "POST", "repos/repo/actions/workflows/dyna-ci.yml/dispatches",
+                            "-f", f"ref={ref}", "-F", "inputs[github-fallback]=true"]
+                if pr:
+                    dispatch += ["-f", "inputs[pr]=6297"]
+                with patch.dict(os.environ, env, clear=True), patch.object(watch, "api", side_effect=[
+                        {"jobs": done + [waiting]}, {"jobs": done + [stale]}]) as api, \
+                        patch.object(watch.time, "monotonic", return_value=0), \
+                        patch.object(watch.time, "sleep") as sleep, \
+                        patch.object(watch, "datetime") as clock, patch.object(watch.subprocess, "run") as run:
+                    clock.now.return_value = NOW
+                    if refused:
+                        run.side_effect = subprocess.CalledProcessError(1, dispatch)
+                        with self.assertRaises(subprocess.CalledProcessError):
+                            watch.main()
+                        run.assert_called_once_with(dispatch, check=True)
+                    else:
+                        watch.main()
+                        self.assertEqual(run.call_args_list, [
+                            call(dispatch, check=True),
+                            call(["gh", "api", "--method", "POST", "repos/repo/actions/runs/123/cancel"], check=True),
+                        ])
+                self.assertEqual(api.call_count, 2)
+                sleep.assert_called_once_with(30)
 
     def test_controller_limits_to_first_fork_attempt(self):
         run = dict(workflow_id=123, event="pull_request", run_attempt=1, status="queued", head_repository=dict(full_name="other/sunrise"))
@@ -506,14 +518,14 @@ class RunnerPackagesTests(unittest.TestCase):
         self.assertTrue(fallback)
         self.assertLessEqual(set(fallback), set(listed))
 
-    def test_the_image_check_fails_on_any_difference(self):
+    def test_the_image_check_fails_when_the_image_lacks_a_listed_package(self):
         spec = importlib.util.spec_from_file_location("check_runner_packages", Path(__file__).parents[1] / "tools/ci/check_runner_packages.py")
         check = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(check)
         image = ("FROM ${DYNA_CI_BASE}\nRUN apt-get update && apt-get install -y --no-install-recommends \\\n"
                  "    xvfb xauth x11-xkb-utils xkb-data pkg-config libasound2-dev libudev-dev libxkbcommon-x11-dev \\\n"
                  "    libwayland-dev libx11-xcb-dev libfontconfig-dev libvulkan-dev libxcursor1 libxi6 libxrandr2 \\\n"
-                 "    valgrind libc6-dbg gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 \\\n"
+                 "    valgrind libc6-dbg gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 gh postgresql-16 nats-server \\\n"
                  "    && rm -rf /var/lib/apt/lists/*\n")
         listed = check.LIST.read_text()
         with tempfile.TemporaryDirectory() as directory:
@@ -529,8 +541,7 @@ class RunnerPackagesTests(unittest.TestCase):
                         return str(failure)
                 return None
             self.assertIsNone(outcome(image, listed))
-            for dropped in ("xauth", "x11-xkb-utils", "xkb-data"):
-                self.assertIn(f"lacks: {dropped}", outcome(image, listed.replace(f"\n{dropped}\n", "\n")))
-            self.assertIn("lacks: extra-package", outcome(image.replace("libxrandr2 ", "libxrandr2 extra-package "), listed))
-            self.assertIn("beyond the image: mesa-vulkan-drivers", outcome(image, listed + "mesa-vulkan-drivers\n"))
+            for dropped in ("xauth", "gh"):
+                self.assertIn(f"lacks runner-packages.txt's: {dropped}", outcome(image.replace(f" {dropped} ", " "), listed))
+            self.assertIn("lacks runner-packages.txt's: mesa-vulkan-drivers", outcome(image, listed + "mesa-vulkan-drivers\n"))
             self.assertIn("no apt-get install", outcome("FROM base\n", listed))

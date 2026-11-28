@@ -33,6 +33,14 @@ pub fn set_client_update_fields(identity: u64, fields: Compound) {
     WAITING.store(waiting.len(), Ordering::Relaxed);
 }
 
+/// Copy the batch waiting under `identity` without consuming it.
+pub fn snapshot_client_update_fields(identity: u64) -> Option<Compound> {
+    if WAITING.load(Ordering::Relaxed) == 0 {
+        return None;
+    }
+    update_fields().get(&identity).cloned()
+}
+
 /// Take the batch waiting under `identity`: the next call finds none.
 pub fn take_client_update_fields(identity: u64) -> Option<Compound> {
     if WAITING.load(Ordering::Relaxed) == 0 {

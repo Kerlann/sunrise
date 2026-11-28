@@ -1,9 +1,10 @@
 //! The staged internals view (#589). Source copies only: the working tree keeps its visibility.
+use crate::source::{ENTRY_DOMAIN, SourceLayout};
 use proc_macro2::Span;
 use quote::{ToTokens, quote};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     fs,
     path::{Path, PathBuf},
 };
@@ -201,6 +202,8 @@ impl TypeUses {
 
 #[derive(Default)]
 struct Pass {
+    layout: SourceLayout,
+    source_root: PathBuf,
     sources: Vec<Source>,
     /// By path, kind and condition: a field and a method of one name are two entries, and so are
     /// two guarded alternatives of one item.
@@ -212,6 +215,14 @@ struct Pass {
     /// lower-crate shape the internals table walks.
     reaching: bool,
     discovery: bool,
+    /// The canonical staging root of a lower-crate pass: no source file outside it is read or
+    /// edited, whether reached through `include!`, `mod` or `#[path]`.
+    root: Option<PathBuf>,
+    /// The first fragment a whole-module pass could not read inside an inline module.
+    scope_error: Option<String>,
+    /// Every `macro_rules!` name the game crate defines: an import of one stays as written,
+    /// since only `#[macro_export]` makes such a macro public.
+    game_macros: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// Crates whose types are the mod API's own: their fields stay private in every build.
@@ -219,7 +230,7 @@ const API_CRATES: &[&str] = &["mod_api"];
 
 // Only test-only declarations are excluded. Other cfgs keep their spelling and visibility, and
 // each entry records them: changing visibility doesn't select an OS or feature for the build.
-use mod_source::modules::{conditions, test_only};
+use mod_source::modules::{IncludeScope, conditions, literal_include, may_compile, test_only};
 
 /// The attributes a layout's signature keeps: which fields exist, and whether another crate may
 /// build it.
@@ -395,13 +406,48 @@ impl Scope {
     }
 }
 
+fn is_std_path(path: &str) -> bool {
+    matches!(path, "std" | "core" | "alloc")
+        || path.starts_with("std::")
+        || path.starts_with("core::")
+        || path.starts_with("alloc::")
+}
+
+fn is_foreign_prefix(path: &str) -> bool {
+    crate::crossing::CROSSING_FOREIGN.iter().any(|(listed, _)| {
+        *listed == path
+            || listed
+                .strip_prefix(path)
+                .is_some_and(|rest| rest.starts_with("::"))
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum GlobTarget {
+    Module(String),
+    Definition(String),
+    Std(String),
+    ForeignPrefix(String),
+}
+
+#[derive(Default)]
+struct ResolveState {
+    active_imports: BTreeSet<(String, String, usize)>,
+    active_ident_depth: BTreeMap<(String, String), usize>,
+    active_glob_modules: BTreeSet<String>,
+    skips: usize,
+}
+
 /// A source-level name index, not a compiler: macros and associated types remain opaque. Crates
 /// are loaded only when a signature reaches them; no visibility edits are made through this index.
 struct Shapes {
+    root: PathBuf,
     roots: BTreeMap<String, PathBuf>,
     loaded: BTreeSet<String>,
     scopes: BTreeMap<String, Scope>,
     definitions: BTreeMap<String, Vec<Definition>>,
+    direct_globs: HashMap<String, Vec<GlobTarget>>,
+    cache: HashMap<String, HashMap<String, BTreeMap<String, bool>>>,
 }
 
 impl Shapes {
@@ -429,10 +475,13 @@ impl Shapes {
             roots.insert(name, lib);
         }
         Ok(Self {
+            root: root.to_owned(),
             roots,
             loaded: BTreeSet::new(),
             scopes: BTreeMap::new(),
             definitions: BTreeMap::new(),
+            direct_globs: HashMap::new(),
+            cache: HashMap::new(),
         })
     }
 
@@ -444,13 +493,18 @@ impl Shapes {
             return Ok(());
         };
         let dir = lib.parent().expect("source parent");
-        let files =
-            crate::source::module_files(krate.to_owned(), lib.clone(), dir.to_owned(), false)?;
+        let files = crate::source::module_files(
+            &self.root,
+            krate.to_owned(),
+            lib.clone(),
+            dir.to_owned(),
+            false,
+        )?;
         self.loaded.insert(krate.to_owned());
         for file in files {
             let text = fs::read_to_string(&file.path)
                 .map_err(|e| format!("{}: {e}", file.path.display()))?;
-            let parsed = crate::game_modules::parse(&file.path, &text)?;
+            let parsed = crate::game_modules::parse(&self.root, &file.path, &text)?;
             self.items(&file.module, &file.cfg, &parsed.items);
         }
         Ok(())
@@ -523,112 +577,370 @@ impl Shapes {
         }
     }
 
-    fn resolve(
+    fn resolve(&mut self, module: &str, path: &str) -> Result<BTreeMap<String, bool>, String> {
+        if let Some(cached) = self.cache.get(module).and_then(|by_path| by_path.get(path)) {
+            return Ok(cached.clone());
+        }
+        let mut state = ResolveState::default();
+        let mut resolved = self.resolve_path(module, path, None, &mut state)?;
+        resolved.retain(|candidate, _| {
+            self.scopes.contains_key(candidate)
+                || self.definitions.contains_key(candidate)
+                || !is_foreign_prefix(candidate)
+                || crate::crossing::foreign(candidate).is_some()
+        });
+        self.cache
+            .entry(module.to_owned())
+            .or_default()
+            .insert(path.to_owned(), resolved.clone());
+        Ok(resolved)
+    }
+
+    fn classify_glob_target(&self, path: &str) -> Option<GlobTarget> {
+        if self.scopes.contains_key(path) {
+            Some(GlobTarget::Module(path.to_owned()))
+        } else if self.definitions.contains_key(path) {
+            Some(GlobTarget::Definition(path.to_owned()))
+        } else if is_std_path(path) {
+            Some(GlobTarget::Std(path.to_owned()))
+        } else if is_foreign_prefix(path) {
+            Some(GlobTarget::ForeignPrefix(path.to_owned()))
+        } else {
+            None
+        }
+    }
+
+    fn direct_globs(
+        &mut self,
+        module: &str,
+        state: &mut ResolveState,
+    ) -> Result<Vec<GlobTarget>, String> {
+        if let Some(cached) = self.direct_globs.get(module) {
+            return Ok(cached.clone());
+        }
+        let krate = module.split("::").next().expect("crate");
+        self.load(krate)?;
+        let globs: Vec<String> = self
+            .scopes
+            .get(module)
+            .map(|scope| scope.globs.iter().cloned().collect())
+            .unwrap_or_default();
+        if globs.is_empty() {
+            self.direct_globs.insert(module.to_owned(), Vec::new());
+            return Ok(Vec::new());
+        }
+        let had_outer = !state.active_imports.is_empty() || !state.active_glob_modules.is_empty();
+        if !state.active_glob_modules.insert(module.to_owned()) {
+            state.skips += 1;
+            return Ok(Vec::new());
+        }
+        let skips_before = state.skips;
+        let mut targets = BTreeSet::new();
+        loop {
+            let before = targets.len();
+            let seed: Vec<GlobTarget> = targets.iter().cloned().collect();
+            for glob in &globs {
+                if glob.is_empty() {
+                    continue;
+                }
+                let resolved = self.resolve_path(module, glob, Some(&seed), state)?;
+                for path in resolved.into_keys() {
+                    if let Some(target) = self.classify_glob_target(&path) {
+                        targets.insert(target);
+                    }
+                }
+            }
+            if targets.len() == before {
+                break;
+            }
+        }
+        state.active_glob_modules.remove(module);
+        let result: Vec<GlobTarget> = targets.into_iter().collect();
+        if !had_outer || state.skips == skips_before {
+            self.direct_globs.insert(module.to_owned(), result.clone());
+        }
+        Ok(result)
+    }
+
+    fn resolve_path(
         &mut self,
         module: &str,
         path: &str,
-        seen: &mut BTreeSet<(String, String)>,
+        seed_globs: Option<&[GlobTarget]>,
+        state: &mut ResolveState,
     ) -> Result<BTreeMap<String, bool>, String> {
-        if !seen.insert((module.to_owned(), path.to_owned())) {
-            return Ok(BTreeMap::new());
-        }
-        if let Some(path) = path.strip_prefix("::") {
-            let parts: Vec<_> = path.split("::").collect();
+        if let Some(rest) = path.strip_prefix("::") {
+            let parts: Vec<_> = rest.split("::").collect();
             if !self.roots.contains_key(parts[0]) {
                 return Ok(BTreeMap::new());
             }
             self.load(parts[0])?;
-            return self.tail(parts[0], &parts[1..], seen);
+            return self.step_tail(parts[0], false, &parts[1..], state);
         }
         let parts: Vec<_> = path.split("::").collect();
         let first = parts[0];
+        let tail = &parts[1..];
         let krate = module.split("::").next().expect("crate");
         self.load(krate)?;
-        let tail = &parts[1..];
         match first {
-            "crate" => return self.tail(krate, tail, seen),
-            "self" => return self.tail(module, tail, seen),
+            "crate" => return self.step_tail(krate, false, tail, state),
+            "self" => return self.step_tail(module, false, tail, state),
             "super" => {
                 return match module.rsplit_once("::") {
-                    Some((parent, _)) => self.tail(parent, tail, seen),
+                    Some((parent, _)) => self.step_tail(parent, false, tail, state),
                     None => Ok(BTreeMap::new()),
                 };
             }
-            "std" | "core" | "alloc" => return Ok(BTreeMap::from([(path.to_owned(), false)])),
-            _ if crate::crossing::foreign(path).is_some() => {
+            "std" | "core" | "alloc" => {
+                return Ok(BTreeMap::from([(path.to_owned(), false)]));
+            }
+            _ if is_foreign_prefix(path) => {
                 return Ok(BTreeMap::from([(path.to_owned(), false)]));
             }
             _ => {}
         }
-        if self
-            .scopes
-            .get(module)
-            .is_some_and(|scope| scope.names.contains(first))
-        {
-            return self.tail(&format!("{module}::{first}"), tail, seen);
-        }
-        let imports = self
-            .scopes
-            .get(module)
-            .and_then(|scope| scope.imports.get(first))
-            .cloned();
-        if let Some(imports) = imports {
-            let mut found = BTreeMap::new();
-            for import in imports {
-                let path = if tail.is_empty() {
-                    import
-                } else {
-                    format!("{import}::{}", tail.join("::"))
-                };
-                for (path, _) in self.resolve(module, &path, seen)? {
-                    found.insert(path, true);
-                }
-            }
-            return Ok(found);
+        if let Some(heads) = self.resolve_direct_in_module(module, first, state)? {
+            return self.step_heads(heads, tail, state);
         }
         if self.roots.contains_key(first) {
             self.load(first)?;
-            return self.tail(first, tail, seen);
+            return self.step_tail(first, false, tail, state);
         }
-        let globs = self
-            .scopes
-            .get(module)
-            .map(|scope| scope.globs.clone())
-            .unwrap_or_default();
-        let mut found = BTreeMap::new();
-        for glob in globs {
-            for (path, _) in self.resolve(module, &format!("{glob}::{path}"), seen)? {
-                found.insert(path, true);
-            }
-        }
+        let glob_heads = self.resolve_via_globs(module, first, seed_globs, state)?;
+        let found = self.step_heads(glob_heads, tail, state)?;
         if !found.is_empty() {
             return Ok(found);
         }
         if module != krate {
-            return self.resolve(krate, path, seen);
+            return self.resolve_path(krate, path, None, state);
         }
         Ok(found)
     }
 
-    fn tail(
+    fn step_heads(
         &mut self,
-        base: &str,
+        heads: BTreeMap<String, bool>,
         tail: &[&str],
-        seen: &mut BTreeSet<(String, String)>,
+        state: &mut ResolveState,
     ) -> Result<BTreeMap<String, bool>, String> {
         if tail.is_empty() {
-            return Ok(BTreeMap::from([(base.to_owned(), false)]));
+            return Ok(heads);
+        }
+        let mut found = BTreeMap::new();
+        for (head, head_imported) in heads {
+            for (resolved, tail_imported) in self.step_tail(&head, head_imported, tail, state)? {
+                found
+                    .entry(resolved)
+                    .and_modify(|flag| *flag |= tail_imported)
+                    .or_insert(tail_imported);
+            }
+        }
+        Ok(found)
+    }
+
+    fn resolve_direct_in_module(
+        &mut self,
+        module: &str,
+        ident: &str,
+        state: &mut ResolveState,
+    ) -> Result<Option<BTreeMap<String, bool>>, String> {
+        if self
+            .scopes
+            .get(module)
+            .is_some_and(|scope| scope.names.contains(ident))
+        {
+            return Ok(Some(BTreeMap::from([(
+                format!("{module}::{ident}"),
+                false,
+            )])));
+        }
+        let imports = self
+            .scopes
+            .get(module)
+            .and_then(|scope| scope.imports.get(ident))
+            .cloned();
+        if let Some(imports) = imports {
+            let depth_key = (module.to_owned(), ident.to_owned());
+            let depth = state
+                .active_ident_depth
+                .get(&depth_key)
+                .copied()
+                .unwrap_or(0);
+            if depth >= 2 {
+                state.skips += 1;
+                return Ok(Some(BTreeMap::new()));
+            }
+            *state
+                .active_ident_depth
+                .entry(depth_key.clone())
+                .or_default() += 1;
+            let mut found = BTreeMap::new();
+            let mut skipped_active = false;
+            for (index, import) in imports.into_iter().enumerate() {
+                let edge = (module.to_owned(), ident.to_owned(), index);
+                if !state.active_imports.insert(edge.clone()) {
+                    skipped_active = true;
+                    state.skips += 1;
+                    continue;
+                }
+                let resolved = self.resolve_path(module, &import, None, state);
+                state.active_imports.remove(&edge);
+                for (path, _) in resolved? {
+                    found.insert(path, true);
+                }
+            }
+            let entry = state.active_ident_depth.get_mut(&depth_key).expect("depth");
+            *entry -= 1;
+            if *entry == 0 {
+                state.active_ident_depth.remove(&depth_key);
+            }
+            if skipped_active && found.is_empty() {
+                return Ok(None);
+            }
+            return Ok(Some(found));
+        }
+        Ok(None)
+    }
+
+    fn resolve_via_globs(
+        &mut self,
+        module: &str,
+        ident: &str,
+        seed_globs: Option<&[GlobTarget]>,
+        state: &mut ResolveState,
+    ) -> Result<BTreeMap<String, bool>, String> {
+        let initial_globs = match seed_globs {
+            Some(seed) => seed.to_vec(),
+            None => self.direct_globs(module, state)?,
+        };
+        let mut found = BTreeMap::new();
+        let mut visited = BTreeSet::from([module.to_owned()]);
+        let mut queue = VecDeque::from(initial_globs);
+        while let Some(target) = queue.pop_front() {
+            match target {
+                GlobTarget::Module(target_mod) => {
+                    if !visited.insert(target_mod.clone()) {
+                        continue;
+                    }
+                    if let Some(hit) = self.resolve_direct_in_module(&target_mod, ident, state)? {
+                        for (path, _) in hit {
+                            found.insert(path, true);
+                        }
+                    } else {
+                        for next in self.direct_globs(&target_mod, state)? {
+                            queue.push_back(next);
+                        }
+                    }
+                }
+                GlobTarget::Definition(def) => {
+                    found.insert(format!("{def}::{ident}"), true);
+                }
+                GlobTarget::Std(prefix) => {
+                    found.insert(format!("{prefix}::{ident}"), true);
+                }
+                GlobTarget::ForeignPrefix(prefix) => {
+                    let candidate = format!("{prefix}::{ident}");
+                    if is_foreign_prefix(&candidate) {
+                        found.insert(candidate, true);
+                    }
+                }
+            }
+        }
+        Ok(found)
+    }
+
+    fn step_tail(
+        &mut self,
+        base: &str,
+        base_imported: bool,
+        tail: &[&str],
+        state: &mut ResolveState,
+    ) -> Result<BTreeMap<String, bool>, String> {
+        let Some((&first, rest)) = tail.split_first() else {
+            return Ok(BTreeMap::from([(base.to_owned(), base_imported)]));
+        };
+        if is_std_path(base) {
+            return Ok(BTreeMap::from([(
+                format!("{base}::{}", tail.join("::")),
+                base_imported,
+            )]));
         }
         if self.scopes.contains_key(base) {
-            self.resolve(base, &tail.join("::"), seen)
-        } else if self.definitions.contains_key(base) {
-            Ok(BTreeMap::from([(
-                format!("{base}::{}", tail.join("::")),
-                false,
-            )]))
-        } else {
-            Ok(BTreeMap::new())
+            let stepped = match first {
+                "self" => BTreeMap::from([(base.to_owned(), false)]),
+                "super" => match base.rsplit_once("::") {
+                    Some((parent, _)) => BTreeMap::from([(parent.to_owned(), false)]),
+                    None => BTreeMap::new(),
+                },
+                _ => match self.resolve_direct_in_module(base, first, state)? {
+                    Some(direct) => direct,
+                    None => self.resolve_via_globs(base, first, None, state)?,
+                },
+            };
+            let mut found = BTreeMap::new();
+            for (target, step_imported) in stepped {
+                let imported = base_imported || step_imported;
+                for (resolved, tail_imported) in self.step_tail(&target, imported, rest, state)? {
+                    found
+                        .entry(resolved)
+                        .and_modify(|flag| *flag |= tail_imported)
+                        .or_insert(tail_imported);
+                }
+            }
+            return Ok(found);
         }
+        if self.definitions.contains_key(base) {
+            return Ok(BTreeMap::from([(
+                format!("{base}::{}", tail.join("::")),
+                base_imported,
+            )]));
+        }
+        if is_foreign_prefix(base) {
+            let candidate = format!("{base}::{}", tail.join("::"));
+            if is_foreign_prefix(&candidate) {
+                return Ok(BTreeMap::from([(candidate, base_imported)]));
+            }
+        }
+        Ok(BTreeMap::new())
+    }
+}
+
+/// Whether staging makes an import of `module` public, `cfg` being the conditions of the module's
+/// enclosing declarations. The patch crate's mirror reads the same answer to tell which bindings the
+/// prebuilt crate exposes.
+///
+/// - A game module's restricted import, such as `pub(super) use lower::Item;` left where an item
+///   moved to a lower crate: the game's code reaches the item through it, and so do a mixin's copy
+///   of that code and the patch crate's repeated imports, so it is widened with the game's own
+///   items. (An import of a game macro stays as written; `Pass::item` checks that.)
+/// - A lower crate's import under one of its own Cargo features: the patch crate is built with the
+///   game's features, so its mirror reaches the binding the prebuilt crate chose through the
+///   module's glob, which needs the import public.
+pub(crate) fn widens_import(
+    layout: SourceLayout,
+    module: &str,
+    cfg: &[String],
+    value: &syn::ItemUse,
+) -> bool {
+    !test_only(&value.attrs)
+        && if layout.owns(module) {
+            matches!(value.vis, Visibility::Restricted(_))
+        } else {
+            cfg.iter()
+                .cloned()
+                .chain(conditions(&value.attrs))
+                .any(|condition| crate::patch::names_feature_text(&condition))
+        }
+}
+
+/// The names a `use` tree imports, before any rename: what each binding refers to.
+fn use_names(tree: &syn::UseTree) -> Vec<String> {
+    match tree {
+        syn::UseTree::Path(path) => use_names(&path.tree),
+        syn::UseTree::Name(name) => vec![name.ident.to_string()],
+        syn::UseTree::Rename(rename) => vec![rename.ident.to_string()],
+        syn::UseTree::Glob(_) => Vec::new(),
+        syn::UseTree::Group(group) => group.items.iter().flat_map(use_names).collect(),
     }
 }
 
@@ -650,15 +962,48 @@ fn type_path(module: &str, ident: &syn::Ident, generics: &syn::Generics) -> Stri
     format!("{module}::{}", owner(&ty))
 }
 
+/// Items at one physical origin in a logical module, with the gates on that contribution.
+struct SourceItems {
+    file: usize,
+    cfg: Vec<String>,
+    items: Vec<Item>,
+    include_scope: IncludeScope,
+}
+
+impl SourceItems {
+    fn scoped_items(&self) -> impl Iterator<Item = (&Item, IncludeScope)> {
+        let mut cursor = self.include_scope.with_imports(&self.items);
+        self.items
+            .iter()
+            .map(move |item| (item, cursor.before(item)))
+    }
+}
+
 impl Pass {
     fn load(&mut self, path: &Path) -> Result<usize, String> {
+        let physical = path
+            .canonicalize()
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        self.load_physical(&physical)
+    }
+
+    // All spellings of the same source file share one edit map.
+    fn load_physical(&mut self, path: &Path) -> Result<usize, String> {
         if let Some(index) = self.sources.iter().position(|source| source.path == path) {
             return Ok(index);
         }
+        if let Some(root) = &self.root
+            && !path.starts_with(root)
+        {
+            return Err(format!(
+                "{}: outside the source at {}",
+                path.display(),
+                root.display()
+            ));
+        }
         let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        // Staged source copies materialize directory-derived declarations before widening them.
-        // Store that same text so source spans and edits still address the exact bytes parsed.
-        let text = crate::game_modules::expand(path, &text)?;
+        // The host forwarders are widened as written into the copy: spans address the expanded text.
+        let text = crate::game_modules::expand(&self.source_root, path, &text)?;
         let parsed = syn::parse_file(&text).map_err(|e| format!("{}: {e}", path.display()))?;
         let lines = std::iter::once(0)
             .chain(text.match_indices('\n').map(|(i, _)| i + 1))
@@ -752,7 +1097,9 @@ impl Pass {
                 }
             }
         }
-        syn::visit::Visit::visit_file(&mut StagedTypes(&mut self.sources[index]), &parsed);
+        if !test_only(&parsed.attrs) {
+            syn::visit::Visit::visit_file(&mut StagedTypes(&mut self.sources[index]), &parsed);
+        }
         Ok(index)
     }
 
@@ -917,13 +1264,20 @@ impl Pass {
     }
 
     // Does not visit expressions or blocks: local items, macros, uses and trait impls stay intact.
-    fn items(&mut self, file: usize, module: &str, items: &[Item]) {
+    fn items(&mut self, file: usize, module: &str, items: &[Item], include_scope: IncludeScope) {
+        let mut cursor = include_scope.with_imports(items);
         for item in items {
-            self.item(file, module, item, true);
+            self.item(file, module, item, Some(cursor.before(item)));
         }
     }
 
-    fn item(&mut self, file: usize, module: &str, item: &Item, children: bool) {
+    fn item(
+        &mut self,
+        file: usize,
+        module: &str,
+        item: &Item,
+        include_scope: Option<IncludeScope>,
+    ) {
         macro_rules! expose {
             ($value:expr, $kind:literal, $start:expr, $signature:expr) => {{
                 let value = $value;
@@ -970,7 +1324,7 @@ impl Pass {
                 let (ident, generics) = (&value.ident, &value.generics);
                 let signature = shape_signature(item).expect("a struct");
                 expose!(value, "struct", value.struct_token.span(), signature);
-                if children || self.reaching {
+                if include_scope.is_some() || self.reaching {
                     self.fields(
                         file,
                         module,
@@ -991,7 +1345,7 @@ impl Pass {
                 };
                 signature.fields = fields;
                 expose!(value, "struct", value.union_token.span(), signature);
-                if children || self.reaching {
+                if include_scope.is_some() || self.reaching {
                     self.fields(
                         file,
                         module,
@@ -1005,7 +1359,7 @@ impl Pass {
             Item::Enum(value) => {
                 let signature = shape_signature(item).expect("an enum");
                 let path = expose!(value, "enum", value.enum_token.span(), signature);
-                if children {
+                if include_scope.is_some() {
                     for variant in &value.variants {
                         if !test_only(&variant.attrs) {
                             self.fields(
@@ -1051,14 +1405,52 @@ impl Pass {
             Item::Mod(value) => {
                 let ident = &value.ident;
                 let path = expose!(value, "mod", value.mod_token.span(), quote!(mod #ident));
-                if children && let Some((_, items)) = &value.content {
-                    let outer = self.cfg.len();
-                    self.cfg.extend(conditions(&value.attrs));
-                    self.items(file, &path, items);
-                    self.cfg.truncate(outer);
+                if let Some(include_scope) = include_scope
+                    && let Some((_, items)) = &value.content
+                {
+                    let outer = self.cfg.clone();
+                    let mut cfg = outer.clone();
+                    cfg.extend(conditions(&value.attrs));
+                    let child = SourceItems {
+                        file,
+                        cfg,
+                        items: items.clone(),
+                        include_scope: include_scope.child(),
+                    };
+                    // A lower-crate pass widens the inline module's fragments in their own
+                    // files, under the module's gates, as for the module's own items.
+                    let scope = if self.root.is_some() {
+                        self.lower_scope(child).unwrap_or_else(|error| {
+                            self.scope_error.get_or_insert(error);
+                            Vec::new()
+                        })
+                    } else {
+                        vec![child]
+                    };
+                    for unit in scope {
+                        self.cfg = unit.cfg;
+                        self.items(unit.file, &path, &unit.items, unit.include_scope);
+                    }
+                    self.cfg = outer;
                 }
             }
-            Item::Impl(value) if children && value.trait_.is_none() && !test_only(&value.attrs) => {
+            // An import `widens_import` names is widened with the game's own items.
+            Item::Use(value)
+                if widens_import(self.layout, module, &self.cfg, value)
+                    && (!self.layout.owns(module)
+                        || !use_names(&value.tree).iter().any(|name| {
+                            self.game_macros
+                                .get(module.split("::").next().unwrap_or_default())
+                                .is_some_and(|macros| macros.contains(name))
+                        })) =>
+            {
+                self.sources[file].public(&value.vis, value.use_token.span(), "use");
+            }
+            Item::Impl(value)
+                if include_scope.is_some()
+                    && value.trait_.is_none()
+                    && !test_only(&value.attrs) =>
+            {
                 let path = format!("{module}::{}", owner(&value.self_ty));
                 let outer = self.cfg.len();
                 self.cfg.extend(conditions(&value.attrs));
@@ -1071,38 +1463,128 @@ impl Pass {
         }
     }
 
+    /// Read the files supplying items to a single lower-crate scope. Keep their spans separate:
+    /// edits to a declaration must go to its own fragment, not to the file spelling `include!`.
+    fn lower_scope(&mut self, initial: SourceItems) -> Result<Vec<SourceItems>, String> {
+        let physical = self.sources[initial.file].path.clone();
+        let mut scope = Vec::new();
+        let mut pending = vec![(initial, vec![physical])];
+        while let Some((unit, ancestors)) = pending.pop() {
+            let includes: Vec<_> = unit
+                .scoped_items()
+                .filter_map(|(item, scope)| {
+                    literal_include(item, scope.shadowed())
+                        .map(|(path, attrs)| (path, attrs, scope))
+                })
+                .collect();
+            for (relative, attrs, include_scope) in includes.into_iter().rev() {
+                if test_only(attrs) {
+                    continue;
+                }
+                let mut cfg = unit.cfg.clone();
+                cfg.extend(conditions(attrs));
+                // A fragment no build compiles under its gates is never opened.
+                if !may_compile(&cfg, false) {
+                    continue;
+                }
+                let from = &self.sources[unit.file].path;
+                let path = from.parent().expect("source parent").join(relative.value());
+                let physical = path
+                    .canonicalize()
+                    .map_err(|e| format!("{}: {e}", path.display()))?;
+                if ancestors.contains(&physical) {
+                    return Err(format!("{}: source inclusion cycle", path.display()));
+                }
+                let file = self.load_physical(&physical)?;
+                let parsed = &self.sources[file].parsed;
+                if test_only(&parsed.attrs) {
+                    continue;
+                }
+                cfg.extend(conditions(&parsed.attrs));
+                let mut chain = ancestors.clone();
+                chain.push(physical);
+                pending.push((
+                    SourceItems {
+                        file,
+                        cfg,
+                        items: parsed.items.clone(),
+                        include_scope,
+                    },
+                    chain,
+                ));
+            }
+            scope.push(unit);
+        }
+        Ok(scope)
+    }
+
     fn lower(&mut self, root: &Path, path: &str, whole_module: bool) -> Result<(), String> {
         self.cfg.clear();
         let parsed: syn::Path = syn::parse_str(path).map_err(|e| format!("invalid path: {e}"))?;
         let mut segments = parsed.segments.iter();
         let crate_name = segments.next().ok_or("empty path")?.ident.to_string();
         let (_, lib) = crate::source::crate_root(root, &crate_name)?;
-        let mut file = self.load(&lib)?;
-        let mut dir = self.sources[file]
-            .path
-            .parent()
-            .expect("source parent")
-            .to_owned();
-        let mut items = self.sources[file].parsed.items.clone();
+        self.root = Some(
+            root.canonicalize()
+                .map_err(|e| format!("{}: {e}", root.display()))?,
+        );
+        let file = self.load(&lib)?;
+        let mut dir = lib.parent().expect("source parent").to_owned();
+        let mut initial = SourceItems {
+            file,
+            cfg: conditions(&self.sources[file].parsed.attrs),
+            items: self.sources[file].parsed.items.clone(),
+            include_scope: IncludeScope::default(),
+        };
         let mut module = crate_name;
         let segments: Vec<_> = segments.collect();
         for (index, segment) in segments.iter().enumerate() {
             let ident = &segment.ident;
-            let child = items.iter().find_map(|item| match item {
-                Item::Mod(value) if value.ident == *ident && !test_only(&value.attrs) => {
-                    Some(value)
+            fn child_module<'a>(item: &'a Item, ident: &syn::Ident) -> Option<&'a syn::ItemMod> {
+                match item {
+                    Item::Mod(value) if value.ident == *ident && !test_only(&value.attrs) => {
+                        Some(value)
+                    }
+                    _ => None,
                 }
-                _ => None,
+            }
+            // An ordinary declaration already identifies the child scope; don't stage unrelated
+            // sibling fragments just to find it.
+            let scope = if initial
+                .items
+                .iter()
+                .any(|item| child_module(item, ident).is_some())
+            {
+                vec![initial]
+            } else {
+                self.lower_scope(initial)?
+            };
+            let items = || {
+                scope
+                    .iter()
+                    .flat_map(|unit| unit.items.iter().map(move |item| (unit, item)))
+            };
+            let child = scope.iter().find_map(|unit| {
+                unit.scoped_items().find_map(|(item, scope)| {
+                    child_module(item, ident).map(|child| (unit, child, scope.child()))
+                })
             });
-            if let Some(child) = child {
-                self.item(file, &module, &Item::Mod(child.clone()), false);
+            if let Some((unit, child, include_scope)) = child {
+                self.cfg.clone_from(&unit.cfg);
+                self.item(unit.file, &module, &Item::Mod(child.clone()), None);
                 module = format!("{module}::{ident}");
                 if index + 1 == segments.len() {
                     return Ok(());
                 }
-                self.cfg.extend(conditions(&child.attrs));
+                let mut cfg = unit.cfg.clone();
+                cfg.extend(conditions(&child.attrs));
                 if let Some((_, inner)) = &child.content {
-                    items = inner.clone();
+                    initial = SourceItems {
+                        file: unit.file,
+                        cfg,
+                        items: inner.clone(),
+                        include_scope,
+                    };
                     dir = dir.join(ident.to_string());
                 } else {
                     let explicit = child.attrs.iter().find_map(|attr| match &attr.meta {
@@ -1118,7 +1600,7 @@ impl Pass {
                         _ => None,
                     });
                     let child_path = if let Some(relative) = explicit {
-                        self.sources[file]
+                        self.sources[unit.file]
                             .path
                             .parent()
                             .expect("source parent")
@@ -1133,16 +1615,21 @@ impl Pass {
                     } else {
                         child_path.with_extension("")
                     };
-                    file = self.load(&child_path)?;
-                    items = self.sources[file].parsed.items.clone();
+                    let file = self.load(&child_path)?;
+                    cfg.extend(conditions(&self.sources[file].parsed.attrs));
+                    initial = SourceItems {
+                        file,
+                        cfg,
+                        items: self.sources[file].parsed.items.clone(),
+                        include_scope,
+                    };
                 }
                 continue;
             }
             let rest = &segments[index..];
             if rest.len() == 1 {
-                let selected = items
-                    .iter()
-                    .find(|item| match item {
+                let (unit, selected) = items()
+                    .find(|(_, item)| match item {
                         Item::Fn(value) => value.sig.ident == *ident && !test_only(&value.attrs),
                         Item::Struct(value) => value.ident == *ident && !test_only(&value.attrs),
                         Item::Enum(value) => value.ident == *ident && !test_only(&value.attrs),
@@ -1155,16 +1642,23 @@ impl Pass {
                     })
                     .ok_or("item not found")?;
                 if whole_module {
-                    self.items(file, &module, &items);
+                    for unit in &scope {
+                        self.cfg.clone_from(&unit.cfg);
+                        self.items(unit.file, &module, &unit.items, unit.include_scope);
+                    }
+                    if let Some(error) = self.scope_error.take() {
+                        return Err(error);
+                    }
                 } else {
-                    self.item(file, &module, selected, false);
+                    self.cfg.clone_from(&unit.cfg);
+                    self.item(unit.file, &module, selected, None);
                 }
                 return Ok(());
             }
             if rest.len() == 2 {
                 let member_name = &rest[1].ident;
                 let mut found = false;
-                for item in &items {
+                for (unit, item) in items() {
                     if let Item::Impl(block) = item
                         && block.trait_.is_none()
                         && !test_only(&block.attrs)
@@ -1175,6 +1669,8 @@ impl Pass {
                             .last()
                             .is_some_and(|part| part.ident == *ident)
                     {
+                        self.cfg.clone_from(&unit.cfg);
+                        self.cfg.extend(conditions(&block.attrs));
                         for member in &block.items {
                             let matches = match member {
                                 ImplItem::Fn(value) => {
@@ -1190,7 +1686,7 @@ impl Pass {
                             };
                             if matches {
                                 self.member(
-                                    file,
+                                    unit.file,
                                     &module,
                                     &format!("{module}::{}", owner(&block.self_ty)),
                                     block,
@@ -1203,14 +1699,21 @@ impl Pass {
                 }
                 if found {
                     if whole_module {
-                        self.items(file, &module, &items);
+                        for unit in &scope {
+                            self.cfg.clone_from(&unit.cfg);
+                            self.items(unit.file, &module, &unit.items, unit.include_scope);
+                        }
+                        if let Some(error) = self.scope_error.take() {
+                            return Err(error);
+                        }
                     }
-                    for item in &items {
+                    for (unit, item) in items() {
                         if matches!(item, Item::Struct(value) if value.ident == *ident)
                             || matches!(item, Item::Enum(value) if value.ident == *ident)
                             || matches!(item, Item::Union(value) if value.ident == *ident)
                         {
-                            self.item(file, &module, item, false);
+                            self.cfg.clone_from(&unit.cfg);
+                            self.item(unit.file, &module, item, None);
                         }
                     }
                     return Ok(());
@@ -1233,7 +1736,7 @@ impl Pass {
                 {
                     continue;
                 }
-                let resolved = shapes.resolve(&module, &written, &mut BTreeSet::new())?;
+                let resolved = shapes.resolve(&module, &written)?;
                 let unique = resolved.len() == 1;
                 for (path, imported) in resolved {
                     if imported
@@ -1278,9 +1781,7 @@ impl Pass {
                                     (definition.module.clone(), TypeUses::item(&definition.item))
                                 });
                             }
-                        } else if !path.starts_with("sunrise_client::")
-                            && !self.entries.contains_key(&key)
-                        {
+                        } else if !self.layout.owns(&path) && !self.entries.contains_key(&key) {
                             self.cfg = definition.cfg;
                             self.entry(
                                 &definition.module,
@@ -1307,12 +1808,12 @@ impl Pass {
             .values()
             .filter(|entry| {
                 matches!(entry.kind, "struct" | "enum")
-                    && !entry.path.starts_with("sunrise_client::")
+                    && !self.layout.owns(&entry.path)
                     && !API_CRATES.contains(&entry.path.split("::").next().unwrap_or_default())
             })
             .map(|entry| entry.path.clone())
             .collect();
-        let manifest = root.join("crates/sunrise-client/Cargo.toml");
+        let manifest = self.layout.runtime.package_path(root).join("Cargo.toml");
         let text = fs::read_to_string(&manifest).map_err(|e| e.to_string())?;
         let manifest: toml::Value = toml::from_str(&text).map_err(|e| e.to_string())?;
         // The table lives in the game crate. A transitive or optional dependency's name is
@@ -1382,31 +1883,41 @@ pub(crate) fn widen_generated(path: &Path, text: String) -> Result<String, Strin
         edits: BTreeMap::new(),
         annotations: BTreeMap::new(),
     });
-    pass.items(0, "sunrise_client::game", &parsed.items);
+    pass.items(
+        0,
+        &format!("{}::game", ENTRY_DOMAIN.key),
+        &parsed.items,
+        IncludeScope::default(),
+    );
     Ok(pass.sources.remove(0).rendered())
 }
 
 /// Widen game internals and the declared lower-crate items in a staged source copy.
 /// Fails before writing anything if a declaration in `internals.txt` cannot be resolved.
-/// A marked replaceable lower-crate function is an internal too: its copy names the function's types.
+/// A marked replaceable lower-crate function is an internal too: its copy names declarations in
+/// the same module, including those from literal source fragments.
 pub fn widen(root: &Path) -> Result<Widened, String> {
-    stage(root, false)
+    stage(root, SourceLayout::read(root)?, false)
 }
 
 /// Instrument a discovery-only source copy. Its catalog is identical to [`widen`]'s, but
 /// compiler deprecation diagnostics identify each use by kind and catalog path.
 /// Never use this copy for a normal build or a published prebuilt.
 pub fn discover(root: &Path) -> Result<Widened, String> {
-    stage(root, true)
+    stage(root, SourceLayout::read(root)?, true)
 }
 
 /// Read the same original signatures and reachable layouts as staging, without changing files.
 /// Visibility edits are collected but never emitted, so build-time consumers can safely build
 /// a crossing rule over the catalog in a normal source checkout.
 pub fn catalog(root: &Path) -> Result<Vec<Internal>, String> {
+    catalog_with_layout(root, SourceLayout::read(root)?)
+}
+
+fn catalog_with_layout(root: &Path, layout: SourceLayout) -> Result<Vec<Internal>, String> {
     let path = root.join("crates/sunrise-mod-api-gen/internals.txt");
     let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(collect(root, &[("internals.txt", text)], false)?
+    Ok(collect(root, layout, &[("internals.txt", text)], false)?
         .entries
         .into_values()
         .collect())
@@ -1415,47 +1926,93 @@ pub fn catalog(root: &Path) -> Result<Vec<Internal>, String> {
 /// [`catalog`] with the listed foreign layouts (`winit::event_loop::ControlFlow`...), as
 /// `internals.json` has them: what a crossing rule over the game reads.
 pub fn rule_catalog(root: &Path) -> Result<Vec<Internal>, String> {
-    let mut entries = catalog(root)?;
+    rule_catalog_with_layout(root, SourceLayout::read(root)?)
+}
+
+pub(crate) fn rule_catalog_with_layout(
+    root: &Path,
+    layout: SourceLayout,
+) -> Result<Vec<Internal>, String> {
+    let mut entries = catalog_with_layout(root, layout)?;
     entries.extend(crate::crossing::foreign_internals(root)?);
     Ok(entries)
 }
 
-fn stage(root: &Path, discovery: bool) -> Result<Widened, String> {
+pub(crate) fn stage(root: &Path, layout: SourceLayout, discovery: bool) -> Result<Widened, String> {
     let path = root.join("crates/sunrise-mod-api-gen/internals.txt");
     let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    widen_mode(root, &[("internals.txt", text)], discovery)
+    collect(root, layout, &[("internals.txt", text)], discovery)?.finish()
 }
 
 /// [`widen`] with each list's file name and text, so an error names the file and line it came from.
 #[cfg(test)]
 fn widen_with(root: &Path, lists: &[(&str, String)]) -> Result<Widened, String> {
-    widen_mode(root, lists, false)
+    collect(root, crate::LEGACY_LAYOUT, lists, false)?.finish()
 }
 
-fn widen_mode(root: &Path, lists: &[(&str, String)], discovery: bool) -> Result<Widened, String> {
-    collect(root, lists, discovery)?.finish()
-}
-
-fn collect(root: &Path, lists: &[(&str, String)], discovery: bool) -> Result<Pass, String> {
+fn collect(
+    root: &Path,
+    layout: SourceLayout,
+    lists: &[(&str, String)],
+    discovery: bool,
+) -> Result<Pass, String> {
     let mut pass = Pass {
+        layout,
+        source_root: root.to_owned(),
         discovery,
         ..Pass::default()
     };
-    let src = root.join("crates/sunrise-client/src");
-    for source in crate::source::game_files(&src, false)?
-        .into_iter()
-        .chain(std::iter::once(mod_source::modules::ModuleFile {
-            module: "sunrise_client::entry".into(),
-            path: src.join("entry.rs"),
+    let mut files = layout.files(root, false)?;
+    if let Some(entry) = layout.entry {
+        files.push(mod_source::modules::ModuleFile {
+            module: format!("{}::entry", layout.runtime.key),
+            path: layout.runtime.package_path(root).join(entry),
             cfg: Vec::new(),
-        }))
-    {
+            included: false,
+        });
+    }
+    let sources = files;
+    let mut files = Vec::new();
+    for source in sources {
         let file = pass.load(&source.path)?;
+        // Inline modules' macros too: `pub(crate) use` re-exports one from anywhere in the crate.
+        fn macros(items: &[Item], out: &mut BTreeSet<String>) {
+            for item in items {
+                match item {
+                    Item::Macro(value) if value.mac.path.is_ident("macro_rules") => {
+                        out.extend(value.ident.as_ref().map(ToString::to_string));
+                    }
+                    Item::Mod(value) => {
+                        if let Some((_, items)) = &value.content {
+                            macros(items, out);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        macros(
+            &pass.sources[file].parsed.items,
+            pass.game_macros
+                .entry(
+                    source
+                        .module
+                        .split("::")
+                        .next()
+                        .unwrap_or_default()
+                        .to_owned(),
+                )
+                .or_default(),
+        );
+        files.push((file, source));
+    }
+    for (file, source) in files {
         pass.cfg = source.cfg;
         pass.items(
             file,
             &source.module,
             &pass.sources[file].parsed.items.clone(),
+            IncludeScope::default(),
         );
     }
     pass.cfg.clear();
@@ -1468,7 +2025,8 @@ fn collect(root: &Path, lists: &[(&str, String)], discovery: bool) -> Result<Pas
             }
         }
     }
-    for (origin, path) in crate::replace::marked(root)? {
+    // Each marked function where its item is: a method under its `impl`'s file module.
+    for (origin, path) in crate::replace::marked_items(root, layout)? {
         pass.lower(root, &path, true)
             .map_err(|e| format!("{origin}: {path}: {e}"))?;
     }
@@ -1482,7 +2040,11 @@ fn collect(root: &Path, lists: &[(&str, String)], discovery: bool) -> Result<Pas
             .map(str::to_owned)
             .collect();
         for krate in crates {
-            let (_, lib) = crate::source::crate_root(root, &krate)?;
+            let lib = if let Some(domain) = layout.domain(&krate) {
+                domain.library(root)?
+            } else {
+                crate::source::crate_root(root, &krate)?.1
+            };
             let file = pass.load(&lib)?;
             let start = pass.sources[file]
                 .parsed
@@ -1610,9 +2172,8 @@ mod tests {
             "#![cfg(feature = \"extra\")]\nfn optional_helper() {}",
         );
         fixture.put("crates/sunrise-client/src/game/runtime.rs", "fn live() {}");
-        let src = fixture.0.join("crates/sunrise-client/src");
         for every_build in [false, true] {
-            let files = crate::source::game_files(&src, every_build).unwrap();
+            let files = ENTRY_DOMAIN.files(&fixture.0, every_build).unwrap();
             assert!(
                 !files
                     .iter()
@@ -1652,10 +2213,8 @@ mod tests {
         let module = "use super::Game; impl Game { fn action(&self) -> u8 { 7 } }";
         let before = Fixture::new(source);
         before.put("crates/sunrise-client/src/game/feature.rs", module);
-        let after = Fixture::new(
-            "struct Game;\ninclude!(concat!(env!(\"OUT_DIR\"), \"/game_modules.rs\"));",
-        );
-        after.put("crates/sunrise-client/src/game/runtime/.game-area", "");
+        let after =
+            Fixture::new("struct Game;\n#[path = \"game/runtime/feature.rs\"]\nmod feature;");
         after.put(
             "crates/sunrise-client/src/game/runtime/feature.rs",
             "include!(\"feature/shared.rs\");",
@@ -1665,7 +2224,8 @@ mod tests {
             module,
         );
         fn modules(root: &Path) -> BTreeSet<String> {
-            crate::source::game_files(&root.join("crates/sunrise-client/src"), true)
+            ENTRY_DOMAIN
+                .files(root, true)
                 .unwrap()
                 .into_iter()
                 .map(|file| file.module)
@@ -1677,20 +2237,21 @@ mod tests {
             widen_with(&after.0, &[]).unwrap().entries
         );
         assert!(after.game().contains("pub mod feature;"));
-        assert!(!after.game().contains("game_modules.rs"));
     }
 
     #[test]
-    fn materialized_game_modules_survive_source_tree_relocation() {
+    fn path_declared_game_modules_survive_source_tree_relocation() {
         let mut fixture = Fixture::new(
-            "struct Game;\nmod native_hooks;\ninclude!(concat!(env!(\"OUT_DIR\"), \"/game_modules.rs\"));",
+            "struct Game;\nmod native_hooks;\n#[path = \"game/runtime/feature.rs\"]\nmod feature;\n#[path = \"game/network/lan_actions/mod.rs\"]\nmod lan_actions;",
         );
-        fixture.put("crates/sunrise-client/src/game/runtime/.game-area", "");
         fixture.put(
             "crates/sunrise-client/src/game/runtime/feature.rs",
             "use super::Game; impl Game { fn action(&self) {} }",
         );
-        fixture.put("crates/sunrise-client/src/game/native_hooks/mod.rs", "include!(concat!(env!(\"OUT_DIR\"), \"/native_hook_modules.rs\"));\ninclude!(\"shared.rs\");");
+        fixture.put(
+            "crates/sunrise-client/src/game/native_hooks/mod.rs",
+            "mod area;\ninclude!(\"shared.rs\");",
+        );
         fixture.put(
             "crates/sunrise-client/src/game/native_hooks/shared.rs",
             "struct State;",
@@ -1699,8 +2260,10 @@ mod tests {
             "crates/sunrise-client/src/game/native_hooks/area.rs",
             "use super::super::Game; impl Game { fn native_action(&self) {} }",
         );
-        fixture.put("crates/sunrise-client/src/game/network/.game-area", "");
-        fixture.put("crates/sunrise-client/src/game/network/lan_actions/mod.rs", "include!(concat!(env!(\"OUT_DIR\"), \"/lan_action_modules.rs\"));\ninclude!(\"shared.rs\");");
+        fixture.put(
+            "crates/sunrise-client/src/game/network/lan_actions/mod.rs",
+            "mod turns;\ninclude!(\"shared.rs\");",
+        );
         fixture.put(
             "crates/sunrise-client/src/game/network/lan_actions/shared.rs",
             "struct GuestState;",
@@ -1713,8 +2276,7 @@ mod tests {
         let moved = fixture.0.with_extension("relocated");
         fs::rename(&fixture.0, &moved).unwrap();
         fixture.0 = moved;
-        let files =
-            crate::source::game_files(&fixture.0.join("crates/sunrise-client/src"), true).unwrap();
+        let files = ENTRY_DOMAIN.files(&fixture.0, true).unwrap();
         assert!(files.iter().all(|file| file.path.starts_with(&fixture.0)));
         let modules: BTreeSet<_> = files.iter().map(|file| file.module.as_str()).collect();
         assert!(modules.contains("sunrise_client::game::feature"));
@@ -1772,8 +2334,14 @@ pub(crate) struct ItemStack { #[allow(dead_code)] kind: StackKind }
         }
         let lists = [("internals.txt", "lower::direct".into())];
         let expected = widen_with(&normal.0, &lists).unwrap();
-        let ordinary = widen_mode(&repeat.0, &lists, false).unwrap();
-        let marked = widen_mode(&discovery.0, &lists, true).unwrap();
+        let ordinary = collect(&repeat.0, crate::LEGACY_LAYOUT, &lists, false)
+            .unwrap()
+            .finish()
+            .unwrap();
+        let marked = collect(&discovery.0, crate::LEGACY_LAYOUT, &lists, true)
+            .unwrap()
+            .finish()
+            .unwrap();
         assert_eq!(expected.entries, marked.entries);
         assert_eq!(
             serde_json::to_vec(&expected.entries).unwrap(),
@@ -2307,6 +2875,38 @@ pub struct ItemStack { a: First, b: Second, c: second::Kind }
     }
 
     #[test]
+    fn restricted_game_imports_widen_but_macro_imports_stay() {
+        let fixture = Fixture::new(
+            r#"mod moved {
+    pub(super) use std::collections::HashMap;
+    pub(in crate::game) use std::vec::{Vec as List, IntoIter};
+    use std::fmt;
+    macro_rules! local { () => {} }
+    pub(super) use local;
+}
+mod macros { macro_rules! shared { () => {} } pub(crate) use shared; }
+pub(crate) use macros::shared as reexported;
+"#,
+        );
+        widen_with(&fixture.0, &[]).unwrap();
+        let source = fixture.game();
+        for expected in [
+            "    pub use std::collections::HashMap;",
+            "    pub use std::vec::{Vec as List, IntoIter};",
+            "    use std::fmt;",
+            "    pub(super) use local;",
+            "pub(crate) use shared; }",
+            "pub(crate) use macros::shared as reexported;",
+        ] {
+            assert!(
+                source.contains(expected),
+                "missing {expected:?} in {source}"
+            );
+        }
+        syn::parse_file(&source).unwrap();
+    }
+
+    #[test]
     fn widens_items_without_touching_uses_trait_impls_or_local_items() {
         let fixture = Fixture::new(
             r#"use std::fmt;
@@ -2433,6 +3033,156 @@ const LABEL: &str = "é"; struct AfterUnicode;
                 .iter()
                 .any(|entry| entry.path.contains("unrelated") || entry.path.contains("sibling"))
         );
+    }
+
+    /// Only fragments some build compiles are opened, and only the standard `include!` is
+    /// followed; an inline module's fragments are widened with the module.
+    #[test]
+    fn lower_scopes_follow_only_compilable_standard_includes_inside_the_root() {
+        let fixture = Fixture::new("");
+        fixture.lower();
+        fixture.put(
+            "crates/lower/src/hidden.rs",
+            r#"
+#[cfg(unix)]
+include!("unix.rs");
+mod shadow {
+    macro_rules! include { ($($t:tt)*) => {}; }
+    include!("no such file");
+}
+mod child { include!("child.rs"); }
+fn selected() { child::helper(); }
+"#,
+        );
+        // The nested include can never compile under its gates: `gone.rs` is never opened.
+        fixture.put(
+            "crates/lower/src/unix.rs",
+            "#[cfg(not(unix))]
+include!(\"gone.rs\");
+fn on_unix() {}
+",
+        );
+        fixture.put(
+            "crates/lower/src/child.rs",
+            "pub(super) fn helper() {}
+",
+        );
+        let mut pass = Pass::default();
+        pass.lower(&fixture.0, "lower::hidden::selected", true)
+            .unwrap();
+        pass.finish().unwrap();
+        let child = fs::read_to_string(fixture.0.join("crates/lower/src/child.rs")).unwrap();
+        assert_eq!(child, "pub fn helper() {}\n");
+    }
+
+    #[test]
+    fn a_later_include_macro_does_not_hide_an_earlier_fragment() {
+        let fixture = Fixture::new("");
+        fixture.lower();
+        fixture.put(
+            "crates/lower/src/hidden.rs",
+            r#"
+include!("earlier.rs");
+macro_rules! include { ($($t:tt)*) => {}; }
+include!("absent.rs");
+"#,
+        );
+        fixture.put("crates/lower/src/earlier.rs", "fn selected() {}\n");
+        let dir = fixture.0.join("crates/lower/src");
+        let fragment = dir.join("earlier.rs");
+        let files = mod_source::modules::walk_module_files(
+            "lower".into(),
+            dir.join("lib.rs"),
+            dir,
+            false,
+            false,
+            |_, source| syn::parse_file(source).map_err(|e| e.to_string()),
+        )
+        .unwrap();
+        assert!(
+            files
+                .iter()
+                .any(|file| file.included && file.path == fragment)
+        );
+
+        let mut pass = Pass::default();
+        pass.lower(&fixture.0, "lower::hidden::selected", false)
+            .unwrap();
+        pass.finish().unwrap();
+        assert_eq!(
+            fs::read_to_string(fragment).unwrap(),
+            "pub fn selected() {}\n"
+        );
+    }
+
+    /// A module reached from a fragment through a link out of the root is refused, and the file
+    /// it names is left as it was. Unix only: creating a link on Windows needs Developer Mode or
+    /// an administrator, so the test could not set its fixture up there.
+    #[cfg(unix)]
+    #[test]
+    fn a_module_reached_through_a_link_out_of_the_root_is_refused() {
+        let fixture = Fixture::new("");
+        fixture.lower();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("elsewhere.rs");
+        fs::write(&target, "fn far() {}\n").unwrap();
+        fixture.put(
+            "crates/lower/src/child.rs",
+            "#[path = \"link.rs\"] pub(super) mod linked;\n",
+        );
+        let link = fixture.0.join("crates/lower/src/link.rs");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        // Windows makes file links only with Developer Mode on (or as an administrator).
+        #[cfg(windows)]
+        if let Err(error) = std::os::windows::fs::symlink_file(&target, &link) {
+            eprintln!("skipping the link-out-of-the-root check: no symlink here ({error})");
+            return;
+        }
+        fixture.put(
+            "crates/lower/src/hidden.rs",
+            "mod child { include!(\"child.rs\"); }\nfn selected() {}\n",
+        );
+        let refused = Pass::default()
+            .lower(&fixture.0, "lower::hidden::child::linked::far", true)
+            .unwrap_err();
+        assert!(refused.contains("elsewhere.rs"), "{refused}");
+        assert_eq!(fs::read_to_string(&target).unwrap(), "fn far() {}\n");
+    }
+
+    #[test]
+    fn required_lower_fragment_errors_name_the_file() {
+        let fixture = Fixture::new("");
+        fixture.lower();
+        fixture.put(
+            "crates/lower/src/hidden.rs",
+            r#"
+#[cfg_attr(not(test), cfg(any()))]
+include!("disabled.rs");
+include!("fragments/outer.rs");
+fn selected() { helper(); }
+"#,
+        );
+        fixture.put(
+            "crates/lower/src/fragments/outer.rs",
+            r#"include!("required.rs");"#,
+        );
+        let fragment = "crates/lower/src/fragments/required.rs";
+        let stage_scope = || Pass::default().lower(&fixture.0, "lower::hidden::selected", true);
+        let missing = stage_scope().unwrap_err();
+        assert!(missing.contains("required.rs:"), "{missing}");
+
+        fixture.put(fragment, "fn =");
+        let invalid = stage_scope().unwrap_err();
+        assert!(invalid.contains("required.rs:"), "{invalid}");
+
+        fixture.put(fragment, r#"include!(".././hidden.rs");"#);
+        let cycle = stage_scope().unwrap_err();
+        assert!(cycle.contains("hidden.rs:"), "{cycle}");
+
+        // `disabled.rs` is still absent: the non-test pass never opens it.
+        fixture.put(fragment, "fn helper() {}");
+        stage_scope().unwrap();
     }
 
     #[test]
@@ -2663,6 +3413,71 @@ const LABEL: &str = "é"; struct AfterUnicode;
             )
             .unwrap()
             .starts_with("pub type PadId")
+        );
+    }
+
+    #[test]
+    fn cyclic_globs_and_self_prefix_imports_terminate_and_resolve() {
+        let fixture = Fixture::new(
+            r#"
+mod side {
+    pub mod sub {
+        pub struct SubValue;
+        pub fn sub() -> SubValue { SubValue }
+        pub fn helper() {}
+    }
+}
+pub use side::sub;
+use sub::{SubValue, helper, sub};
+
+mod a {
+    pub use super::b::*;
+    pub struct FromA;
+}
+mod b {
+    pub use super::a::*;
+    use super::*;
+    use a::*;
+    use external_missing::glob::*;
+    fn use_both(_: FromA, _: SubValue) {
+        helper();
+        sub();
+        missing_call();
+    }
+}
+fn caller(_: SubValue) {
+    helper();
+    sub();
+}
+"#,
+        );
+        let entries = widen_with(&fixture.0, &[]).unwrap().entries;
+        let find = |path: &str| {
+            entries
+                .iter()
+                .find(|entry| entry.path == format!("sunrise_client::game::{path}"))
+                .unwrap()
+        };
+        let use_both = find("b::use_both");
+        assert_eq!(use_both.refs["FromA"], "sunrise_client::game::a::FromA");
+        assert_eq!(
+            use_both.refs["SubValue"],
+            "sunrise_client::game::side::sub::SubValue"
+        );
+        assert_eq!(
+            use_both.refs["helper"],
+            "sunrise_client::game::side::sub::helper"
+        );
+        assert!(!use_both.refs.contains_key("missing_call"));
+
+        let caller = find("caller");
+        assert_eq!(
+            caller.refs["SubValue"],
+            "sunrise_client::game::side::sub::SubValue"
+        );
+        assert_eq!(
+            caller.refs["helper"],
+            "sunrise_client::game::side::sub::helper"
         );
     }
 }

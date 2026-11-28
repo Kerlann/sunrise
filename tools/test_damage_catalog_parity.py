@@ -10,15 +10,18 @@ import os
 from pathlib import Path
 import re
 import subprocess
-import lab
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab
 
 
 def snapshot_tests(build):
     """Run the prepared-resource hurt, landing, world lifetime and wire cases.
 
-    One package per Cargo run, as other harnesses select them: in one run, sunrise-client-lib's lib test and rlib
-    compiled beside sunrise-client's lib test, 15.6 GiB at once, and a 16 GiB parity runner killed it (signal 9,
-    main, run 43884739298). Apart, the larger, sunrise-client's with its rlib, peaks at 11.5 GiB."""
+    One Cargo run per package: sunrise-client-lib's lib test, then sunrise-client's fixtures from their own binary
+    (lab.parity_fixtures()), never the sunrise-client lib test, whose rustc a parity runner cannot hold (#4896)."""
     stdout = output = ""
     # Tests that run their cases in child processes (native_entity_refs::tests::run_fresh_cases) pass the
     # prepared resources down by this variable; the scratch homes keep the runs out of a player's folders.
@@ -26,7 +29,7 @@ def snapshot_tests(build):
     # Written out whole: CI's named-harness step finds the lib tests to build first by these literal arguments.
     for command in (
         ["cargo", "test", "--locked", "-p", "sunrise-client-lib", "--lib", "datapack_damage_", "--", "--include-ignored"],
-        ["cargo", "test", "--locked", "-p", "sunrise-client", "--lib", "datapack_damage_", "--", "--include-ignored"],
+        [lab.parity_fixtures(), "datapack_damage_", "--include-ignored"],
     ):
         run = subprocess.run(command, cwd=lab.ROOT, env=env, text=True, capture_output=True)
         stdout += run.stdout
@@ -85,10 +88,10 @@ def main():
                lab.ROOT / "crates/sunrise-world/examples/damage_catalog_probe.rs",
                lab.ROOT / "crates/sunrise-world/src/damage_source.rs",
                lab.ROOT / "crates/sunrise-world/src/damage_source/resources.rs",
-               lab.ROOT / "crates/sunrise-client/src/health/datapack_tests.rs",
-               lab.ROOT / "crates/sunrise-client/src/landing.rs",
-               lab.ROOT / "crates/sunrise-client/src/lan/data.rs",
-               lab.ROOT / "crates/sunrise-client/src/game/network/lan/mod.rs"]
+               lab.ROOT / "crates/sunrise-sim/src/health/datapack_tests.rs",
+               lab.ROOT / "crates/sunrise-sim/src/landing.rs",
+               lab.ROOT / "crates/sunrise-sim/src/lan/data.rs",
+               lab.ROOT / "crates/sunrise-gameplay/src/game/network/lan/mod.rs"]
     hashes = {str(p.relative_to(lab.ROOT)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sources}
     libraries = sorted((args.game_dir / "libraries/server").rglob("*.jar"))
     jar = args.game_dir / "jars/server-game.jar"

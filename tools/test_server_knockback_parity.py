@@ -28,6 +28,7 @@ players, so a hit lands in Alice's next tick). A server that stalls under load g
 Each case is compared on its own. KNOWN lists the cases Sunrise still gets wrong and why; one that matches
 again is reported, and should leave the list.
 """
+import json
 import os
 from pathlib import Path
 import platform
@@ -37,15 +38,11 @@ import subprocess
 import sys
 import time
 
-try:
-    from . import lab, test_rust_parity as base
-    from .test_dedicated_server_parity import Server, free_port, game_time, wait_ticks
-    from .test_locator_bar_parity import generate_world, ops_json
-except ImportError:
-    import lab
-    import test_rust_parity as base
-    from test_dedicated_server_parity import Server, free_port, game_time, wait_ticks
-    from test_locator_bar_parity import generate_world, ops_json
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, test_rust_parity as base
+from tools.test_dedicated_server_parity import Server, free_port, game_time, wait_ticks
+from tools.test_locator_bar_parity import generate_world, ops_json
 
 NAME = 'server-knockback-parity'
 PLAYERS = ('Alice', 'Bob')
@@ -265,7 +262,7 @@ def server_dir(directory, world):
     return port
 
 
-def run_side(label, server_command, client_command, build, world):
+def run_side(label, server_command, client_command, build, world, cases, *, tracking=False):
     directory = build / label
     port = server_dir(directory, world)
     out = build / f'{label}.txt'
@@ -274,7 +271,8 @@ def run_side(label, server_command, client_command, build, world):
     try:
         server.wait_for(r'Done \(')
         with (build / f'{label}-client.log').open('w') as log:
-            client = subprocess.Popen([*map(str, client_command), '127.0.0.1', str(port), str(out)],
+            client = subprocess.Popen([*map(str, client_command), '127.0.0.1', str(port), str(out),
+                                       *(['tracking'] if tracking else [])],
                                       cwd=lab.ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                       stderr=subprocess.STDOUT, text=True)
 
@@ -299,6 +297,10 @@ def run_side(label, server_command, client_command, build, world):
                     sync()
                     wait_ticks(server, int(line.split()[1]))
                     sync()
+                elif word == 'present':
+                    sync()
+                    kind = line.split()[1]
+                    server_data(server, f'@e[type=minecraft:{kind},limit=1]', 'Pos')
                 elif word == 'frozen':
                     # The tick in flight when ticking was frozen has finished: the clock reads the same twice.
                     sync()
@@ -308,11 +310,19 @@ def run_side(label, server_command, client_command, build, world):
                     # Alice hits the mob. A frozen server still ticks its players, and the hit lands in Alice's
                     # next tick, not when the packet arrives: the mob's motion says when it has.
                     sync()
-                    mob = f'@e[type=minecraft:{line.split()[1]},limit=1]'
+                    kind = line.split()[1]
+                    mob = f'@e[type=minecraft:{kind},limit=1]'
                     before = server_data(server, mob, 'Motion')
-                    client.stdin.write(f'attack Alice {line.split()[1]}\n')
+                    client.stdin.write(f'attack Alice {kind}\n')
                     client.stdin.flush()
-                    while server_data(server, mob, 'Motion') == before:
+                    # Use the same console-observation deadline as tickstep and server_data.
+                    deadline = time.monotonic() + 120
+                    while True:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise AssertionError(f'{label}: hitting {kind} did not change its motion')
+                        if server_data(server, mob, 'Motion', timeout=remaining) != before:
+                            break
                         time.sleep(0.05)
                     sync()
                 elif word == 'tickstep':
@@ -355,7 +365,7 @@ def run_side(label, server_command, client_command, build, world):
                     wait_ticks(server, 40)
                 for line in SETUP:
                     send(line)
-                for case, lines in CASES.items():
+                for case, lines in cases.items():
                     send(f'step {case}')
                     for line in lines:
                         send(line)
@@ -395,12 +405,7 @@ def compared(lines):
     return cases
 
 
-def main():
-    lock, jars, libraries = base.verify_artifacts()
-    build = lab.LOCAL / NAME
-    build.mkdir(parents=True, exist_ok=True)
-    report = build / 'report.json'
-    report.unlink(missing_ok=True)
+def harness_commands(lock, jars, libraries, build, sunrise_binary=None):
     oracle = lab.ROOT / 'mods/sunrise/src/test/java/dev/sunriselab/parity/KnockbackClient.java'
     classes = build / 'classes'
     shutil.rmtree(classes, ignore_errors=True)
@@ -409,22 +414,34 @@ def main():
     subprocess.run(['javac', '--release', str(lock['minecraft']['java_major']), '-proc:none', '-nowarn', '-sourcepath',
                     lab.ROOT / 'mods/sunrise/src/test/java', '-cp', dependencies, '-d', classes, oracle],
                    cwd=lab.ROOT, check=True, capture_output=True)
-    subprocess.run(['cargo', 'build', '--profile', 'fast', '-p', 'sunrise-game', '--bin', 'sunrise-client'], cwd=lab.ROOT,
-                   check=True, capture_output=True)
-    import json
-    metadata = json.loads(subprocess.check_output(['cargo', 'metadata', '--no-deps', '--format-version', '1'],
-                                                  cwd=lab.ROOT, text=True))
-    binary = Path(metadata['target_directory']) / 'fast' / ('sunrise-client.exe' if os.name == 'nt' else 'sunrise-client')
+    if sunrise_binary:
+        binary = sunrise_binary.resolve(strict=True)
+    else:
+        subprocess.run(['cargo', 'build', '--profile', 'fast', '-p', 'sunrise-game', '--bin', 'sunrise-client'],
+                       cwd=lab.ROOT, check=True, capture_output=True)
+        metadata = json.loads(subprocess.check_output(['cargo', 'metadata', '--no-deps', '--format-version', '1'],
+                                                       cwd=lab.ROOT, text=True))
+        binary = Path(metadata['target_directory']) / 'fast' / ('sunrise-client.exe' if os.name == 'nt' else 'sunrise-client')
     vanilla_server = ['java', '-Xmx2g', '-Duser.timezone=UTC', '-cp', dependencies, 'net.minecraft.server.Main', 'nogui']
     sunrise_server = [binary, '--resources', lab.RESOURCES, '--dedicated', '--nogui']
     client = ['java', '-Xmx1g', '-cp', str(classes) + os.pathsep + dependencies, 'dev.sunriselab.parity.KnockbackClient']
 
+    return vanilla_server, sunrise_server, client
+
+
+def main():
+    lock, jars, libraries = base.verify_artifacts()
+    build = lab.LOCAL / NAME
+    build.mkdir(parents=True, exist_ok=True)
+    report = build / 'report.json'
+    report.unlink(missing_ok=True)
+    vanilla_server, sunrise_server, client = harness_commands(lock, jars, libraries, build)
     world = generate_world(vanilla_server, build)
-    vanilla = compared(run_side('vanilla', vanilla_server, client, build, world))
+    vanilla = compared(run_side('vanilla', vanilla_server, client, build, world, CASES))
     takeoff = [line for line in vanilla.get('pvp-takeoff', []) if line.startswith('Alice motion self ')]
     if len(takeoff) != 1 or not 0.4 < float(takeoff[0].split()[4]) < 0.43:
         raise AssertionError(f'pvp-takeoff: vanilla did not hit after the jump and before travel: {takeoff}')
-    sunrise = compared(run_side('sunrise', sunrise_server, client, build, world))
+    sunrise = compared(run_side('sunrise', sunrise_server, client, build, world, CASES))
     differ, fixed = [], []
     for case in CASES:
         want, got = vanilla.get(case, []), sunrise.get(case, [])

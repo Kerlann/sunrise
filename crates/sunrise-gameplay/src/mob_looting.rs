@@ -1,36 +1,23 @@
 //! `Mob.aiStep`'s looting block: what a mob that can pick up loot takes and wears, on `MobLevel`.
-use crate::{item_areas::ItemAreas, mob_level::MobLevel};
-use sunrise_client::{
-    items::ItemStack,
-    mobs::{
-        Species,
-        equip::{self, Facts, ItemTags, Slot},
-        finalize::{self, set_drop_chance, set_item_stack, stored_drop_chance},
-    },
-};
+use crate::mob_level::MobLevel;
 use sunrise_core::{geometry::Vec3, random::RandomSource};
+use sunrise_gameplay_common::item_areas::ItemAreas;
+use sunrise_items::items::ItemStack;
+use sunrise_sim::mobs::{
+    Species,
+    equip::{self, Facts, ItemTags, Slot},
+    finalize::{self, set_drop_chance, set_item_stack, stored_drop_chance},
+};
 
 /// What looting asks of the level beyond `MobLevel`: the mod hooks and the tables only the game holds.
 pub trait LootingLevel: MobLevel {
-    /// A stack converted for the parts of its item, ready for any number of `can_equip` questions.
-    type Prepared;
     /// `EntityMobGriefingEvent` has listeners: `Game::grief_hooked`, `fn(&self) -> bool`.
     fn grief_hooked(&self) -> bool;
     /// `Mob.isEquippableInSlot`'s own answer: `Game::stations().enchantments.entity_tags` with `equip::equippable_in_slot`.
     fn equippable_in_slot(&self, stack: &ItemStack, slot: &str, kind: &str) -> bool;
-    /// `IItemExtension.canEquip` preparation: `Game::equip_stack(&self, &ItemStack, &[u32]) -> EquipStack`.
-    fn equip_stack(&self, stack: &ItemStack, targets: &[u32]) -> Self::Prepared;
     /// `IItemExtension.canEquip`: `Game::can_equip(&self, &EquipStack, &str, u32, &str, bool) -> bool`.
-    fn can_equip(
-        &self,
-        prepared: &Self::Prepared,
-        slot: &str,
-        entity: u32,
-        kind: &str,
-        data: bool,
-    ) -> bool;
-    /// Whether the prepared stack still applies: `Game::equip_can_apply(&self, &EquipStack, u32) -> bool`.
-    fn equip_can_apply(&self, prepared: &Self::Prepared, id: u32) -> bool;
+    fn can_equip(&self, stack: &ItemStack, slot: &str, entity: u32, kind: &str, data: bool)
+    -> bool;
     /// `Level.gameEvent(EQUIP)` of a mob: `Game::mob_equip_event(&mut self, u32, [f64; 3], bool)`.
     fn mob_equip_event(&mut self, id: u32, at: [f64; 3], equip: bool);
     /// The numbers `Mob.compareArmor` and `compareWeapons` read for mob `index`: `Game::stack_facts(&self, &Mob, &ItemStack, Slot) -> Facts`.
@@ -135,10 +122,7 @@ pub fn equip_item_if_possible(
         (m.id, m.kind.clone())
     };
     let data = level.equippable_in_slot(stack, slot.name(), &kind.id);
-    let observed = mod_api::__private::item_listens(mod_api::HookId::CanEquip, &stack.item);
-    let source = observed.then(|| equip::EquipInput::new(u64::from(id), stack.clone()));
-    let prepared = level.equip_stack(source.as_deref().unwrap_or(stack), &[id]);
-    if !level.can_equip(&prepared, slot.name(), id, &kind.id, data) {
+    if !level.can_equip(stack, slot.name(), id, &kind.id, data) {
         return None;
     }
     let mut replace = can_replace(level, index, stack, slot);
@@ -158,9 +142,6 @@ pub fn equip_item_if_possible(
     } else {
         stack.count.max(1)
     };
-    if !level.equip_can_apply(&prepared, id) {
-        return None;
-    }
     let m = &mut level.parts().mobs[index];
     let old = finalize::item_stack(m, slot.index());
     let chance = stored_drop_chance(m, slot.index());

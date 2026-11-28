@@ -1,97 +1,48 @@
-//! Physical game areas share one logical module scope; compiler and source tools use this list.
-use crate::catalog::Catalog;
+//! The game's generated host forwarders, written into a source copy for tools that can't read OUT_DIR.
+use mod_source::modules::{IncludeScope, gate_items, generated_include};
 use std::{fs, path::Path};
+use syn::spanned::Spanned;
 
-pub(crate) const INCLUDE: &str = "include!(concat!(env!(\"OUT_DIR\"), \"/game_modules.rs\"));";
-
-pub(crate) fn declarations(game: &Path) -> Result<String, String> {
-    sunrise_game_discovery::declarations(game, &["native_hooks", "host", "creatures"])
-}
-
-/// Expand the same directory-derived include before source traversal, without needing OUT_DIR.
+/// `source` with the host forwarders' include replaced by the generated items, without needing OUT_DIR.
 /// Other includes are left alone: source tools must not evaluate arbitrary build-time code.
-pub(crate) fn expand(path: &Path, source: &str) -> Result<String, String> {
-    const NATIVE: &str = "include!(concat!(env!(\"OUT_DIR\"), \"/native_hook_modules.rs\"));";
-    const LAN: &str = "include!(concat!(env!(\"OUT_DIR\"), \"/lan_action_modules.rs\"));";
-    const HOST: &str = "include!(concat!(env!(\"OUT_DIR\"), \"/game_host_modules.rs\"));";
-    if !source.contains(INCLUDE)
-        && !source.contains(NATIVE)
-        && !source.contains(LAN)
-        && !source.contains(HOST)
-    {
+/// Re-parsing the returned text gives the internals pass spans for editing the generated items.
+pub(crate) fn expand(root: &Path, path: &Path, source: &str) -> Result<String, String> {
+    // The filename itself may be escaped in a string literal.
+    if !source.contains("include") {
         return Ok(source.to_owned());
     }
-    let file = syn::parse_file(source).map_err(|e| e.to_string())?;
-    let mut lines: Vec<_> = source.split_inclusive('\n').map(str::to_owned).collect();
-    for item in file.items {
-        if let syn::Item::Macro(item) = item
-            && item.mac.path.is_ident("include")
-        {
-            let line = item.mac.path.segments[0].ident.span().start().line - 1;
-            let declarations = match lines[line].trim_end_matches(['\r', '\n']) {
-                INCLUDE => declarations(&path.with_extension(""))?,
-                LAN => {
-                    let directory = path.parent().ok_or("LAN actions source has no parent")?;
-                    sunrise_game_discovery::lan_action_modules(
-                        directory,
-                        Catalog::modules(directory).map_err(|e| e.to_string())?,
-                    )?
-                }
-                HOST => crate::build::game_host_modules(
-                    path.canonicalize()
-                        .map_err(|e| e.to_string())?
-                        .ancestors()
-                        .nth(6)
-                        .ok_or("game host source outside the game tree")?,
-                )?,
-                NATIVE => sunrise_game_discovery::native_hook_modules(
-                    path.canonicalize()
-                        .map_err(|e| e.to_string())?
-                        .ancestors()
-                        .nth(6)
-                        .ok_or("native hook source outside the game tree")?,
-                )?,
-                _ => continue,
-            };
-            // OUT_DIR lists need absolute paths, but materialized source must survive
-            // the launcher's stage.new -> stage copy and removal of the original tree.
-            let directory = path
-                .parent()
-                .ok_or("game source has no parent")?
-                .canonicalize()
-                .map_err(|e| e.to_string())?;
-            let mut declarations = syn::parse_file(&declarations).map_err(|e| e.to_string())?;
-            for item in &mut declarations.items {
-                let syn::Item::Mod(item) = item else { continue };
-                for attribute in &mut item.attrs {
-                    if let syn::Meta::NameValue(value) = &mut attribute.meta
-                        && value.path.is_ident("path")
-                        && let syn::Expr::Lit(value) = &mut value.value
-                        && let syn::Lit::Str(literal) = &mut value.lit
-                    {
-                        let absolute = literal.value();
-                        let relative = Path::new(&absolute)
-                            .strip_prefix(&directory)
-                            .map_err(|e| e.to_string())?
-                            .to_string_lossy();
-                        *literal = syn::LitStr::new(&relative, literal.span());
-                    }
-                }
-            }
-            lines[line] = prettyplease::unparse(&declarations);
+    let file = syn::parse_file(source).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut scope = IncludeScope::default().with_imports(&file.items);
+    let lines: Vec<_> = std::iter::once(0)
+        .chain(source.match_indices('\n').map(|(i, _)| i + 1))
+        .collect();
+    let mut replacements = Vec::new();
+    for item in &file.items {
+        if let Some(generated) = host_include(root, path, item, scope.before(item).shadowed())? {
+            let span = item.span();
+            let start = crate::source::offset(source, &lines, span.start());
+            let end = crate::source::offset(source, &lines, span.end());
+            replacements.push((start..end, prettyplease::unparse(&generated)));
         }
     }
-    Ok(lines.concat())
+    let mut expanded = source.to_owned();
+    for (range, replacement) in replacements.into_iter().rev() {
+        expanded.replace_range(range, &replacement);
+    }
+    Ok(expanded)
 }
 
-/// Materialize generated module lists in a disposable game source copy before external tools
-/// traverse it. Uses the same source view as point discovery and internals widening, without
-/// widening visibility, adding points or requiring an OUT_DIR. Never pass a downloaded cache.
-pub fn materialize_game_modules(root: &Path) -> Result<(), String> {
-    for file in crate::source::game_files(&root.join("crates/sunrise-client/src"), false)? {
+/// Write the generated host forwarders into a disposable game source copy before external tools
+/// traverse it, without widening visibility or requiring an OUT_DIR. Never pass a downloaded cache.
+pub fn materialize_generated_host(root: &Path) -> Result<(), String> {
+    materialize_with_layout(root, crate::SourceLayout::read(root)?)
+}
+
+fn materialize_with_layout(root: &Path, layout: crate::source::SourceLayout) -> Result<(), String> {
+    for file in layout.files(root, false)? {
         let source =
             fs::read_to_string(&file.path).map_err(|e| format!("{}: {e}", file.path.display()))?;
-        let expanded = expand(&file.path, &source)?;
+        let expanded = expand(root, &file.path, &source)?;
         if expanded != source {
             fs::write(&file.path, expanded).map_err(|e| format!("{}: {e}", file.path.display()))?;
         }
@@ -99,200 +50,145 @@ pub fn materialize_game_modules(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn parse(path: &Path, source: &str) -> Result<syn::File, String> {
-    syn::parse_file(&expand(path, source)?).map_err(|e| format!("{}: {e}", path.display()))
+/// `source` parsed once, with the host forwarders' include replaced by the generated items in
+/// the tree. Spans address `source`, so an edit that needs them uses [`expand`] instead.
+pub(crate) fn parse(root: &Path, path: &Path, source: &str) -> Result<syn::File, String> {
+    let mut file = syn::parse_file(source).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut scope = IncludeScope::default().with_imports(&file.items);
+    let mut items = Vec::with_capacity(file.items.len());
+    for item in file.items {
+        if let Some(generated) = host_include(root, path, &item, scope.before(&item).shadowed())? {
+            items.extend(generated.items);
+        } else {
+            items.push(item);
+        }
+    }
+    file.items = items;
+    Ok(file)
 }
 
-/// [`parse`] for a walk that reads module declarations and never bodies: through the
-/// interface cache, which `scan` then reuses.
-pub(crate) fn parse_signatures(path: &Path, source: &str) -> Result<syn::File, String> {
-    syn::parse_file(&expand(path, source)?).map_err(|error| format!("{}: {error}", path.display()))
+/// Recognize and gate the host include identically for analysis and source editing.
+fn host_include(
+    root: &Path,
+    path: &Path,
+    item: &syn::Item,
+    shadowed: bool,
+) -> Result<Option<syn::File>, String> {
+    let Some((name, attrs)) = generated_include(item, shadowed) else {
+        return Ok(None);
+    };
+    if name != crate::build::HOST_OUTPUT {
+        return Ok(None);
+    }
+    let mut file = generated_host(root, path)?;
+    file.items = gate_items(file.items, attrs).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(Some(file))
+}
+
+/// The generated forwarders of the game file at `path`, parsed.
+fn generated_host(root: &Path, path: &Path) -> Result<syn::File, String> {
+    let physical_root = root.canonicalize().ok();
+    let package = crate::GameplayPackage::ALL.into_iter().find(|package| {
+        let domain = package.domain();
+        path.starts_with(domain.package_path(root))
+            || physical_root
+                .as_ref()
+                .is_some_and(|root| path.starts_with(domain.package_path(root)))
+    });
+    let generated = match package {
+        Some(package) => crate::gameplay::host_source(root, package)?,
+        None => crate::build::game_host_generated(root)?,
+    };
+    syn::parse_file(&generated).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn materialization_writes_a_plain_module_view_without_instrumentation() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target")
-            .join(format!("materialized-areas-{}", std::process::id()));
-        let src = root.join("crates/sunrise-client/src");
-        let area = src.join("game/runtime");
-        fs::create_dir_all(&area).unwrap();
-        fs::write(area.join(".game-area"), "").unwrap();
-        fs::write(src.join("game.rs"), format!("{INCLUDE}\n")).unwrap();
-        let body = "fn untouched() -> u32 { 7 }";
-        fs::write(area.join("feature.rs"), body).unwrap();
-        materialize_game_modules(&root).unwrap();
-        let source = fs::read_to_string(src.join("game.rs")).unwrap();
-        let file = syn::parse_file(&source).unwrap();
-        let [syn::Item::Mod(module)] = file.items.as_slice() else {
-            panic!("{source}")
-        };
-        assert_eq!(module.ident, "feature");
-        let syn::Meta::NameValue(path) = &module.attrs[0].meta else {
-            panic!("{source}")
-        };
-        let syn::Expr::Lit(value) = &path.value else {
-            panic!("{source}")
-        };
-        let syn::Lit::Str(relative) = &value.lit else {
-            panic!("{source}")
-        };
-        assert_eq!(
-            fs::read_to_string(src.join(relative.value())).unwrap(),
-            body
-        );
-        assert_eq!(fs::read_to_string(area.join("feature.rs")).unwrap(), body);
-        materialize_game_modules(&root).unwrap();
-        assert_eq!(fs::read_to_string(src.join("game.rs")).unwrap(), source);
-        fs::remove_dir_all(root).unwrap();
-    }
+    const HOST: &str = "include!(concat!(env!(\"OUT_DIR\"), \"/game_host_generated.rs\"));";
 
     /// Git for Windows checks sources out with CRLF by default.
     #[test]
-    fn an_include_is_expanded_whatever_ends_its_line() {
-        let directory = std::env::temp_dir().join(format!("lan-line-ends-{}", std::process::id()));
-        fs::create_dir_all(&directory).unwrap();
-        let root = directory.join("mod.rs");
-        fs::write(directory.join("turns.rs"), "").unwrap();
+    fn the_host_include_becomes_its_generated_items_whatever_ends_its_line() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         for end in ["\n", "\r\n"] {
-            let source =
-                format!("include!(concat!(env!(\"OUT_DIR\"), \"/lan_action_modules.rs\"));{end}");
-            fs::write(&root, &source).unwrap();
-            let code = expand(&root, &source).unwrap();
-            assert!(code.contains("mod turns;"), "{end:?}");
-        }
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn lan_actions_are_discovered_without_lists_and_reject_shared_methods() {
-        let directory = std::env::temp_dir().join(format!("lan-actions-{}", std::process::id()));
-        fs::create_dir_all(&directory).unwrap();
-        let include = "include!(concat!(env!(\"OUT_DIR\"), \"/lan_action_modules.rs\"));";
-        let root = directory.join("mod.rs");
-        fs::write(&root, include).unwrap();
-        fs::write(directory.join("shared.rs"), "struct State;").unwrap();
-        fs::write(
-            directory.join("turns.rs"),
-            "impl Game { fn turn(&self) {} }",
-        )
-        .unwrap();
-        let code = expand(&root, include).unwrap();
-        assert!(code.contains("mod turns;"));
-        assert!(!code.contains("mod shared;") && !code.contains("mod mod;"));
-        fs::write(directory.join("new_area.rs"), "").unwrap();
-        assert!(expand(&root, include).unwrap().contains("mod new_area;"));
-        fs::write(
-            directory.join("shared.rs"),
-            "impl Game<'_> { fn vehicle_has_other_viewers() {} } impl Game<'_> { fn __fnr_vehicle_has_other_viewers(f: fn()) -> bool { true } fn __fnr_get_vehicle_has_other_viewers() -> Option<fn()> { None } }", 
-        )
-        .unwrap();
-        assert!(
-            sunrise_game_discovery::lan_action_modules(
-                &directory,
-                Catalog::modules(&directory).unwrap()
-            )
-            .is_ok()
-        );
-        for file in ["shared.rs", "mod.rs"] {
-            fs::write(
-                directory.join(file),
-                "impl Game<'_> { fn misplaced(&self) {} }",
-            )
-            .unwrap();
-            assert!(
-                sunrise_game_discovery::lan_action_modules(
-                    &directory,
-                    Catalog::modules(&directory).unwrap()
-                )
-                .unwrap_err()
-                .contains("action area")
-            );
-            fs::write(directory.join(file), "").unwrap();
-        }
-        fs::remove_dir_all(directory).unwrap();
-        let game = Path::new(env!("CARGO_MANIFEST_DIR")).join("../sunrise-client/src/game");
-        let directory = game.join("network/lan_actions");
-        let actual = sunrise_game_discovery::lan_action_modules(
-            &directory,
-            Catalog::modules(&directory).unwrap(),
-        )
-        .unwrap();
-        assert!(!actual.contains("mod shared;"));
-        assert!(actual.contains("mod packets;"));
-    }
-
-    #[test]
-    #[ignore = "daily"]
-    fn existing_game_exports_keep_their_visibility() {
-        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../sunrise-client/src");
-        let code = declarations(&src.join("game")).unwrap();
-        for (name, visibility) in [
-            ("cushions", "pub(crate)"),
-            ("mods", "pub(crate)"),
-            ("native_block_entity_draw", "pub"),
-            ("native_client_services", "pub"),
-        ] {
-            assert!(code.contains(&format!("{visibility} mod {name};")));
-        }
-        let files = crate::source::game_files(&src, true).unwrap();
-        let game_tests = "sunrise_client::game::game_tests";
-        assert!(files.iter().any(|file| file.module == game_tests));
-    }
-
-    #[test]
-    fn discovery_preserves_scope_cfg_and_visibility_and_rejects_drift() {
-        let root = std::env::temp_dir().join(format!("game-areas-{}", std::process::id()));
-        let game = root.join("game");
-        let area = game.join("network");
-        fs::create_dir_all(&area).unwrap();
-        fs::write(area.join(".game-area"), "").unwrap();
-        let source = format!("const DOC: &str = r#\"\n{INCLUDE}\n\"#;\n{INCLUDE}");
-        fs::write(root.join("game.rs"), &source).unwrap();
-        assert!(
-            expand(&root.join("game.rs"), &source)
-                .unwrap()
-                .contains(INCLUDE)
-        );
-        fs::create_dir_all(area.join("remote")).unwrap();
-        fs::write(area.join("remote/mod.rs"), "mod child;").unwrap();
-        fs::write(area.join("remote/child.rs"), "").unwrap();
-        fs::write(area.join("probe_tests.rs"), "").unwrap();
-        fs::write(area.join("game_tests.rs"), "// game-module-cfg: always\n").unwrap();
-        fs::write(
-            area.join("service.rs"),
-            "// game-module-visibility: pub(crate)\n",
-        )
-        .unwrap();
-        let files = crate::source::game_files(&root, false).unwrap();
-        let names: Vec<_> = files.iter().map(|file| file.module.as_str()).collect();
-        assert!(names.contains(&"sunrise_client::game::remote::child"));
-        assert!(names.contains(&"sunrise_client::game::game_tests"));
-        assert!(
-            !names
+            let source = format!("pub(crate) mod draw;{end}{HOST}{end}");
+            let file =
+                syn::parse_file(&expand(&root, Path::new("game/host/mod.rs"), &source).unwrap())
+                    .unwrap();
+            let names: Vec<_> = file
+                .items
                 .iter()
-                .any(|name| name.contains("probe_tests") || name.contains("network"))
+                .filter_map(|item| match item {
+                    syn::Item::Mod(module) => Some(module.ident.to_string()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(names, ["draw", "generated"], "{end:?}");
+        }
+        let other = "include!(concat!(env!(\"OUT_DIR\"), \"/mod_api_fire_generated.rs\"));\n";
+        assert_eq!(
+            expand(&root, Path::new("game/native_hooks/fire.rs"), other).unwrap(),
+            other
         );
-        let code = declarations(&game).unwrap();
-        assert!(code.contains("pub(crate) mod service;"));
-        fs::write(area.join("new_feature.rs"), "").unwrap();
-        assert!(declarations(&game).unwrap().contains("mod new_feature;"));
-        fs::write(game.join("loose.rs"), "").unwrap();
-        assert!(declarations(&game).unwrap_err().contains("area folder"));
-        fs::remove_file(game.join("loose.rs")).unwrap();
-        let other = game.join("world");
-        fs::create_dir(&other).unwrap();
-        fs::write(other.join(".game-area"), "").unwrap();
-        fs::write(other.join("remote.rs"), "").unwrap();
-        assert!(
-            declarations(&game)
-                .unwrap_err()
-                .contains("duplicate game module remote")
+    }
+
+    #[test]
+    fn parse_and_expand_keep_shadowed_includes_and_gate_qualified_ones() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let host = Path::new("game/host/mod.rs");
+        let source = format!(
+            "macro_rules! include {{ ($($t:tt)*) => {{}}; }}\n{HOST}\n#[cfg(test)]\nstd::{HOST} // keep this comment\npub(crate) mod draw;\n"
         );
-        fs::remove_dir_all(root).unwrap();
+        let expanded = expand(&root, host, &source).unwrap();
+        assert!(expanded.contains("// keep this comment"));
+        for file in [
+            parse(&root, host, &source).unwrap(),
+            syn::parse_file(&expanded).unwrap(),
+        ] {
+            assert!(
+                matches!(&file.items[1], syn::Item::Macro(it) if it.mac.path.is_ident("include"))
+            );
+            let generated = file
+                .items
+                .iter()
+                .find_map(|item| match item {
+                    syn::Item::Mod(module) if module.ident == "generated" => Some(module),
+                    _ => None,
+                })
+                .expect("the qualified include expands");
+            assert!(mod_source::modules::test_only(&generated.attrs));
+        }
+    }
+
+    #[test]
+    fn parse_and_expand_use_the_scope_at_each_include() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let host = Path::new("game/host/mod.rs");
+        let source = format!("{HOST}\nmacro_rules! include {{ ($($t:tt)*) => {{}}; }}\n{HOST}\n");
+        let expanded = expand(&root, host, &source).unwrap();
+        for file in [
+            parse(&root, host, &source).unwrap(),
+            syn::parse_file(&expanded).unwrap(),
+        ] {
+            assert!(matches!(&file.items[0], syn::Item::Mod(it) if it.ident == "generated"));
+            assert!(
+                matches!(&file.items[2], syn::Item::Macro(it) if it.mac.path.is_ident("include"))
+            );
+        }
+    }
+
+    #[test]
+    fn parse_and_expand_refuse_cfg_attr_at_the_host_include() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let host = Path::new("game/host/mod.rs");
+        let source = format!("#[cfg_attr(unix, cfg(test), allow(dead_code))]\n{HOST}\n");
+        let parse_error = parse(&root, host, &source)
+            .err()
+            .expect("cfg_attr is unsupported");
+        let expand_error = expand(&root, host, &source).unwrap_err();
+        assert!(parse_error.contains("cfg_attr"), "{parse_error}");
+        assert_eq!(parse_error, expand_error);
     }
 }

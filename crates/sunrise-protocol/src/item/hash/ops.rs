@@ -22,6 +22,11 @@ pub(crate) trait Ops: Sized {
     fn from_nbt(v: &Tag, bools: &[&str]) -> Option<Self::Value>;
     fn saved_component(name: &str, tag: &Tag) -> Option<Self::Value>;
     fn template(stack: &Stack, names: &dyn Names) -> Option<Self::Value>;
+    fn registered_consume_effect(
+        effect: sunrise_world::component_value::consume_effects::Admitted,
+    ) -> Option<Self::Value> {
+        Self::from_nbt(&effect.saved, &[])
+    }
     fn special_component(
         _: i32,
         _: &super::Component,
@@ -79,6 +84,7 @@ impl Values {
                     .map(|(k, v)| Some((Self::hash(k)?, Self::hash(v)?)))
                     .collect::<Option<_>>()?,
             ),
+            RegisteredConsumeEffect(effect) => HashOps::from_nbt(&effect.saved, &[]),
             Template(t) => Self::template_hash(t)?,
             Container(slots) => HashOps::create_list(
                 slots
@@ -180,6 +186,11 @@ impl Ops for Values {
     }
     fn from_nbt(v: &Tag, bools: &[&str]) -> Option<Value> {
         Some(Value::from_nbt(v, bools))
+    }
+    fn registered_consume_effect(
+        effect: sunrise_world::component_value::consume_effects::Admitted,
+    ) -> Option<Value> {
+        Some(Value::RegisteredConsumeEffect(effect))
     }
     fn saved_component(name: &str, tag: &Tag) -> Option<Value> {
         sunrise_world::component_value::source::from_component_tag_with(

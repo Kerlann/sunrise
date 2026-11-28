@@ -7,22 +7,18 @@ pub enum Subtitles {
     Hidden,
     /// In the HUD's own pass, under any screen that draws later.
     Now,
-    /// Deferred (`Hud.extractDeferredSubtitles`): an in-game screen draws
-    /// them from `Screen.extractBackground`, under its slots and tooltips,
-    /// whether or not the HUD is hidden. Sunrise draws them just before the
-    /// screen, which keeps that order (only the screen's dimming goes over them).
+    /// An in-game screen draws them from `Screen.extractBackground`, after its dimming
+    /// and before its widgets. Without a screen, `Gui.extractRenderState` draws them last.
     Deferred,
 }
 
-/// `Hud.extractRenderState`'s subtitle rule: with no in-game screen the
-/// subtitles follow the HUD (`!isHidden`); with one they are deferred and
-/// draw over it, which is the one HUD element F1 does not take away.
-pub fn subtitles(show_hud: bool, in_game_ui: bool) -> Subtitles {
-    if in_game_ui {
-        Subtitles::Deferred
-    } else if show_hud {
-        Subtitles::Now
-    } else {
-        Subtitles::Hidden
+/// `Hud.extractRenderState`'s subtitle rule. `screen` is the open screen's `isInGameUi`
+/// answer, or `None` when no screen is open.
+pub fn subtitles(show_hud: bool, screen: Option<bool>) -> Subtitles {
+    match screen {
+        Some(true) => Subtitles::Deferred,
+        _ if !show_hud => Subtitles::Hidden,
+        Some(false) => Subtitles::Now,
+        None => Subtitles::Deferred,
     }
 }

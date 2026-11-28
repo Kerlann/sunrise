@@ -50,22 +50,21 @@ pub(crate) struct Pipeline {
 
 impl Pipeline {
     /// `None` when `enabled` and the shader can't be given a coverage output (a resource
-    /// pack's, which the caller then doesn't use).
+    /// pack's, which the caller then doesn't use). The plain pipeline is made first either way,
+    /// so the device checks it whatever the coverage mode.
     pub(crate) fn new(
         device: &wgpu::Device,
         desc: &wgpu::RenderPipelineDescriptor<'_>,
         source: wgpu::ShaderSource<'_>,
         enabled: bool,
     ) -> Option<Self> {
+        let plain = device.create_render_pipeline(desc);
         let coverage = if enabled {
             Some(pipeline(device, desc, source)?)
         } else {
             None
         };
-        Some(Self {
-            plain: device.create_render_pipeline(desc),
-            coverage,
-        })
+        Some(Self { plain, coverage })
     }
 
     pub(crate) fn get(&self, coverage: bool) -> &wgpu::RenderPipeline {
@@ -382,13 +381,14 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn disabled_coverage_builds_only_the_original_pipeline() {
         let _gpu = crate::gfx::test_gpu::lock();
-        let instance = crate::gfx::test_gpu::instance();
-        let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
+        let Some(adapter) = crate::gfx::test_gpu::adapter() else {
             return;
         };
-        let Ok((device, _)) = pollster::block_on(adapter.request_device(&Default::default()))
+        let Some((device, _)) =
+            crate::gfx::test_gpu::optional_device_with(&adapter, &Default::default())
         else {
             return;
         };

@@ -4,7 +4,7 @@ use sunrise_client::{
     Result,
     items::ItemStack,
     mobs::{
-        Anim, Brain, Flags, Mob, MobType, Part, Species,
+        Anim, Brain, Flags, Mob, MobType, Species,
         allay::interaction::{Interaction, predict},
     },
 };
@@ -12,7 +12,7 @@ use sunrise_core::geometry::Vec3;
 
 fn kind() -> Arc<MobType> {
     Arc::new(MobType {
-        shadow: None,
+        type_key: Default::default(),
         id: "minecraft:allay".into(),
         species: Species::Allay,
         width: 0.6,
@@ -45,14 +45,6 @@ fn kind() -> Arc<MobType> {
         max_head_y_rot: 75.0,
         ambient_interval: 120,
         flags: Flags::default(),
-        model: Arc::new(Part {
-            name: "root".into(),
-            pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
-            polygons: Vec::new(),
-            children: Vec::new(),
-        }),
-        layers: Default::default(),
-        texture: String::new(),
         brain: Brain::Passive,
         anim: Anim::Allay,
         sounds: [""; 3],

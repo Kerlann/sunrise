@@ -27,7 +27,7 @@ fn fixture() -> Fixture {
     let assets = Assets::load(&root).unwrap();
     let facts = BlockFacts::load(&root, assets.registry).unwrap();
     let biomes = Biomes::load(&source).unwrap();
-    let render = assets.reload(&source).unwrap();
+    let render = crate::assets::RenderAssets::load(&source, &assets).unwrap();
     let visibility = models::load_visibility(&root, assets.registry).unwrap();
     let tables = MeshTables::new(&assets, &render, &facts, visibility.clone(), None).unwrap();
     Fixture {
@@ -71,6 +71,7 @@ fn mesh_region(
         cutout_leaves: true,
         opaque_ice: false,
         translucent_layers: &[],
+        layer_overrides: &[],
         leaf_culling: LeafCullingMode::Off,
         hidden_states: &f.hidden_states,
         part_tables: Default::default(),
@@ -372,6 +373,7 @@ fn without_a_plan_meshes_are_byte_identical() {
         cutout_leaves: true,
         opaque_ice: false,
         translucent_layers: &[],
+        layer_overrides: &[],
         leaf_culling: LeafCullingMode::Off,
         hidden_states: &[],
         part_tables: Default::default(),

@@ -6,20 +6,7 @@ use crate::buf::Reader;
 use crate::item::{ATTRIBUTE_OPERATIONS, EQUIPMENT_SLOT_GROUPS};
 use sunrise_world::snbt_text::to_snbt;
 
-const USE_ANIMATION: [&str; 12] = [
-    "none",
-    "eat",
-    "drink",
-    "block",
-    "bow",
-    "trident",
-    "crossbow",
-    "spyglass",
-    "toot_horn",
-    "brush",
-    "bundle",
-    "spear",
-];
+use sunrise_core::use_animation::NAMES as USE_ANIMATION;
 const SWING: [&str; 3] = ["none", "whack", "stab"];
 /// `EquipmentSlot` by `id` (not declaration order).
 const SLOT: [&str; 8] = [
@@ -136,52 +123,70 @@ fn holder_with<O: Ops>(registry: &str, names: &dyn Names, r: &mut Reader) -> Opt
     entry_with::<O>(names, registry, int_with::<O>(r)?)
 }
 
-/// `ConsumeEffect.CODEC`: a `type` field and the type's fields.
-fn consume_effect_with<O: Ops>(r: &mut Reader, names: &dyn Names) -> Option<O::Value> {
-    let kind = int_with::<O>(r)?;
-    let rec = Record::<O>::new();
-    Some(
-        match kind {
-            0 => {
-                let effects = list_with::<O, _>(r, |r| super::raw::mob_effect_with::<O>(r, names))?;
-                let probability = float_with::<O>(r)?;
-                float_or_with::<O>(
-                    rec.field("type", string_with::<O>("minecraft:apply_effects"))
-                        .field("effects", O::create_list(effects)),
-                    "probability",
-                    probability,
-                    1.0,
-                )
-            }
-            1 => rec
-                .field("type", string_with::<O>("minecraft:remove_effects"))
-                .field(
-                    "effects",
-                    holder_set_with::<O>("minecraft:mob_effect", names, r)?,
-                ),
-            2 => rec.field("type", string_with::<O>("minecraft:clear_all_effects")),
-            3 => {
-                let diameter = float_with::<O>(r)?;
-                let particles = boolean_with::<O>(r)?;
-                bool_or_with::<O>(
-                    float_or_with::<O>(
-                        rec.field("type", string_with::<O>("minecraft:teleport_randomly")),
-                        "diameter",
-                        diameter,
-                        16.0,
-                    ),
-                    "directional_particles",
-                    particles,
-                    true,
-                )
-            }
-            4 => rec
-                .field("type", string_with::<O>("minecraft:play_sound"))
-                .field("sound", sound_with::<O>(r, names)?.code),
-            _ => return None,
+/// Structural failure rejects the component; a registered save refusal skips that effect.
+fn consume_effects_with<O: Ops>(r: &mut Reader, names: &dyn Names) -> Option<Vec<O::Value>> {
+    let n = r.count(r.remaining()).ok()?;
+    let mut effects = Vec::with_capacity(n);
+    for _ in 0..n {
+        if let Some(effect) = consume_effect_with::<O>(r, names)? {
+            effects.push(effect);
         }
-        .build(),
-    )
+    }
+    Some(effects)
+}
+
+/// `ConsumeEffect.CODEC`: a `type` field and the type's fields.
+fn consume_effect_with<O: Ops>(r: &mut Reader, names: &dyn Names) -> Option<Option<O::Value>> {
+    use crate::item::consume_effects::{Kind, read_kind, read_native};
+    let kind = read_kind(r).ok()?;
+    let rec = Record::<O>::new();
+    let value = match kind {
+        Kind::Builtin(0) => {
+            let effects = list_with::<O, _>(r, |r| super::raw::mob_effect_with::<O>(r, names))?;
+            let probability = float_with::<O>(r)?;
+            float_or_with::<O>(
+                rec.field("type", string_with::<O>("minecraft:apply_effects"))
+                    .field("effects", O::create_list(effects)),
+                "probability",
+                probability,
+                1.0,
+            )
+        }
+        Kind::Builtin(1) => rec
+            .field("type", string_with::<O>("minecraft:remove_effects"))
+            .field(
+                "effects",
+                holder_set_with::<O>("minecraft:mob_effect", names, r)?,
+            ),
+        Kind::Builtin(2) => rec.field("type", string_with::<O>("minecraft:clear_all_effects")),
+        Kind::Builtin(3) => {
+            let diameter = float_with::<O>(r)?;
+            let particles = boolean_with::<O>(r)?;
+            bool_or_with::<O>(
+                float_or_with::<O>(
+                    rec.field("type", string_with::<O>("minecraft:teleport_randomly")),
+                    "diameter",
+                    diameter,
+                    16.0,
+                ),
+                "directional_particles",
+                particles,
+                true,
+            )
+        }
+        Kind::Builtin(4) => rec
+            .field("type", string_with::<O>("minecraft:play_sound"))
+            .field("sound", sound_with::<O>(r, names)?.code),
+        Kind::Builtin(_) => unreachable!("built-in consume-effect type"),
+        Kind::Native(name, ty) => {
+            return match read_native(name, ty, r).ok()? {
+                Some(effect) => Some(Some(O::registered_consume_effect(effect)?)),
+                None => Some(None),
+            };
+        }
+    }
+    .build();
+    Some(Some(value))
 }
 
 /// `SwingAnimation`: `DEFAULT` is whack for 6 ticks.
@@ -404,7 +409,7 @@ pub(super) fn code_with<O: Ops>(kind: i32, r: &mut Reader, names: &dyn Names) ->
             let animation = int_with::<O>(r)?;
             let snd = sound_with::<O>(r, names)?;
             let particles = boolean_with::<O>(r)?;
-            let effects = list_with::<O, _>(r, |r| consume_effect_with::<O>(r, names))?;
+            let effects = consume_effects_with::<O>(r, names)?;
             let rec = float_or_with::<O>(Record::<O>::new(), "consume_seconds", seconds, 1.6);
             let rec = or_default_with::<O, _>(
                 rec,
@@ -518,7 +523,7 @@ pub(super) fn code_with<O: Ops>(kind: i32, r: &mut Reader, names: &dyn Names) ->
         }
         // DeathProtection: deathEffects.
         36 => {
-            let effects = list_with::<O, _>(r, |r| consume_effect_with::<O>(r, names))?;
+            let effects = consume_effects_with::<O>(r, names)?;
             if effects.is_empty() {
                 Record::<O>::new()
             } else {
@@ -674,8 +679,6 @@ pub(super) fn code_with<O: Ops>(kind: i32, r: &mut Reader, names: &dyn Names) ->
                 _ => O::create_list(predicates),
             }
         }
-        // UseRemainder: one template.
-        25 => super::raw::template_code_with::<O>(r, names)?,
         _ => return None,
     })
 }

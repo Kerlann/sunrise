@@ -6,14 +6,24 @@
     python3 tools/pr_ready.py --host macmini        # builds and harnesses on a fleet machine (~/fleet/rbuild)
     python3 tools/pr_ready.py --harnesses           # also run the affected vanilla harnesses here
     python3 tools/pr_ready.py --quick               # never run the vanilla harnesses
+    python3 tools/pr_ready.py --full                # the whole workspace's tests, not only the touched crates'
+    python3 tools/pr_ready.py --serial-python       # the Python tests in one process, as CI runs them
 
 From the files the branch changes since its merge base with --base (committed or not) it decides what to run:
 rustfmt, and clippy with warnings denied exactly as CI's verify job runs it (the whole workspace with the game's code
-mods, plus the server build when sunrise-client is affected); the tests of the touched crates, with the features
-CI's workspace-wide run gives them; crates/sunrise-theme/tokens.css against sunrise-theme; Cargo.lock changing
-only with a Cargo.toml; the Python tests (always, as in CI) and the public-tree check; and the vanilla harnesses the
-changes can affect (tools/parity.py --changed). Locally, the harnesses run only when the branch changes a
-harness, an oracle, a probe or the runner; otherwise they are listed and left to the daily on main. --harnesses runs them anyway.
+mods, plus the server build when sunrise-client is affected); the tests of the touched crates and every workspace
+crate that depends on them, with the features CI's workspace-wide run gives them (it never falls back to --workspace
+silently: a Rust path no crate owns is refused and named, and --full runs the whole workspace on purpose; a change to
+the workspace's shared configuration selects it too), and which crates it chose and why; crates/sunrise-theme/tokens.css against sunrise-theme; Cargo.lock changing
+only with a Cargo.toml; the Python tests (always, as in CI; here one test file per worker, tools/parallel_unittest.py,
+with the same outcome in a fraction of the time, and --serial-python runs them in one process as CI does) and the
+public-tree check; the mod API surface report, when the branch changes what it exports (sunrise-stage and the crates
+it depends on, the change notes, the report's own files, and the game files that carry a #[sunrise_loop]:
+tools/ci/surface_report.py against the merge base, which builds sunrise-stage as CI's verify job does; a change note that names an id that did not
+change, or a breaking change without a note, fails here and not only on the gate); and the vanilla harnesses the
+changes can affect (tools/parity.py --changed). Locally, the
+harnesses run only when the branch changes a harness, an oracle, a probe or the runner; otherwise they are listed
+and left to the daily on main. --harnesses runs them anyway.
 Harnesses run where the vanilla data is (a prepared .local/ here, or the Mac mini); elsewhere they are listed for CI.
 Tests select library, binary and integration targets explicitly, followed by doc tests, so unrelated example
 executables are not built and linked again.
@@ -48,6 +58,7 @@ if "PARITY_SHARED" not in os.environ and not (ROOT / ".local" / "minecraft").exi
     # A fleet worktree without vanilla data still knows each harness's dependencies.
     os.environ["PARITY_SHARED"] = str(FLEET_SHARED)
 from tools import parity, process_tree, release_train  # noqa: E402
+from tools.ci import check_launcher_mirrors as launcher_mirrors  # noqa: E402
 
 RBUILD = Path.home() / "fleet" / "rbuild"
 # What rbuild's login shell needs on each fleet machine before cargo (it adds sccache itself). The ThinkPad no
@@ -70,17 +81,40 @@ mkdir -p "$state/parity-runner" "$state/parity-target"
 ln -sfn "$state/parity-runner" .local/parity-runner && ln -sfn "$state/parity-target" .local/parity-target""",
 }
 ROOT_RUST = {"Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rustfmt.toml", "clippy.toml"}
+# Standalone workspaces under crates/ that the root Cargo.toml excludes: the main workspace never builds them
+# (the telemetry server is tested by its own workflow).
+SEPARATE_WORKSPACES = ("crates/sunrise-telemetry-server/",)
 
 
 # Build-script inputs outside the crates: catalog-only edits still need to build and test their consumers.
 MOD_API_INPUTS = ("crates/sunrise-mod-vocab/src/hooks/",)
-# The generated dispatch surface: edits here change what the dispatch tests compile and run. The registry is its
-# own crate with its own suite; a `--manifest-path` run keeps both out of the workspace selection above.
+# The generated dispatch surface: edits here change what the dispatch tests compile and run. They are their own crate
+# with their own suite; a `--manifest-path` run keeps them out of the workspace selection above.
 DISPATCH_TESTS = "crates/sunrise-mod-api-gen/dispatch-tests/Cargo.toml"
 DISPATCH_TEST_INPUTS = ("crates/sunrise-mod-api-gen/", "crates/sunrise-mod-api-macros/",
                         "crates/sunrise-mod-api/",
                         "crates/sunrise-mod-vocab/", *MOD_API_INPUTS)
-MOD_REGISTRY = "crates/sunrise-mod-registry/Cargo.toml"
+# What decides the mod API surface report. The crates are sunrise-stage and everything it depends on in the workspace
+# (surface_crates): the generator and the crates whose source it reads. Besides them (crates/sunrise-mod-api-gen/src:
+# surface/mod.rs `export_here`, `OutsideSeam::read`, loops.rs `collect`): the change notes, the workspace manifest
+# (`OutsideSeam::read` reads it for the members), the report's own script and settings, and the game files that
+# hold a `#[sunrise_loop]` (loops.rs `collect` reads every file of sunrise-client's `game` module that mentions it).
+SURFACE_NOTES = "crates/sunrise-mod-vocab/changes/"
+SURFACE_FILES = ("Cargo.toml", "tools/ci/surface_report.py", "tools/ci/surface.toml",
+                 "tools/ci/surface-schema-3-reset.json")
+SURFACE_TOOL = "sunrise-stage"
+GAME_FILES = (
+    "crates/sunrise-client/src/game.rs",
+    "crates/sunrise-gameplay-common/src/game.rs",
+)
+GAME_FOLDERS = (
+    "crates/sunrise-client/src/game/",
+    "crates/sunrise-client/src/cut_layout/game/",
+    "crates/sunrise-gameplay-common/src/game/",
+    "crates/sunrise-gameplay/src/game/",
+    "crates/sunrise-client-gameplay/src/game/",
+)
+LOOP_MARK = "sunrise_loop"
 
 def is_doc(path):
     return path.endswith(".md")
@@ -88,12 +122,13 @@ def is_doc(path):
 
 def workspace_rust(path):
     """Whether a change to path is built by the main Cargo workspace."""
-    return not is_doc(path) and (path.startswith(("crates/", "xtask/", ".cargo/", *MOD_API_INPUTS))
-                                 or path in ROOT_RUST)
+    return not is_doc(path) and not path.startswith(SEPARATE_WORKSPACES) and (
+        path.startswith(("crates/", "xtask/", ".cargo/", *MOD_API_INPUTS)) or path in ROOT_RUST)
 
 
 def touched_crates(paths, packages):
-    """Workspace packages to test for these paths ({name: directory}), or None for the whole workspace."""
+    """The workspace packages these paths directly belong to ({name: directory}), not their dependents, or None for
+    the whole workspace."""
     if any(path in ROOT_RUST or path.startswith(".cargo/") for path in paths):
         return None
     crates = set()
@@ -101,13 +136,17 @@ def touched_crates(paths, packages):
         if is_doc(path):
             continue
         if path.startswith(MOD_API_INPUTS):
-            crates.update({"sunrise-client", "sunrise-client-render", "sunrise-mod-api-gen"})
+            crates.update({
+                "sunrise-client", "sunrise-client-render", "sunrise-mod-api-gen",
+                "sunrise-gameplay-common", "sunrise-gameplay", "sunrise-client-gameplay",
+            })
             continue
         if "sunrise-client-lib" in packages and path.startswith("crates/sunrise-client/"):
             relative = path.removeprefix("crates/sunrise-client/")
             gameplay = relative in {"Cargo.toml", "build.rs", "windows-segment-heap.manifest",
-                                    "src/lib.rs", "src/main.rs", "src/entry.rs", "src/game.rs"} \
-                or relative.startswith(("src/game/", "tests/it/"))
+                                    "src/lib.rs", "src/main.rs", "src/entry.rs", "src/game.rs",
+                                    "src/game_facade.rs", "src/test_game_dir.rs"} \
+                or relative.startswith(("src/game/", "src/cut_layout/", "tests/it/"))
             crates.add("sunrise-client" if gameplay else "sunrise-client-lib")
             continue
         owners = [name for name, directory in packages.items() if path.startswith(directory.rstrip("/") + "/")]
@@ -154,7 +193,9 @@ def suggested_label(paths, exporter_paths=frozenset()):
 # CI runs parity only in the daily on main's head.
 PARITY_SCOPE = re.compile(
     r"^(tools/test_[a-z0-9_]+_parity\.py|tools/(parity[a-z_]*|lab)\.py|tools/parity_hosts\.json|mods/sunrise/src/test/"
-    r"|crates/[^/]+/examples/|crates/sunrise-client/src/game/[a-z_]*(fixture|harness)\.rs"
+    r"|crates/[^/]+/examples/"
+    r"|crates/(?:sunrise-client/src/(?:cut_layout/)?game|sunrise-gameplay-common/src/game"
+    r"|sunrise-gameplay/src/game|sunrise-client-gameplay/src/game)/(?:.*/)?[a-z_]*(fixture|harness)\.rs"
     r"|\.github/workflows/parity[a-z-]*\.yml)")
 
 
@@ -244,6 +285,96 @@ def dependent_crates(crates, dependencies):
         selected.update(consumers)
 
 
+def crate_selection_reasons(touched, dependencies):
+    """Why each crate dependent_crates selects is in the set: {crate: reason}, in a fixed order. The touched crates
+    come first, sorted, with the reason "touched"; then each dependent in the breadth-first wave that first reaches
+    it (sorted within a wave), with "depends on <the previous wave's crates it uses, sorted>"."""
+    reasons = {name: "touched" for name in sorted(touched)}
+    wave = sorted(reasons)
+    while wave:
+        found = {name: sorted(used.intersection(wave)) for name, used in sorted(dependencies.items())
+                 if name not in reasons and used.intersection(wave)}
+        reasons.update({name: "depends on " + ", ".join(via) for name, via in found.items()})
+        wave = list(found)
+    return reasons
+
+
+def format_test_scope(touched, dependencies, whole=None):
+    """One line saying what the tests cover and why, or None when no Rust is tested. `whole` is why the whole
+    workspace runs ("--full", "root config: Cargo.toml"); otherwise `touched` are the directly touched crates."""
+    if whole:
+        return f"workspace ({whole})"
+    if not touched:
+        return None
+    return ", ".join(f"{name} ({reason})" for name, reason in crate_selection_reasons(touched, dependencies).items())
+
+
+def select_crates(args, changed, crates_of):
+    """(touched, whole): the crates the changed files directly touch (see touched_crates), or None for the whole
+    workspace, with why it is the whole workspace ("--full", "root config: ...") or None.
+
+    A workspace Rust path no crate owns raises ValueError, naming every one: skipping its tests would pass a change
+    nothing checked, and a silent --workspace would hide a crate that is missing from Cargo.toml or from here. The
+    check also covers a branch that changes the root configuration, so a typo there is caught unless --full is given.
+    """
+    if getattr(args, "full", False):
+        return None, "--full"
+    rust = [path for path in changed if workspace_rust(path)]
+    root = sorted(path for path in rust if path in ROOT_RUST or path.startswith(".cargo/"))
+    unmapped = sorted(path for path in rust if path not in root and not touched_crates({path}, crates_of))
+    if unmapped:
+        raise ValueError(f"no workspace crate owns {', '.join(unmapped)}: map the crate in Cargo.toml and "
+                         "tools/pr_ready.py, or re-run with --full to run the full workspace suite")
+    if root:
+        return None, "root config: " + ", ".join(root)
+    return (touched_crates(changed, crates_of) if rust else []), None
+
+
+def surface_crates(dependencies):
+    """sunrise-stage and every workspace crate it depends on, directly or not: dependent_crates the other way."""
+    selected = {SURFACE_TOOL}
+    while True:
+        used = set().union(*(dependencies.get(name, ()) for name in selected))
+        if used <= selected:
+            return sorted(selected)
+        selected.update(used)
+
+
+def holds_loop(files, merge_base):
+    """Whether any of these game files mentions `sunrise_loop` now, or did at the merge base (a deleted or moved file
+    counts by its old text). A base that cannot be read counts as a yes: the report is the safe side."""
+    for path in files:
+        file = ROOT / path
+        if file.is_file() and LOOP_MARK in file.read_text(encoding="utf-8", errors="replace"):
+            return True
+    found = subprocess.run(["git", "grep", "-l", "-F", LOOP_MARK, merge_base, "--",
+                            *(f":(literal){path}" for path in files)], cwd=ROOT, capture_output=True)
+    return found.returncode != 1
+
+
+def launcher_mirrors_touched(changed):
+    """Whether the changed files include a launcher mirror's source or the manifest that records its surface."""
+    sources = [source.rstrip("/") for mirror in launcher_mirrors.load_manifest()["mirror"]
+               for source in mirror.get("sources", [])]
+    return any(path == launcher_mirrors.MANIFEST_PATH or any(path == source or path.startswith(source + "/")
+                                                             for source in sources) for path in changed)
+
+
+def surface_touched(changed, crates_of, dependencies, merge_base):
+    """Whether the changed files can change what the surface report exports. `crates_of` and `dependencies` are empty
+    when the branch changes no Rust: then only the notes, the manifest and the report's own files count."""
+    folders = (SURFACE_NOTES, *(crates_of[name].rstrip("/") + "/" for name in surface_crates(dependencies)
+                                if name in crates_of))
+    if any(
+        path in SURFACE_FILES or path.endswith(".extension-tags.json") or path.startswith(folders)
+        for path in changed
+    ):
+        return True
+    games = sorted(path for path in changed
+                   if path.endswith(".rs") and (path in GAME_FILES or path.startswith(GAME_FOLDERS)))
+    return bool(games) and holds_loop(games, merge_base)
+
+
 def prepare_key():
     """tools/ci/vanilla-data.sh's preparation key, for a copy without Git history."""
     listing = git("ls-files", "-s", "crates/sunrise-prepare", "mods/sunrise/src/test/java", "research-lock.json",
@@ -267,6 +398,26 @@ def unittest_passed(output):
     outcome = re.search(r"^((?:OK|FAILED) \(.*\))$", output, re.M)
     ran = re.search(r"^Ran (\d+) tests?", output, re.M)
     return f"{ran.group(1) if ran else '?'} run, {outcome.group(1)}" if outcome else f"{ran.group(1)} passed" if ran else ""
+
+
+# What tools/ci/check_launcher_mirrors.py says: the reminder to announce a changed surface, and each stale mirror.
+LAUNCHER_MIRROR_LINES = re.compile(r"^(Reminder: .*|  \S.*)$", re.M)
+
+
+def launcher_mirror_summary(output):
+    return "; ".join(LAUNCHER_MIRROR_LINES.findall(output))
+
+
+# The lines of tools/ci/surface_report.py's output that say what it found and why it failed: the report's own verdict,
+# a stale change note, a breaking change no note names, and what stopped the tool (an unreadable note, say)
+# (crates/sunrise-stage/src/main.rs surface_diff and fail).
+SURFACE_LINES = re.compile(r"^(Surface: .*|No surface report: .*|change note .* which did not change.*"
+                           r"|breaking change without a change note: .*|sunrise-stage: .*)$", re.M)
+
+
+def surface_summary(output):
+    """The surface report's verdict line, or why it has none, and on a failure each line that made it fail."""
+    return "; ".join(SURFACE_LINES.findall(output))
 
 
 def parity_summary(output):
@@ -343,9 +494,109 @@ def mod_features(crates):
 
 # What sunrise-client's full content-root tests load (mod_content_tests.rs). They take minutes on prepared data, so
 # they are #[ignore]d and run here only when one of these changes.
-CONTENT_ROOT = ("crates/sunrise-client/src/mod_content", "crates/sunrise-client-render/src/assets.rs", "crates/sunrise-items/",
+CONTENT_ROOT = ("crates/sunrise-sim/src/mod_content", "crates/sunrise-client/src/mod_content",
+                "crates/sunrise-client-render/src/assets.rs", "crates/sunrise-items/",
                 "crates/sunrise-mod-package/", "crates/sunrise-assets/")
 CONTENT_ROOT_TESTS = "cargo test --locked -p sunrise-client-lib --lib mod_content::tests:: -- --ignored"
+
+PREPARED_PROFILE = "crates/sunrise-core/src/prepared_profile.rs"
+
+
+def expected_prepared_stamp():
+    """What the full profile's prepared root must carry: the schema and full output version that
+    crates/sunrise-core/src/prepared_profile.rs defines, and the Minecraft version research-lock.json pins."""
+    source = (ROOT / PREPARED_PROFILE).read_text(encoding="utf-8")
+    return {
+        "schema": int(re.search(r"pub const SCHEMA: i64 = (\d+);", source).group(1)),
+        "output_version": int(re.search(r"Self::Full => (\d+),", source).group(1)),
+        "minecraft": json.loads((ROOT / "research-lock.json").read_text(encoding="utf-8"))["minecraft"]["version"],
+    }
+
+
+def read_json_object(path):
+    """The JSON object in path, or None when it is unreadable or not an object."""
+    try:
+        value = json.loads(path.read_bytes())
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _is_exact_int(value, low, high):
+    """Whether value is a JSON integer token within [low, high]: not a float (7.0) and not a bool, as serde's
+    i64 and u32 read it. type() is exact where == and isinstance are not (True == 1, 7.0 == 7)."""
+    return type(value) is int and low <= value <= high
+
+
+def prepared_stamp_problems(root):
+    """Why root is not a current full-profile prepared root, worded as Manifest::version_problems and
+    prepared_test_support.rs `stamp_problems` word it; empty when it is."""
+    if not (root / "sunrise-resources.json").is_file():
+        return ["sunrise-resources.json is missing"]
+    manifest = read_json_object(root / "sunrise-resources.json")
+    if manifest is None:
+        return ["sunrise-resources.json is not a readable JSON object"]
+    # The field types of prepared_profile.rs `Manifest`: Manifest::read fails Serde on any other.
+    schema, files = manifest.get("schema"), manifest.get("server_files")
+    strings = (manifest.get(key) for key in ("profile", "minecraft", "server_sha1", "facts_sha256",
+                                             "block_tags_sha256"))
+    if not (schema is None or _is_exact_int(schema, -(1 << 63), (1 << 63) - 1)) \
+            or not all(value is None or isinstance(value, str) for value in strings) \
+            or not (files is None or isinstance(files, list) and all(isinstance(item, str) for item in files)):
+        return ["sunrise-resources.json is not a valid manifest"]
+    expected = expected_prepared_stamp()
+    problems = []
+    server = manifest.get("profile") == "server"
+    if server:
+        problems.append("prepared for the server profile, tests need full client resources")
+    if manifest.get("schema") != expected["schema"]:
+        found = manifest.get("schema")
+        problems.append(f"an older layout (schema {'none' if found is None else found}, "
+                        f"this preparer writes {expected['schema']})")
+    if manifest.get("minecraft") != expected["minecraft"]:
+        problems.append(f"prepared for Minecraft {manifest.get('minecraft') or 'unknown'}, "
+                        f"this build needs {expected['minecraft']}")
+    if not server:  # a server root's own version is the server profile's, not this one's
+        # `Stamp { output_version: u32 }`: anything else reads as no stamp.
+        stamp = read_json_object(root / "sunrise-prepare.json") or {}
+        made_by = stamp.get("output_version") if _is_exact_int(stamp.get("output_version"), 0, 0xFFFFFFFF) else None
+        if made_by != expected["output_version"]:
+            problems.append(f"made by output version {'unknown' if made_by is None else made_by}, "
+                            f"this build needs {expected['output_version']}")
+    return problems
+
+
+def refuse_stale_prepared(args, steps):
+    """Fail `content root tests` before cargo starts when a local run would read a stale prepared root: the
+    test boundary (prepared_test_root.rs `prepared_root`) refuses it after minutes of building. A root that is not
+    there is left to that boundary, which names every missing input."""
+    step = next((step for step in steps if step.name == "content root tests"), None)
+    if args.host != "local" or step is None or step.skip:
+        return
+    override = os.environ.get("SUNRISE_TEST_RESOURCES")
+    if override == "":  # Rust's Path::new("").is_dir() is false, where Python's Path("") is "."
+        return
+    if override is None:
+        root = ROOT / ".local" / "sunrise-client" / expected_prepared_stamp()["minecraft"]
+    else:
+        # CONTENT_ROOT_TESTS runs under `cargo test -p sunrise-client-lib`, whose tests start in that crate's
+        # directory: a relative override names a root there (as prepared_test_root.rs `prepared_root` reads it),
+        # not relative to this script's cwd.
+        path = Path(override)
+        root = path if path.is_absolute() else ROOT / "crates" / "sunrise-client-lib" / path
+    # The OS looks the path up as written, `..` after a missing segment included (as Rust's Path::is_dir does),
+    # so ask it before resolve() erases such segments.
+    if not os.path.isdir(root):
+        return
+    root = root.resolve()  # no `..` segments in the repair path below
+    problems = prepared_stamp_problems(root)
+    if problems:
+        step.status = "fail"
+        step.detail = (f"stale prepared test resources: {'; '.join(problems)}; run sunrise-prepare "
+                       f"--prepare --server-jar PATH --output \"{root}\"")
+        step.output = step.detail + "\n"
+        finish(step, False)
+
 
 # holder::tests spawns target/<profile>/examples/holder_actor beside its test binary.
 # --tests does not build that executable; use the same explicit prerequisite as CI.
@@ -359,24 +610,28 @@ def plan(args, base, changed, crates_of, libraries, dependencies, merge_base=Non
     main already had is not this branch's addition (see docs/port-ledger.md).
     """
     merge_base = merge_base or base
-    rust = any(workspace_rust(path) for path in changed)
     # The Python tests also hold ROADMAP.md to roadmap/roadmap.toml (tests/test_roadmap.py).
-    crates = touched_crates(changed, crates_of) if rust else []
-    # An unrecognised Rust path must not silently skip validation.
-    if rust and crates == []:
-        crates = None
+    touched, _ = select_crates(args, changed, crates_of)
+    rust = touched is None or bool(touched)
+    # Tests, doc tests, the holder actor and clippy cover the touched crates and everything that depends on them.
+    crates = dependent_crates(touched, dependencies)
     selection = "--workspace" if crates is None else " ".join(f"-p {shlex.quote(c)}" for c in crates)
     # CI's own clippy commands: a crate checked alone gets other features than in CI's workspace-wide run, and an
     # unused import behind a feature passed here and failed in CI (#1895). Warm, the workspace run costs about what
     # the touched crates and their dependents did (14-32 s against 14-17 s on the Mac mini, 2026-10-26).
-    clippy_crates = dependent_crates(crates, dependencies)
     clippy = CI_CLIPPY
-    if clippy_crates is None or "sunrise-client" in clippy_crates:
+    if crates is None or "sunrise-client" in crates:
         clippy = f'status=0\n{CI_CLIPPY} || status=$?\n{CI_CLIPPY_SERVER} || status=$?\nexit "$status"'
     test_skip = None if crates is None or crates else "no crate touched"
     doc_crates = sorted(libraries if crates is None else libraries.intersection(crates))
     doc_selection = "--workspace" if crates is None else " ".join(f"-p {shlex.quote(c)}" for c in doc_crates)
     no_rust = "no Rust change"
+    if not surface_touched(changed, crates_of, dependencies, merge_base):
+        surface_skip = "mod API surface untouched"
+    elif os.name == "nt":
+        surface_skip = "CI's verify reports it: the base tool build needs POSIX file locking"
+    else:
+        surface_skip = None
     steps = [
         Step("Cargo.lock", where="git"),
         Step("Public tree", "python3 tools/check_public_tree.py", where="here"),
@@ -384,6 +639,11 @@ def plan(args, base, changed, crates_of, libraries, dependencies, merge_base=Non
         # docs/layers.md: a crate depends only on its own layer or a lower one, and the exceptions only shrink.
         Step("Layers", f"python3 tools/check_layers.py --base {shlex.quote(base)}", where="here"),
         Step("Addresses", f"python3 tools/check_addresses.py --base {shlex.quote(base)}", where="here"),
+        # The launcher's copies of game crates: the manifest matches the surface. CI also needs the pull request body's
+        # `launcher-mirror:` line, which this run lacks: a changed surface passes here with a reminder to write it.
+        Step("Launcher mirrors", f"python3 tools/ci/check_launcher_mirrors.py --base {shlex.quote(merge_base)} --remind-body",
+             where="here", summary=launcher_mirror_summary,
+             skip=None if launcher_mirrors_touched(changed) else "launcher mirrors untouched"),
         # tools/port_map/: a row that names a Sunrise function still finds it, and the known-stale list only shrinks.
         # The merge base, not the moving tip: a line main already had is not this branch's addition.
         Step("Port map", f"python3 tools/ci/check_port_map_paths.py --base {shlex.quote(merge_base)}", where="here"),
@@ -391,19 +651,27 @@ def plan(args, base, changed, crates_of, libraries, dependencies, merge_base=Non
         Step("Export lists", "python3 tools/hotspots/check_lists.py", where="here"),
         # tools/hotspots/check_stand_ins.py: test stand-ins keep up with the hooks and traits they mirror.
         Step("Test stand-ins", "python3 tools/hotspots/check_stand_ins.py", where="here"),
-        # Always, as in CI: some read the crates, the roadmap or the workflows.
-        Step("Python tests", "python3 -m unittest discover -s tests", where="here", summary=unittest_passed),
+        # tools/ci/check_gameplay_layers.py: manifest dependency boundary across the three gameplay crates.
+        Step("Gameplay layers", "python3 tools/ci/check_gameplay_layers.py", where="here"),
+        # Always, as in CI: some read the crates, the roadmap or the workflows. One file per worker here, with
+        # unittest's own summary (#5043); CI and --serial-python run them in one process.
+        Step("Python tests", "python3 -m unittest discover -s tests" if getattr(args, "serial_python", False)
+             else "python3 tools/parallel_unittest.py", where="here", summary=unittest_passed),
         # CI's own scan (tools/ci/format_scan.py): cargo fmt, then the files no `mod` line reaches, by path.
         Step("rustfmt", "python3 tools/ci/format_scan.py", skip=None if rust else no_rust),
         Step("clippy", clippy, skip=None if rust else no_rust),
         Step("holder actor", HOLDER_ACTOR,
              skip=None if crates is None or "sunrise-mod-package" in crates
              else "holder tests untouched"),
-        Step("tests" + (": workspace" if crates is None else f": {', '.join(crates)}" if crates else ""),
+        Step("tests" + (": workspace" if crates is None else f": {short_list(crates)}" if crates else ""),
              f"cargo test --locked {selection}{mod_features(crates)} --tests",
              skip=test_skip, summary=tests_passed),
         Step("doc tests", f"cargo test --locked {doc_selection} --doc",
              skip=test_skip or (None if doc_crates else "no library touched"), summary=tests_passed),
+        # CI's verify job reports it on every pull request: a note naming an id that did not change, or a breaking
+        # change without a note, fails there. Against the merge base, as CI's base is the pull request's first parent.
+        Step("Surface report", f"python3 tools/ci/surface_report.py --base {shlex.quote(merge_base)}",
+             summary=surface_summary, skip=surface_skip),
         Step("content root tests", CONTENT_ROOT_TESTS, summary=tests_passed,
              skip=None if crates is None or any(p.startswith(CONTENT_ROOT) for p in changed)
              else "content root untouched"),
@@ -413,18 +681,14 @@ def plan(args, base, changed, crates_of, libraries, dependencies, merge_base=Non
     ]
     dispatch_skip = None if any(path.startswith(DISPATCH_TEST_INPUTS) for path in changed) \
         else "dispatch surface untouched"
-    registry_skip = None if any(path.startswith("crates/sunrise-mod-registry/") for path in changed) \
-        else "mod registry untouched"
-    for name, manifest, skip in (("dispatch tests", DISPATCH_TESTS, dispatch_skip),
-                                 ("mod registry tests", MOD_REGISTRY, registry_skip)):
-        steps.extend([
-            Step(f"{name} clippy",
-                 f"CARGO_BUILD_JOBS=${{CARGO_BUILD_JOBS:-4}} python3 tools/ci/check_warnings.py cargo clippy --keep-going --manifest-path {manifest}"
-                 " --all-targets --locked", skip=skip),
-            Step(f"{name} tests",
-                 f"CARGO_BUILD_JOBS=${{CARGO_BUILD_JOBS:-4}} cargo test --manifest-path {manifest}"
-                 " --locked -- --test-threads=4", skip=skip, summary=tests_passed),
-        ])
+    steps.extend([
+        Step("dispatch tests clippy",
+             f"CARGO_BUILD_JOBS=${{CARGO_BUILD_JOBS:-4}} python3 tools/ci/check_warnings.py cargo clippy --keep-going --manifest-path {DISPATCH_TESTS}"
+             " --all-targets --locked", skip=dispatch_skip),
+        Step("dispatch tests tests",
+             f"CARGO_BUILD_JOBS=${{CARGO_BUILD_JOBS:-4}} cargo test --manifest-path {DISPATCH_TESTS}"
+             " --locked -- --test-threads=4", skip=dispatch_skip, summary=tests_passed),
+    ])
     harness = Step("Parity", summary=parity_summary)
     affected = affected_here(changed)
     local_data = (ROOT / ".local" / "minecraft").exists() and (ROOT / ".local" / "sunrise-client").exists()
@@ -554,7 +818,7 @@ def run_windows(steps, verbose, environment=None):
         elif step.name == "Test stand-ins":
             command = [sys.executable, "tools/hotspots/check_stand_ins.py"]
         elif step.name == "Python tests":
-            command = [sys.executable, "-m", "unittest", "discover", "-s", "tests"]
+            command = [sys.executable, *command[1:]]
         elif step.name == "rustfmt":
             command = [sys.executable, "tools/ci/format_scan.py"]
         elif step.name == "clippy":
@@ -659,11 +923,13 @@ def revision_state():
             git("diff", "HEAD", "--binary") + repr(metadata))
 
 
-def block(args, base, merge_base, changed, counts, steps, label, elapsed, revision, changed_during_run=False):
+def block(args, base, merge_base, changed, counts, steps, label, elapsed, revision, changed_during_run=False,
+          test_scope=None):
     where = socket.gethostname().split(".")[0] if args.host == "local" else args.host
     head, status, _ = revision
     dirty = bool(status)
-    flags = "".join(f" --{flag}" for flag in ("quick", "harnesses") if getattr(args, flag)) + \
+    flags = "".join(f" --{flag}" for flag in ("quick", "harnesses", "full") if getattr(args, flag, False)) + \
+        (" --serial-python" if getattr(args, "serial_python", False) else "") + \
         ("" if args.host == "local" else f" --host {args.host}") + ("" if base == "origin/main" else f" --base {base}")
     added, removed = (sum(count[i] for count in counts.values()) for i in (0, 1))
     warnings = scope_warnings(changed)
@@ -673,6 +939,8 @@ def block(args, base, merge_base, changed, counts, steps, label, elapsed, revisi
              f"{duration(elapsed)})", "", "| Check | Result |", "| --- | --- |",
              f"| Scope | {'⚠️' if warnings else '✅'} {len(changed)} files, +{added} −{removed}"
              + "".join(f"; {warning}" for warning in warnings) + " |"]
+    if test_scope:
+        lines.append(f"| Test scope | {test_scope} |")
     for step in steps:
         took = f" ({duration(step.seconds)})" if step.seconds else ""
         detail = f" {step.detail}" if step.detail else ""
@@ -701,6 +969,10 @@ def main():
     parser.add_argument("--harnesses", action="store_true",
                         help="run the affected harnesses even when the branch changes no harness, oracle, probe or runner")
     parser.add_argument("--verbose", action="store_true", help="show every check's output")
+    parser.add_argument("--serial-python", action="store_true",
+                        help="run the Python tests in one process, as CI does, instead of one test file per worker")
+    parser.add_argument("--full", action="store_true",
+                        help="run the full workspace tests instead of only the touched crates and their dependents")
     parser.add_argument('--datafix', action='store_true', help='opt in to datafix parity downloads in a private SUNRISE_DATAFIX_ROOT')
     args = parser.parse_args()
     if args.host != "local" and not RBUILD.exists():
@@ -712,10 +984,19 @@ def main():
         parser.error(f"no merge base with {args.base} (git fetch?)")
     merge_base = git("merge-base", "HEAD", args.base).strip()
     counts = line_counts(merge_base, changed)
-    crates_of, libraries, dependencies = packages() if any(workspace_rust(p) for p in changed) else ({}, set(), {})
-    steps = plan(args, args.base, changed, crates_of, libraries, dependencies, merge_base=merge_base)
+    crates_of, libraries, dependencies = packages() if args.full or any(workspace_rust(p) for p in changed) \
+        else ({}, set(), {})
+    try:
+        steps = plan(args, args.base, changed, crates_of, libraries, dependencies, merge_base=merge_base)
+    except ValueError as error:
+        sys.exit(f"pr_ready: {error}")
     print(f"pr_ready: {len(changed)} files changed since {args.base}; checks on {args.host}", file=sys.stderr, flush=True)
+    touched, whole = select_crates(args, changed, crates_of)
+    test_scope = format_test_scope(touched, dependencies, whole)
+    if test_scope:
+        print(f"pr_ready: test scope: {test_scope}", file=sys.stderr, flush=True)
 
+    refuse_stale_prepared(args, steps)
     lock = steps[0]
     problem = lock_problem(changed)
     lock.status, lock.detail = ("fail", problem) if problem else ("pass", "unchanged" if not any(
@@ -728,7 +1009,7 @@ def main():
 
     label = suggested_label(changed, release_train.exporters())
     print(block(args, args.base, merge_base, sorted(changed), counts, steps, label,
-                time.monotonic() - started, revision, revision_state() != revision))
+                time.monotonic() - started, revision, revision_state() != revision, test_scope))
     return 1 if any(step.status == "fail" for step in steps) else 0
 
 

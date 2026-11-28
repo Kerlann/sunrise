@@ -35,34 +35,36 @@ plan are in [server.md](server.md).
   them.
 - **No Docker image is published.** You build it yourself from the repository (below). Publishing an image
   needs the project owner.
-- Nothing of Mojang's is downloaded or shipped. The server reads the game files you prepare from your own copy
-  of Minecraft 26.3.
+- The server does not need a Minecraft account or client install to prepare its game files. Setup can download
+  Mojang's free `server.jar` and Java runtime directly from Mojang, checking their SHA-1s. Neither the downloads
+  nor the prepared data are shipped with Sunrise.
 
 ## 1. Install
 
-Linux (x86-64) and macOS (Apple Silicon or Intel):
+Linux (x86-64) and macOS (Apple Silicon):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/sunrise-org/sunrise/main/packaging/server/install.sh | sh
 ```
 
-Windows (x64 or ARM64), in PowerShell:
+Windows x64, in PowerShell:
 
 ```powershell
 irm https://raw.githubusercontent.com/sunrise-org/sunrise/main/packaging/server/install.ps1 | iex
 ```
 
-The script picks the machine's x64 or ARM64 archive, including when PowerShell runs under x64 emulation. It downloads
-the current Sunrise Nightly from GitHub (the only build Sunrise ships;
-`--version` picks another), checks it against the release's signature when OpenSSL 3 is installed (on Windows, Git
-for Windows includes it), else against the SHA-256 GitHub publishes, and never asks for sudo or administrator rights. It installs:
+The scripts install Linux x86_64, Apple-chip macOS and Windows x64, Sunrise's three platforms. It downloads
+the current Sunrise Nightly from GitHub, or the release `--version <tag>` names (Windows: `-Version <tag>`): a stable
+release's tag, such as `26.3-0.1.0`, puts the server on that stable line, which its updates then follow. It checks it
+against the release's signature with a verifier the script pins (it refuses the install if anything doesn't match),
+and never asks for sudo or administrator rights. It installs:
 
 - the release in `~/.local/share/sunrise/releases/<version>` (Windows: `%LOCALAPPDATA%\Sunrise`), with
   `current` pointing at the one in use;
 - `sunrise-server` and `sunrise-prepare` in `~/.local/bin` (Windows: added to your PATH);
 - a `game-files` folder for the files you prepare, kept across updates.
 
-Options: `--version vX.Y.Z`, `--dir FOLDER`, `--bin FOLDER` (Windows: `-Version`, `-Dir`). Other systems,
+Options: `--version <tag>`, `--dir FOLDER`, `--bin FOLDER` (Windows: `-Version <tag>`, `-Dir FOLDER`). Other systems,
 such as Linux on ARM, build from source: `cargo build --release -p sunrise-game --bin sunrise-client -p
 sunrise-server` and keep both programs in one folder.
 
@@ -74,35 +76,27 @@ from there too.
 
 ## 2. Prepare the game files
 
-Sunrise reads Minecraft's data from your own copy of the game. You need Minecraft Java Edition 26.3, played
-once from the official launcher on this computer, a Java 25 runtime, and the 26.3 `server.jar`: it's the
-`downloads.server.url` in your launcher's `versions/26.3/26.3.json`. Then:
+Nothing to do before `init`: if it finds no prepared files after you accept the EULA, it runs
+`sunrise-prepare --server` to download the pinned `server.jar` from Mojang and prepare the server's data. If a
+release has no suitable Java installed, preparation also downloads Mojang's Java runtime. Running the server
+itself does not use Java.
 
-```sh
-sunrise-prepare --prepare --server-jar /path/to/server.jar
-```
+If the server cannot reach Mojang, download the pinned `server.jar` on another computer, copy it to the server,
+and run `sunrise-server init --server-jar /path/to/server.jar`. Provide Java 25 or newer through `JAVA_HOME` for
+an entirely offline preparation. A source checkout needs a JDK to compile the exporters; releases include the
+compiled exporters and need only a runtime.
 
-Add `--minecraft-dir PATH` if your launcher keeps the game elsewhere. The prepared files go to
-`game-files`, which updates keep.
+Or prepare on another computer with `sunrise-prepare --server` and copy its `game-files/sunrise-client/26.3-server`
+folder to the server. Use `sunrise-server import-resources DIR` to install that copy, or
+`sunrise-server init --resources DIR` to use it in place.
 
-**On a headless machine** (a VPS, a home server) with no Minecraft install, the launcher's command line can
-download the game for your account and set the server up there:
-
-```sh
-sunrise-launcher install latest
-sunrise-launcher account sign-in        # shows a code: enter it at the address it prints, on any device
-sunrise-launcher prepare --download     # Mojang's files, for the signed-in account that owns Minecraft
-sunrise-launcher servers set-up
-sunrise-launcher servers create --name "My server" --accept-eula
-sunrise-launcher servers run "My server" -- start
-```
-
-Or prepare on your own computer instead, with the launcher or `sunrise-prepare`, and copy the prepared `26.3` folder to the server with `sunrise-server import-resources DIR` (it checks the
-folder and its version first), or by hand: into
-`~/.local/share/sunrise/game-files/sunrise-client/26.3`, or into `resources/` in the server folder, or anywhere
-`[engine] resources` in `server.toml` names. A folder copied this way needs release v2026.10.17.07 or
-newer: older ones don't keep `registries.json` and `commands.json` with the prepared files, and the
-server then stops with "registries.json not found next to the resources". Prepare again with a newer release.
+Managed server files are prepared again when `sunrise-server run` finds they are missing or stale. To prepare
+those files before starting a configured server that has already accepted the EULA, run
+`sunrise-server --dir DIR init --yes`; it leaves `server.toml` unchanged. For a folder you set in `[engine] resources`, run
+`sunrise-prepare --server --output DIR` for server-only output. To repair a full folder, including output v7,
+run `sunrise-prepare --prepare --server-jar PATH --output DIR` with your own client files. Full output v8 is
+required. Use `--complete` to copy the sounds and run the full check, including client extras. Only the launcher downloads
+client files, for a signed-in account that owns Minecraft. Keep full and server-only output in separate folders.
 
 ## 3. First run
 
@@ -120,8 +114,8 @@ sunrise-server init
 4. whether to use a whitelist (yes by default, as in vanilla) and who to add;
 5. whether to make the first player an operator.
 
-It then tells you where it found the game and its files. Every question has a flag, so it also runs from a
-script:
+It then tells you where it found the game and its files, or prepares the files if they are missing. Every
+question has a flag, so it also runs from a script:
 
 ```sh
 sunrise-server init --eula --world survival --seed 12345 --port 25565 --whitelist --player Alex --op Alex --yes
@@ -254,18 +248,11 @@ The four caps limit what mods can ask for, counted per level:
 0 refuses every area of that kind. A request over a cap is refused whole, and the mod is told which cap and
 its value. Areas end when the player leaves.
 
-### Levels a mod opens: `sunrise-max-runtime-levels`
+### Levels a mod opens
 
-A mod can open levels of its own while the server runs ([runtime levels](modding/src/how-to/world/runtime-levels.md)).
-The server keeps at most 64 of them open at once, for all mods together; the 65th request is refused
-with `CapReached`. Set another number under `[properties]` in `server.toml`:
-
-```toml
-[properties]
-sunrise-max-runtime-levels = 128
-```
-
-A level frees its place when its mod unloads or deletes it (a delete also removes its folder from `dimensions/`). After 300 ticks with nobody in it, it leaves memory, as any level does, but keeps its place: it opens again when someone enters it.
+A mod can [open levels while the server runs](modding/src/how-to/world/runtime-levels.md). An idle level
+leaves memory and opens again when someone enters it. An explicit unload closes the level but keeps its
+folder; deleting the level also removes its folder from `dimensions/`.
 
 Already have a vanilla server? Run `sunrise-server init` in its folder, or `sunrise-server import
 server.properties` to write `server.toml` from it. The world, `ops.json`, `whitelist.json` and the ban lists
@@ -338,15 +325,6 @@ playsunrise.net", and the console says which client it was. The check reads the 
 by (`minecraft:brand`), which any client can fake: it keeps out players who didn't install Sunrise, not
 cheaters. The server's own checks (reach, movement) are what protect it.
 
-Sunrise clients can get their far terrain (Video Settings → LOD Distance) from the server: set
-`sunrise-lod-distance` under `[properties]` to how far, in chunks (1024 at most), and the server samples the
-tiles each player's client asks for out to there. It is off (0) by default: far tiles show the world's terrain
-far past the view distance, which helps players find the seed. A player's own LOD Distance applies when it is
-shorter. Each player may have 8 tiles waiting and ask for 64 a second on average, and one background thread
-samples them for everyone in turn, behind the ticks, so far terrain never slows the server down; a tile past the
-distance or over a player's limits is refused, and a client that keeps breaking the limits is disconnected.
-Tiles are sampled again for each player who asks (there is no cache yet). Vanilla clients never hear of it.
-
 `sunrise-server report` records the running server for 60 seconds (`report 300` for five minutes, up to 600) into
 `reports/profile-<time>Z.hzperf`, a capture the performance tools read ([perf-platform.md](perf-platform.md)), and
 prints a short summary (TPS, MSPT, CPU, memory, players and the heaviest tick phases) and where it went. On the console it is `sunrise-report [SECONDS]`; `sunrise-report stop` ends it now and
@@ -407,7 +385,9 @@ minutes. It keeps the crash report and gives up after 5 crashes in 10 minutes, a
 after it starts and every 6 hours after, and says so in its log, in `status` and in the panel; it never
 updates by itself. `sunrise-server update --check` (add `--json` for machine output) asks once. `sunrise-server update`:
 
-1. downloads the current Nightly and checks it against its signed SHA-256;
+1. downloads the newest build of the server's channel and checks it against its signed SHA-256: on a stable release
+   (`26.3-0.1.0`), the newest stable release of its line (the same Minecraft version and major, `26.3-0.x`),
+   never a Nightly or the next major; on any other build, the current Nightly;
 2. stops the game, backs up the world (`backups/<time>-before-<release>.zip`) and switches to the new
    release;
 3. starts the game on it and waits up to 5 minutes (`--timeout SECONDS`) for it to come up.
@@ -415,11 +395,25 @@ updates by itself. `sunrise-server update --check` (add `--json` for machine out
 If the new game crashes or doesn't come up in time, the server goes back to the release it was on by itself
 and puts the world back as it was just before the switch (the world the new game left is kept in
 `backups/`). `sunrise-server rollback` goes back to the release before by hand, keeping the world as it is
-(it backs it up first). `--version vX.Y.Z` installs a given release, and `--archive FILE --version NAME` an
+(it backs it up first). `--version <tag>` installs a given release (moving to another line or channel too), and `--archive FILE --version NAME` an
 archive you have, such as your own build. A server still on a release from before the last dated one doesn't know
 that 0.2 comes after the dated releases and says it is up to date: run `sunrise-server update --version v0.2.0`
 once ([versioning](versioning.md)). A stopped server is switched and starts on the new release next
 time. Set `SUNRISE_NO_UPDATE_CHECK=1` in the server's environment to turn the check off.
+
+Release checks and downloads, and the Discord webhook, use the first nonblank setting in this order:
+`HTTPS_PROXY`, `https_proxy`, `ALL_PROXY`, `all_proxy` for HTTPS, or `HTTP_PROXY`, `http_proxy`,
+`ALL_PROXY`, `all_proxy` for HTTP. A proxy address without a scheme means HTTP. Supported schemes are
+`http://`, `socks4://`, `socks4a://`, `socks5://`, `socks5h://` and `socks://` (an alias for SOCKS5).
+An `https://` proxy address is not supported, even for HTTPS downloads. HTTP proxy credentials are sent
+only on HTTPS CONNECT, not for plain HTTP requests.
+
+Local addresses bypass the proxy. `NO_PROXY` (or `no_proxy` if `NO_PROXY` is unset) is a comma-separated
+list: `*` bypasses all hosts; a host or domain (`example.org`, `.example.org`, `*.example.org`) matches
+that name and its subdomains. The list accepts IP literals, including bare or bracketed IPv6, but not CIDR.
+An entry with a port (`example.org:8443` or `[2001:db8::1]:8443`) matches only that destination port,
+including the URL scheme's default port when no port is written. Release checks and downloads
+select the route again at each redirect.
 
 ## 6. Web panel
 
@@ -637,8 +631,7 @@ The choice for a missing mod is saved in the world, so it holds even if the sett
 Substitution keeps the missing region's slot and weight; a returning mod does not undo it.
 Adoption keeps saved weights for returning regions, takes declared weights for new regions and
 drops absent regions. Completed chunks keep their saved biomes and blocks. New generation may
-differ in surface material, carving, features and structures. The
-[design note](design/mod-api/mod-biome-regions.md) lists record limits and fixture coverage.
+differ in surface material, carving, features and structures.
 
 ### Worlds saved with mods that are gone: `[missing_mods]`
 
@@ -767,7 +760,7 @@ effect from the environment variable `MIMALLOC_ALLOW_THP=0`. On macOS and Window
 **Fork limitation:** all opt-in parallel server phases are currently disabled, including when this
 setting is true or `SUNRISE_PARALLEL_TICK` is set. A request logs a warning and uses serial execution.
 The upstream behavior described below is retained for reference, not currently available on the fork.
-Typed hook-aware parallel execution is tracked in [#3491](https://github.com/arismoko/horizon/issues/3491).
+Typed hook-aware parallel execution is tracked in [#1532](https://github.com/sunrise-org/sunrise/issues/1532).
 
 Off by default. Under `[engine]`, `parallel_tick = true` starts the game with its parallel tick on: the
 phases of the server tick that give the same result in any order share their work among helper threads (at
@@ -781,12 +774,12 @@ environment still applies.
 A mod can declare a payload channel as droppable (voice chat, live data): under congestion the game drops
 those sends, instead of letting them queue behind chunks and arrive late ([the modding
 book](modding/src/how-to/client/networking.md)). Under `[engine]`, `droppable_clientbound` is the bytes a
-second of them the server sends to each player (default 262144, 256 KiB, about 45 simultaneous speakers
-of Opus voice) and `droppable_serverbound` the bytes a second it accepts from each player (default 16384,
-16 KiB, one microphone with room to spare). Raise them for a busy voice server; `0` turns droppable
-delivery off in that direction. A player over the limit loses those sends, which are counted, and is not
-kicked; nothing else on the connection is ever dropped. Vanilla's `rate-limit` (off by default) still
-counts droppable payloads as packets. It applies at the next start.
+second of them the server sends to each player (default 262144, 256 KiB) and `droppable_serverbound`
+the bytes a second it accepts from each player (default 16384, 16 KiB). For voice, tune these budgets
+for the traffic your mod's codec and relay produce; `0` turns droppable delivery off in that direction.
+A player over the limit loses those sends, which are counted, and is not kicked; nothing else on the
+connection is ever dropped. Vanilla's `rate-limit` (off by default) still counts droppable payloads as
+packets. Changes to the budgets apply at the next start.
 
 ## When something goes wrong
 

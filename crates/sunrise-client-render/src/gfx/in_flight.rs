@@ -10,7 +10,7 @@ pub(super) const LOST: &str = "the graphics device was lost";
 /// `Device::poll`, unless the device is lost (`lost`, set by its loss callback). wgpu has no
 /// error result for a poll that finds the device lost (it panics), so that panic is contained;
 /// the callback has set `lost` by then. Any other panic goes on.
-pub(super) fn poll_live(
+pub(crate) fn poll_live(
     device: &wgpu::Device,
     lost: &AtomicBool,
     poll: wgpu::PollType,
@@ -39,7 +39,8 @@ fn contain_loss(
 impl Renderer {
     /// The frame's readbacks to start right after its submission (on the submit thread when
     /// the frame goes there): occlusion culling's results (`cull`) and GPU culling's
-    /// statistics, then a pack-drawn light texture's copy while F3 charts it. GPU frames leave
+    /// statistics, then a pack-drawn light texture's copy while F3 charts it, then the copies of
+    /// the mods' storage buffer readbacks. GPU frames leave
     /// occlusion culling off, so a frame has one of the first two at most.
     pub(super) fn after_submit(&mut self) -> Option<submit::AfterSubmit> {
         let cull = self.cull.as_mut().and_then(|c| c.submitted());
@@ -47,7 +48,9 @@ impl Renderer {
         let lightmap = self.core_lightmap.as_mut().and_then(|l| l.submitted());
         let cull = cull.map(|c| Box::new(c) as submit::AfterSubmit);
         let gpu = gpu.map(|g| Box::new(g) as submit::AfterSubmit);
-        chain(chain(cull, gpu), lightmap)
+        // A mod's readback copies, mapped as the frame that holds them is submitted.
+        let mods = self.mod_gpu.readbacks_submitted();
+        chain(chain(chain(cull, gpu), lightmap), mods)
     }
     /// Frame `frame`'s statistics shown, unless a newer frame's are: a CPU frame's as it is
     /// drawn, a GPU frame's when its counts come back (`GpuCulling::collect`).
@@ -62,7 +65,10 @@ impl Renderer {
         }
     }
     /// Frames between the last one drawn and the one whose statistics are shown: 0 after a
-    /// CPU frame, one to three in GPU frames, while their counts are on their way back.
+    /// CPU frame; in GPU frames, the age of the last sample published (`GpuCulling::collect`),
+    /// while its counts come back through the rings — a frame or a few, and longer when a
+    /// pass's ring held no readback free for a frame (`copy_stats`) and a complete sample
+    /// had to wait for a later one's.
     pub fn stats_lag(&self) -> u64 {
         self.frame_serial - self.stats_frame
     }
@@ -81,7 +87,7 @@ impl Renderer {
         if let Some(timer) = &mut self.gpu_timer {
             timer.submitted(&self.queue);
         }
-        if let Some(Some(timer)) = Self::pass_timer(&mut self.pack_post, &mut self.native) {
+        if let Some(Some(timer)) = Self::pass_timer(&mut self.pack_post) {
             timer.submitted(&self.queue);
         }
         if let Some(timer) = &mut self.own_timing {

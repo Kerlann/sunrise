@@ -20,6 +20,9 @@ Manifest {
         Registries,
     ],
     namespaces: [],
+    served_by: Some(
+        "rule_host",
+    ),
     dependencies: {},
     incompatible: {
         "client_overlay": Detailed(

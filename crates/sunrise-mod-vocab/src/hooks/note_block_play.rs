@@ -10,12 +10,14 @@ pub trait Hooks {
     /// Set `cancel` and it doesn't play: no sound, no particle, no
     /// `note_block_play` game event. Server-side.
     #[hook(
+        receiver = "read",
+        dispatch = "api_carrier",
         side = "server",
         contract = "cancel",
         out = "cancel",
         neoforge = "NoteBlockEvent.Play",
         cancellable = true,
-        target = "sunrise_client::game::native_hooks::note_block_play::GameLevel<'_>::native_note_block_play"
+        target = "sunrise_gameplay_common::game::native_hooks::note_block_play::GameLevel<'_>::native_note_block_play"
     )]
     fn note_block_play(
         dimension: LevelDimension,

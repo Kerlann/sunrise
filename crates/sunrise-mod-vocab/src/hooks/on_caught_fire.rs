@@ -10,12 +10,19 @@ pub trait Hooks {
     /// Lava, lightning, spread into air, flint and steel, TNT use, burning
     /// projectiles, redstone and dispensers are outside this spread-only hook.
     #[hook(
+        dispatch = "flat",
         side = "server",
         contract = "listen",
         scope = "block",
         key = "state",
-        target = "sunrise_client::game::native_hooks::on_caught_fire::GameLevel<'_>::native_on_caught_fire",
+        target = "sunrise_gameplay_common::game::native_hooks::on_caught_fire::GameLevel<'_>::native_on_caught_fire",
         neoforge = "IBlockExtension.onCaughtFire"
     )]
-    fn on_caught_fire();
+    fn on_caught_fire(
+        dimension: LevelDimension,
+        state: BlockState,
+        pos: BlockPos,
+        face: Direction,
+        #[engine] ticks: &mut Ticks,
+    );
 }

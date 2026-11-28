@@ -1,5 +1,4 @@
 //! The `living_breathe` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0151
 
 pub trait Hooks {
     /// An entity's breathing this tick (`LivingBreatheEvent`, posted from
@@ -29,11 +28,17 @@ pub trait Hooks {
     /// granted at once, not through the transaction. Mod effects that this
     /// tick's air update causes (drowning, drying out) are not part of the call.
     #[hook(
+        dispatch = "flat",
         side = "server",
         contract = "listen",
         neoforge = "LivingBreatheEvent",
         cancellable = false,
         version = 3
     )]
-    fn living_breathe();
+    fn living_breathe(
+        entity: mod_api::LivingRef,
+        can_breathe: &mut bool,
+        consume: &mut i32,
+        refill: &mut i32,
+    );
 }

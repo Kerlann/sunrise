@@ -1,7 +1,13 @@
 pub use client::particle_providers::{
-    ModParticle, ParticleBatch, ParticleFacing, ParticleLevelView, ParticleProvider,
+    CustomParticle, ParticleExtractView, ParticleFacing, ParticleLevelView, ParticleProvider,
     ParticleProviderRegistry, ParticleProviders,
 };
+pub use client::particle_providers::{
+    ParticleQuad, ParticleSpawn, ParticleSpriteSet, ParticleTickView, ParticleView,
+    QuadParticleRenderState,
+};
 pub mod __private {
-    pub use crate::client::particle_providers::{particle_batch_from_vec, particle_batch_into_vec};
+    pub use crate::client::particle_providers::{
+        BoundParticleProvider, ParticleProviderFactory, particle_provider_factory,
+    };
 }

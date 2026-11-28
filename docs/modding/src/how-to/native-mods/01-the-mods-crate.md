@@ -4,11 +4,10 @@ The root `Cargo.toml` and `src/` form the mod's crate. It depends on `sunrise-mo
 `mod_api`), never directly on the game. The build supplies the pinned SDK and declared
 [mod dependencies](../../concepts/dependencies.md).
 
-**Registry dependencies belong to the mod.** A mod may use crates.io packages that the game does
-not use, or different versions of packages the game uses. Each package must have an exact version
-and SHA-256 checksum in the mod's registry dependency lock, stored as `Cargo.lock` beside its
-`Cargo.toml`. Keep this file in version control and include it in the mod package. Changing it
-changes the native build's cache identity.
+**Registry dependencies belong to the mod.** A mod may use crates.io packages whether or not the
+game uses them. Each package must have an exact version and SHA-256 checksum in the mod's registry
+dependency lock, stored as `Cargo.lock` beside its `Cargo.toml`. Keep this file in version control
+and include it in the mod package. Changing it changes the native build's cache identity.
 
 `cargo sunrise-mod build` writes it the first time a mod with registry dependencies is built. After
 you change `Cargo.toml`, resolve again on purpose:
@@ -22,31 +21,30 @@ A build server writes the lock with the `native-lock` command of the
 
 Every build consumes this **registry dependency lock** during staging. Ordinary Cargo may not
 resolve the original pinned SDK declaration offline. Writing the lock creates an inert copy
-of the manifests, removes only SDK dependencies naming the exact pinned Sunrise repository and
-revision, and resolves registry metadata. It does not copy or execute mod sources, build scripts
+of the manifests, removes the SDK path dependencies, and resolves registry metadata. It does not
+copy or execute mod sources, build scripts
 or proc macros. It does not modify the original manifests or Cargo configuration. Existing pins
 are not replaced without `--update-lock`; a refused input leaves the existing lock untouched.
 A starter that uses only the SDK does not need registry pins until it adds a
 registry dependency.
 
-A build never repins a dependency the lock already pins, and a player's build never writes a lock:
-it refuses a package the mod's lock doesn't pin.
-A build may resolve registry **index metadata** online using an inert manifest whose
-requirements are exact pins. Before fetching crate archives, every resulting identity and
-checksum must match a supplied lock. Cargo checks downloaded archives against those checksums.
-Only after this fetch does the build resolve the actual staged workspace **offline**.
+A build never rewrites a mod's `Cargo.lock`. It may resolve registry **index metadata** online,
+but before fetching crate archives, every resolved version and checksum must match the game's lock
+or an installed mod's lock. Cargo checks downloaded archives against those checksums. After the
+fetch, the build runs **offline**.
 
 The game's own packages never change because of a mod. The game ships prebuilt, and a mod's registry
 packages are compiled for the mod and linked into the mod's library, so a package both use exists
-twice: the features and dependency versions of the mod's copy are the mod's own. What a build checks
-is that every registry package it compiles is pinned, by version and checksum, in the game's lock or
-in the lock of a mod in the build.
+twice. A mod can enable different features on its copy without changing the prebuilt game.
 
 All native mods of an instance compile in one Cargo workspace, which resolves one version of a
-package for every mod that uses it. When two mods' locks pin different versions that both their
-requirements allow, both mods are built on one of the two. So a mod may be built on another
-semver-compatible version of a dependency than the one its author locked; a requirement that must
-not move is written as an exact one (`dtoa = "=1.0.9"`).
+package per semver line: the same major from 1.0 onward, the same `0.minor` from 0.1 to 1.0,
+and a separate line for each `0.0.patch`. If the game locks a package on that line, the build uses
+its version and checksum even if a mod's lock pins a different version. If a dependency's version
+requirement excludes the game's version or requests a feature that version doesn't have, the build
+refuses instead of compiling a different version. For packages the game doesn't lock on that line,
+mods that pin different versions build on one of their pins if all their requirements allow it. To
+require a particular version of a mod-only crate, use an exact requirement (`dtoa = "=1.0.9"`).
 
 Each mod is its own library, and a library carries a copy of every registry package linked into it,
 so a mod depending on two mods that each use `serde` would reach two copies of `serde`, which Rust
@@ -60,10 +58,10 @@ none uses registry packages writes no such library. The package name `sunrise-re
 the crate name `sunrise_registry_shared` are reserved for it.
 
 `native-lock` starts from the game's `Cargo.lock`, which it downloads once from the pinned game
-commit. A package the game also locks takes the game's version where the mod's requirements allow
-it, so mods made for one game build agree on those packages; the mod's other packages take the newest
-version that fits. A requirement the game's version can't meet (`libc = "0.2.999"`) gives the mod
-its own version of that package.
+commit. A shared crates.io package keeps the game's version on the same semver line; other packages
+and semver lines take the newest version that fits. If a requirement excludes the game's version on
+that line, `native-lock` leaves the lock untouched. Relax the requirement or target a game build
+that locks a version the mod can use.
 
 A package the SDK builds from its own patched source (the `[patch]` table of the SDK's
 `engine/Cargo.toml`) is used in that form only: at the SDK's version a mod's graph gets the SDK's
@@ -102,10 +100,22 @@ restrictions do not trigger a source fallback.
 
 ## Build restrictions
 
-A mod's own build script is refused with `E_NATIVE_BUILD_SCRIPT`: ship generated source instead.
 `E_NATIVE_FEATURES` refuses mod feature declarations and custom SDK feature requests; use the
-pinned SDK's feature set. These restrictions do not prohibit the separately approved build scripts
-of registry dependencies.
+pinned SDK's feature set.
+
+### Build scripts and C sources
+
+A mod may have a build script (`build.rs`, or a `build` key in `[package]`) and `[build-dependencies]`,
+and may carry C sources and headers that the script compiles with the `cc` crate, as many `-sys` crates do.
+Such a mod is built by Cargo, like a mod with crates.io dependencies, so the build script runs on the
+computer that builds the mod, under the same approval as its dependencies' build scripts: the question lists
+the mod's own script beside theirs. The package carries the C files like any other source file (see the
+package contents in [the data files page](03-data-files.md)); a prebuilt object file, library or executable
+is refused whatever its name. `build = false` in `[package]` switches an incidental `build.rs` off.
+
+Mods build for the game's own target, and on Windows x64 that is `x86_64-pc-windows-gnu`: `cc` finds a
+MinGW GCC, the one the build's toolchain brings or a GCC on `PATH`, and not MSVC. A C source that builds
+only with MSVC does not build. On Linux and macOS `cc` uses the system's C compiler.
 
 The build adds a small generated module to the crate's root, the library entry that the game
 loads, and that module exports two `#[unsafe(no_mangle)]` functions. A crate root may say

@@ -44,11 +44,10 @@ import time
 import zipfile
 import zlib
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import lab  # noqa: E402
-import net_capture  # noqa: E402
-import test_rust_parity as base  # noqa: E402
-from test_dedicated_server_parity import Server, free_port  # noqa: E402
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, net_capture, test_rust_parity as base
+from tools.test_dedicated_server_parity import Server, free_port  # noqa: E402
 
 # ServerboundResourcePackPacket.Action, by ordinal.
 ACTIONS = ['successfully_loaded', 'declined', 'failed_download', 'accepted', 'downloaded', 'invalid_url',
@@ -202,15 +201,16 @@ def read_setting(path):
 # The game.
 
 class Game:
-    def __init__(self, bins, resources, work):
+    def __init__(self, bins, resources, work, *, mode='--offscreen', env=None, log=None):
         self.home = work / 'home'
         for d in ('home', 'launcher', 'data', 'config'):
             (work / d).mkdir(parents=True)
         self.env = lab.game_env(SUNRISE_HOME=self.home, SUNRISE_LAUNCHER_HOME=work / 'launcher',
-                                XDG_DATA_HOME=work / 'data', XDG_CONFIG_HOME=work / 'config')
-        self.base = [str(bins / 'sunrise-ctl'), '--socket', str(work / 'c.sock')]
-        self.log = work / 'c.log'
-        reply = self('launch', '--game', bins / 'sunrise-client', '--offscreen', '--resources', resources)
+                                XDG_DATA_HOME=work / 'data', XDG_CONFIG_HOME=work / 'config',
+                                **(env or {}))
+        self.base = [str(lab.binary(bins, 'sunrise-ctl')), '--socket', str(work / 'c.sock')]
+        self.log = (work / 'c.log') if log is None else Path(log)
+        reply = self('launch', '--game', lab.binary(bins, 'sunrise-client'), mode, '--resources', resources)
         self.pid = reply.get('pid')
 
     def __call__(self, *words, ok=True, timeout=300):

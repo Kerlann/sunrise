@@ -2,8 +2,14 @@
 // No `#![recursion_limit]` or other inner attribute horizon-mixins doesn't know here: the
 // launcher's horizon-mixins then rejects every native mod targeting this crate (#8169).
 #![forbid(unsafe_code)]
+
+#[cfg(test)]
+mod_platform::__install_engine_test_platform!();
+
 extern crate self as sunrise_client;
+#[cfg(feature = "client")]
 pub use sunrise_client_lib::carrier_store;
+#[cfg(feature = "client")]
 pub use sunrise_client_lib::*;
 #[doc(hidden)]
 pub mod entry;
@@ -12,10 +18,32 @@ pub mod entry;
 // dylib, and the allocator must be the one its code and the mods' executable share. The Windows and macOS archives
 // build with `system-allocator`: their loaders bind each library to std's own allocator, which everything then
 // shares (#2394, #3877).
-#[cfg(not(feature = "system-allocator"))]
+
+// The unit-test crate uses the allocator from its self dev-dependency.
+#[cfg(all(not(test), not(feature = "system-allocator")))]
 #[global_allocator]
 static ALLOCATOR: sunrise_threads::GameAllocator = sunrise_threads::GAME_ALLOCATOR;
-pub mod game;
-pub mod orb_limits;
+mod cut_layout;
+pub mod game_facade;
+pub use cut_layout::game;
+#[cfg(all(test, not(feature = "client")))]
+pub(crate) use sunrise_client_lib::settings;
+#[cfg(all(test, not(feature = "client")))]
+pub(crate) use sunrise_game_data::scoreboard;
+#[cfg(all(test, not(feature = "client")))]
+pub(crate) use sunrise_items::items;
+#[cfg(all(test, not(feature = "client")))]
+pub(crate) use sunrise_level::chunk;
+#[cfg(all(test, not(feature = "client")))]
+pub(crate) use sunrise_sim::{datapack_net, entities, motion, raw_payloads};
+pub use sunrise_sim::{lan, orb_limits, save};
 #[cfg(test)]
 mod test_game_dir;
+
+// The one way a unit test gets prepared data: `SUNRISE_TEST_RESOURCES`, else the checkout's
+// `.local/sunrise-client/<version>`, with every input it names required.
+#[cfg(test)]
+#[path = "../../sunrise-core/src/prepared_test_root.rs"]
+pub(crate) mod prepared_test_root;
+
+pub use sunrise_level::{crash, logging, spans};

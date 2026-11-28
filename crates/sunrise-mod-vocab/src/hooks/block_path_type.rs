@@ -16,14 +16,16 @@ pub trait Hooks {
     /// and mob-specific adjustments run afterwards, outside that cache.
     /// Diverges from upstream: new hook.
     #[hook(
+        receiver = "read",
+        dispatch = "flat",
         side = "server",
         contract = "replace",
         out = "path_type",
         scope = "block",
         key = "state",
         host = "level",
-        target = "sunrise_client::game::native_hooks::block_path_type::ReadLevel<'_,'_>::native_block_path_type",
+        target = "sunrise_gameplay_common::game::native_hooks::block_path_type::ReadLevel<'_, '_>::native_block_path_type",
         neoforge = "IBlockExtension.getBlockPathType"
     )]
-    fn block_path_type();
+    fn block_path_type(pos: BlockPos, state: BlockState, path_type: &mut Option<mod_api::PathType>);
 }

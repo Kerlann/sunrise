@@ -2,6 +2,7 @@
 use crate::{
     json::*,
     model::*,
+    model_loaders::{LoaderQuad, LoaderTexture},
     obj::{MtlTexture, ObjFace, ObjModel},
     resolve::{ResolvedCuboidModel, ResolvedLoader},
 };
@@ -175,7 +176,8 @@ fn corners(from: [f32; 3], to: [f32; 3], direction: Direction) -> [[f32; 3]; 4] 
     selectors
         .map(|selector| std::array::from_fn(|i| if selector[i] == 0 { from[i] } else { to[i] }))
 }
-fn facing(vertices: &[[f32; 3]; 4]) -> Option<Direction> {
+/// The cardinal facing for the winding of a quad, or `None` for an invalid normal.
+pub fn facing(vertices: &[[f32; 3]; 4]) -> Option<Direction> {
     let a: [f32; 3] = std::array::from_fn(|i| vertices[1][i] - vertices[0][i]);
     let b: [f32; 3] = std::array::from_fn(|i| vertices[2][i] - vertices[0][i]);
     let n = [
@@ -229,13 +231,16 @@ fn bake_elements(
     bake_into(model, transform, skip_flat, &mut output)?;
     Ok(output)
 }
-/// The elements, then what the model's loader adds.
+/// The elements, then what the model's loader adds. The model's root transform is composed
+/// after `transform` for its elements, composite children and obj faces, as NeoForge's geometries
+/// read it; a registered loader's quads take `transform` as given.
 fn bake_into(
     model: &ResolvedCuboidModel,
     transform: BlockModelTransform,
     skip_flat: bool,
     output: &mut Vec<ModelQuad>,
 ) -> Result<()> {
+    let own = transform.with_root(model.root_transform.as_ref());
     let render_type = model
         .render_type
         .as_deref()
@@ -266,7 +271,7 @@ fn bake_into(
                 *direction,
                 matrix,
                 material,
-                transform,
+                own,
                 render_type,
             )?);
         }
@@ -274,7 +279,7 @@ fn bake_into(
     match model.loader() {
         Some(ResolvedLoader::Composite(children)) => {
             for child in children {
-                bake_into(child, transform, skip_flat, output)?;
+                bake_into(child, own, skip_flat, output)?;
             }
         }
         Some(ResolvedLoader::Obj {
@@ -282,11 +287,11 @@ fn bake_into(
             flip_v,
             shade,
             hidden,
-        }) => bake_obj(model, obj, *flip_v, *shade, hidden, transform, output)?,
+        }) => bake_obj(model, obj, *flip_v, *shade, hidden, own, output)?,
         Some(ResolvedLoader::Obj { model: None, .. }) | None => {}
         Some(ResolvedLoader::Registered(quads)) => {
             for quad in quads.iter() {
-                if let Some(quad) = loader_quad(model, quad, transform, render_type)? {
+                if let Some(quad) = loader_quad(model, quad, transform, render_type) {
                     output.push(quad);
                 }
             }
@@ -298,19 +303,25 @@ fn bake_into(
 /// texture key the model doesn't define skips the quad with a reason.
 fn loader_quad(
     model: &ResolvedCuboidModel,
-    quad: &crate::model_loaders::LoaderQuad,
+    quad: &LoaderQuad,
     transform: BlockModelTransform,
     render_type: Option<RenderType>,
-) -> Result<Option<ModelQuad>> {
-    let Some(material) = model.material(&quad.texture)?.cloned() else {
-        log::warn!(
-            "model loader quad skipped: the model has no texture {:?}",
-            quad.texture
-        );
-        return Ok(None);
+) -> Option<ModelQuad> {
+    let material = match &quad.texture {
+        LoaderTexture::Sprite(sprite) => Material {
+            sprite: sprite.clone(),
+            force_translucent: false,
+        },
+        LoaderTexture::Slot(slot) => {
+            let Some(material) = model.material(slot).ok().flatten().cloned() else {
+                log::warn!("model loader quad skipped: the model has no texture {slot:?}");
+                return None;
+            };
+            material
+        }
     };
     let positions = quad.positions.map(|p| transform.position(p));
-    Ok(Some(ModelQuad {
+    Some(ModelQuad {
         positions,
         uv: quad.uvs,
         facing: facing(&positions).unwrap_or(Direction::Up),
@@ -324,7 +335,7 @@ fn loader_quad(
         ambient_occlusion: None,
         render_type,
         shade: quad.shade,
-    }))
+    })
 }
 /// Obj faces are unculled quads in block units; the blockstate transform moves them whole.
 fn bake_obj(
@@ -614,19 +625,100 @@ mod loader_tests {
         );
     }
     #[test]
-    fn own_loader_wins_and_unknown_loader_adds_nothing() {
-        let other = r#"{"parent":"t:comp","loader":"somemod:thing"}"#;
+    fn an_unknown_optional_loader_inherits() {
         let library = library(
-            &[("t:cube", CUBE), ("t:comp", COMPOSITE), ("t:other", other)],
+            &[
+                ("t:cube", CUBE),
+                ("t:comp", COMPOSITE),
+                (
+                    "t:optional",
+                    r#"{"parent":"t:comp","loader":{"id":"somemod:thing","optional":true}}"#,
+                ),
+            ],
             &[],
         );
-        assert!(bake(&library, "t:other").is_empty());
+        assert_eq!(
+            sprites(&bake(&library, "t:optional")),
+            ["minecraft:block/own", "minecraft:block/shared"]
+        );
     }
     #[test]
     fn composites_that_nest_through_themselves_are_an_error() {
         let looping = r#"{"loader":"neoforge:composite","children":{"a":{"parent":"t:loop"}}}"#;
         let library = library(&[("t:loop", looping)], &[]);
         assert!(library.resolve("t:loop").is_err());
+    }
+
+    fn heights(quads: &[ModelQuad]) -> Vec<f32> {
+        quads
+            .iter()
+            .flat_map(|q| q.positions.map(|p| p[1]))
+            .collect()
+    }
+    /// NeoForge's root `transform` moves a model's elements; a model without one inherits its
+    /// parent's, and `"identity"` in a child replaces it.
+    #[test]
+    fn a_root_transform_moves_elements_and_the_leaf_most_one_wins() {
+        let moved = r#"{"parent":"t:cube","textures":{"all":"block/a"},
+            "transform":{"translation":[0,0.5,0]}}"#;
+        let library = library(
+            &[
+                ("t:cube", CUBE),
+                ("t:moved", moved),
+                ("t:inherits", r#"{"parent":"t:moved"}"#),
+                ("t:reset", r#"{"parent":"t:moved","transform":"identity"}"#),
+            ],
+            &[],
+        );
+        assert_eq!(heights(&bake(&library, "t:moved")), [1.5; 4]);
+        assert_eq!(heights(&bake(&library, "t:inherits")), [1.5; 4]);
+        assert_eq!(heights(&bake(&library, "t:reset")), [1.0; 4]);
+    }
+    /// A composite's root transform applies to its children, after each child's own
+    /// (`CompositeUnbakedGeometry` composes it into the state the children bake with).
+    #[test]
+    fn a_composite_root_transform_composes_with_its_childrens() {
+        let composite = r#"{"loader":"neoforge:composite","textures":{"all":"block/shared"},
+            "transform":{"translation":[0,0.25,0]},
+            "children":{"zeta":{"parent":"t:cube","transform":{"translation":[0,0.25,0]}},
+                "alpha":{"parent":"t:cube"}}}"#;
+        let library = library(&[("t:cube", CUBE), ("t:comp", composite)], &[]);
+        let quads = bake(&library, "t:comp");
+        assert_eq!(heights(&quads), [[1.5; 4], [1.25; 4]].concat());
+    }
+    /// The face direction and cull face follow the root transform: a half turn about X turns
+    /// the top face, culled by the block above, into a bottom face culled by the block below.
+    #[test]
+    fn faces_and_cull_faces_turn_with_the_root_transform() {
+        let culled = r##"{"textures":{"all":"block/a"},"transform":{"rotation":{"x":180},"origin":"center"},
+            "elements":[{"from":[0,0,0],"to":[16,16,16],"faces":{"up":{"texture":"#all","cullface":"up"}}}]}"##;
+        let library = library(&[("t:turned", culled)], &[]);
+        let quad = &bake(&library, "t:turned")[0];
+        assert_eq!(
+            (quad.facing, quad.cull),
+            (Direction::Down, Some(Direction::Down))
+        );
+        assert_eq!(heights(std::slice::from_ref(quad)), [0.0; 4]);
+    }
+    /// `neoforge:empty` is `EmptyModel`: no quads, whatever else the file names, and a model
+    /// inheriting from it has no geometry either.
+    #[test]
+    fn the_empty_loader_bakes_nothing() {
+        let empty = r#"{"loader":"neoforge:empty","parent":"t:cube","textures":{"all":"block/a"}}"#;
+        let library = library(
+            &[
+                ("t:cube", CUBE),
+                ("t:empty", empty),
+                (
+                    "t:child",
+                    r#"{"parent":"t:empty","textures":{"all":"block/b"}}"#,
+                ),
+            ],
+            &[],
+        );
+        assert!(bake(&library, "t:empty").is_empty());
+        assert!(bake(&library, "t:child").is_empty());
+        assert!(library.resolve("t:empty").unwrap().textures.is_empty());
     }
 
     const OBJ: &str = "mtllib m.mtl\nv 0 0 0\nv 1 0 0\nv 1 0 1\nv 0 0 1\nv 0 1 0\n\

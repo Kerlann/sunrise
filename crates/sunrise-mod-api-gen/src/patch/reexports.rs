@@ -1,9 +1,9 @@
-//! The source-level part of path resolution that can prove a copy crosses a restricted `use`.
+//! The source-level part of path resolution that can prove a copy can't reach a name.
 //! Leave external crates, macro expansions and ambiguous bindings to the compiler.
 
-use super::{Item, Source, Visit};
+use super::{Found, Item, Source, Visit};
 use crate::source::unraw;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use syn::{Attribute, ItemUse, UseTree, Visibility};
 
@@ -13,6 +13,90 @@ pub(super) type Scopes = HashMap<String, Rc<Scope>>;
 enum Namespace {
     Type,
     Value,
+}
+
+/// The namespaces an item declares its name in.
+fn declared(item: &Item) -> &'static [Namespace] {
+    match item {
+        Item::Fn(_) | Item::Const(_) | Item::Static(_) => &[Namespace::Value],
+        // A tuple or unit struct has a constructor in the value namespace too.
+        Item::Struct(item) if !matches!(item.fields, syn::Fields::Named(_)) => {
+            &[Namespace::Type, Namespace::Value]
+        }
+        _ => &[Namespace::Type],
+    }
+}
+
+/// Whether an item declares its name in the value namespace: a function, a constant, a static or a
+/// tuple or unit struct's constructor.
+pub(super) fn declares_value(item: &Item) -> bool {
+    declared(item).contains(&Namespace::Value)
+}
+
+/// One name an import binds, and what its path resolves to in the original source.
+pub(super) struct Imported {
+    pub(super) name: String,
+    pub(super) path: Vec<String>,
+    /// Whether the name is bound in the type namespace, where a module is: `None` when the source
+    /// alone can't tell (an external crate, a glob or a cfg-gated declaration).
+    pub(super) types: Option<bool>,
+    /// The same for the value namespace, where a function is.
+    pub(super) values: Option<bool>,
+    /// Whether the path starts at a name the module itself binds, so that from a module inside it
+    /// the path starts with `super::`. A relative `self` or `super` path does too; an external
+    /// crate, `crate` and a leading `::` do not.
+    pub(super) local: bool,
+}
+
+/// The names `item`, written in `module`, binds one by one: a mirror module decides for each of
+/// them whether another binding of its name in the same namespace is already there.
+pub(super) fn imported(source: &mut Source, module: &str, item: &ItemUse) -> Vec<Imported> {
+    let mut leaves = Vec::new();
+    imports(item, |name, path| {
+        leaves.extend(name.map(|name| (name, path)))
+    });
+    let mut walk = Walk {
+        source,
+        origin: module,
+        active: HashSet::new(),
+    };
+    leaves
+        .into_iter()
+        .map(|(name, path)| {
+            // A leading `::` names an external crate, which the source alone can't read.
+            let import = Import {
+                path,
+                external: item.leading_colon.is_some(),
+                conditional: false,
+                limit: None,
+            };
+            let mut lookup = |space| {
+                walk.import_path(module, &import, space)
+                    .ok()
+                    .map(|binding| binding.is_some())
+            };
+            let (types, values) = (lookup(Namespace::Type), lookup(Namespace::Value));
+            let path = import.path;
+            let local = item.leading_colon.is_none()
+                && path.first().is_some_and(|head| {
+                    !matches!(head.as_str(), "crate" | "self" | "super")
+                        && (walk.scope(module).is_some_and(|scope| {
+                            scope.items[Namespace::Type as usize].contains_key(head)
+                                || scope.imports.contains_key(head)
+                        }) || matches!(
+                            walk.binding(module, head, Namespace::Type),
+                            Ok(Some(_))
+                        ))
+                });
+            Imported {
+                name,
+                path,
+                types,
+                values,
+                local,
+            }
+        })
+        .collect()
 }
 
 #[derive(Default)]
@@ -36,8 +120,38 @@ struct Binding {
     module: Option<String>,
     // Which module and its descendants can see this name in the original source. `None` is pub.
     limit: Option<String>,
+    blocked: Option<Blocked>,
+}
+
+#[derive(Clone)]
+enum Blocked {
     // A non-public import in a module whose imports the copy cannot repeat.
-    blocked: Option<String>,
+    Import(String),
+    // The mirror cannot re-export a non-public crate-root function.
+    RootFunction(String),
+}
+
+/// A lower crate's unlisted modules may carry imports the mirror cannot access.
+pub(super) struct Narrowing<'a> {
+    /// The names the copies and the rows' helpers use: the imports a mirror keeps.
+    pub(super) used: &'a BTreeSet<String>,
+    /// Linked externs can supply traits a copy uses through method syntax.
+    linked: &'a BTreeSet<String>,
+}
+
+impl<'a> Narrowing<'a> {
+    pub(super) fn new(used: &'a BTreeSet<String>, linked: &'a BTreeSet<String>) -> Self {
+        Self { used, linked }
+    }
+
+    /// The patch crate's extern prelude includes the linked crates, std and core.
+    pub(super) fn resolves(&self, root: &syn::Ident) -> bool {
+        root == "std" || root == "core" || self.linked.contains(&root.to_string())
+    }
+}
+
+pub(super) fn preserve_owner_features(layout: crate::source::SourceLayout, module: &str) -> bool {
+    !layout.owns(module)
 }
 
 fn within(module: &str, ancestor: &str) -> bool {
@@ -184,20 +298,15 @@ impl Scope {
             };
             if !mod_source::modules::test_only(attrs) {
                 let name = unraw(ident);
-                let spaces: &[_] = match item {
-                    Item::Fn(_) | Item::Const(_) | Item::Static(_) => &[Namespace::Value],
-                    // A tuple or unit struct has a constructor in the value namespace too.
-                    Item::Struct(item) if !matches!(item.fields, syn::Fields::Named(_)) => {
-                        &[Namespace::Type, Namespace::Value]
-                    }
-                    _ => &[Namespace::Type],
-                };
                 let binding = (!conditional(attrs)).then(|| Binding {
                     module: matches!(item, Item::Mod(_)).then(|| format!("{module}::{name}")),
                     limit: limit(module, vis),
-                    blocked: None,
+                    blocked: (matches!(item, Item::Fn(_))
+                        && !module.contains("::")
+                        && !matches!(vis, Visibility::Public(_)))
+                    .then(|| Blocked::RootFunction(name.clone())),
                 });
-                for &space in spaces {
+                for &space in declared(item) {
                     let names = &mut scope.items[space as usize];
                     if let Some(binding) = &binding {
                         names
@@ -244,8 +353,9 @@ impl Walk<'_> {
         self.path(module, &import.path, space)
     }
 
-    fn import_block(&self, module: &str, import: &Import) -> Option<String> {
-        (import.limit.is_some() && !within(self.origin, module)).then(|| module.to_owned())
+    fn import_block(&self, module: &str, import: &Import) -> Option<Blocked> {
+        (import.limit.is_some() && !within(self.origin, module))
+            .then(|| Blocked::Import(module.to_owned()))
     }
 
     fn binding(&mut self, module: &str, name: &str, space: Namespace) -> Lookup {
@@ -395,41 +505,71 @@ macro_rules! attrs {
     };
 }
 
-pub(super) fn check_body(
-    source: &mut Source,
-    module: &str,
-    signature: &syn::Signature,
-    body: &syn::Block,
-) -> Result<(), String> {
-    // Don't guess whether a bare name denotes an import when a pattern could bind it.
-    #[derive(Default)]
-    struct Values(HashSet<String>);
-
-    impl<'ast> Visit<'ast> for Values {
-        fn visit_pat_ident(&mut self, pat: &'ast syn::PatIdent) {
-            self.0.insert(unraw(&pat.ident));
-            syn::visit::visit_pat_ident(self, pat);
-        }
-    }
-
+pub(super) fn check_paths(source: &mut Source, found: &Found) -> Result<(), String> {
     struct Check<'a> {
         walk: Walk<'a>,
         local: Vec<Scope>,
-        values: HashSet<String>,
+        names: Vec<(Namespace, String)>,
+        in_inline_module: bool,
+        root_copy: Option<String>,
         refusal: Option<String>,
     }
     impl Check<'_> {
+        fn scoped(&mut self, visit: impl FnOnce(&mut Self)) {
+            let start = self.names.len();
+            visit(self);
+            self.names.truncate(start);
+        }
+
+        fn bind(&mut self, pat: &syn::Pat) {
+            // Don't guess whether a bare pattern name is a binding or a constant. Types,
+            // expressions and inline const blocks inside a pattern don't bind any names.
+            struct Names<'a>(&'a mut Vec<(Namespace, String)>);
+            impl<'ast> Visit<'ast> for Names<'_> {
+                fn visit_pat_ident(&mut self, pat: &'ast syn::PatIdent) {
+                    self.0.push((Namespace::Value, unraw(&pat.ident)));
+                    syn::visit::visit_pat_ident(self, pat);
+                }
+                fn visit_type(&mut self, _: &'ast syn::Type) {}
+                fn visit_expr(&mut self, _: &'ast syn::Expr) {}
+                fn visit_block(&mut self, _: &'ast syn::Block) {}
+            }
+            Names(&mut self.names).visit_pat(pat);
+        }
+
+        fn function(&mut self, sig: &syn::Signature, body: Option<&syn::Block>) {
+            self.visit_signature(sig);
+            if let Some(body) = body {
+                for arg in &sig.inputs {
+                    if let syn::FnArg::Typed(arg) = arg
+                        && !mod_source::modules::test_only(&arg.attrs)
+                    {
+                        // A cfg-gated parameter can still shadow a name on some builds.
+                        self.bind(&arg.pat);
+                    }
+                }
+                self.visit_block(body);
+            }
+        }
+
         fn binding(&mut self, parts: &[String], space: Namespace) -> Lookup {
-            let Some(first) = parts.first().filter(|_| self.refusal.is_none()) else {
+            let Some(first) = parts.first() else {
                 return Err(Unresolved);
             };
+            if self.in_inline_module && first != "crate" {
+                return Err(Unresolved);
+            }
             let head = if parts.len() == 1 {
                 space
             } else {
                 Namespace::Type
             };
             if !matches!(first.as_str(), "crate" | "self" | "super")
-                && ((head == Namespace::Value && self.values.contains(first))
+                && (self
+                    .names
+                    .iter()
+                    .rev()
+                    .any(|(space, name)| *space == head && name == first)
                     || self.local.iter().any(|scope| {
                         scope.opaque
                             || !scope.globs.is_empty()
@@ -444,22 +584,40 @@ pub(super) fn check_body(
         }
 
         fn note(&mut self, parts: &[String], binding: Binding) {
-            if let Some(module) = binding.blocked {
-                self.refusal = Some(format!(
-                    "its body names `{}`, which crosses a non-public `use` in `{module}`",
+            self.refusal = match binding.blocked {
+                Some(Blocked::Import(module)) => Some(format!(
+                    "it names `{}`, which crosses a non-public `use` in `{module}`",
                     parts.join("::")
-                ));
-            }
+                )),
+                Some(Blocked::RootFunction(name)) if self.root_copy.as_ref() != Some(&name) => {
+                    Some(format!(
+                        "it names `{}`, which reaches the non-public crate-root function `{name}`",
+                        parts.join("::")
+                    ))
+                }
+                _ => None,
+            };
         }
 
-        fn path(&mut self, path: &syn::Path, space: Namespace) {
-            if path.leading_colon.is_none()
-                && (space == Namespace::Value || path.segments.len() > 1)
-            {
-                let parts: Vec<_> = path.segments.iter().map(|s| unraw(&s.ident)).collect();
-                if let Ok(Some(binding)) = self.binding(&parts, space) {
-                    self.note(&parts, binding);
-                }
+        fn path(&mut self, path: &syn::Path, qself: Option<&syn::QSelf>, space: Namespace) {
+            if path.leading_colon.is_some() || self.refusal.is_some() {
+                return;
+            }
+            let (len, space) = match qself {
+                // In `<T as m::Trait>::Item` only `m::Trait` is a path we can resolve here.
+                // In `<T>::Item` there is no trait prefix. Syn visits `T` separately.
+                Some(qself) if qself.position == 0 => return,
+                Some(qself) => (qself.position, Namespace::Type),
+                None => (path.segments.len(), space),
+            };
+            let parts: Vec<_> = path
+                .segments
+                .iter()
+                .take(len)
+                .map(|s| unraw(&s.ident))
+                .collect();
+            if let Ok(Some(binding)) = self.binding(&parts, space) {
+                self.note(&parts, binding);
             }
         }
     }
@@ -473,23 +631,30 @@ pub(super) fn check_body(
                     _ => None,
                 })
                 .peekable();
-            if items.peek().is_some() {
+            let has_items = items.peek().is_some();
+            if has_items {
                 self.local.push(Scope::read(self.walk.origin, items));
-                syn::visit::visit_block(self, block);
+            }
+            self.scoped(|check| syn::visit::visit_block(check, block));
+            if has_items {
                 self.local.pop();
-            } else {
-                syn::visit::visit_block(self, block);
             }
         }
 
+        fn visit_generics(&mut self, generics: &'ast syn::Generics) {
+            for param in &generics.params {
+                let (space, ident) = match param {
+                    syn::GenericParam::Type(param) => (Namespace::Type, &param.ident),
+                    syn::GenericParam::Const(param) => (Namespace::Value, &param.ident),
+                    syn::GenericParam::Lifetime(_) => continue,
+                };
+                self.names.push((space, unraw(ident)));
+            }
+            syn::visit::visit_generics(self, generics);
+        }
+
         fn visit_expr(&mut self, expr: &'ast syn::Expr) {
-            use syn::Expr;
-            if !conditional(attrs!(Expr, expr;
-                Array, Assign, Async, Await, Binary, Block, Break, Call, Cast, Closure, Const,
-                Continue, Field, ForLoop, Group, If, Index, Infer, Let, Lit, Loop, Macro, Match,
-                MethodCall, Paren, Path, Range, RawAddr, Reference, Repeat, Return, Struct, Try,
-                TryBlock, Tuple, Unary, Unsafe, While, Yield,
-            )) {
+            if !conditional(crate::source::expr_attrs(expr)) {
                 syn::visit::visit_expr(self, expr);
             }
         }
@@ -499,19 +664,114 @@ pub(super) fn check_body(
                 Const, Enum, ExternCrate, Fn, ForeignMod, Impl, Macro, Mod, Static, Struct,
                 Trait, TraitAlias, Type, Union, Use,
             )) {
-                syn::visit::visit_item(self, item);
+                self.scoped(|check| syn::visit::visit_item(check, item));
             }
+        }
+
+        fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+            self.function(&item.sig, Some(&item.block));
+        }
+
+        fn visit_fn_arg(&mut self, arg: &'ast syn::FnArg) {
+            let attrs = match arg {
+                syn::FnArg::Receiver(arg) => &arg.attrs,
+                syn::FnArg::Typed(arg) => &arg.attrs,
+            };
+            if !conditional(attrs) {
+                syn::visit::visit_fn_arg(self, arg);
+            }
+        }
+
+        fn visit_field(&mut self, field: &'ast syn::Field) {
+            if !conditional(&field.attrs) {
+                syn::visit::visit_field(self, field);
+            }
+        }
+
+        fn visit_variant(&mut self, variant: &'ast syn::Variant) {
+            if !conditional(&variant.attrs) {
+                syn::visit::visit_variant(self, variant);
+            }
+        }
+
+        fn visit_trait_item(&mut self, item: &'ast syn::TraitItem) {
+            use syn::TraitItem;
+            if !conditional(attrs!(TraitItem, item; Const, Fn, Type, Macro)) {
+                self.scoped(|check| syn::visit::visit_trait_item(check, item));
+            }
+        }
+
+        fn visit_trait_item_fn(&mut self, item: &'ast syn::TraitItemFn) {
+            self.function(&item.sig, item.default.as_ref());
         }
 
         fn visit_local(&mut self, local: &'ast syn::Local) {
             if !conditional(&local.attrs) {
                 syn::visit::visit_local(self, local);
             }
+            // Neither the initializer nor a let-else's else block sees this binding.
+            // A cfg-gated pattern can still shadow later references on some builds.
+            if !mod_source::modules::test_only(&local.attrs) {
+                self.bind(&local.pat);
+            }
+        }
+
+        fn visit_expr_let(&mut self, expr: &'ast syn::ExprLet) {
+            // A conditional binding starts after its initializer and extends through
+            // the rest of the let chain and its successful branch.
+            syn::visit::visit_expr_let(self, expr);
+            self.bind(&expr.pat);
+        }
+
+        fn visit_expr_if(&mut self, expr: &'ast syn::ExprIf) {
+            self.scoped(|check| {
+                check.visit_expr(&expr.cond);
+                check.visit_block(&expr.then_branch);
+            });
+            if let Some((_, otherwise)) = &expr.else_branch {
+                self.visit_expr(otherwise);
+            }
+        }
+
+        fn visit_expr_while(&mut self, expr: &'ast syn::ExprWhile) {
+            self.scoped(|check| {
+                check.visit_expr(&expr.cond);
+                check.visit_block(&expr.body);
+            });
+        }
+
+        fn visit_expr_for_loop(&mut self, expr: &'ast syn::ExprForLoop) {
+            self.visit_pat(&expr.pat);
+            self.visit_expr(&expr.expr);
+            self.scoped(|check| {
+                check.bind(&expr.pat);
+                check.visit_block(&expr.body);
+            });
+        }
+
+        fn visit_expr_closure(&mut self, expr: &'ast syn::ExprClosure) {
+            for pat in &expr.inputs {
+                self.visit_pat(pat);
+            }
+            self.visit_return_type(&expr.output);
+            self.scoped(|check| {
+                for pat in &expr.inputs {
+                    check.bind(pat);
+                }
+                check.visit_expr(&expr.body);
+            });
         }
 
         fn visit_arm(&mut self, arm: &'ast syn::Arm) {
             if !conditional(&arm.attrs) {
-                syn::visit::visit_arm(self, arm);
+                self.visit_pat(&arm.pat);
+                self.scoped(|check| {
+                    check.bind(&arm.pat);
+                    if let Some((_, guard)) = &arm.guard {
+                        check.visit_expr(guard);
+                    }
+                    check.visit_expr(&arm.body);
+                });
             }
         }
 
@@ -528,48 +788,41 @@ pub(super) fn check_body(
         }
 
         fn visit_expr_path(&mut self, expr: &'ast syn::ExprPath) {
-            if expr.qself.is_none() {
-                self.path(&expr.path, Namespace::Value);
-            }
+            self.path(&expr.path, expr.qself.as_ref(), Namespace::Value);
             syn::visit::visit_expr_path(self, expr);
         }
 
         fn visit_type_path(&mut self, ty: &'ast syn::TypePath) {
-            if ty.qself.is_none() {
-                self.path(&ty.path, Namespace::Type);
-            }
+            self.path(&ty.path, ty.qself.as_ref(), Namespace::Type);
             syn::visit::visit_type_path(self, ty);
         }
 
         fn visit_trait_bound(&mut self, bound: &'ast syn::TraitBound) {
-            self.path(&bound.path, Namespace::Type);
+            self.path(&bound.path, None, Namespace::Type);
             syn::visit::visit_trait_bound(self, bound);
         }
 
         fn visit_expr_struct(&mut self, expr: &'ast syn::ExprStruct) {
-            if expr.qself.is_none() {
-                self.path(&expr.path, Namespace::Type);
-            }
+            self.path(&expr.path, expr.qself.as_ref(), Namespace::Type);
             syn::visit::visit_expr_struct(self, expr);
         }
 
         fn visit_pat_struct(&mut self, pat: &'ast syn::PatStruct) {
-            if pat.qself.is_none() {
-                self.path(&pat.path, Namespace::Type);
-            }
+            self.path(&pat.path, pat.qself.as_ref(), Namespace::Type);
             syn::visit::visit_pat_struct(self, pat);
         }
 
         fn visit_pat_tuple_struct(&mut self, pat: &'ast syn::PatTupleStruct) {
-            if pat.qself.is_none() {
-                self.path(&pat.path, Namespace::Value);
-            }
+            self.path(&pat.path, pat.qself.as_ref(), Namespace::Value);
             syn::visit::visit_pat_tuple_struct(self, pat);
         }
 
         fn visit_item_use(&mut self, item: &'ast ItemUse) {
             if item.leading_colon.is_none() {
                 imports(item, |name, parts| {
+                    if self.refusal.is_some() {
+                        return;
+                    }
                     let types = self.binding(&parts, Namespace::Type);
                     // A glob names a module; a single import can name both a type and a value.
                     let values = if name.is_some() {
@@ -590,22 +843,28 @@ pub(super) fn check_body(
             }
         }
 
-        // An inline module nested inside the body has its own scope, not the copy's scope.
-        fn visit_item_mod(&mut self, _: &'ast syn::ItemMod) {}
+        fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+            // The enclosing body's bindings do not resolve names in this module. Only `crate::`
+            // starts from a scope we know, regardless of the inline module's own declarations.
+            let was_inline = std::mem::replace(&mut self.in_inline_module, true);
+            syn::visit::visit_item_mod(self, item);
+            self.in_inline_module = was_inline;
+        }
     }
-    let mut values = Values::default();
-    values.visit_signature(signature);
-    values.visit_block(body);
     let mut check = Check {
         walk: Walk {
             source,
-            origin: module,
+            origin: &found.module,
             active: HashSet::new(),
         },
         local: Vec::new(),
-        values: values.0,
+        names: Vec::new(),
+        in_inline_module: false,
+        // A root function copied under its own name can still call itself.
+        root_copy: (found.owner.is_none() && !found.module.contains("::"))
+            .then(|| unraw(&found.function.sig.ident)),
         refusal: None,
     };
-    check.visit_block(body);
+    check.function(&found.function.sig, Some(&found.function.block));
     check.refusal.map_or(Ok(()), Err)
 }

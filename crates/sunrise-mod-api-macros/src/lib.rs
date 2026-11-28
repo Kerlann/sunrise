@@ -1,16 +1,13 @@
 //! Derive hook subscriptions from a trait implementation.
-mod payload;
+mod event;
 mod wire;
 
-/// Derive a typed payload's value codec from its fields.
-///
-/// `#[payload(crate = ::mod_vocab)]` selects the contract crate for
-/// lower-layer crates. The default is `::mod_api`.
-/// For mutually recursive types, `#[payload(bound = "T: ::mod_api::PayloadCodec")]`
-/// replaces inferred predicates; use `#[payload(bound = "")]` when none are needed.
-#[proc_macro_derive(PayloadCodec, attributes(payload))]
-pub fn derive_payload_codec(input: TokenStream) -> TokenStream {
-    payload::expand(syn::parse_macro_input!(input as syn::DeriveInput))
+/// Derive [`Event`](../mod_api/trait.Event.html) for a mod's own event:
+/// `#[event(id = "your_mod:name", side = server | client, cancellable)]` on a
+/// `#[non_exhaustive]` struct; a cancellable one has a `cancelled: bool` field.
+#[proc_macro_derive(Event, attributes(event))]
+pub fn derive_event(input: TokenStream) -> TokenStream {
+    event::expand(syn::parse_macro_input!(input as syn::DeriveInput))
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }
@@ -71,30 +68,29 @@ struct ListenerOptions {
     receive_cancelled: Option<proc_macro2::Span>,
 }
 
-/// Takes `method`'s `#[listener]`, if it has one.
-fn take_listener(method: &mut ImplItemFn) -> syn::Result<Option<ListenerOptions>> {
+/// Takes `method`'s `#[listener]` or `#[subscribe]` (named by `kind`), if it has one.
+fn take_listener(method: &mut ImplItemFn, kind: &str) -> syn::Result<Option<ListenerOptions>> {
     let Some(index) = method
         .attrs
         .iter()
-        .position(|attr| attr.path().is_ident("listener"))
+        .position(|attr| attr.path().is_ident(kind))
     else {
         return Ok(None);
     };
     let attr = method.attrs.remove(index);
-    if let Some(again) = method
-        .attrs
-        .iter()
-        .find(|attr| attr.path().is_ident("listener"))
-    {
+    if let Some(again) = method.attrs.iter().find(|attr| attr.path().is_ident(kind)) {
         return Err(syn::Error::new_spanned(
             again,
-            "a hook method takes one #[listener]",
+            format!("a method takes one #[{kind}]"),
         ));
     }
     let mut options = ListenerOptions {
         priority: syn::parse_quote!(0),
         receive_cancelled: None,
     };
+    if matches!(attr.meta, Meta::Path(_)) {
+        return Ok(Some(options));
+    }
     attr.parse_nested_meta(|meta| {
         if meta.path.is_ident("priority") {
             options.priority = meta.value()?.parse()?;
@@ -152,6 +148,65 @@ fn expand(mut implementation: ItemImpl, export: bool) -> TokenStream {
     let mut methods = Vec::new();
     let mut cfgs = Vec::new();
     let mut listeners = Vec::new();
+    // Mod event listeners: plain methods, moved out of the trait impl.
+    let mut subscribers = Vec::new();
+    let mut inherent = Vec::new();
+    let mut index = 0;
+    while index < implementation.items.len() {
+        let ImplItem::Fn(method) = &mut implementation.items[index] else {
+            index += 1;
+            continue;
+        };
+        match take_listener(method, "subscribe") {
+            Ok(Some(_)) if part.is_some() => {
+                return syn::Error::new_spanned(
+                    &method.sig.ident,
+                    "#[subscribe] listens to a mod event from a mod's `impl Hooks`, not a part",
+                )
+                .into_compile_error()
+                .into();
+            }
+            Ok(Some(options)) => {
+                subscribers.push((method.sig.ident.clone(), cfg_attributes(method), options));
+                inherent.push(implementation.items.remove(index));
+            }
+            Ok(None) => index += 1,
+            Err(error) => return error.into_compile_error().into(),
+        }
+    }
+    if !subscribers.is_empty() {
+        // `register` adds the listeners, then runs the mod's own `register`, if any.
+        let own = implementation.items.iter().position(
+            |item| matches!(item, ImplItem::Fn(method) if method.sig.ident == "register"),
+        );
+        let own = own.map(|position| {
+            let ImplItem::Fn(mut method) = implementation.items.remove(position) else {
+                unreachable!()
+            };
+            method.sig.ident = format_ident!("__sunrise_register");
+            let cfgs = cfg_attributes(&method);
+            let call = quote!(#(#cfgs)* Self::__sunrise_register(self, r, cx););
+            inherent.push(ImplItem::Fn(method));
+            call
+        });
+        let adds = subscribers.iter().map(|(method, cfgs, options)| {
+            let priority = &options.priority;
+            let add = if options.receive_cancelled.is_some() {
+                format_ident!("add_listener_receive_cancelled")
+            } else {
+                format_ident!("add_listener")
+            };
+            // A refusal is recorded on the registrar and refuses the mod at startup.
+            quote! { #(#cfgs)* let _ = r.#add(#priority, Self::#method); }
+        });
+        implementation.items.push(syn::parse_quote! {
+            fn register(&self, r: &mut dyn mod_api::Registrar, cx: &mod_api::RegistrationContext) {
+                let _ = (&r, cx);
+                #(#adds)*
+                #own
+            }
+        });
+    }
     // A block part's plain declarations are not hooks, so their names subscribe nothing.
     const BLOCK_PART_PLAIN: [&str; 1] = ["explosion_resistance_is_pure"];
     for item in &mut implementation.items {
@@ -161,7 +216,7 @@ fn expand(mut implementation: ItemImpl, export: bool) -> TokenStream {
             {
                 continue;
             }
-            match take_listener(method) {
+            match take_listener(method, "listener") {
                 Ok(Some(_)) if part.is_some() => {
                     return syn::Error::new_spanned(
                         &method.sig.ident,
@@ -183,40 +238,6 @@ fn expand(mut implementation: ItemImpl, export: bool) -> TokenStream {
     let id = format_ident!("HookId");
     let ids = format_ident!("hook_ids");
     let subscribed_name = format_ident!("{}", part.unwrap_or("subscribed"));
-    // Entity parts (#1077) carry plain methods beside their scoped hooks
-    // (#792): the goal, behavior and spawn-size registrars are not hooks, so
-    // their names subscribe nothing.
-    if name == "EntityPart" {
-        const ENTITY_PART_PLAIN: [&str; 5] = [
-            "register_goals",
-            "register_behaviors",
-            "spawn_cluster_size",
-            "is_shearable",
-            "on_sheared",
-        ];
-        let plain: Vec<bool> = methods
-            .iter()
-            .map(|method| ENTITY_PART_PLAIN.contains(&method.to_string().as_str()))
-            .collect();
-        let hooked: Vec<_> = methods
-            .iter()
-            .zip(&plain)
-            .filter(|(_, plain)| !*plain)
-            .map(|(method, _)| method)
-            .collect();
-        let hooked_cfgs: Vec<_> = cfgs
-            .iter()
-            .zip(&plain)
-            .filter(|(_, plain)| !*plain)
-            .map(|(cfgs, _)| cfgs)
-            .collect();
-        implementation.items.push(syn::parse_quote! {
-            fn #subscribed_name(&self) -> &'static [Option<mod_api::#id>] {
-                &[#(#(#hooked_cfgs)* mod_api::#ids::#hooked),*]
-            }
-        });
-        return quote!(#implementation).into();
-    }
     let subscribed = {
         syn::parse_quote! {
             fn #subscribed_name(&self) -> &'static [Option<mod_api::#id>] {
@@ -250,19 +271,34 @@ fn expand(mut implementation: ItemImpl, export: bool) -> TokenStream {
     } else {
         quote!()
     };
-    quote!(#implementation #export).into()
+    let inherent = if inherent.is_empty() {
+        quote!()
+    } else {
+        let (generics, _, where_clause) = implementation.generics.split_for_impl();
+        let ty = &implementation.self_ty;
+        quote! { impl #generics #ty #where_clause { #(#inherent)* } }
+    };
+    quote!(#implementation #inherent #export).into()
 }
 
-/// Generate the panicking defaults of a host area from each method's access declaration.
-/// The same declarations drive game forwarders in the build-time API generator. A backend trait
-/// may carry `#[table_backend("path")]`: the game answers its reads from the borrowed view at
-/// `path`, which implements the trait, and `Game` forwards to it.
+/// Generate the defaults of a host area trait. Methods marked `#[decline_unavailable]`
+/// do nothing or return `false`, according to their return type. Others panic if unimplemented.
+/// The same declarations drive game forwarders in the build-time API generator.
+/// A backend trait may carry `#[table_backend("path")]`: the game answers its reads from the
+/// borrowed view at `path`, which implements the trait, and `Game` forwards to it. Methods can
+/// opt out of generated conversion in either direction with `#[forward_api_inputs]` or
+/// `#[forward_api_output]` when the implementation accepts or returns the API types directly.
+/// `#[serialize_text]` validates Text arguments at a forwarding boundary that writes a packet
+/// or a saved component; unmarked text arguments are converted only for in-process use.
+/// Use `#[manual_handle]` for an inherent handle wrapper written by hand.
+/// `#[goal_view]` marks a read a mob's goal tick answers from its own view for every holder.
 #[proc_macro_attribute]
 pub fn host_area(_attribute: TokenStream, input: TokenStream) -> TokenStream {
     let mut area = parse_macro_input!(input as syn::ItemTrait);
-    // `#[table_backend("path")]` is read by the build-time generator alone.
-    area.attrs
-        .retain(|attr| !attr.path().is_ident("table_backend"));
+    // `#[table_backend("path")]` and `#[server_only]` are read by the build-time generator alone.
+    area.attrs.retain(|attr| {
+        !attr.path().is_ident("table_backend") && !attr.path().is_ident("server_only")
+    });
     let name = area.ident.to_string();
     let union = [
         "ClientBackendMut",
@@ -285,30 +321,69 @@ pub fn host_area(_attribute: TokenStream, input: TokenStream) -> TokenStream {
         let syn::TraitItem::Fn(method) = member else {
             continue;
         };
-        let Some(index) = method
+        let decline = method
             .attrs
             .iter()
-            .position(|attr| attr.path().is_ident("access"))
-        else {
-            return syn::Error::new_spanned(&method.sig, "host method needs #[access(Level)]")
-                .to_compile_error()
-                .into();
-        };
-        let attr = method.attrs.remove(index);
-        let level = match attr.parse_args::<syn::Ident>() {
-            Ok(level) => level,
-            Err(error) => return error.to_compile_error().into(),
-        };
+            .any(|attr| attr.path().is_ident("decline_unavailable"));
         method.attrs.retain(|attr| {
             !attr.path().is_ident("static_call")
                 && !attr.path().is_ident("service")
                 && !attr.path().is_ident("read_stack")
+                && !attr.path().is_ident("game_method")
+                && !attr.path().is_ident("access")
+                && !attr.path().is_ident("forward_api_inputs")
+                && !attr.path().is_ident("forward_api_output")
+                && !attr.path().is_ident("serialize_text")
+                && !attr.path().is_ident("decline_unavailable")
+                && !attr.path().is_ident("manual_handle")
+                && !attr.path().is_ident("goal_view")
+                && !attr.path().is_ident("server_only")
         });
-        let operation = method.sig.ident.to_string();
-        let label = format!("{union}::{operation}");
-        method.default = Some(syn::parse_quote!({
-            crate::world::phase::unprovided(#label, #operation, crate::world::phase::LoadAccess::#level)
-        }));
+        // A shared published read answers from the installed table, without a live Game.
+        let published = match method
+            .attrs
+            .iter()
+            .position(|attr| attr.path().is_ident("published"))
+            .map(|index| method.attrs.remove(index).parse_args::<syn::Path>())
+        {
+            None => None,
+            Some(Ok(path)) => Some(path),
+            Some(Err(error)) => return error.to_compile_error().into(),
+        };
+        if let Some(path) = published {
+            let args = method.sig.inputs.iter().filter_map(|arg| match arg {
+                syn::FnArg::Typed(arg) => Some(arg.pat.clone()),
+                syn::FnArg::Receiver(_) => None,
+            });
+            method.default = Some(syn::parse_quote!({ crate::__private::#path(#(#args),*) }));
+            method.semi_token = None;
+            continue;
+        }
+        method.default = Some(if decline {
+            match &method.sig.output {
+                syn::ReturnType::Default => syn::parse_quote!({}),
+                syn::ReturnType::Type(_, ty)
+                    if matches!(
+                        ty.as_ref(),
+                        syn::Type::Path(path) if path.qself.is_none() && path.path.is_ident("bool")
+                    ) =>
+                {
+                    syn::parse_quote!({ false })
+                }
+                output => {
+                    return syn::Error::new_spanned(
+                        output,
+                        "#[decline_unavailable] requires no return value or a bool return value",
+                    )
+                    .to_compile_error()
+                    .into();
+                }
+            }
+        } else {
+            let operation = method.sig.ident.to_string();
+            let label = format!("{union}::{operation}");
+            syn::parse_quote!({ unimplemented!("{}", #label) })
+        });
         method.semi_token = None;
     }
     quote!(#area).into()
@@ -321,6 +396,11 @@ pub fn host_area(_attribute: TokenStream, input: TokenStream) -> TokenStream {
 /// receives cancelled events is still called after an earlier mod cancels, with
 /// `event.cancelled` to read and clear. `receive_cancelled` compiles only on a hook a mod may
 /// cancel.
+///
+/// A method with `#[subscribe(priority = <i32>, receive_cancelled)]` (both optional) listens to
+/// another mod's [`Event`](../mod_api/trait.Event.html) instead: the macro moves it out of the
+/// trait impl and adds it in `register` with `Registrar::add_listener`, before the mod's own
+/// `register` body runs.
 #[proc_macro_attribute]
 pub fn sunrise_mod(_attribute: TokenStream, input: TokenStream) -> TokenStream {
     expand(parse_macro_input!(input as ItemImpl), true)
@@ -373,30 +453,6 @@ pub fn sunrise_loop(attribute: TokenStream, input: TokenStream) -> TokenStream {
         .into();
     }
     input
-}
-
-/// Marks a provided trait method computed from the trait's other methods.
-/// A method without a default body is refused.
-#[proc_macro_attribute]
-pub fn computed_in_mod(attribute: TokenStream, input: TokenStream) -> TokenStream {
-    let method = parse_macro_input!(input as syn::TraitItemFn);
-    if !attribute.is_empty() {
-        return syn::Error::new_spanned(
-            proc_macro2::TokenStream::from(attribute),
-            "write #[computed_in_mod] with no arguments",
-        )
-        .to_compile_error()
-        .into();
-    }
-    if method.default.is_none() {
-        return syn::Error::new_spanned(
-            &method.sig,
-            "#[computed_in_mod] needs a default body: the mod computes this method itself",
-        )
-        .to_compile_error()
-        .into();
-    }
-    quote!(#method).into()
 }
 
 /// Derive subscriptions for internal test fixtures that construct their own mods.

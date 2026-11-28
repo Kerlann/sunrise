@@ -46,6 +46,25 @@ class Install(unittest.TestCase):
 
 
 class Measure(unittest.TestCase):
+    def test_direct_and_callgrind_runs_inherit_the_main_stack_limit(self):
+        def benchmark(command, *, cwd, env, **kwargs):
+            self.assertIsNone(kwargs.get('preexec_fn'), command)
+            self.assertFalse(any(arg.startswith('--main-stacksize') for arg in command), command)
+            Path(env['SUNRISE_HOT_PATHS']).write_text('{"name":"tick","operations":1}\n')
+            if command[0] == 'valgrind':
+                (cwd / 'callgrind.out').write_text('desc: Trigger: Client Request: tick\ntotals: 7\n')
+            return SimpleNamespace(returncode=0)
+
+        with (tempfile.TemporaryDirectory() as directory,
+              patch.object(hot_paths, 'scratch_env', side_effect=lambda _, **env: env),
+              patch.object(hot_paths.subprocess, 'run', side_effect=benchmark)):
+            root = Path(directory)
+            game = root / 'sunrise-client'
+            expected = {'tick': {'name': 'tick', 'operations': 1}}
+            self.assertEqual(hot_paths.run_game(game, root, root / 'direct', 'none', ''), expected)
+            self.assertEqual(hot_paths.callgrind('valgrind', game, root, root / 'counted', 'none', ''),
+                             ({'tick': (7, 0)}, expected))
+
     def test_the_same_filter_selects_and_runs_fanout_workloads(self):
         inherited = 'mod.hook.fanout.entity_tick.10'  # prefix also selects .100 and .1000
         explicit = 'mod.hook.fanout.server_started.1000'

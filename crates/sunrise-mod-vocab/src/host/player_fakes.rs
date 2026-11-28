@@ -8,7 +8,6 @@ use crate::*;
 pub trait PlayerFakesBackend {
     /// Side: server.
     /// Whether a live player handle names a connectionless actor.
-    #[access(WorldOnly)]
     fn player_is_fake(&self, player: PlayerRef) -> Option<bool>;
 }
 /// The handles' writes of the `player_fakes` area, implemented by the game and reached through [`BackendMut`].
@@ -26,7 +25,6 @@ pub trait PlayerFakesBackendMut {
     /// vanilla's result) have still happened then. The fake is found once, and its turn
     /// starts at that place in the list. The acting fake's body can obstruct its
     /// own block placement, just as a connected player's can.
-    #[access(WorldOnly)]
     fn player_perform_action(
         &mut self,
         player: PlayerRef,
@@ -37,7 +35,6 @@ pub trait PlayerFakesBackendMut {
     /// when the action refuses. Only the existing guest turn runs gameplay and its hooks.
     /// For placement, choose an eye position that keeps the temporary standing body
     /// clear of the block's collision shape.
-    #[access(WorldOnly)]
     fn player_perform_action_scoped(
         &mut self,
         player: PlayerRef,
@@ -46,6 +43,5 @@ pub trait PlayerFakesBackendMut {
     ) -> Result<ScopedActionResult, ActionRefused>;
     /// Side: server.
     /// Remove a fake without treating it as a disconnect or saving it.
-    #[access(WorldOnly)]
     fn player_remove_fake(&mut self, player: PlayerRef) -> bool;
 }

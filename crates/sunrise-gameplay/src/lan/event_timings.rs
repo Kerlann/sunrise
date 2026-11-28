@@ -7,7 +7,7 @@
 //! server's guests, so the groups stay as few as those, and only while timing is recorded.
 
 use std::sync::Arc;
-use sunrise_client::lan::hub::HostEvent;
+use sunrise_sim::lan::hub::HostEvent;
 
 pub struct Burst<W, D> {
     pub kind: &'static str,
@@ -105,15 +105,19 @@ pub type EventKind = (&'static str, Option<u32>, Option<String>);
 
 pub fn event_kind(event: &HostEvent) -> EventKind {
     match event {
-        HostEvent::Joined(c) => ("join", Some(*c), None),
+        HostEvent::Joined(c, _) => ("join", Some(*c), None),
         HostEvent::Left(g) => ("leave", None, Some(g.name.clone())),
+        HostEvent::CloseInvalidContainer { conn, .. } => {
+            ("close invalid container", Some(*conn), None)
+        }
         HostEvent::Packet(c, p) => (p.name(), Some(*c), None),
         HostEvent::InputCredits(_) => ("input credits", None, None),
         HostEvent::RawPayload(_) => ("raw payload", None, None),
+        HostEvent::PlayerPong { conn, .. } => ("player pong", Some(*conn), None),
         HostEvent::ClientInformation(c, _, _) => ("client settings", Some(*c), None),
         HostEvent::ChatSubmitted { .. } => ("chat submitted", None, None),
         HostEvent::ChatSessionStarted(_) => ("chat session", None, None),
-        HostEvent::Jump { conn, .. } => ("jump", Some(*conn), None),
+        HostEvent::AcceptedMove(conn, _) => ("accepted player move", Some(*conn), None),
         HostEvent::PlayerMove(c) => ("player move", Some(*c), None),
         HostEvent::PlayerLoaded(c) => ("loaded", Some(*c), None),
         HostEvent::RecipeBookSettings { conn, .. } => ("recipe book", Some(*conn), None),
@@ -121,8 +125,6 @@ pub fn event_kind(event: &HostEvent) -> EventKind {
         HostEvent::Input { conn, .. } => ("input", Some(*conn), None),
         HostEvent::Kicked { name, .. } => ("kick", None, Some(name.clone())),
         HostEvent::Flight { conn, .. } => ("flight", Some(*conn), None),
-        HostEvent::Chat { .. } => ("chat line", None, None),
-        HostEvent::PlayerChat { .. } => ("chat", None, None),
         HostEvent::Warn(_) => ("warning", None, None),
         HostEvent::Error(_) => ("error", None, None),
     }

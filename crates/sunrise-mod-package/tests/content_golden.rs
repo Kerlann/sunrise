@@ -5,7 +5,11 @@
 #[path = "support/content_corpus.rs"]
 mod corpus;
 
-use std::{env, fs, io, path::Path};
+use std::{
+    env, fs,
+    io::{self, Write},
+    path::Path,
+};
 use sunrise_mod_package::{Content, Package};
 
 const GOLDEN: &str = "tests/content-golden";
@@ -50,9 +54,17 @@ fn content_golden() {
     for (entry, path) in &entries {
         let actual = dump(Path::new(path));
         let golden = format!("{GOLDEN}/{entry}.txt");
-        if bless && !Path::new(&golden).exists() {
-            fs::write(&golden, actual).unwrap_or_else(|e| panic!("{golden}: {e}"));
-            continue;
+        if bless {
+            // Creating is the check: an existing golden is never opened for writing.
+            match fs::File::create_new(&golden) {
+                Ok(mut file) => {
+                    file.write_all(actual.as_bytes())
+                        .unwrap_or_else(|e| panic!("{golden}: {e}"));
+                    continue;
+                }
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => panic!("{golden}: {e}"),
+            }
         }
         let expected = match fs::read(&golden) {
             Ok(bytes) if bytes == actual.as_bytes() => continue,

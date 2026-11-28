@@ -15,6 +15,14 @@ const MIN_SCALE: f32 = 0.25;
 /// The TAA history format: 8 bits would band as frames accumulate.
 const HISTORY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
+fn reduced_scale(scale: f32) -> Option<f32> {
+    if scale <= MIN_SCALE {
+        None
+    } else {
+        Some((scale * 0.75).max(MIN_SCALE))
+    }
+}
+
 struct WorldTarget {
     size: [u32; 2],
     color: wgpu::TextureView,
@@ -373,11 +381,11 @@ impl Post {
     /// The world's rendered size and the size it is shown at (TAA's history).
     fn sizes(&self, window: [u32; 2]) -> ([u32; 2], [u32; 2]) {
         let upscale = if self.taa_on { self.upscale } else { 1.0 };
-        self.sizes_with_upscale(window, upscale)
+        Self::sizes_with_upscale(window, self.scale, upscale)
     }
 
-    fn sizes_with_upscale(&self, window: [u32; 2], upscale: f32) -> ([u32; 2], [u32; 2]) {
-        let output = window.map(|v| ((v as f32 * self.scale).round() as u32).clamp(1, 8192));
+    fn sizes_with_upscale(window: [u32; 2], scale: f32, upscale: f32) -> ([u32; 2], [u32; 2]) {
+        let output = window.map(|v| ((v as f32 * scale).round() as u32).clamp(1, 8192));
         (
             output.map(|v| ((v as f32 / upscale).round() as u32).max(1)),
             output,
@@ -386,7 +394,7 @@ impl Post {
 
     /// The next TAA frame's input size, even before its first jitter or resize.
     pub(super) fn taa_render_size(&self, window: [u32; 2]) -> [u32; 2] {
-        self.sizes_with_upscale(window, self.upscale).0
+        Self::sizes_with_upscale(window, self.scale, self.upscale).0
     }
 
     /// TAA's sub-pixel jitter this frame, as a clip-space matrix to multiply into the
@@ -432,6 +440,13 @@ impl Post {
         [j[0] * size[0] as f32 * 0.5, -j[1] * size[1] as f32 * 0.5]
     }
 
+    /// Tests: no target, as `prepare`'s out-of-memory fallback leaves it
+    /// (`TestHooks::fail_scaled_targets`).
+    #[cfg(feature = "test-support")]
+    pub(super) fn drop_target(&mut self) {
+        self.target = None;
+    }
+
     /// The world's colour and depth targets this frame, or `None` to draw
     /// it straight to the screen.
     /// `always`: a target even at scale 1 without anti-aliasing (a shader pack reads it).
@@ -471,7 +486,7 @@ impl Post {
                 break;
             }
             drop(target);
-            if self.scale <= MIN_SCALE {
+            let Some(reduced) = reduced_scale(self.scale) else {
                 log::warn!(
                     "Sunrise renderer: no video memory for the scaled world at {size:?} ({}); drawing at the window's size",
                     error.map_or_else(String::new, |e| e.to_string())
@@ -479,8 +494,7 @@ impl Post {
                 self.scale = 1.0;
                 self.target = None;
                 return None;
-            }
-            let reduced = (self.scale * 0.75).max(MIN_SCALE);
+            };
             log::warn!(
                 "Sunrise renderer: out of video memory for the scaled world at {size:?}; resolution scale {:.2} -> {reduced:.2} ({})",
                 self.scale,
@@ -797,6 +811,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn culling_uses_the_next_taa_size_before_the_first_jitter_or_resize() {
         let _gpu = crate::gfx::test_gpu::lock();
         let Some((device, _)) = test_device() else {
@@ -822,6 +837,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn baked_light_changes_and_returning_from_a_pack_reject_taa_history() {
         let _gpu = crate::gfx::test_gpu::lock();
         let Some((device, _)) = test_device() else {
@@ -877,12 +893,12 @@ mod tests {
     }
 
     fn test_device() -> Option<(wgpu::Device, wgpu::Queue)> {
-        let instance = crate::gfx::test_gpu::instance();
-        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
-        pollster::block_on(adapter.request_device(&Default::default())).ok()
+        let (_, device, queue) = crate::gfx::test_gpu::optional_device()?;
+        Some((device, queue))
     }
 
     #[test]
+    #[ignore = "daily"]
     fn world_post_pipelines_compile_or_fall_back() {
         let _gpu = crate::gfx::test_gpu::lock();
         let Some((device, _)) = test_device() else {

@@ -1,18 +1,23 @@
 //! Admission and world-thread preparation for terrain visibility in the player's level.
-use super::{Job, MeshSettings, MeshUpload, Streaming, WorkerContext};
+use super::{MeshJob, MeshSettings, MeshStreamer, MeshUpload, WorkerContext};
 use crate::fast_hash::{FxHashMap, FxHashSet};
 use crate::mesher::{
     ANSWER_BYTES, Lease, MAX_RESIDENT_VISIBILITY_BYTES, PLAN_BYTES, Region, SectionAnswer,
-    SectionVisibilityPlan, plan_section,
+    SectionVisibilityPlan, capture_input, plan_section,
 };
-use crate::section_mask::SectionMask;
 use crate::world::World;
-use mod_api::{BiomeId, CellVisibility, MAX_CELL_RECORDS, SECTION_INPUT_CELLS, SectionCell};
+use mod_api::{
+    BlockState, CellVisibility, MAX_CELL_RECORDS, SECTION_INPUT_CELLS, SectionCell,
+    SectionVisibilityInput,
+};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use sunrise_level::chunk_streamer::dirty_visibility_columns;
 
-const SNAPSHOT_BYTES: usize = SECTION_INPUT_CELLS
-    * (size_of::<SectionCell>() + size_of::<u8>() + size_of::<Option<BiomeId>>());
+// The registry belongs to the already shared worker context. Capture allocates only these
+// three arrays and retains a reference to the existing keys, with no palette scratch.
+const SNAPSHOT_BYTES: usize = size_of::<SectionVisibilityInput>()
+    + SECTION_INPUT_CELLS * (size_of::<SectionCell>() + size_of::<u8>() + size_of::<Option<u16>>());
 const WORKER_BYTES: usize = PLAN_BYTES + size_of::<Region>() + size_of::<FrozenPlan>();
 const HALO_BYTES: usize = size_of::<HaloAnswers>();
 const CACHE_BYTES: usize = ANSWER_BYTES + size_of::<HeldAnswer>() - size_of::<SectionAnswer>();
@@ -77,6 +82,18 @@ pub struct VisibilityRequest {
     settings: MeshSettings,
     context: Arc<WorkerContext>,
     lease: Lease,
+}
+
+impl VisibilityRequest {
+    /// Capture input using this request's immutable region and the worker's own biome table.
+    pub fn capture_input(&self, state_of: impl FnMut(u32) -> BlockState) -> SectionVisibilityInput {
+        capture_input(
+            &self.region,
+            self.key.1,
+            state_of,
+            &self.context.chunk.biomes,
+        )
+    }
 }
 
 impl SectionPreparation {
@@ -200,7 +217,7 @@ impl SectionPreparation {
     }
 }
 
-impl Streaming {
+impl MeshStreamer {
     pub(super) fn submit_mesh(
         &mut self,
         key: (i32, i32, i32),
@@ -208,13 +225,13 @@ impl Streaming {
         first: bool,
         visibility: Option<Lease>,
     ) {
-        let settings = self.mesh_settings();
+        let mut settings = self.mesh_settings();
         if let Some(lease) = visibility {
-            let context = self.shared.context.read().unwrap().clone();
+            let context = self.mesh_shared.context.read().unwrap().clone();
             self.section_visibility.pending.push(VisibilityRequest {
                 key,
                 region: region.clone(),
-                seq: self.sequence,
+                seq: self.chunks.sequence(),
                 first,
                 settings,
                 context,
@@ -223,8 +240,16 @@ impl Streaming {
             return;
         }
         let (x, sy, z) = key;
-        let job = Job::Mesh(x, sy, z, region.clone(), self.sequence, settings);
-        self.submit(Some((x, z)), if first { 2 } else { 0 }, job);
+        if region[1][1]
+            .as_ref()
+            .is_some_and(|c| !c.extra_models.is_empty())
+        {
+            let context = self.mesh_shared.context.read().unwrap().clone();
+            self.attached_tint_preparation
+                .prepare(&context, &mut settings, region, sy);
+        }
+        let job = MeshJob::mesh(x, sy, z, region.clone(), self.chunks.sequence(), settings);
+        self.submit_mesh_job(Some((x, z)), if first { 2 } else { 0 }, job);
     }
 
     /// The admitted sections whose raw inputs are ready to lend to mods on the world thread.
@@ -278,12 +303,14 @@ impl Streaming {
         });
         settings.visibility = Some(Arc::new(FrozenPlan {
             plan,
-            context,
+            context: context.clone(),
             halo,
             _lease: lease.split(WORKER_BYTES),
         }));
-        let job = Job::Mesh(x, sy, z, region, seq, settings);
-        self.submit(Some((x, z)), if first { 2 } else { 0 }, job);
+        self.attached_tint_preparation
+            .prepare(&context, &mut settings, &region, sy);
+        let job = MeshJob::mesh(x, sy, z, region, seq, settings);
+        self.submit_mesh_job(Some((x, z)), if first { 2 } else { 0 }, job);
     }
 
     /// A visibility policy change, or the join. Invalidate answers, jobs and queued uploads,
@@ -295,6 +322,7 @@ impl Streaming {
         }
         state.listening = listening;
         state.guard_uploads = true;
+        self.chunks.set_dirty_visibility_on_load(listening);
         world.dirty_sections.track_visibility_edits(listening);
         self.reload_sections(world);
     }
@@ -323,20 +351,7 @@ impl Streaming {
                 self.section_visibility.answers.remove(&(x, sy, z));
                 self.section_visibility.capacity_waiting.remove(&(x, sy, z));
             }
-            Self::dirty_visibility_columns(world, x, z);
-        }
-    }
-
-    /// A column arrived or disappeared; every resident reader's raw halo changed.
-    pub(super) fn dirty_visibility_columns(world: &mut World, x: i32, z: i32) {
-        let mask = SectionMask::below(world.layout().sections());
-        for dz in -1..=1 {
-            for dx in -1..=1 {
-                let n = (x + dx, z + dz);
-                if world.chunks.contains_key(&n) {
-                    world.dirty_sections.insert_column_mask(n, mask);
-                }
-            }
+            dirty_visibility_columns(world, x, z);
         }
     }
 }
@@ -362,7 +377,7 @@ fn dirty_neighbours(world: &mut World, (x, sy, z): (i32, i32, i32)) {
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
-    use crate::streaming::{ChunkGenerator, Done, Proto};
+    use crate::streaming::{ChunkGenerator, ChunkWorkerContext, MeshWorkerContext, Proto};
     use crate::{
         assets::Assets, biome::Biomes, chunk::Chunk, light::LightTables, mesher::MeshTables, models,
     };
@@ -372,12 +387,12 @@ pub(super) mod tests {
     use sunrise_items::blocks::BlockFacts;
     use sunrise_world::registry::BlockStateId;
 
-    pub(in crate::streaming) fn fixture() -> (World, Streaming, u32) {
+    pub(in crate::streaming) fn fixture() -> (World, MeshStreamer, u32) {
         struct RemoteOnly;
         impl ChunkGenerator for RemoteOnly {
             type Worker = ();
             fn worker(&self) {}
-            fn proto(&self, _: &mut (), _: i32, _: i32) -> Proto {
+            fn proto(&self, _: &mut (), _: i32, _: i32) -> Result<Proto, String> {
                 panic!("a remote level never generates locally")
             }
             fn finish(&self, _: Proto) -> Chunk {
@@ -386,30 +401,40 @@ pub(super) mod tests {
         }
         static CONTEXT: OnceLock<Arc<WorkerContext>> = OnceLock::new();
         let context = CONTEXT.get_or_init(|| {
-            let root =
-                std::path::PathBuf::from(std::env::var_os("SUNRISE_MESH_TEST_RESOURCES").unwrap());
+            let root = std::path::PathBuf::from(
+                std::env::var_os("SUNRISE_MESH_TEST_RESOURCES")
+                    .or_else(|| std::env::var_os("SUNRISE_TEST_RESOURCES"))
+                    .unwrap(),
+            );
             let source = ResourceRoot::directory(root.clone());
             let assets = Arc::new(Assets::load(&root).unwrap());
-            let render = Arc::new(assets.reload(&source).unwrap());
+            let render = Arc::new(crate::assets::RenderAssets::load(&source, &assets).unwrap());
             let facts = BlockFacts::load(&root, assets.registry).unwrap();
             let visibility = models::load_visibility(&root, assets.registry).unwrap();
+            let tables =
+                Arc::new(MeshTables::new(&assets, &render, &facts, visibility, None).unwrap());
+            let light = Arc::new(LightTables::load(&root, assets.registry, &facts).unwrap());
+            let biomes = Arc::new(Biomes::load(&source).unwrap());
             Arc::new(WorkerContext {
-                tables: Arc::new(
-                    MeshTables::new(&assets, &render, &facts, visibility, None).unwrap(),
-                ),
-                light: Arc::new(LightTables::load(&root, assets.registry, &facts).unwrap()),
-                biomes: Arc::new(Biomes::load(&source).unwrap()),
-                assets,
-                render,
-                hidden_states: Arc::from([]),
-                part_tables: Default::default(),
+                chunk: ChunkWorkerContext {
+                    assets,
+                    biomes,
+                    light,
+                },
+                mesh: MeshWorkerContext {
+                    render,
+                    tables,
+                    hidden_states: Arc::from([]),
+                    part_tables: Default::default(),
+                },
             })
         });
         let world = World::new(BlockStateId(0), 0);
-        let mut streaming = Streaming::new(Arc::new(RemoteOnly), context.clone(), 1);
+        let mut streaming = MeshStreamer::new(Arc::new(RemoteOnly), context.clone(), 1);
         streaming.remote = true;
         streaming.center_y = world.bottom_y();
         let stone = context
+            .chunk
             .assets
             .registry
             .default_state("minecraft:stone")
@@ -480,188 +505,248 @@ pub(super) mod tests {
         );
     }
 
+    fn test_block_key() -> mod_api::BlockKey {
+        mod_platform::__private::part_tests::install_parts_fixture(&[]).unwrap();
+        mod_api::__private::resolve_block_keys(["minecraft:air"], |_| {
+            sunrise_mod_runtime::block_definitions::BlockDefinition::new(
+                &[&std::collections::BTreeMap::new()],
+                0,
+            )
+            .map_err(|error| format!("{error:?}"))
+        })
+        .unwrap();
+        mod_api::__private::block_key("minecraft:air").unwrap()
+    }
+
+    /// `Streaming::meshed_columns` (#5911): a column is listed once its sections are meshed and
+    /// leaves the list when it unloads.
     #[test]
     #[ignore = "daily"]
-    fn remote_column_arrival_and_unload_remesh_the_actual_halo() {
-        use crate::mesher::{SectionPlanBuilder, capture_input};
-        use mod_api::{BlockStateId, SectionCell};
+    fn a_meshed_column_is_listed_until_it_unloads() {
+        use crate::mesher::SectionPlanBuilder;
 
-        let (mut world, mut streaming, stone) = fixture();
-        let base = world.bottom_y();
-        let mut centre = Chunk::empty(0, 0);
-        centre.set(15, base + 4, 8, stone);
-        streaming.insert_remote(&mut world, centre);
-        assert!(streaming.update(&mut world).0.is_empty());
-        assert!(streaming.take_visibility_requests().is_empty());
-        assert!(
-            world.dirty_sections.contains(&CENTRE),
-            "the no-listener route still waits for a complete region"
-        );
-        streaming.refresh_section_visibility(&mut world, true);
-
-        let compile = |world: &mut World, streaming: &mut Streaming, expected: SectionCell| {
-            let mut captured = false;
+        mod_platform::testing::with_mods(Vec::new().into(), || {
+            let (mut world, mut streaming, stone) = fixture();
+            let base = world.bottom_y();
+            let mut centre = Chunk::empty(0, 0);
+            centre.set(8, base + 4, 8, stone);
+            streaming.insert_remote(&mut world, centre);
+            assert!(streaming.meshed_columns().next().is_none());
+            streaming.refresh_section_visibility(&mut world, true);
+            let mut meshed = false;
             for _ in 0..100 {
-                let (uploads, _) = streaming.update(world);
+                let (uploads, _) = streaming.update(&mut world);
                 for request in streaming.take_visibility_requests() {
-                    let mut builder = SectionPlanBuilder::new();
-                    if request.key == CENTRE {
-                        let input = capture_input(&request.region, 0);
-                        assert_eq!(input.cell([16, 4, 8]), Ok(expected));
-                        captured = true;
-                    } else if request.key == (1, 0, 0) {
-                        builder.restrict([1, 4, 8], false, false, 0);
-                    }
-                    streaming.submit_visibility_answer(world, request, builder.finish());
+                    let plan = SectionPlanBuilder::new().finish();
+                    streaming.submit_visibility_answer(&mut world, request, plan);
                 }
-                let faces = uploads
-                    .iter()
-                    .find(|upload| {
-                        upload.key == CENTRE && streaming.can_publish_mesh(world, upload)
-                    })
-                    .map(|upload| upload.mesh.solid.len() / 4);
+                meshed |= uploads.iter().any(|upload| upload.key == CENTRE);
                 streaming.free(uploads);
-                if let Some(faces) = faces {
-                    assert!(captured);
-                    return faces;
+                if meshed {
+                    break;
                 }
                 streaming.wait(Duration::from_millis(20));
             }
-            panic!("the requested centre mesh did not complete");
-        };
-        assert_eq!(compile(&mut world, &mut streaming, SectionCell::Missing), 6);
-        let mut east = Chunk::empty(1, 0);
-        east.set(0, base + 4, 8, stone);
-        streaming.insert_remote(&mut world, east);
-        assert_eq!(
-            compile(
-                &mut world,
-                &mut streaming,
-                SectionCell::State(BlockStateId(stone))
-            ),
-            5
-        );
-        assert!(
-            streaming
-                .section_visibility
-                .answers
-                .contains_key(&(1, 0, 0))
-        );
-        let gone = [(1, 0)].into_iter().collect();
-        assert_eq!(Streaming::take_remote_columns(&mut world, &gone).len(), 1);
-        streaming.forget_columns(&mut world, &gone);
-        assert!(
-            !streaming
-                .section_visibility
-                .answers
-                .contains_key(&(1, 0, 0)),
-            "unload drops the answer and its lease"
-        );
-        assert_eq!(compile(&mut world, &mut streaming, SectionCell::Missing), 6);
+            assert!(meshed, "the centre column was meshed");
+            assert!(streaming.meshed_columns().any(|column| column == (0, 0)));
+            let gone = [(0, 0)].into_iter().collect();
+            MeshStreamer::take_remote_columns(&mut world, &gone);
+            streaming.forget_columns(&mut world, &gone);
+            assert!(!streaming.meshed_columns().any(|column| column == (0, 0)));
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn remote_column_arrival_and_unload_remesh_the_actual_halo() {
+        use crate::mesher::SectionPlanBuilder;
+        use mod_api::SectionCell;
+
+        mod_platform::testing::with_mods(Vec::new().into(), || {
+            let block = test_block_key();
+            let state = |raw: u32| mod_api::__private::block_state_from_ordinal(block, raw as u16);
+            let (mut world, mut streaming, stone) = fixture();
+            let base = world.bottom_y();
+            let mut centre = Chunk::empty(0, 0);
+            centre.set(15, base + 4, 8, stone);
+            streaming.insert_remote(&mut world, centre);
+            assert!(streaming.update(&mut world).0.is_empty());
+            assert!(streaming.take_visibility_requests().is_empty());
+            assert!(
+                world.dirty_sections.contains(&CENTRE),
+                "the no-listener route still waits for a complete region"
+            );
+            streaming.refresh_section_visibility(&mut world, true);
+
+            let compile =
+                |world: &mut World, streaming: &mut MeshStreamer, expected: SectionCell| {
+                    let mut captured = false;
+                    for _ in 0..100 {
+                        let (uploads, _) = streaming.update(world);
+                        for request in streaming.take_visibility_requests() {
+                            let mut builder = SectionPlanBuilder::new();
+                            if request.key == CENTRE {
+                                let input = request.capture_input(state);
+                                assert_eq!(input.cell([16, 4, 8]), Ok(expected));
+                                captured = true;
+                            } else if request.key == (1, 0, 0) {
+                                builder.restrict([1, 4, 8], false, false, 0);
+                            }
+                            streaming.submit_visibility_answer(world, request, builder.finish());
+                        }
+                        let faces = uploads
+                            .iter()
+                            .find(|upload| {
+                                upload.key == CENTRE && streaming.can_publish_mesh(world, upload)
+                            })
+                            .map(|upload| upload.mesh.solid.len() / 4);
+                        streaming.free(uploads);
+                        if let Some(faces) = faces {
+                            assert!(captured);
+                            return faces;
+                        }
+                        streaming.wait(Duration::from_millis(20));
+                    }
+                    panic!("the requested centre mesh did not complete");
+                };
+            assert_eq!(compile(&mut world, &mut streaming, SectionCell::Missing), 6);
+            let mut east = Chunk::empty(1, 0);
+            east.set(0, base + 4, 8, stone);
+            streaming.insert_remote(&mut world, east);
+            assert_eq!(
+                compile(&mut world, &mut streaming, SectionCell::State(state(stone))),
+                5
+            );
+            assert!(
+                streaming
+                    .section_visibility
+                    .answers
+                    .contains_key(&(1, 0, 0))
+            );
+            let gone = [(1, 0)].into_iter().collect();
+            assert_eq!(
+                MeshStreamer::take_remote_columns(&mut world, &gone).len(),
+                1
+            );
+            streaming.forget_columns(&mut world, &gone);
+            assert!(
+                !streaming
+                    .section_visibility
+                    .answers
+                    .contains_key(&(1, 0, 0)),
+                "unload drops the answer and its lease"
+            );
+            assert_eq!(compile(&mut world, &mut streaming, SectionCell::Missing), 6);
+        });
     }
 
     #[test]
     #[ignore = "daily"]
     fn a_neighbours_interior_edit_stops_a_mesh_using_its_old_border_answer() {
-        use crate::mesher::{SectionPlanBuilder, capture_input};
+        use crate::mesher::SectionPlanBuilder;
         use mod_api::SectionCell;
 
         const EAST: (i32, i32, i32) = (1, 0, 0);
-        let (mut world, mut streaming, stone) = fixture();
-        let base = world.bottom_y();
-        let marker = streaming
-            .shared
-            .context
-            .read()
-            .unwrap()
-            .assets
-            .registry
-            .default_state("minecraft:cobblestone")
-            .unwrap();
-        let mut centre = Chunk::empty(0, 0);
-        centre.set(15, base + 4, 8, stone);
-        let mut east = Chunk::empty(1, 0);
-        east.set(0, base + 4, 8, stone);
-        east.set(8, base + 4, 8, marker.0);
-        streaming.insert_remote(&mut world, centre);
-        streaming.insert_remote(&mut world, east);
-        streaming.refresh_section_visibility(&mut world, true);
+        mod_platform::testing::with_mods(Vec::new().into(), || {
+            let block = test_block_key();
+            let state = |raw: u32| mod_api::__private::block_state_from_ordinal(block, raw as u16);
+            let (mut world, mut streaming, stone) = fixture();
+            let base = world.bottom_y();
+            let marker = streaming
+                .mesh_shared
+                .context
+                .read()
+                .unwrap()
+                .chunk
+                .assets
+                .registry
+                .default_state("minecraft:cobblestone")
+                .unwrap();
+            let mut centre = Chunk::empty(0, 0);
+            centre.set(15, base + 4, 8, stone);
+            let mut east = Chunk::empty(1, 0);
+            east.set(0, base + 4, 8, stone);
+            east.set(8, base + 4, 8, marker.0);
+            streaming.insert_remote(&mut world, centre);
+            streaming.insert_remote(&mut world, east);
+            streaming.refresh_section_visibility(&mut world, true);
 
-        let centre_faces = |world: &mut World, streaming: &mut Streaming| {
-            for _ in 0..200 {
-                let (uploads, _) = streaming.update(world);
-                for request in streaming.take_visibility_requests() {
-                    let mut answer = SectionPlanBuilder::new();
-                    if request.key == EAST
-                        && capture_input(&request.region, EAST.1).cell([8, 4, 8])
-                            == Ok(SectionCell::State(mod_api::BlockStateId(marker.0)))
-                    {
-                        answer.restrict([0, 4, 8], false, false, 0);
+            let centre_faces = |world: &mut World, streaming: &mut MeshStreamer| {
+                for _ in 0..200 {
+                    let (uploads, _) = streaming.update(world);
+                    for request in streaming.take_visibility_requests() {
+                        let mut answer = SectionPlanBuilder::new();
+                        if request.key == EAST
+                            && request.capture_input(state).cell([8, 4, 8])
+                                == Ok(SectionCell::State(state(marker.0)))
+                        {
+                            answer.restrict([0, 4, 8], false, false, 0);
+                        }
+                        streaming.submit_visibility_answer(world, request, answer.finish());
                     }
-                    streaming.submit_visibility_answer(world, request, answer.finish());
-                }
-                let faces = uploads
-                    .iter()
-                    .find(|upload| {
-                        upload.key == CENTRE && streaming.can_publish_mesh(world, upload)
-                    })
-                    .map(|upload| upload.mesh.solid.len() / 4);
-                streaming.free(uploads);
-                if let Some(faces) = faces {
-                    return faces;
-                }
-                streaming.wait(Duration::from_millis(20));
-            }
-            panic!("the centre never had a current mesh");
-        };
-        assert_eq!(centre_faces(&mut world, &mut streaming), 6);
-
-        world.dirty_sections.insert_mesh(CENTRE);
-        streaming.update(&mut world);
-        let request = streaming
-            .take_visibility_requests()
-            .into_iter()
-            .find(|request| request.key == CENTRE)
-            .expect("centre selected");
-        let seq = request.seq;
-        streaming.submit_visibility_answer(&mut world, request, None);
-        // Same light behaviour and away from all borders: only the east section's raw input
-        // changes. Its listener will no longer hide the stone on the border.
-        world.set(24, base + 4, 8, BlockStateId(stone)).unwrap();
-        assert!(!world.dirty_sections.contains(&CENTRE));
-        assert!(world.dirty_sections.contains(&EAST));
-
-        let completed = (0..200)
-            .find_map(|_| {
-                let (uploads, _) = streaming.update(&mut world);
-                let completed = uploads
-                    .iter()
-                    .find(|upload| upload.key == CENTRE && upload.seq == seq)
-                    .map(|upload| {
-                        (
-                            upload.mesh.solid.len() / 4,
-                            streaming.can_publish_mesh(&world, upload),
-                        )
-                    });
-                streaming.free(uploads);
-                if completed.is_none() {
+                    let faces = uploads
+                        .iter()
+                        .find(|upload| {
+                            upload.key == CENTRE && streaming.can_publish_mesh(world, upload)
+                        })
+                        .map(|upload| upload.mesh.solid.len() / 4);
+                    streaming.free(uploads);
+                    if let Some(faces) = faces {
+                        return faces;
+                    }
                     streaming.wait(Duration::from_millis(20));
                 }
-                completed
-            })
-            .expect("the centre worker finished before the east answer was collected");
-        assert_eq!(
-            completed,
-            (6, false),
-            "the old six-face mesh must not publish"
-        );
-        let east = streaming
-            .take_visibility_requests()
-            .into_iter()
-            .find(|request| request.key == EAST)
-            .expect("the east answer is still outstanding");
-        streaming.submit_visibility_answer(&mut world, east, None);
-        assert_eq!(centre_faces(&mut world, &mut streaming), 5);
+                panic!("the centre never had a current mesh");
+            };
+            assert_eq!(centre_faces(&mut world, &mut streaming), 6);
+
+            world.dirty_sections.insert_mesh(CENTRE);
+            streaming.update(&mut world);
+            let request = streaming
+                .take_visibility_requests()
+                .into_iter()
+                .find(|request| request.key == CENTRE)
+                .expect("centre selected");
+            let seq = request.seq;
+            streaming.submit_visibility_answer(&mut world, request, None);
+            // Same light behaviour and away from all borders: only the east section's raw input
+            // changes. Its listener will no longer hide the stone on the border.
+            world.set(24, base + 4, 8, BlockStateId(stone)).unwrap();
+            assert!(!world.dirty_sections.contains(&CENTRE));
+            assert!(world.dirty_sections.contains(&EAST));
+
+            let completed = (0..200)
+                .find_map(|_| {
+                    let (uploads, _) = streaming.update(&mut world);
+                    let completed = uploads
+                        .iter()
+                        .find(|upload| upload.key == CENTRE && upload.seq == seq)
+                        .map(|upload| {
+                            (
+                                upload.mesh.solid.len() / 4,
+                                streaming.can_publish_mesh(&world, upload),
+                            )
+                        });
+                    streaming.free(uploads);
+                    if completed.is_none() {
+                        streaming.wait(Duration::from_millis(20));
+                    }
+                    completed
+                })
+                .expect("the centre worker finished before the east answer was collected");
+            assert_eq!(
+                completed,
+                (6, false),
+                "the old six-face mesh must not publish"
+            );
+            let east = streaming
+                .take_visibility_requests()
+                .into_iter()
+                .find(|request| request.key == EAST)
+                .expect("the east answer is still outstanding");
+            streaming.submit_visibility_answer(&mut world, east, None);
+            assert_eq!(centre_faces(&mut world, &mut streaming), 5);
+        });
     }
 
     #[test]
@@ -676,7 +761,7 @@ pub(super) mod tests {
             chunk.set(8, base + 4, 8, stone);
             chunk
         };
-        let request = |world: &mut World, streaming: &mut Streaming| {
+        let request = |world: &mut World, streaming: &mut MeshStreamer| {
             streaming.update(world);
             streaming
                 .take_visibility_requests()
@@ -685,15 +770,15 @@ pub(super) mod tests {
                 .unwrap()
         };
         // Drive the mailbox in a fixed order rather than depending on which worker finishes first.
-        let completed = |streaming: &Streaming, seq| {
-            streaming.shared.done.send(Done::Meshed(MeshUpload {
+        let completed = |streaming: &MeshStreamer, seq| {
+            streaming.chunks().send_auxiliary_done_for_test(MeshUpload {
                 key: CENTRE,
                 mesh: Default::default(),
                 seq,
                 halo: None,
-            }));
+            });
         };
-        let upload = |world: &mut World, streaming: &mut Streaming| -> MeshUpload {
+        let upload = |world: &mut World, streaming: &mut MeshStreamer| -> MeshUpload {
             let uploads = streaming.update(world).0;
             let mut centre = uploads.into_iter().filter(|upload| upload.key == CENTRE);
             let upload = centre.next().expect("one accepted centre mesh");
@@ -733,26 +818,24 @@ pub(super) mod tests {
         );
         let a = &resource_a.context;
         let context_b = Arc::new(WorkerContext {
-            assets: a.assets.clone(),
-            render: a.render.clone(),
-            tables: a.tables.clone(),
-            biomes: a.biomes.clone(),
-            light: a.light.clone(),
-            hidden_states: vec![true; a.assets.registry.len()].into(),
-            part_tables: a.part_tables.clone(),
+            chunk: a.chunk.clone(),
+            mesh: MeshWorkerContext {
+                hidden_states: vec![true; a.chunk.assets.registry.len()].into(),
+                ..a.mesh.clone()
+            },
         });
         streaming.reload_resources(&mut world, context_b.clone());
         assert!(streaming.section_visibility.answers.is_empty());
         let resource_b = request(&mut world, &mut streaming);
         assert!(Arc::ptr_eq(&resource_b.context, &context_b));
-        assert!(resource_a.context.hidden_states.is_empty());
+        assert!(resource_a.context.mesh.hidden_states.is_empty());
         completed(&streaming, resource_b.seq);
         completed(&streaming, seq_a);
         let before_unload = upload(&mut world, &mut streaming);
         assert_eq!(before_unload.seq, resource_b.seq);
         assert!(streaming.can_publish_mesh(&world, &before_unload));
         let gone = [(0, 0)].into_iter().collect();
-        Streaming::take_remote_columns(&mut world, &gone);
+        MeshStreamer::take_remote_columns(&mut world, &gone);
         streaming.forget_columns(&mut world, &gone);
         streaming.insert_remote(&mut world, column());
         let reloaded = request(&mut world, &mut streaming);

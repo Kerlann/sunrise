@@ -4,7 +4,7 @@
 The Java oracle (VanillaBlockEntityItemOracle) runs the real CampfireRenderer,
 BrushableBlockRenderer, ShelfRenderer and VaultRenderer, with a real ItemModelResolver over
 the baked item models, under the pose LevelRenderer gives them. The game test
-`game::campfire::block_entity_items_tests::block_entity_items_match_the_vanilla_cases` runs the
+`game::server_side::campfire::block_entity_items_tests::block_entity_items_match_the_vanilla_cases` runs the
 same cases through `campfire_items`, `brushable_items`, `shelf_items` and `vault_items`, the
 items `campfire_geometry`, `brushable_geometry`, `shelf_geometry` and `vault_geometry` draw.
 Each item handed to the item renderer is compared in order, exactly: the stack, the display
@@ -13,7 +13,7 @@ context and seed it was resolved with, the pose's matrix as raw float bits, and 
 Cases: every facing; one to four items in different slots (block items, flat items, special
 models); each dusted level and hit direction; shelves aligned to the bottom or not; vaults with
 and without a display item, clusters of each size and a few spin alphas; blocks near the origin,
-below zero, at y 319 and near the world border.
+below zero, at y 319 and near the world border; and camera offsets at chunk and reach boundaries.
 
 Only the pass and fail counts are printed; each mismatch is written to
 .local/block-entity-item-geometry-parity/report.txt.
@@ -28,13 +28,17 @@ import subprocess
 import sys
 import tempfile
 
-try:
-    from . import lab, test_rust_parity as base, test_model_baking_parity as baking, test_item_model_parity as item_model
-except ImportError:
-    import lab, test_rust_parity as base, test_model_baking_parity as baking, test_item_model_parity as item_model
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import (
+    lab,
+    test_rust_parity as base,
+    test_model_baking_parity as baking,
+    test_item_model_parity as item_model,
+)
 
 PARITY = lab.ROOT / 'mods/sunrise/src/test/java/dev/sunriselab/parity'
-TEST = 'game::campfire::block_entity_items_tests::block_entity_items_match_the_vanilla_cases'
+TEST = 'game::server_side::campfire::block_entity_items_tests::block_entity_items_match_the_vanilla_cases'
 FACINGS = ['north', 'south', 'west', 'east']
 # Near the origin, below zero, at the top of the world, near the world border.
 PLACES = [(3, 64, 5), (-7, -40, -13), (12, 319, -3), (29_999_983, 70, -29_999_985)]
@@ -90,6 +94,28 @@ def cases():
                 out.append(case(f'vault {item}x{count} spin={spin} at {pos}', 'vault', 'minecraft:vault',
                                 {'facing': FACINGS[i % 4], 'ominous': 'false', 'vault_state': 'active'}, pos, (13, 15),
                                 item=[item, count], spin=spin))
+
+    # Exercise item submission on both sides of chunk boundaries and at the strict renderer reach.
+    pos = (15, 64, -1)
+    fixtures = [
+        case('campfire', 'campfire', 'minecraft:campfire', {'facing': 'north', 'lit': 'false'},
+             pos, (15, 0), items=[[0, 'minecraft:beef', 1]]),
+        case('shelf', 'shelf', 'minecraft:oak_shelf', {'facing': 'north'},
+             pos, (15, 0), items=[[0, 'minecraft:stone', 1]], align=False),
+        case('brushable', 'brushable', 'minecraft:suspicious_sand', {'dusted': '1'},
+             pos, (15, 0), item=['minecraft:emerald', 1], hit=1),
+        case('vault', 'vault', 'minecraft:vault',
+             {'facing': 'north', 'ominous': 'false', 'vault_state': 'active'},
+             pos, (15, 0), item=['minecraft:diamond', 1], spin=[0.0, 10.0, 0.5]),
+    ]
+    offsets = [((63.75, 0, 0), True), ((0, 0, 63.75), True), ((-63.75, 0, 0), True),
+               ((64, 0, 0), False), ((64.25, 0, 0), False), ((0, 64.25, 0), False),
+               ((48, 40, 32), False)]
+    for fixture in fixtures:
+        for offset, visible in offsets:
+            out.append({**fixture, 'name': f'{fixture["name"]} reach {offset}',
+                        'camera': [p + 0.5 + d for p, d in zip(pos, offset)],
+                        'expect_items': visible})
     return out
 
 
@@ -133,17 +159,7 @@ def main():
         scratch = Path(tmp)
         homes = {k: scratch / k for k in ('SUNRISE_HOME', 'SUNRISE_LAUNCHER_HOME', 'XDG_DATA_HOME', 'XDG_CONFIG_HOME')}
         env = lab.game_env(os.environ, **homes, RUST_MIN_STACK='16777216')
-        compiled = run(['cargo', 'test', '--locked', '-p', 'sunrise-client', '--lib', '--no-run', '--message-format=json'],
-                       'compile', env=env)
-        binaries = []
-        for line in compiled.read_text(encoding='utf-8').splitlines():
-            if not line.startswith('{'):
-                continue
-            row = json.loads(line)
-            if (row.get('reason') == 'compiler-artifact' and row.get('executable')
-                    and row.get('target', {}).get('name') == 'sunrise_client' and row.get('profile', {}).get('test')):
-                binaries.append(Path(row['executable']))
-        assert len(binaries) == 1, 'expected one Game test binary'
+        binaries = [lab.parity_fixtures()]
         env['SUNRISE_TEST_RESOURCES'] = str(args.resources.resolve())
         env['SUNRISE_BLOCK_ENTITY_ITEM_CASES'] = str(inputs)
         env['SUNRISE_BLOCK_ENTITY_ITEM_OUT'] = str(build / 'rust.jsonl')
@@ -156,9 +172,8 @@ def main():
     for c, v, r in zip(chosen, vanilla, rust):
         if 'error' in v:
             lines.append(f'ORACLE ERROR {c["name"]}: {v["error"]}')
-        elif not v['submits'] and (c.get('item') or c.get('items')):
-            # A case with items that vanilla doesn't draw shows nothing.
-            lines.append(f'NO ITEMS {c["name"]}')
+        elif bool(v['submits']) != c.get('expect_items', bool(c.get('item') or c.get('items'))):
+            lines.append(f'UNEXPECTED VANILLA VISIBILITY {c["name"]}')
         elif v['submits'] != r['submits']:
             lines.append(f'MISMATCH {c["name"]}\n  vanilla {json.dumps(v["submits"])}\n  sunrise {json.dumps(r["submits"])}')
         else:

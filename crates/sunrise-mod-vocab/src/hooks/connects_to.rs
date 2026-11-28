@@ -22,13 +22,14 @@ pub trait Hooks {
     /// `2`: version `1` was `fence_connects_to`, for fences alone and without
     /// `kind`. Diverges from upstream: new hook.
     #[hook(
+        receiver = "read",
         side = "server",
         contract = "collect",
         out = "connected",
         scope = "block",
         key = "state",
         version = 2,
-        target = "sunrise_client::game::native_hooks::connects_to::GameLevel<'_>::native_connects_to",
+        target = "sunrise_gameplay_common::game::native_hooks::connects_to::GameLevel<'_>::native_connects_to",
         neoforge = "none (vanilla FenceBlock.connectsTo / WallBlock.connectsTo / IronBarsBlock.attachsTo)"
     )]
     fn connects_to(

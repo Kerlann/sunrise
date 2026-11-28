@@ -9,7 +9,7 @@ How decisions are made is in [GOVERNANCE.md](../GOVERNANCE.md); how a change rea
 
 | Who | Can |
 | --- | --- |
-| **Sunrise Team** (GitHub team `sunrise-team`, write access) | Review, label and merge pull requests; approve a fork's workflow runs; re-run failed jobs; start workflows by hand (`gh workflow run`); add `release-blocker` to an issue; merge in sunrise-mods (form pull requests too) and upload its `staging` files |
+| **Sunrise Team** (GitHub team `sunrise-team`, write access) | Review, label and merge pull requests; approve a fork's workflow runs; re-run failed jobs; start workflows by hand (`gh workflow run`); add `release-blocker` to an issue; merge in sunrise-mods the pull requests its merger leaves (below) |
 | **Trusted reviewers** (`.github/trusted-reviewers.txt`) | `/nightly`, `/close`, `/reopen`, `/label`, `/unlabel`, `/unclaim` by comment ([release-flow.md](release-flow.md#trusted-reviewers)) |
 | **Council** (🏛️ Council on Discord) | Decide by poll (`/vote`, `/poll start`); emergency actions (GOVERNANCE.md 4.6) |
 | **Organisation owners** (Ludovic and rdbtCVS since 2026-11-11, council poll P28) | Repository variables and secrets (`SELF_HOSTED_CI`, `RELEASES_PAUSED`), branch protection, adding people to GitHub teams, merging past a missing review, the security advisories |
@@ -69,14 +69,14 @@ is waiting, and closes it once the runners are back.
 
 | Runner label | What waits | What to do |
 | --- | --- | --- |
-| `sunrise-light` (bots) | Triage and claim commands, labels, overlap notes, the Mojang check | An organisation owner sets `SELF_HOSTED_CI` to `off` (Settings → Secrets and variables → Actions → Variables). Then everything runs on GitHub |
+| `sunrise-light` (bots) | Triage commands, labels, overlap notes, the Mojang check | An organisation owner sets `SELF_HOSTED_CI` to `off` (Settings → Secrets and variables → Actions → Variables). Then everything runs on GitHub |
 | `sunrise-checks` | `verify` of this repository's own pull requests ending in 0 or 1 | Same switch (`off` or `light`), then re-run the waiting checks. Forks' pull requests never use these runners |
 | `sunrise-game` | By-hand game tools | Use local tools or wait for the maintainer's runner |
 | `dyna-large` | Daily vanilla parity | Inspect Dyna's runner pool; no other CI workflow runs it |
 | `sunrise-nightly`, `sunrise-release` | The Nightly's and the launcher's macOS builds | Nothing can be done on GitHub. No Nightly or launcher release until the Mac is back |
 
-What keeps working without them: `verify` and merging, triage and labels (once `SELF_HOSTED_CI=off`), Kira, the
-website, the mods registry and its checks, the official server.
+What keeps working without them: `verify` and merging, claims (on GitHub's hosted runners), triage and labels (once
+`SELF_HOSTED_CI=off`), Kira, the website, the mods registry and its checks, the official server.
 
 What the council decides about it (which pull requests may still merge without the vanilla harnesses, and who could
 host a runner with their own Minecraft) is a poll, not a rule on this page.
@@ -88,14 +88,15 @@ version file the game is pinned to. If its text says the jars are unchanged, a p
 from the issue into `research-lock.json` fixes it. New players can't prepare the game until a Nightly with that fix
 is out, so label that pull request `release-now` (or ask the council to) once it merged.
 
-## The mods registry (horizon-rust/horizon-mods)
+## The mods registry (sunrise-org/sunrise-mods)
 
-- **Submissions from the website** arrive as pull requests authored by `ludovic111` (the registry's account). A
-  Team member reviews the mod (what it does, its licence, no sign-in or token handling, no Mojang files; see
-  `MOD-POLICY.md` there), approves, and squash-merges once `check` passed. Publishing to the registry is hourly
-  (`publish.yml`).
-- **Fork pull requests:** approve their workflow run, and upload the mod's file to the `staging` release as
-  `<sha256>.<extension>` after checking its hash.
+- **Registration:** the registry's app opens a registration pull request from a `register/` branch. The merger
+  requires a saved approving verdict and a review file that approves the live head, plus green checks.
+- **Releases:** a signed release pull request is reviewed for malware, dangerous patterns and suspicious or
+  obfuscated code only (never licences, provenance or copyright). The merger merges it only when the saved
+  verdict for its live head is approved and the checks are green.
+- **Everything else** in sunrise-mods is reviewed and merged by hand by a Team member. Publishing to the registry is
+  hourly (`publish.yml`).
 - **Taking a mod down:** a pull request adding it to `revoked.toml`. That file is a code-owner path: today only
   Ludovic can approve it. For malware, two council members act at once as an emergency (GOVERNANCE.md 4.6), post
   in #mod-log, and ask Ludovic to approve.

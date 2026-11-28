@@ -1,6 +1,6 @@
 //! One pool of worker threads for the whole process, shared by every source of
 //! background work: chunk generation, light and meshing (the client's and each
-//! of the server thread's levels), chunk encoding, far terrain.
+//! of the server thread's levels), and chunk encoding.
 //!
 //! Before it, each of those started its own threads, about one per core each:
 //! a single player world ran four or five such pools at once, ~100 threads on a
@@ -33,7 +33,7 @@ pub enum Class {
     Urgent,
     /// The chunks around the player: generation, light, meshing.
     Near,
-    /// Far terrain and the meshing of levels the player only views: runs on
+    /// The meshing of levels the player only views: runs on
     /// what the near work leaves, and never on every worker at once, so near
     /// work that arrives finds a worker free.
     Far,
@@ -206,7 +206,8 @@ impl Pool {
     /// [`Pool::new`] whose workers free their buffers after `idle_release`.
     pub fn with_idle_release(threads: usize, name: &str, idle_release: Duration) -> Self {
         Self::with_spawner(threads, idle_release, |worker, i| {
-            sunrise_guest_stack::builder()
+            std::thread::Builder::new()
+                .stack_size(crate::GAME_THREAD_STACK_BYTES)
                 .name(format!("{name}-{i}"))
                 .spawn(move || {
                     crate::behind_server();

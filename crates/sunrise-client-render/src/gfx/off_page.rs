@@ -6,8 +6,8 @@ use super::*;
 /// until the next range would pass `budget` bytes (it keeps what is left; the
 /// first range moves whatever its size, so none keeps the page closed), the
 /// copies into `encoder`, the ranges' flat draw ids (`flat`) and, in the
-/// section arena, GPU culling's records (`records`) along. False when the other
-/// pages have no room left.
+/// section arena, the GPU culling records, by `SectionGpu::gpu_id`. False when
+/// the other pages have no room left.
 pub(super) fn move_off_page<'a>(
     arena: &mut arena::Arena,
     encoder: &mut wgpu::CommandEncoder,
@@ -29,7 +29,8 @@ pub(super) fn move_off_page<'a>(
         let Some((_, start, vertices)) = part.of(s).filter(|r| r.0 == page) else {
             continue;
         };
-        let bytes = vertices * arena.stride();
+        // With the normal stream, a move copies its entries too (`Arena::copy`).
+        let bytes = vertices * arena.vertex_bytes();
         if moved && bytes > *budget {
             break;
         }

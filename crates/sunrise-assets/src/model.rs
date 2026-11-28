@@ -3,9 +3,15 @@
 //! Absent geometry differs from an explicit empty element list. Explicit null
 //! elements, faces and display transforms are retained as the native decoder
 //! does; render preparation must diagnose these before baking.
-use crate::json::*;
+use crate::{
+    json::*,
+    model_loaders::{LoaderProvider, LoaderSchema, RegisteredLoader},
+};
 use serde_json::value::RawValue;
 use std::{collections::BTreeMap, sync::Arc};
+
+mod root_transform;
+pub use root_transform::RootTransform;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Direction {
@@ -56,7 +62,7 @@ pub enum TextureSlot {
     Reference(String),
     Material(Material),
 }
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct CuboidModel {
     pub parent: Option<String>,
     pub loader: Option<Loader>,
@@ -69,6 +75,8 @@ pub struct CuboidModel {
     pub render_type: Option<String>,
     /// A model's `visibility`: an obj object or composite child name to shown; absent is shown.
     pub visibility: BTreeMap<String, bool>,
+    /// NeoForge's root `transform`; the model closest to the leaf that names one wins.
+    pub root_transform: Option<RootTransform>,
 }
 /// A custom model loader's payload; a model inherits its parent's loader unless it names its own.
 #[derive(Clone, Debug, PartialEq)]
@@ -86,14 +94,10 @@ pub enum Loader {
         shade_quads: Option<bool>,
         mtl_override: Option<String>,
     },
-    /// A loader a native mod registered ([`crate::model_loaders`]): the model's JSON object,
-    /// which its mod reads.
-    Registered {
-        kind: String,
-        config: Arc<serde_json::Value>,
-    },
-    /// A loader nobody registered: it adds no geometry.
-    Unknown(String),
+    /// Fusion uses the cuboid geometry here and resolves its connected textures separately.
+    Fusion,
+    /// A native provider selected before any cuboid fields are decoded.
+    Registered(Arc<RegisteredLoader>),
 }
 /// NeoForge's `neoforge_data` of an element or a face; a face's keys win.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -226,15 +230,49 @@ impl CuboidModel {
     /// Like the native stream entry point, this reads one value and leaves
     /// trailing input unread. The pinned native entry point uses strict JSON.
     pub fn from_json(json: &str) -> Result<Self> {
+        Self::from_json_with_loaders(json, &|_| None)
+    }
+
+    /// Select native loaders at the resource boundary, including for inline composite children.
+    pub fn from_json_with_loaders(
+        json: &str,
+        loaders: &dyn Fn(&str) -> Option<LoaderProvider>,
+    ) -> Result<Self> {
         let raw = serde_json::Deserializer::from_str(json.strip_prefix('\u{feff}').unwrap_or(json))
             .into_iter::<&RawValue>()
             .next()
             .ok_or_else(|| error("empty model input"))??;
         validate_number_tokens(raw)?;
-        Self::decode(raw)
+        Self::decode(raw, loaders)
     }
-    fn decode(raw: &RawValue) -> Result<Self> {
+
+    fn decode(raw: &RawValue, loaders: &dyn Fn(&str) -> Option<LoaderProvider>) -> Result<Self> {
         let obj = object(raw)?;
+        let loader = match obj.get("loader").filter(|raw| raw.get() != "null") {
+            Some(declaration) => {
+                let (id, optional) = Loader::declared(declaration)?;
+                // `EmptyModel.LOADER`: no parent, textures or properties, and empty geometry,
+                // whatever else the file holds.
+                if id == "neoforge:empty" {
+                    return Ok(Self {
+                        elements: Some(Vec::new()),
+                        ..Self::default()
+                    });
+                }
+                Loader::decode(id, optional, raw, &obj, loaders)?
+            }
+            None => None,
+        };
+        let schema = match &loader {
+            Some(Loader::Registered(registered)) => registered.schema(),
+            _ => LoaderSchema::Cuboids,
+        };
+        if schema == LoaderSchema::Custom {
+            return Ok(Self {
+                loader,
+                ..Self::default()
+            });
+        }
         let parent = obj
             .get("parent")
             .map(|r| primitive_string(r))
@@ -245,11 +283,6 @@ impl CuboidModel {
         } else {
             Some(identifier(&parent)?)
         };
-        let loader = obj
-            .get("loader")
-            .filter(|raw| raw.get() != "null")
-            .map(|raw| Loader::decode(raw, &obj))
-            .transpose()?;
         let ambient_occlusion = obj
             .get("ambientocclusion")
             .map(|r| boolean(r))
@@ -268,15 +301,18 @@ impl CuboidModel {
                 textures.insert(key, texture(raw)?);
             }
         }
-        let elements = obj
-            .get("elements")
-            .map(|raw| {
-                array(raw)?
-                    .into_iter()
-                    .map(|raw| nullable(raw, Element::decode))
-                    .collect::<Result<Vec<_>>>()
-            })
-            .transpose()?;
+        let elements = if schema == LoaderSchema::Cuboids {
+            obj.get("elements")
+                .map(|raw| {
+                    array(raw)?
+                        .into_iter()
+                        .map(|raw| nullable(raw, Element::decode))
+                        .collect::<Result<Vec<_>>>()
+                })
+                .transpose()?
+        } else {
+            None
+        };
         let display = obj
             .get("display")
             .map(|r| ItemTransforms::decode(r))
@@ -297,6 +333,11 @@ impl CuboidModel {
             display,
             render_type,
             visibility: visibility(&obj)?,
+            root_transform: obj
+                .get("transform")
+                .filter(|raw| raw.get() != "null")
+                .map(|raw| RootTransform::decode(raw))
+                .transpose()?,
         })
     }
     /// The models this one needs besides itself: its parent and its composite children's parents.
@@ -320,20 +361,41 @@ fn visibility(obj: &Object<'_>) -> Result<BTreeMap<String, bool>> {
     Ok(visibility)
 }
 impl Loader {
-    fn decode(raw: &RawValue, obj: &Object<'_>) -> Result<Self> {
-        let name = primitive_string(raw)?;
-        match name.as_str() {
+    /// The loader a model names, canonical, and whether it is optional.
+    fn declared(declaration: &RawValue) -> Result<(String, bool)> {
+        let (name, optional) = if declaration.get().starts_with('{') {
+            let declaration = object(declaration)?;
+            let id = primitive_string(required(&declaration, "id")?)?;
+            let optional = declaration
+                .get("optional")
+                .map(|value| boolean(value))
+                .transpose()?
+                .unwrap_or(false);
+            (id, optional)
+        } else {
+            (primitive_string(declaration)?, false)
+        };
+        Ok((identifier(&name)?, optional))
+    }
+    fn decode(
+        canonical: String,
+        optional: bool,
+        model: &RawValue,
+        obj: &Object<'_>,
+        loaders: &dyn Fn(&str) -> Option<LoaderProvider>,
+    ) -> Result<Option<Self>> {
+        let loader = match canonical.as_str() {
             "neoforge:composite" => {
                 let mut children = Vec::new();
                 if let Some(raw) = obj.get("children") {
                     for (name, raw) in ordered_object(raw)? {
-                        children.push((name, Arc::new(CuboidModel::decode(raw)?)));
+                        children.push((name, Arc::new(CuboidModel::decode(raw, loaders)?)));
                     }
                 }
-                Ok(Self::Composite {
+                Self::Composite {
                     children,
                     visibility: visibility(obj)?,
-                })
+                }
             }
             "neoforge:obj" => {
                 let optional = |key: &str| {
@@ -342,7 +404,7 @@ impl Loader {
                         .map(|raw| primitive_string(raw))
                         .transpose()
                 };
-                Ok(Self::Obj {
+                Self::Obj {
                     model: identifier(&optional("model")?.ok_or_else(|| error("missing model"))?)?,
                     flip_v: obj
                         .get("flip_v")
@@ -353,22 +415,20 @@ impl Loader {
                     mtl_override: optional("mtl_override")?
                         .map(|name| identifier(&name))
                         .transpose()?,
-                })
-            }
-            kind if crate::model_loaders::is_registered(kind) => {
-                let mut config = serde_json::Map::new();
-                for (key, raw) in obj {
-                    let value = serde_json::from_str(raw.get())
-                        .map_err(|_| error("invalid model loader data"))?;
-                    config.insert(key.clone(), value);
                 }
-                Ok(Self::Registered {
-                    kind: name,
-                    config: Arc::new(serde_json::Value::Object(config)),
-                })
             }
-            _ => Ok(Self::Unknown(name)),
-        }
+            "fusion:model" => Self::Fusion,
+            _ => match loaders(&canonical) {
+                Some(provider) => Self::Registered(Arc::new(RegisteredLoader::new(
+                    canonical,
+                    model.get().to_owned(),
+                    provider,
+                ))),
+                None if optional => return Ok(None),
+                None => return Err(error(&format!("unknown required loader {canonical}"))),
+            },
+        };
+        Ok(Some(loader))
     }
 }
 fn nullable<T>(raw: &RawValue, decode: impl FnOnce(&RawValue) -> Result<T>) -> Result<Option<T>> {

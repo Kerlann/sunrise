@@ -2,14 +2,14 @@ name: mod tool
 # The rolling mod tool (docs/release-flow.md "Rolling mod tool"): the one release `mod-tool` always holds the newest
 # `cargo-sunrise-mod` built from main, for the three hosts, so a tool fix reaches modders without waiting for a Nightly
 # and its SDK. A prerelease, never "latest". Assets: tool-<target>.tar.xz (the same archives an SDK holds, made by
-# tools/prebuilt_game.py), tool.json (the commit, its date, the native-* contract number), SHA256SUMS and
+# tools/prebuilt_game.py), tool.json (the commit, its date, the native-* contract number, the SDK package format), SHA256SUMS and
 # SHA256SUMS.sig, signed with the release key for the tag `mod-tool` (the message is "horizon release mod-tool\n" and
 # the sums, as an SDK's is for its tag). tool.json is in the sums, so the commit a tool says it is built from is signed.
 #
 # Runs when dyna-checks finishes a main push and by dispatch, never on a pull request (a run that starts at the push
 # would look for the gate before it had finished), and builds only when the tool changed: the folders
 # are the workspace crates cargo-sunrise-mod depends on, from `cargo metadata` (tools/ci/mod_tool.py), plus the files
-# that build and sign it. Like release.yml's snapshot, it needs dyna-checks' gate green on the commit.
+# that build and sign it. Like release.yml's Dev build, it needs dyna-checks' gate green on the commit.
 # - `decide` (no secrets, a read-only token) refuses a commit that is not on main in a step of this file, before any
 #   code of that commit runs; then refuses one not containing what `mod-tool` holds, finds whether the tool changed
 #   since, and needs the gate green on the commit (a cancelled gate is run again by hand, or the next push covers it).
@@ -157,6 +157,8 @@ jobs:
       - name: Build and pack the tool
         env:
           SUNRISE_TOOL_COMMIT: ${{ needs.decide.outputs.commit }}
+          # Marks this build as the rolling release's, the only one `self-update` follows.
+          SUNRISE_TOOL_CHANNEL: mod-tool
         run: python tools/prebuilt_game.py tool dist
       - name: The tool starts and names this commit
         run: |

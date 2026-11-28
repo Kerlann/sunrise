@@ -26,8 +26,8 @@ the runner has a Vulkan driver (an ICD file), and must pass there.
 
 A row marked `daily` (`PACKAGE TEST TARGET daily REASON`, in `daily-<package>.txt`) is a test moved out of
 `verify` into the daily run with `#[ignore = "daily"]` (tools/ci/move_to_daily.py): not a known failure, it must
-pass, and its row must name a test that still runs. A package's shard runs the daily rows of the targets it
-already runs (its library; every target for the packages in INTEGRATION_TESTS); the shard `daily-rows`
+pass, and its row must name a test that still runs. Daily shards and `daily-rows` require an adapter for GPU
+fixtures, including rows with reason `gpu`. A package's shard runs the daily rows of the targets it already runs (its library; every target for the packages in INTEGRATION_TESTS); the shard `daily-rows`
 (tools/ci/ignored_shards.py) runs every other daily row: the root workspace's tests are built once with verify's command
 (WORKSPACE_TEST_BUILD) and each package's test executables then run with `--ignored --exact TEST...`; a package that
 build didn't make, or one in OWN_BUILD, runs `cargo test -p PACKAGE TARGET... -- --ignored --exact TEST...`, from the
@@ -56,18 +56,22 @@ expose bounded compiler headings.
 """
 
 import argparse
+import ctypes
 import json
 import os
 import errno
 import io
+from contextlib import nullcontext
 from functools import lru_cache
 import re
 import shlex
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import zlib
 from pathlib import Path
@@ -75,9 +79,12 @@ from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from tools import lab
-from tools.ci import ignored_shards
+from tools.ci import cgroup_telemetry, ignored_shards
 
 ROOT = Path(__file__).resolve().parents[2]
+
+# The environment variable through which a test executable finds the shared libraries beside it.
+LIBRARY_PATH = "PATH" if os.name == "nt" else "DYLD_LIBRARY_PATH" if sys.platform == "darwin" else "LD_LIBRARY_PATH"
 
 # One file per topic, read in file-name order (README.md there gives the row format).
 POLICY = Path(__file__).with_name("ignored-tests")
@@ -85,6 +92,8 @@ POLICY_PATH = "tools/ci/ignored-tests"  # as messages name it
 # The single list these files replaced: a file there again fails every reader, naming the folder.
 RETIRED = Path(__file__).with_name("ignored-tests-known-failures.txt")
 RESULT = re.compile(r"^test (\S+)(?: - should panic)? \.\.\. (ok|FAILED)$")
+# libtest's header over a failed test's captured output.
+CAPTURE = re.compile(r"^---- (\S+) stdout ----$")
 SUMMARY = re.compile(r"^test result: \S+\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured;")
 # Cargo's line as a test executable starts: `Running unittests src/lib.rs (…)`, `Running tests/x.rs (…)`, or a
 # target whose source lives in another package's folder (`Running ../sunrise-client/tests/lan_bot.rs (…)`).
@@ -108,7 +117,7 @@ LISTED = re.compile(r"^(\S+): test$")
 DAILY_TARGET = re.compile(r"^(?:lib|(?:bin|test):[\w-]+)$")
 # Why a test is a daily test (CONTRIBUTING.md "CI tiers"): slower than 2 s, or what it needs. `stable-line` is a check
 # `verify` runs too, repeated in the daily because a stable release needs a green daily of its commit to hold it.
-DAILY_REASONS = ("slow", "game-boot", "resources", "child-process", "network", "windows", "own-sdk", "stable-line")
+DAILY_REASONS = ("slow", "game-boot", "resources", "child-process", "network", "gpu", "windows", "own-sdk", "stable-line")
 # A test that needs the daily head's SDK in book-quickstart.yml, not a previous Nightly.
 OWN_SDK_REASON = "own-sdk"
 # A daily reason for a test whose target compiles only on Windows (`#![cfg(windows)]`): no Linux shard or `daily-rows`
@@ -147,8 +156,12 @@ def compile_diagnostics(output):
         elif re.match(r"^\s*--> [\w./-]+:\d+:\d+$", line):
             headings.append(line)
     for line in headings[:20]:
+        location = re.match(r"^\s*--> ([\w./-]+):\d+:\d+$", line)
+        # A location is published only when it is a tracked source: a generated file's path is the runner's own.
+        if location and source_lines(location[1]) is None:
+            line, location = "  --> location withheld (not a tracked Rust source)", None
         print("  compiler: " + line[:300] + (" [shortened]" if len(line) > 300 else ""))
-        if line.strip().startswith("--> "):
+        if location:
             panic_source(line.strip()[4:], kind="compiler")
     if len(headings) > 20:
         print(f"  compiler diagnostics truncated: {len(headings) - 20} more headings")
@@ -189,9 +202,180 @@ def panic_source(location, kind="panic"):
 
 def has_vulkan():
     """Whether this machine has a Vulkan driver for wgpu to find."""
-    return bool(os.environ.get("VK_ICD_FILENAMES")) or any(
+    return bool(os.environ.get("VK_DRIVER_FILES") or os.environ.get("VK_ICD_FILENAMES")) or any(
         Path(d).is_dir() and any(Path(d).glob("*.json")) for d in ICD_DIRS
     )
+
+
+# The system Vulkan loader, by platform: the adapter line below reads it directly, with no `vulkaninfo`.
+VULKAN_LOADERS = ("vulkan-1.dll",) if os.name == "nt" else (
+    ("libvulkan.1.dylib", "libMoltenVK.dylib") if sys.platform == "darwin" else ("libvulkan.so.1",))
+VULKAN_DEVICE_TYPES = ("other", "integrated-gpu", "discrete-gpu", "virtual-gpu", "cpu")
+VULKAN_MAX_ADAPTERS = 4
+# The probe runs in a child process: a driver that crashes or hangs in vkCreateInstance must not take this runner with it,
+# and one that floods stdout is killed once it has written more than VULKAN_PROBE_MAX_BYTES, never buffered whole.
+VULKAN_PROBE_TIMEOUT = 10
+VULKAN_PROBE_MAX_BYTES = 64 * 1024
+# The path comes through argv, so no quoting of it (a Windows backslash) can break the `-c` text.
+VULKAN_PROBE_SCRIPT = "import sys; sys.path.insert(0, sys.argv[1]); from tools.ci import ignored_tests; print('\\n'.join(ignored_tests._probe_vulkan_adapters()))"
+VULKAN_UNAVAILABLE_TAGS = frozenset({"loader-missing", "instance-init-failed", "no-physical-devices", "query-failed",
+                                     "probe-timed-out", "probe-crashed", "probe-output-capped"})
+# What vulkan_adapter_line prints; anything else a driver writes to the child's stdout is dropped.
+VULKAN_ADAPTER_LINE = re.compile(r"^vulkan adapter\[[0-3]\]: name=[\x20-\x7e]{1,80} type=[a-z-]+ api=\d+\.\d+\.\d+ max_storage_buffer_binding_size=\d+ \(\d+ MiB\) max_storage_buffers_per_shader_stage=\d+ max_texture_dimension_2d=\d+$")
+
+
+def vulkan_adapter_line(index, properties):
+    """One adapter's line from its `VkPhysicalDeviceProperties` bytes (Vulkan 1.0 layout, 64-bit): the device name
+    reduced to printable ASCII, its type and API version, and the limits wgpu reads as
+    `max_storage_buffer_binding_size`, `max_storage_buffers_per_shader_stage` and `max_texture_dimension_2d`."""
+    api = struct.unpack_from("<I", properties, 0)[0]
+    kind = struct.unpack_from("<I", properties, 16)[0]
+    raw = properties[20:276].split(b"\0", 1)[0]
+    name = " ".join(bytes(b if 0x20 <= b <= 0x7e else 0x20 for b in raw).decode("ascii").split())[:80] or "unknown"
+    max_tex_2d = struct.unpack_from("<I", properties, 300)[0]
+    storage_bytes = struct.unpack_from("<I", properties, 324)[0]
+    per_stage_storage = struct.unpack_from("<I", properties, 372)[0]
+    return (f"vulkan adapter[{index}]: name={name} "
+            f"type={VULKAN_DEVICE_TYPES[kind] if kind < len(VULKAN_DEVICE_TYPES) else 'unknown'} "
+            f"api={(api >> 22) & 0x7f}.{(api >> 12) & 0x3ff}.{api & 0xfff} "
+            f"max_storage_buffer_binding_size={storage_bytes} ({storage_bytes // (1024 * 1024)} MiB) "
+            f"max_storage_buffers_per_shader_stage={per_stage_storage} max_texture_dimension_2d={max_tex_2d}")
+
+
+def _probe_vulkan_adapters():
+    """In this process: one line per Vulkan adapter (at most VULKAN_MAX_ADAPTERS), or one `unavailable (reason)` line.
+    Only fixed tags are reported on failure, never an exception's text or a host path; it never raises. A driver
+    can still crash or hang it: vulkan_adapter_summaries runs it in a child process."""
+    for name in VULKAN_LOADERS:
+        try:
+            loader = ctypes.CDLL(name)
+            break
+        except OSError:
+            pass
+    else:
+        return ["vulkan adapter: unavailable (loader-missing)"]
+
+    class ApplicationInfo(ctypes.Structure):
+        _fields_ = [("sType", ctypes.c_uint32), ("pNext", ctypes.c_void_p), ("pApplicationName", ctypes.c_char_p),
+                    ("applicationVersion", ctypes.c_uint32), ("pEngineName", ctypes.c_char_p),
+                    ("engineVersion", ctypes.c_uint32), ("apiVersion", ctypes.c_uint32)]
+
+    class InstanceCreateInfo(ctypes.Structure):
+        _fields_ = [("sType", ctypes.c_uint32), ("pNext", ctypes.c_void_p), ("flags", ctypes.c_uint32),
+                    ("pApplicationInfo", ctypes.c_void_p), ("enabledLayerCount", ctypes.c_uint32),
+                    ("ppEnabledLayerNames", ctypes.c_void_p), ("enabledExtensionCount", ctypes.c_uint32),
+                    ("ppEnabledExtensionNames", ctypes.c_void_p)]
+
+    instance = ctypes.c_void_p()
+    created = False
+    try:
+        for function, arguments, result in (
+                ("vkCreateInstance", 3, ctypes.c_int32), ("vkDestroyInstance", 2, None),
+                ("vkEnumeratePhysicalDevices", 3, ctypes.c_int32), ("vkGetPhysicalDeviceProperties", 2, None)):
+            getattr(loader, function).argtypes = [ctypes.c_void_p] * arguments
+            getattr(loader, function).restype = result
+        application = ApplicationInfo(sType=0, apiVersion=1 << 22)
+        info = InstanceCreateInfo(sType=1, pApplicationInfo=ctypes.addressof(application))
+        if loader.vkCreateInstance(ctypes.byref(info), None, ctypes.byref(instance)) != 0:
+            return ["vulkan adapter: unavailable (instance-init-failed)"]
+        created = True
+        count = ctypes.c_uint32(0)
+        if loader.vkEnumeratePhysicalDevices(instance, ctypes.byref(count), None) < 0:
+            return ["vulkan adapter: unavailable (query-failed)"]
+        if count.value == 0:
+            return ["vulkan adapter: unavailable (no-physical-devices)"]
+        count.value = min(count.value, VULKAN_MAX_ADAPTERS)
+        devices = (ctypes.c_void_p * VULKAN_MAX_ADAPTERS)()
+        # A result above zero (VK_INCOMPLETE: more adapters than the bound) still filled the array.
+        if loader.vkEnumeratePhysicalDevices(instance, ctypes.byref(count), devices) < 0:
+            return ["vulkan adapter: unavailable (query-failed)"]
+        lines = []
+        for index in range(min(count.value, VULKAN_MAX_ADAPTERS)):
+            properties = ctypes.create_string_buffer(1024)
+            loader.vkGetPhysicalDeviceProperties(devices[index], properties)
+            lines.append(vulkan_adapter_line(index, properties.raw))
+        return lines
+    except Exception:
+        return ["vulkan adapter: unavailable (query-failed)"]
+    finally:
+        if created:
+            try:
+                loader.vkDestroyInstance(instance, None)
+            except Exception:
+                pass
+
+
+def vulkan_adapter_summaries():
+    """_probe_vulkan_adapters in a child process, bounded in time by VULKAN_PROBE_TIMEOUT and in memory by
+    VULKAN_PROBE_MAX_BYTES of its stdout: its adapter lines, or one `unavailable (tag)` line. The child's stderr,
+    stray stdout and exceptions are never shown; it never raises. A reader thread (not `select`, which cannot watch
+    a pipe on Windows) keeps the wait bounded, and the child is killed and reaped when it times out or hits the cap."""
+    process = reader = None
+    chunks = []
+    capped = False
+
+    def read_output():
+        nonlocal capped
+        total = 0
+        try:
+            while chunk := process.stdout.read(4096):
+                if total + len(chunk) > VULKAN_PROBE_MAX_BYTES:
+                    capped = True
+                    process.kill()
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+        except Exception:
+            pass
+
+    def reap():
+        try:
+            process.kill()
+            process.wait(timeout=1)
+        except Exception:
+            pass
+
+    try:
+        process = subprocess.Popen([sys.executable, "-c", VULKAN_PROBE_SCRIPT, str(ROOT)], stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        deadline = time.monotonic() + VULKAN_PROBE_TIMEOUT
+        reader = threading.Thread(target=read_output, daemon=True)
+        reader.start()
+        reader.join(max(0.0, deadline - time.monotonic()))
+        if reader.is_alive():
+            reap()
+            reader.join(timeout=1)
+            return ["vulkan adapter: unavailable (probe-timed-out)"]
+        if capped:
+            reap()
+            return ["vulkan adapter: unavailable (probe-output-capped)"]
+        process.wait(timeout=max(0.0, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        reap()
+        return ["vulkan adapter: unavailable (probe-timed-out)"]
+    except Exception:
+        if process is not None:
+            reap()
+        return ["vulkan adapter: unavailable (query-failed)"]
+    finally:
+        # Closing the pipe under a reader still inside read() would race it.
+        if process is not None and not (reader is not None and reader.is_alive()):
+            try:
+                process.stdout.close()
+            except Exception:
+                pass
+    if process.returncode != 0:
+        return ["vulkan adapter: unavailable (probe-crashed)"]
+    adapters = []
+    for line in b"".join(chunks).decode("utf-8", errors="replace").splitlines():
+        if VULKAN_ADAPTER_LINE.match(line):
+            adapters.append(line)
+            if len(adapters) == VULKAN_MAX_ADAPTERS:
+                break
+        elif (unavailable := re.fullmatch(r"vulkan adapter: unavailable \(([a-z-]+)\)", line)) \
+                and unavailable[1] in VULKAN_UNAVAILABLE_TAGS:
+            return [line]
+    return adapters or ["vulkan adapter: unavailable (query-failed)"]
 
 
 def parse_shard(shard):
@@ -541,11 +725,13 @@ def assertion_source(path, line):
     return statement[:PUBLIC_CHARS] + (" [shortened]" if len(statement) > PUBLIC_CHARS else "")
 
 
-def failure_diagnostics(output):
+def failure_diagnostics(output, remaining=None):
     """One record per failed result occurrence, including repeated names across targets.
 
-    Panic contexts use libtest's name model and the first panic for that name.
-    They cannot disambiguate identical names in different targets.
+    Panic contexts use libtest's name model. Within the first failed-test capture kept for a name (libtest's
+    `---- <name> stdout ----` block), its last panic wins: the one the test failed on, after any it caught. Across
+    targets the first kept context wins for every occurrence of the name, and so does the first panic of output
+    outside a failed test's capture (a fatal run's).
     Beside the classified reason, a record shows the statement that panicked and any part of the payload (a
     message, an operand) that occurs verbatim in the tracked source around it (public_text): the checkout's own text,
     never a computed or prepared value.
@@ -556,9 +742,22 @@ def failure_diagnostics(output):
     aborts = []
     panic_reason_pending = False
     thread_name = None
-    # Collect compiler codes only after a panic that already exposed a tracked message.
+    # Collect compiler codes only after a panic that already exposed a tracked message, or one whose payload starts as
+    # rustc's own output does.
     compiler_codes = {}
     pending_codes = None
+    # Which captured-output block a line is in (a result line or libtest's capture header starts the next), the test
+    # whose failed-test capture it is (None outside one), and the block each kept context came from.
+    block = 0
+    capture = None
+    kept_block = {}
+    # A test that reruns its own executable prints the child's libtest report inside its own capture: its `running N
+    # tests` after a capture began, then a failed result and capture header for that same name. `child_parent` is the
+    # capture active at that `running`, `child_failed` the name the child reported failed, and `nested_block` the block
+    # of its nested capture, whose panic replaces the wrapper's. A summary or a new target ends the child run.
+    child_parent = None
+    child_failed = None
+    nested_block = None
     # The tracked (path, line) of the current panic, and whether its `left:`/`right:` operand lines may follow.
     where = None
     operands_pending = False
@@ -586,6 +785,10 @@ def failure_diagnostics(output):
         if RESULT.match(line) or SUMMARY.match(line) or TARGET.match(line) or panic:
             panic_reason_pending = operands_pending = False
             pending_codes = None
+        if COUNT.match(line) and capture is not None:
+            child_parent, child_failed, nested_block = capture, None, None
+        elif SUMMARY.match(line) or TARGET.match(line):
+            child_parent, child_failed, nested_block = None, None, None
         if pending_codes is not None and len(pending_codes) < 3 and (code := RUSTC_ERROR.match(line)):
             if code[1] not in pending_codes:
                 pending_codes.append(code[1])
@@ -606,6 +809,10 @@ def failure_diagnostics(output):
                 ("index out of bounds", "index out of bounds"),
                 ("attempt to", "arithmetic failure"),
             ) if line.strip().startswith(prefix)), "custom panic")
+            # A test that compiles a generated program panics with rustc's own output: its codes are categories.
+            compiler = RUSTC_ERROR.match(line.strip())
+            if compiler:
+                reason = "rustc could not compile a test program"
             withheld_text = "payload withheld (resource privacy)"
             if reason == "Result::unwrap on an error":
                 if shape := unwrap_error_shape(line.strip().split(" value: ", 1)[-1]):
@@ -618,7 +825,10 @@ def failure_diagnostics(output):
                 message = line.strip().split("failed: ", 1)[1] if "failed: " in line else None
             elif where and reason in ("assertion condition failed", "custom panic"):
                 message = line.strip()
-            if shown := (public_text(message, *where) if message else None):
+            if compiler and context is contexts.get(thread_name):
+                context.append(f"  panic reason: {reason}; {withheld_text}")
+                pending_codes = compiler_codes[thread_name] = [compiler[1]]
+            elif shown := (public_text(message, *where) if message else None):
                 context.append(f"  panic reason: {reason}; message: {shown}")
                 if context is contexts.get(thread_name):
                     pending_codes = compiler_codes[thread_name] = []
@@ -631,13 +841,32 @@ def failure_diagnostics(output):
             continue
         if found := RESULT.match(line):
             if found[2] == "FAILED":
-                failures.append(found[1])
+                if child_parent is not None and found[1] == child_parent:
+                    child_failed = found[1]
+                else:
+                    failures.append(found[1])
+        header = CAPTURE.match(line)
+        # A summary or a new target ends the capture it follows: a child run's summary locks the panic kept for it.
+        if header or RESULT.match(line) or SUMMARY.match(line) or TARGET.match(line):
+            block += 1
+            capture = header[1] if header else None
+            if header:
+                nested_block = block if child_parent is not None and header[1] == child_parent == child_failed else None
         if panic:
             context = []
             thread_name = panic[1]
-            if thread_name not in contexts:
+            if (thread_name in contexts and capture == thread_name
+                    and block in (kept_block[thread_name], nested_block)):
+                # A test that catches a panic it raises on purpose (a listener's) fails on its last one: a later
+                # panic in the same failed-test capture replaces the earlier. So does a panic in a child's own
+                # report embedded in the capture: it is the real failure, the wrapper only names it.
+                contexts[thread_name] = context
+                kept_block[thread_name] = block
+                compiler_codes.pop(thread_name, None)
+            elif thread_name not in contexts:
                 if len(contexts) < DIAGNOSTIC_CONTEXTS:
                     contexts[thread_name] = context
+                    kept_block[thread_name] = block
                 else:
                     skipped_contexts += 1
                     continue
@@ -645,9 +874,7 @@ def failure_diagnostics(output):
             path = location[1] if location else ""
             if any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in path):
                 path = ""
-            # game-discovery emits canonical absolute #[path] declarations. Only
-            # this checkout's exact resolved prefix is authoritative; never guess
-            # another checkout's prefix or search for a matching path suffix.
+            # An absolute path counts only under this checkout's exact prefix, never a guessed one.
             path = path.replace(os.sep, "/")
             prefix = ROOT.as_posix() + "/"
             if path.startswith(prefix):
@@ -679,7 +906,8 @@ def failure_diagnostics(output):
     for name, codes in compiler_codes.items():
         if codes:
             contexts[name].append(f"  compiler: rustc {', '.join(codes)} (diagnostic text withheld)")
-    remaining = _active_budget if _active_budget is not None else [FAILURE_TOTAL_BYTES]
+    if remaining is None:
+        remaining = [FAILURE_TOTAL_BYTES]
     # What killed the process comes first: a test that libtest reported FAILED ran to its end, so it is never
     # the one that took the process down.
     for abort in aborts:
@@ -729,6 +957,18 @@ def failure_diagnostics(output):
 
 
 RUNNING_LONG = re.compile(r"^test (\S+) has been running for over 60 seconds$")
+# A hung test held its leg until the job's own time limit cancelled the job, and a cancelled job names no test
+# (the client halves in daily 44814607973). Each test run stops at this limit instead: GNU timeout ends the run's
+# whole process group, the test executable included, and returns TIMED_OUT, so the run is red with the tests still
+# running named (libtest's 60 s notices) and the job's later legs still run. The longest leg that finished ran
+# 1,424 s (daily 44781526923).
+TEST_RUN_LIMIT = 45 * 60
+TIMED_OUT = 124
+
+
+def time_limit():
+    """The prefix that stops a test run at TEST_RUN_LIMIT; none without GNU timeout (Windows' `timeout` only waits)."""
+    return ["timeout", f"{TEST_RUN_LIMIT}s"] if os.name == "posix" and shutil.which("timeout") else []
 CRASH_NAMES = 20
 # The job's cgroup (v2): the whole job's memory, compilation and file cache included, as the data-leg lines print it.
 CGROUP = Path("/sys/fs/cgroup")
@@ -896,18 +1136,24 @@ def run_binaries(package, executables, arguments, env):
     does (in its folder, with the variables cargo sets), printing cargo's own lines around each, which run() reads."""
     folder = ROOT / ignored_shards.workspace_members()[package][0]
     deps = Path(next(iter(executables.values()))).parent
+    # The variable the platform's loader reads (Windows' environment names are case-insensitive: keep the spelling in env).
+    library_path = next((key for key in env if key.upper() == LIBRARY_PATH.upper()), LIBRARY_PATH)
     env = dict(env, CARGO=shutil.which("cargo") or "cargo", CARGO_MANIFEST_DIR=str(folder),
                CARGO_MANIFEST_PATH=str(folder / "Cargo.toml"), CARGO_PKG_NAME=package,
-               LD_LIBRARY_PATH=os.pathsep.join(filter(None, [str(deps), str(deps.parent), env.get("LD_LIBRARY_PATH")])))
+               **{library_path: os.pathsep.join(filter(None, [str(deps), str(deps.parent), env.get(library_path)]))})
     output, status = [], 0
     for target, executable in executables.items():
         output.append(f"     Running {executable} ({executable})")
         crate = package if target == "lib" else target.split(":", 1)[1]
-        done = subprocess.run([executable, *arguments], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                              errors="replace", env=dict(env, CARGO_CRATE_NAME=crate.replace("-", "_")), cwd=folder)
+        done = subprocess.run([*time_limit(), executable, *arguments], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              text=True, errors="replace", env=dict(env, CARGO_CRATE_NAME=crate.replace("-", "_")),
+                              cwd=folder)
         output.append(done.stdout)
-        if done.returncode:
-            status = 101
+        if done.returncode == TIMED_OUT:
+            # The executables after it still run; the run as a whole reads as stopped at the limit.
+            status = TIMED_OUT
+        elif done.returncode:
+            status = status or 101
             ended = (f"signal: {-done.returncode}, {signal.Signals(-done.returncode).name}"
                      if done.returncode < 0 and -done.returncode in signal.valid_signals()
                      else f"exit status: {done.returncode}")
@@ -916,7 +1162,31 @@ def run_binaries(package, executables, arguments, env):
     return subprocess.CompletedProcess(list(executables.values()), status, "\n".join(output) + "\n")
 
 
+# What the current run's commands printed, by stage (build, list, test): kept privately when the run fails.
+_captured = {}
+
+
 def run(package, skip, number=None, count=None, only=None, binaries=None):
+    """Run one leg (run_leg) and, when it fails in any way, keep everything its commands printed.
+
+    The public log withholds free-form panic payloads and compiler text (they can carry vanilla data). With
+    IGNORED_TESTS_PRIVATE_LOGS set, a run that stopped (None) or has a failed test keeps each stage's whole output
+    there as `<leg>.<stage>.log`, which ignored-tests.yml copies into the CI host's private keep; the public log
+    names the files only."""
+    _captured.clear()
+    results = run_leg(package, skip, number, count, only, binaries)
+    private = os.environ.get("IGNORED_TESTS_PRIVATE_LOGS")
+    if private and (results is None or not all(results.values())):
+        leg = package if number is None else f"{package}#{number}of{count}"
+        for stage, text in _captured.items():
+            kept = Path(private) / f"{leg}.{stage}.log"
+            kept.parent.mkdir(parents=True, exist_ok=True)
+            kept.write_text(text, errors="replace")
+            print(f"{package}: kept privately on the runner: {kept.name}")
+    return results
+
+
+def run_leg(package, skip, number=None, count=None, only=None, binaries=None):
     """Each test's result in `package`'s ignored library tests but `skip` (and, with a leg, the other legs'), or None if they didn't build.
 
     `only=(targets, tests)` runs just those ignored tests of those targets (`lib`, `bin:NAME`, `test:NAME`) instead;
@@ -934,7 +1204,7 @@ def run(package, skip, number=None, count=None, only=None, binaries=None):
         for key in ("SUNRISE_LAUNCHER_TRASH", "SUNRISE_LAUNCHER_CLIPBOARD", "SUNRISE_LAUNCHER_DESKTOP"):
             homes[key] = Path(scratch) / key.lower()
         env = lab.game_env(**homes)
-        # A fixture holds a server Game by value, which the server thread gets a guest stack for: not libtest's 2 MiB.
+        # Some fixtures hold a server Game by value on a libtest thread and need more than its default stack.
         env["RUST_MIN_STACK"] = str(TEST_THREAD_STACK)
         if package == "sunrise-client-lib":
             # Worldgen must meet its real-time deadlines without disabling test assertions.
@@ -959,10 +1229,11 @@ def run(package, skip, number=None, count=None, only=None, binaries=None):
         if client_half:
             # The runner's own cap (tools/ci/cargo_jobs.py --cap) when set, else the old fixed one.
             command.append(f"--jobs={os.environ.get('CI_JOBS', '8')}")
-        # What the package's tests need built first (ignored_shards.PREPARE: the command verify runs too).
+        # What the package's tests need built first (ignored_shards.PREPARE).
         if prepare := ignored_shards.PREPARE.get(package):
             built = subprocess.run(prepare, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                    errors="replace", env=env, cwd=ROOT / workspace)
+            _captured["build"] = built.stdout
             if built.returncode:
                 print(f"{package}: building what its tests need failed (cargo exit {built.returncode})")
                 compile_diagnostics(built.stdout)
@@ -970,16 +1241,19 @@ def run(package, skip, number=None, count=None, only=None, binaries=None):
         expected = set()
         timing = os.environ.get("SUNRISE_DATA_LEG_TIMING") == "1"
         phase = f"{package}#{number}of{count}" if number is not None else package
+        batch = f"sunrise-client#{number}of{count}" if timing and client_half and number is not None else None
         if timing:
             print(f"data-leg phase={phase} compile-list-start utc={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}", flush=True)
         compile_started = time.monotonic()
         if number is not None:
             # List what exists, then skip every test another leg owns.
-            listing = subprocess.run(
-                [*command, "--", "--list", "--include-ignored"],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", env=env,
-                cwd=ROOT / workspace,
-            )
+            list_command = [*command, "--", "--list", "--include-ignored"]
+            with cgroup_telemetry.sample_command(CGROUP, batch, "compile-list") if batch else nullcontext():
+                listing = subprocess.run(
+                    list_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", env=env,
+                    cwd=ROOT / workspace,
+                )
+            _captured["list"] = (listing.stdout or "") + (listing.stderr or "")
             names = {found[1] for line in listing.stdout.splitlines() if (found := LISTED.match(line))}
             if listing.returncode or not names:
                 print(f"{package}: could not list the tests to split into legs (cargo exit {listing.returncode})")
@@ -999,18 +1273,21 @@ def run(package, skip, number=None, count=None, only=None, binaries=None):
         threads = min(8 if client_half else 4, int(os.environ.get("CI_CPUS", "8")))
         selection = ["--ignored", "--exact", f"--test-threads={threads}", *only[1]] if only else \
             ["--include-ignored", "--exact", f"--test-threads={threads}", *skips]
+        env["SUNRISE_GPU_TESTS_REQUIRE_ADAPTER"] = "1"
         if binaries:
             process = run_binaries(package, {target: binaries[target] for target in only[0]}, selection, env)
         else:
-            process = subprocess.run(
-                [*command, "--", *selection],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace", env=env,
-                cwd=ROOT / workspace,
-            )
+            # Cargo may check freshness or build again: measure the command, not isolated test execution.
+            test_command = [*time_limit(), *command, "--", *selection]
+            with cgroup_telemetry.sample_command(CGROUP, batch, "test-command") if batch else nullcontext():
+                process = subprocess.run(
+                    test_command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace", env=env,
+                    cwd=ROOT / workspace,
+                )
         if timing:
             print(f"data-leg phase={phase} test-command-end utc={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} execution_seconds={time.monotonic() - execution_started:.3f}", flush=True)
+    _captured["test"] = process.stdout
     results = {}
-    summaries = []
     print(f"{package}: cargo exit {process.returncode}")
     long_running = dict.fromkeys(
         found[1] for line in process.stdout.splitlines() if (found := RUNNING_LONG.match(line.strip()))
@@ -1021,11 +1298,12 @@ def run(package, skip, number=None, count=None, only=None, binaries=None):
     target_count = None
     target_number = 0
     awaiting_count = False
-    incomplete = False
+    incomplete = completed = False
     occurrences = {}
     ambiguous = set()
     max_name_length = max(map(len, expected), default=0)
-    failure_diagnostics(process.stdout)
+    remaining = _active_budget if _active_budget is not None else [FAILURE_TOTAL_BYTES]
+    failure_diagnostics(process.stdout, remaining)
     # A target finished only if its LAST summary counts every test it started. Fixtures that rerun this test
     # executable print their own summaries first, from inside a parent test; the parent's comes after them.
     last_summary = None
@@ -1036,14 +1314,15 @@ def run(package, skip, number=None, count=None, only=None, binaries=None):
         return stopped(reason, started, kills_before, process, results, expected, ended_by)
 
     def finish_target():
-        nonlocal incomplete, target_count, last_summary
+        nonlocal incomplete, completed, target_count, last_summary
         if target_count is None:
             return
-        if last_summary is None or sum(map(int, SUMMARY.match(last_summary).groups())) != target_count:
+        if last_summary is None or sum(last_summary) != target_count:
             incomplete = True
         else:
-            summaries.append(last_summary)
-            print(f"{package}: {last_summary}")
+            completed = True
+            passed, failed, ignored, measured = last_summary
+            print(f"{package}: test result: {passed} passed; {failed} failed; {ignored} ignored; {measured} measured;")
         target_count = last_summary = None
 
     for line in process.stdout.splitlines():
@@ -1060,21 +1339,22 @@ def run(package, skip, number=None, count=None, only=None, binaries=None):
             # A test may report more than once (below); it passes only if every record passed.
             results[found[1]] = results.get(found[1], True) and found[2] == "ok"
         elif line.startswith("screen-effect event loop error: "):
-            print(line)
-        elif SUMMARY.match(line):
+            bounded_record("screen-effect event loop error: details withheld\n", remaining)
+        elif found := SUMMARY.match(line):
             if target_count is not None:
-                last_summary = line
-        elif status := re.search(r"\((signal|exit status): (\d+)", line):
+                counters = found.groups()
+                # Libtest's usize counters have at most 20 decimal digits on supported targets.
+                last_summary = tuple(map(int, counters)) if all(len(counter) <= 20 for counter in counters) else None
+        elif status := re.search(r"\((signal|exit status): (\d+)(?:, (SIG\w+))?", line):
             # Emit only the numeric status, never adjacent test output.
-            print(f"{package}: {status[0]})")
+            print(f"{package}: ({status[1]}: {status[2]})")
             # Cargo's own line for a test process that ended: 101 is libtest's "tests failed"; a signal or any
             # other status is a crash, whatever summaries came before it.
             if cargo_failure and "process didn't exit successfully" in line:
                 crash = status[1] == "signal" or status[2] != "101"
                 if crash and ended_by is None:
-                    number = int(status[2])
-                    name = signal.Signals(number).name if status[1] == "signal" and number in signal.valid_signals() else None
-                    ended_by = f"{status[1]} {number}" + (f" ({name})" if name else "")
+                    # The name is the one cargo printed: this machine's signal table may not know the signal.
+                    ended_by = f"{status[1]} {status[2]}" + (f" ({status[3]})" if status[3] else "")
                 crashed |= crash
                 cargo_failure = False
         if line.startswith("error: test failed, to rerun pass "):
@@ -1091,6 +1371,12 @@ def run(package, skip, number=None, count=None, only=None, binaries=None):
                 if status != "ignored":
                     results[name] = results.get(name, True) and status == "ok"
     finish_target()
+    if process.returncode == TIMED_OUT:
+        ended_by = f"the {TEST_RUN_LIMIT} s limit"
+        stop("tests still running at the time limit (a hung test)")
+        still = ", ".join(_stopped["still_running"]) or "none named (each started under 60 s before the limit)"
+        print(f"{package}: stopped after {TEST_RUN_LIMIT} s; still running past 60 s: {still}")
+        return None
     if crashed:
         print(f"{package}: a test process crashed (cargo exit {process.returncode})")
         crash_report(package, process.stdout, expected, results)
@@ -1103,7 +1389,6 @@ def run(package, skip, number=None, count=None, only=None, binaries=None):
               "test); each passes only if every result passed")
     framing_problems = {name: "ambiguous-result" for name in ambiguous}
     if framing_problems:
-        remaining = _active_budget if _active_budget is not None else [FAILURE_TOTAL_BYTES]
         for name, category in sorted(framing_problems.items()):
             bounded_record(f"  {safe_identity(name)}; category={category}\n", remaining)
         print(f"{package}: {len(framing_problems)} listed identities have ambiguous result framing")
@@ -1118,7 +1403,6 @@ def run(package, skip, number=None, count=None, only=None, binaries=None):
         return stop("cargo failed without a test failure (a build failure, or a process that ended early)")
     if missing := sorted(expected - results.keys()):
         print(f"{package}: {len(missing)} listed tests of this leg never reported a result:")
-        remaining = _active_budget if _active_budget is not None else [FAILURE_TOTAL_BYTES]
         shown = 0
         for name in missing:
             if remaining[0] <= 0:
@@ -1129,7 +1413,7 @@ def run(package, skip, number=None, count=None, only=None, binaries=None):
             shown += emitted
         print(f"{len(missing) - shown} missing identities not shown (shared total byte budget)")
         return stop("listed tests never reported a result")
-    if not summaries:
+    if not completed:
         # Unknown output is not necessarily a compiler diagnostic: never forward
         # a malformed test process's captured payload to public CI logs.
         print(f"{package}: no completed test-target summary; raw output withheld")
@@ -1152,6 +1436,9 @@ def main(shards, report=None):
     skipped = {"harness", "manual"} if has_vulkan() else {"harness", "manual", "gpu"}
     if "gpu" in skipped:
         print("no Vulkan driver on this runner: the tests marked `gpu` are skipped")
+    else:
+        for line in vulkan_adapter_summaries():
+            print(line)
     problems = []
     accepted_unshown = 0
     # Reuse the hash selection in two consecutive processes on the same runner.

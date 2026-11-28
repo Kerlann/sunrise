@@ -1,4 +1,5 @@
 //! Host backends: what the game answers the API with.
+use crate::world::random::with_random_draw;
 use crate::*;
 
 /// Why a fake player's `perform_action` did nothing at all: it was refused before any of the
@@ -12,6 +13,11 @@ pub enum ActionRefused {
     /// The handle is stale, or its fake is gone.
     Stale,
     /// Another player's turn, an open transaction, or another `perform_action` is running.
+    /// A `level_tick_pre` or `level_tick_post` listener's own failure boundary is not an open
+    /// transaction here: the action runs outside it, so the listener's panic doesn't undo the
+    /// action. That panic still rolls back the listener's own writes, and a write it made
+    /// before the action, at a place the action then changed, is put back over the action's
+    /// result there. A `host.transaction` the listener opens is an open transaction.
     Busy,
     /// The block or entity is out of the player's reach, or the hit isn't on the block
     /// (`ServerGamePacketListenerImpl`'s `handleUseItemOn`, `handleInteract` and
@@ -34,15 +40,14 @@ pub enum ActionRefused {
 pub trait NoBackend {
     /// The error for a host without a game.
     fn no_backend() -> Self;
-}
 
-/// The error a gated Host method refuses with when it is called outside the side or phase that
-/// allows it, in place of unwinding: `Result<_, E>` with `E: AccessRefusal` is what the game-side
-/// forwarder generator accepts for an `#[access]` method (it finds the `impl`s in this crate, so
-/// the impl is the marker), and it answers `Err(E::unavailable())` before the call runs.
-pub trait AccessRefusal {
-    /// The refusal for a call outside its allowed phase.
-    fn unavailable() -> Self;
+    /// The error for a call made on the side that does not have it.
+    fn wrong_side() -> Self
+    where
+        Self: Sized,
+    {
+        Self::no_backend()
+    }
 }
 
 impl NoBackend for ActionRefused {
@@ -250,30 +255,30 @@ pub fn client_backend_mut_of(host: &mut dyn ClientHost) -> Option<&mut dyn Clien
     host.client_backend_mut().map(|wrapper| wrapper.open())
 }
 
-/// A host is the store of its holders' attachments, so `TYPE.get(host, holder)` reads one.
+/// A host is the store of its holders' attachments, so `key.get(host, holder, read)` reads one.
 macro_rules! host_attachment_store {
     ($($host:ident),+) => { $(
         impl AttachmentStore for dyn $host + '_ {
-            fn validate_attachment(&mut self, namespace: &str, name: &str, sync: bool) -> AttachmentResult<()> {
-                crate::parts::validate_attachment_use(namespace, name, sync)
+            fn read_only(&mut self, holder: Holder) -> AttachmentResult<bool> {
+                self.attachments().read_only(holder)
             }
-            fn holds(&mut self, holder: Holder, namespace: &str, name: &str) -> AttachmentResult<bool> {
-                self.attachments().holds(holder, namespace, name)
+            fn holds(&mut self, holder: Holder, key: &AttachmentStoreKey<'_>) -> AttachmentResult<bool> {
+                self.attachments().holds(holder, key)
             }
-            fn decoded(&mut self, holder: Holder, namespace: &str, name: &str) -> AttachmentResult<Option<AttachmentValue>> {
-                self.attachments().decoded(holder, namespace, name)
+            fn lend_decoded(&mut self, holder: Holder, key: &AttachmentStoreKey<'_>, read: AttachmentLoan<'_>) -> AttachmentResult<()> {
+                self.attachments().lend_decoded(holder, key, read)
             }
-            fn saved(&mut self, holder: Holder, namespace: &str, name: &str) -> AttachmentResult<Option<Compound>> {
-                self.attachments().saved(holder, namespace, name)
+            fn binding(&mut self, holder: Holder, key: &AttachmentStoreKey<'_>) -> AttachmentResult<Option<AttachmentBinding>> {
+                self.attachments().binding(holder, key)
             }
-            fn store(&mut self, holder: Holder, namespace: &str, name: &str, value: AttachmentValue, form: AttachmentForm) -> AttachmentResult<()> {
-                self.attachments().store(holder, namespace, name, value, form)
+            fn store(&mut self, holder: Holder, write: AttachmentStoreWrite<'_>) -> AttachmentResult<()> {
+                self.attachments().store(holder, write)
             }
-            fn discard(&mut self, holder: Holder, namespace: &str, name: &str, sync: bool) -> AttachmentResult<()> {
-                self.attachments().discard(holder, namespace, name, sync)
+            fn discard(&mut self, holder: Holder, key: &AttachmentStoreKey<'_>) -> AttachmentResult<()> {
+                self.attachments().discard(holder, key)
             }
-            fn queue_sync(&mut self, holder: Holder, namespace: &str, name: &str) -> AttachmentResult<()> {
-                self.attachments().queue_sync(holder, namespace, name)
+            fn queue_sync(&mut self, holder: Holder, key: &AttachmentStoreKey<'_>) -> AttachmentResult<()> {
+                self.attachments().queue_sync(holder, key)
             }
         }
     )+ };
@@ -290,13 +295,14 @@ host_attachment_store!(
 macro_rules! level_random_draws {
     ($($host:ident),+) => { $(
         impl dyn $host + '_ {
-            /// Draw from the level's own random stream, in vanilla's order: `draw` gets the
-            /// stream and the level keeps it after. None on a non-authoritative level.
+            /// Borrow the hook's level stream (`Level.getRandom`) for the closure only:
+            /// `host.with_random(|rng| rng.next_int_bound(bound))`. Returns `None` without
+            /// invoking `draw` if the host does not lend an authoritative level stream.
+            ///
+            /// Draws advance the live stream directly in vanilla's order and are not rolled
+            /// back on panic/unwind or transaction abort, matching vanilla `Level.getRandom()`.
             pub fn with_random<T>(&mut self, draw: impl FnOnce(&mut dyn RandomSource) -> T) -> Option<T> {
-                let mut random = self.random()?;
-                let drawn = draw(&mut random);
-                self.set_random(random);
-                Some(drawn)
+                with_random_draw(draw, |draw| self.lend_random(draw))
             }
         }
     )+ };

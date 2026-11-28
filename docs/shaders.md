@@ -1,77 +1,48 @@
-# Sunrise shader packs
+# Shader packs
 
-Sunrise has its own shader packs: WGSL written against stages of Sunrise's renderer, checked before they run. This page
-is the guide for pack authors. The design and the pack format are in [api/shaders.md](api/shaders.md); every stage's
-signature, input, resource and limit is in the generated [api/shaders-reference.md](api/shaders-reference.md).
+Sunrise runs shader packs in the Iris/OptiFine `shaders/` format: a folder or a `.zip` in `shaderpacks/` with a
+`shaders/` folder inside, written in GLSL. The format Sunrise implements is defined in
+[cleanroom/shader-packs-spec.md](cleanroom/shader-packs-spec.md); `crates/sunrise-shaders` reads a pack and translates
+its GLSL, and the renderer draws it.
 
-Shader packs in the Iris/OptiFine format are a separate feature with its own loader; this page is only about
-Sunrise's own format.
-
-| Part | Where | State |
-|---|---|---|
-| Format, stages, check | `crates/sunrise-shader-api` | API 0.1, experimental |
-| Authoring tool | `sunrise-shader` (same crate) | `new`, `check`, `pack` |
-| Templates | `crates/sunrise-shader-api/templates/` | post, sky, material |
-| Example pack | `crates/sunrise-shader-api/packs/golden_hour` | a warm sky and two post passes |
-| In the game: every stage | Options > Video Settings > Shaders > Shader Packs | sky, material, post passes, hot reload |
-| The registry and the launcher | `shader` kind ([modding/src/reference/registry-index.md](modding/src/reference/registry-index.md)); the Mods page's Shader packs tab | checked, then installed into `shaderpacks/` |
-
-## Quick start
-
-```sh
-cargo install --path crates/sunrise-shader-api      # or: cargo run -p sunrise-shader-api --bin sunrise-shader -- <command>
-sunrise-shader new my_pack --template post          # also: --template sky, --template material; --name "My Pack"
-sunrise-shader check my_pack                        # what the game, the launcher and the registry will check
-sunrise-shader pack my_pack                         # check, then write my_pack-0.1.0.sshader beside the folder
-```
-
-`check` prints each stage with its cost, and the pack's SHA-256:
-
-```
-golden_hour 1.0.0 (shader API 0.1): ok
-  sky       Warm sunrise                     99 expressions, 0 texture reads
-  post      Glow                            192 expressions, 3 texture reads
-  post      Colour grade                    201 expressions, 2 texture reads
-  sha256 b5e0d98c...
-```
-
-or every problem, at its file, line and column:
-
-```
-my_pack 0.1.0 (shader API 0.1): FAILED
-  post.wgsl:9:1: expected `;`, found "}"
-```
-
-`--json` prints the same for tools (`ok`, `id`, `version`, `api`, `sha256`, `stages`, `problems`).
+Sunrise's own WGSL pack format (`sunrise-shaders.toml` and the `.sshader` package, API 0.1 and 0.2) is removed. A
+`.sshader` file or such a folder in `shaderpacks/` is left out of the list with a note that its format is no longer
+supported, and a saved choice of one falls back to no pack with the same note. The registry lists no such pack.
 
 ## Trying a pack in the game
 
-Put the pack folder (or its `.sshader`) in `shaderpacks/` beside `options.txt` (Open Pack Folder opens it) and pick
-it on Options > Video Settings > Shaders > Shader Packs..., which lists Sunrise's packs, marked (Sunrise), beside packs in the
-`shaders/` format; one runs at a time, and clicking it again turns it off. `SUNRISE_SHADER_PACK=<its folder or file
-name>` runs a pack whatever the page says, for development. The game checks the pack first, and refuses one that
-fails, with its problems in the chat. While it runs, the game looks at the pack twice a second: save a file
-and the pack is checked and rebuilt in place ("Shader pack ... reloaded"); if the new version fails, the chat says
-where and the last good version keeps drawing. All three stages run.
+Put the pack folder (or its `.zip`) in `shaderpacks/` beside `options.txt` (Open Pack Folder opens it) and pick
+it on Options > Sunrise Settings > Shaders; one runs at a time, and clicking it again turns it off. Its
+Shader Options... row opens the picked pack's own settings.
 
-The Extras page has a Shader pack key for the same pick: press it and the picked pack turns off, press it again
-and the same pack runs again. It is bound on the Extras page (click the row, then press a key; Escape unbinds it),
-`K` out of the box, and it is not a vanilla key binding, so rebinding it never turns into another mapping's key
-(Replay Studio keeps physical `K` for its camera keyframe). Turning off remembers the pick in the Extras settings,
+The Shaders page of Sunrise Settings has a Shader pack key for the same pick: press it and the picked pack turns off,
+press it again and the same pack runs again. It is bound there (click the row, then press a key; Escape unbinds it),
+`K` out of the box, and it is not a vanilla key binding, so rebinding it never turns into another mapping's key.
+Turning off remembers the pick in the Extras settings,
 so the pack stays off across restarts until the key is pressed again; the menu's second click on the picked pack
-does the same. A pack whose owning mod is off can't run: the key says so instead of claiming it turned on.
+does the same.
 
-A picked pack's options are pages of the same screen, under the pack's name in its page list: its screens, with the
-names the pack gives them, its profiles, and Reset. The main screen and those it links to are in the list (when
+A picked pack's options open from Shaders' **Shader Options...** row, on a screen of their own, under the pack's name
+in its page list: its screens, with the names the pack gives them, its profiles, and Reset. The row is greyed, saying
+why, while no pack is picked or the pick's options couldn't be read. The main screen and those it links to are in the list (when
 there are more than it has room for, they collapse into one `‹ Name ›` row that the arrows and a controller's
 bumpers step through); deeper screens open from their links, and Escape goes back. A click, Enter or Right picks an
 option's next value, a Shift click or Left the one before, and the options the pack lists in
 `sliders` are sliders. Pointing at one shows what the pack says of it (`option.NAME.comment`); the search finds an
-option on any screen. Undo puts back the pick, the Shadow Cache, the Sunrise packs' options and the options of the
-`shaders/` pack that was picked when the screen opened; another `shaders/` pack keeps what was saved for it (picking
-away from it saves its changes, as Apply does). A `shaders/` pack's
+option on any screen. Shader Options' Undo puts back the pack's options as the screen opened with them (and the
+remembered pick, which the key can change meanwhile); the pick and the Shadow Cache are Sunrise Settings', whose Undo
+puts them back. Picking away from a pack saves its changed options, as Apply does. A pack's
 options are saved to `shaderpacks/<pack>.txt` (`NAME=value` lines), and the pack loads again with them, with Apply
-(shown while they differ from the saved ones) or on leaving the screen; a Sunrise pack's apply at once.
+(shown while they differ from the saved ones) or on leaving the screen.
+
+Under the picked pack's row, **Iris compatibility** (Auto, On, Off) decides whether the pack gets `IS_IRIS` and
+`IRIS_VERSION`, the macros packs test to take the path they wrote for Iris. Auto, the default, gives them only to a
+pack whose programs test them (seen while reading its programs with its saved options and feature answers); On and Off
+decide for that pack whatever it tests. The choice is kept by the pack's name in `sunrise-graphics.txt`
+(`shaderPackIrisCompat:<on|off>:<name>`), apart from the pack's own options, so a pack replaced under the same name
+keeps it. While it applies, the pack's row says so and the log has a `runs with Iris compatibility` line; a load
+started before the switch changed is dropped and the pack loads again. The rule is decision D-8 in
+[cleanroom/decisions.md](cleanroom/decisions.md).
 
 The **Shadow Cache** (off by default; `shadowCache` in `sunrise-graphics.txt`) skips the shadow pass and keeps the
 shadow map and shadowcolor buffers of the frame before while nothing that draws them has changed (the world, the
@@ -80,13 +51,13 @@ read). It keeps them only while the pass would draw the same again: the shadow p
 entity casts a shadow, while the pack has `image.*` images, while a shadow program draws into, flips or stores into a
 shadowcolor buffer that isn't cleared every frame (`shadowcolorNClear=false`: the program builds on the frame
 before), while a shadow program or a compute stage attached to one binds the pack's `bufferObject.*` storage buffers
-(they keep their contents between frames, so it may read or write something new each frame), and while a program
+or reads its work-group counts from one (`indirect.<pass>`) (they keep their contents between frames, so it may read or write something new each frame), and while a program
 outside the shadow pass binds `shadowcolorimg0` or `shadowcolorimg1`, since its stores would otherwise pile up in the
 kept buffers.
 
 ## Testing a pack frame by frame
 
-A pack that keeps something from frame to frame (`history`, eased values) draws a little differently in every run,
+A pack that keeps something from frame to frame (buffers, images, smoothed values) draws a little differently in every run,
 as frames come when they come. With `SUNRISE_STILL=1` and the world frozen the scene holds still
 ([agent-control.md](agent-control.md#repeatable-screenshots)), and
 
@@ -94,208 +65,104 @@ as frames come when they come. With `SUNRISE_STILL=1` and the world frozen the s
 sunrise-ctl screenshot-sequence 64 50 frame64.png
 ```
 
-starts the pack over as if just loaded (black `history`, eased values from the start) and draws 64 frames 50 ms
-apart on its clock: frame n has `frame_index` n, `time` (n - 1) × 0.05 and `delta_time` 0.05 (0 on frame 1). The
+starts the pack over as if just loaded and draws 64 frames 50 ms apart on its clock: frame n is at n frames and
+(n - 1) × 0.05 seconds. The
 64th is written to `frame64.png` (and `frame64-hdr.png` with HDR output on) before the reply. STEP_MS may be a
 decimal: `16.666667` steps a 60 fps clock. The same build, GPU
 and driver write the same bytes every run, so two versions of a pack compare by a pixel diff. `screenshot-sequence
 cancel` stops one.
 
-## A pack
+## Sunrise extensions: HDR
 
-A folder (or the same files zipped as a `.sshader`) with `sunrise-shaders.toml` and WGSL files:
+A pack can ask Sunrise to show its picture in HDR: light above paper white, up to the display's peak. It's an
+addition to the format, under Sunrise's own names, and a pack that doesn't ask runs exactly as without it. For now
+it's served only under `SUNRISE_HDR_FRAME=float` (the switch for the float frame, [hdr-passes.md](hdr-passes.md)),
+an experimental API. `tools/fixtures/shaderpacks/hdr_extension` is a whole pack that uses it; the examples below are
+taken from it.
 
-```toml
-schema = 1
-id = "my_pack"
-name = "My Pack"
-version = "0.1.0"
-api = "0.1"
+**Asking.** Two keys in `shaders.properties`:
 
-[[post]]
-file = "post.wgsl"
-
-[[options]]
-id = "saturation"
-name = "Saturation"
-type = "float"
-default = 1.15
-min = 0.0
-max = 2.0
+```properties
+sunrise.hdr = true
+#ifdef SUNRISE_CURVE
+sunrise.hdr.tonemap = sunrise
+#else
+sunrise.hdr.tonemap = pack
+#endif
 ```
 
-Every key is in [api/shaders.md](api/shaders.md#the-pack-format-schema-1).
+- `sunrise.hdr` is `true` or `false`; `sunrise.hdr.tonemap` is `pack` (without the key too) or `sunrise`. Any other
+  value turns the request off, with a note in the log naming the key and the line. Nothing may follow the value on
+  its line: a comment goes on a line of its own.
+- Sunrise picks the frame before it compiles the pack, so it reads the keys then, with the standard macros and the
+  pack's options as chosen: they may sit behind one of the pack's options, as here (`SUNRISE_CURVE` is a switch in
+  `final.fsh`). The renderer's macros don't count yet; where the loader's later read with them differs, the
+  frame's answer counts and the log says so.
 
-## Stages
+**Served.** The pack is served the extension when the switch is on, the key asked for it when the frame was picked,
+and the renderer was made for that request. Whether HDR output is on doesn't change it: on an SDR display the pack
+is still served, with SDR's display values, so turning HDR on or off never changes which path the pack compiles.
+Served, its programs see these macros, which no other loader defines; anywhere else the pack takes its other path:
 
-A stage is one function your file defines. Sunrise puts its prelude (the structs, `frame`, the stage's resources and
-helpers) before your file and calls the function from its own pass, so the world is still culled, batched and meshed
-by Sunrise: a pack changes how things look, not how they are drawn.
-
-| Stage | Your function | What it does |
+| Macro | Value | Means |
 | --- | --- | --- |
-| `[sky]` | `fn sky(input: SkyInput) -> vec4<f32>` | the sky's colour along each view ray, opaque (alpha is ignored), drawn where vanilla draws its sky dome (the Overworld's sky; not the Nether's or the End's); the sun, moon, stars and clouds are drawn over it |
-| `[material]` | `fn material(input: MaterialInput) -> Surface` | the lit colour of each point of a block's surface, before the alpha test and fog: every terrain section and distant tile, solid, cutout and translucent (not entities, block entities or particles) |
-| `[weather]` | `fn weather(input: WeatherInput) -> vec4<f32>` | the colour of each point of a rain or snow streak, blended over the world with its alpha; Sunrise's light and fog aren't applied, so the pack applies its own |
-| `[[post]]` | `fn post(input: PostInput) -> vec4<f32>` | a full-screen pass over the world's picture (up to 8, in order), under the hand and HUD. Return `input.color.a` as your alpha: HDR output reads it to find light sources |
+| `SUNRISE_HDR` | `1`, the extension's version | `final` writes linear light, and the display uniforms are served |
+| `SUNRISE_HDR_TONEMAP_PACK` | defined, empty | `sunrise.hdr.tonemap = pack`: the pack owns the tone curve |
 
-A pack has at least one stage; a stage it leaves out keeps vanilla's look. Each input says what vanilla would draw
-(`input.color` in the sky and post stages; `albedo * tint * vec4(lightmap, 1.0)` for a material), so a pack can start
-from vanilla and change only what it means to.
+**What `final` writes.** Served, output 0 of `final` is linear light: BT.709 primaries, 1.0 at paper white, more is
+brighter, any value. Sunrise stores it in the frame's encoding (vanilla's 2.2 power) after the pack's `main`: a
+negative or NaN channel becomes 0, and the encoded value, after the 2.2 power, is held at half float's largest,
+65504; alpha is stored as written. A pack with no `final` is served the
+same way: what it leaves in `colortex0` is read as linear light. Render scale doesn't change any of it.
 
-Every stage can read `frame`: the camera's matrices and position, the sun and moon directions, the time of day,
-vanilla's sky and fog colours, rain and thunder, fog distances, the light at the camera, effects and the dimension.
-Post passes also read `scene_color`, `scene_depth`, `previous` (the last pass's output), two samplers and the helpers
-`depth_at(uv)` and `view_position(uv, depth)`.
-
-Rules the check enforces: your files declare no bindings (`@group`/`@binding`), no entry points and no names starting
-with `sunrise_`. Code shared by several stages goes in files listed in `shared`, put before every stage.
-
-## Sprite tags
-
-The material stage can tell block sprites apart through tags the manifest declares. Each `[[tags]]` is a bit of
-`input.tags`, in the order they appear (32 at most); its `sprites` are sprite names, the namespace `minecraft` by
-default, each with at most one `*`:
-
-```toml
-[[tags]]
-id = "glass"                                      # bit 0: (input.tags & 1u) != 0u
-sprites = ["block/glass", "block/*_stained_glass"]
+```glsl
+#ifdef SUNRISE_HDR
+#ifdef SUNRISE_HDR_TONEMAP_PACK
+    // The pack owns the tone curve: what it writes is what the display shows, up to its peak.
+    linearColor = min(linearColor, vec3(sunriseHeadroom));
+#endif
+    // Linear light, 1.0 at paper white: Sunrise stores it in the frame's encoding.
+    gl_FragData[0] = vec4(linearColor, 1.0);
+#else
+    // Anywhere else: the SDR picture, clipped at white and in the 2.2 power, as before.
+    gl_FragData[0] = vec4(pow(min(linearColor, vec3(1.0)), vec3(1.0 / 2.2)), 1.0);
+#endif
 ```
 
-Terrain carries its sprite, not its block, so a sprite drawn by several blocks gets the tag for all of them.
+Light above white shows only on the float frame, which Sunrise uses with HDR output on where the device can keep the
+HUD on a layer of its own. On any other frame (HDR off, or a device without that layer) the picture is clipped at
+white, as an SDR pack's is.
 
-## Material ids
+**The tone curve has one owner:**
 
-Tags answer "is it one of these"; a pack that treats hundreds of kinds of surface differently numbers them
-instead. Each sprite takes the `id` of the first `[[materials]]` entry that names it, 0 without one, as
-`input.material`. Patterns may hold any number of `*`:
+| `sunrise.hdr.tonemap` | `final` writes | Sunrise then |
+| --- | --- | --- |
+| `pack` | what the display shows, from 0 to `sunriseHeadroom` | runs no tone curve; light past the peak is held at it |
+| `sunrise` | the scene's light, any value from 0 | on the float frame, eases the light into the display's peak with its own tone curve, as it does without a pack with HDR Lighting off |
 
-```toml
-[[materials]]
-id = 10
-sprites = ["block/*_leaves"]
+**Display uniforms.** Served only with `SUNRISE_HDR`, every frame (an Auto paper white follows what the display
+reports):
 
-[shadow]
-solid_materials = [10]   # these cast whole shadows: their cutouts are ignored in the shadow map
-```
+| Uniform | Type | SDR, or a frame that isn't the float one | HDR |
+| --- | --- | --- | --- |
+| `sunriseHdr` | `int` | 0 | 1 |
+| `sunriseHeadroom` | `float` | 1.0 | the peak over paper white, at least 1 |
+| `sunrisePaperWhite` | `float` | 80 | paper white in nits, as set or as the display reports it (Auto) |
+| `sunrisePeak` | `float` | 80 | paper white times the headroom, in nits |
+| `sunriseBlackLevel` | `float` | 0 | the black level in nits, at most paper white |
 
-## Textures
+The black level is for information: Sunrise lifts the shadows to it after the tone curve, so the pack doesn't lift
+them itself. Served, these names are Sunrise's, ahead of a custom uniform (`uniform.*`) of the same name. Not served,
+a program that declares one reads 0, or the pack's custom uniform of that name.
 
-Each `[[textures]]` entry is a PNG in the pack that every stage reads under the name of its `id`, with a sampler named
-`<id>_sampler`. Eight at most, without mipmaps; `filter` is `linear` (the default) or `nearest`, `wrap` is `repeat` (the
-default) or `clamp`:
+**Everything else is as without the extension.** What a program reads (`fogColor`, `skyColor`, textures, the
+colortex buffers) keeps its meaning; a pack that blends linear light does so in its own buffers, in a format it
+picks, as on any loader. The hand is part of the pack's picture, as it draws it. The camera overlays, the HUD and
+the menus draw over `final`'s picture as over Sunrise's own HDR picture. Of an HDR screenshot, the `-hdr.png` keeps
+the pack's light, and the SDR screenshot clips it at white. HDR Lighting stays greyed under a pack.
 
-```toml
-[[textures]]
-id = "noise"
-file = "noise.png"
-```
+**Changelog.** The extension's version is `SUNRISE_HDR`'s value.
 
-```wgsl
-let n = textureSample(noise, noise_sampler, input.uv);
-```
-
-## Coloured block light
-
-Each `[[lights]]` entry gives the blocks it names a colour. The material stage reads the colour at a point with
-`block_light_color(input.position)`: rgb the colours of the sources nearby, averaged by how near each is, and a how
-strongly they reach it (0 where none does). Block light keeps its own brightness, so walls still stop it: this is only its
-colour, and only what a pack does with it shows.
-
-```toml
-[[lights]]
-color = [0.3, 0.7, 1.0]
-blocks = ["soul_torch", "soul_wall_torch", "soul_lantern"]
-```
-
-```wgsl
-let tint = block_light_color(input.position);
-let block = mix(vec3(1.0), tint.rgb, min(tint.a, 1.0)) * input.light.x;
-```
-
-It covers 128 blocks around the camera, moved in steps of 16, and is rebuilt on the CPU when the camera steps or a source
-changes, from at most 2048 sources, the nearest first.
-
-## Options
-
-A picked pack with options gets a Shader Options... button at the top of the Shader Packs page. Float and int options
-are sliders that take the nearest `step` (an int's whole numbers), and the arrow keys move a focused one a step at a
-time; bool and choice options are buttons, where a click picks the next value and a right click the one before.
-Shift-click puts either back to its default, and Reset all of them; hovering one shows its `description`. Each change
-is saved to `shaderpacks/<pack>.txt` (`id=value` lines, values at their defaults left out), a slider's when it is
-let go, and the pack reloads with it within half a second.
-
-The page shows every option two a row, unless the pack lays them out in `[[pages]]`: it opens on the first page, and an
-item `"page:<id>"` is a button opening another, so options can be grouped into categories. `""` leaves a slot empty, and
-`columns = 1` gives a page full-width buttons:
-
-```toml
-[[pages]]
-id = "main"
-name = "My Pack"
-items = ["page:lighting", "page:water"]
-
-[[pages]]
-id = "lighting"
-name = "Lighting"
-description = "Shadows and the light of blocks."   # the tooltip of the button opening it
-items = ["shadow_softness", "block_light"]
-```
-
-Every page has to be reached from the first and every option has to be on a page, or the check refuses the pack.
-
-Each `[[options]]` entry is a WGSL `override` of the same name, set when the game builds the pipeline: no text
-substitution, no recompiling a different program per value.
-
-```wgsl
-override saturation: f32 = 1.15;   // type = "float"; bool → bool, int → i32, choice → u32 (the value's index)
-```
-
-The game shows the options on the pack's settings screen. Branches on an option are on a constant, so the GPU
-skips the side that isn't taken.
-
-The shadow map is most of what a pack with `[shadow]` costs: each frame the terrain in the light's square is drawn again.
-Options can size it, so players pick their own quality. While `option` is off there is no map and no shadow pass
-(`frame.has_shadow` reads 0); `resolution_option` and `distance_option` name an `int` option, or a `choice` whose values
-are numbers, whose value replaces `resolution` or `distance`, checked against their ranges. Changing one rebuilds the map
-at the new size. These two need no `override` in your WGSL: the frame has the map's size.
-
-```toml
-[shadow]
-option = "shadows"                        # a bool: no shadow pass while it is off
-resolution_option = "shadow_resolution"
-
-[[options]]
-id = "shadow_resolution"
-name = "Shadow resolution"
-type = "choice"
-values = ["1024", "2048", "4096"]
-default = "2048"
-```
-
-## What the check does
-
-The game runs the same check when it loads a pack (a pack that fails is refused with the message, and the last good
-one keeps drawing), the launcher before it installs one, and the registry's CI before a pack is listed:
-
-1. The manifest and the package: known keys, valid ids, every file used, sizes.
-2. Each stage built as the renderer builds it and validated by naga.
-3. The stage function's signature, and the rules above.
-4. Each `override` matches its option's type (or has a default); each option is used (those sizing the shadow map
-   may be by `[shadow]` alone).
-5. Budgets: 20 000 expressions and 64 texture reads per stage.
-6. Every entry point translated for Vulkan (SPIR-V), Metal and DirectX 12 (HLSL), with the options at their
-   defaults, minimums and maximums.
-
-`[budget] gpu_ms` is the GPU time your pack aims to add to a frame. To compare, open F3 in the game: while it is
-open, each pass is timed on the GPU and the overlay shows the pack's total and its costliest passes, by their `name`
-(the median of the last 15 timed frames). Timing waits for nothing, so it does not slow the game. In a timed frame the sky
-stage draws in a pass of its own (it shares the world's pass otherwise), so its time includes clearing the picture. The
-material stage runs inside terrain's own draws, so it has no time of its own: compare the frame's GPU time with and
-without the pack.
-
-## Next
-
-An overlay showing what each pass draws (F3 already shows what each costs), and stages for entities, block entities
-and particles (the material stage covers terrain only).
+- 1: `sunrise.hdr`, `sunrise.hdr.tonemap`, `SUNRISE_HDR`, `SUNRISE_HDR_TONEMAP_PACK` and the linear `final`
+  ([#6284](https://github.com/sunrise-org/sunrise/pull/6284)); the display uniforms
+  ([#6487](https://github.com/sunrise-org/sunrise/pull/6487)).

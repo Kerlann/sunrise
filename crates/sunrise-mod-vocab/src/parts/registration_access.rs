@@ -1,5 +1,6 @@
 //! Cold authoring hooks and the scoped key-membership boundary.
 use super::*;
+use crate::RegistryName;
 
 // no wire: this selector is native registration plumbing, never a mod payload.
 // hidden: platform-owned instrumentation plumbing, not a mod authoring surface.
@@ -11,6 +12,7 @@ pub enum RegistrationKeyKind {
     Item,
     Fluid,
     Effect,
+    DamageType,
     BlockEntityType,
     EntityType,
     GameEvent,
@@ -25,7 +27,7 @@ pub enum RegistrationKeyKind {
 pub struct RegistrationAccess {
     pub active: &'static std::sync::atomic::AtomicUsize,
     pub contains: fn(RegistrationKeyKind, u32) -> Option<bool>,
-    pub name: fn(RegistrationKeyKind, u32) -> Option<String>,
+    pub name: fn(RegistrationKeyKind, u32) -> Option<RegistryName>,
     pub in_scope: fn() -> bool,
     pub install: fn(
         &[ModEntry],
@@ -49,11 +51,13 @@ pub(crate) fn registration_membership(kind: RegistrationKeyKind, slot: u32) -> O
         .flatten()
 }
 
-pub(crate) fn registration_name(kind: RegistrationKeyKind, slot: u32) -> Option<String> {
+pub(crate) fn registration_name(kind: RegistrationKeyKind, slot: u32) -> Option<RegistryName> {
     #[cfg(test)]
-    if let Some(result) =
-        with_registering_keys(|keys| keys.map(|keys| names(keys, kind).id(slot).map(str::to_owned)))
-    {
+    if let Some(result) = with_registering_keys(|keys| {
+        keys.map(|keys| {
+            crate::content::registry_keys::registry_name_snapshot(names(keys, kind), slot)
+        })
+    }) {
         return result;
     }
     let access = &crate::dispatch_scope::backend()?.registration;
@@ -148,6 +152,7 @@ fn names(
         RegistrationKeyKind::Item => &keys.items,
         RegistrationKeyKind::Fluid => &keys.fluids,
         RegistrationKeyKind::Effect => &keys.effects,
+        RegistrationKeyKind::DamageType => &keys.damage_types,
         RegistrationKeyKind::BlockEntityType => &keys.block_entity_types,
         RegistrationKeyKind::EntityType => &keys.entity_types,
         RegistrationKeyKind::GameEvent => &keys.game_events,

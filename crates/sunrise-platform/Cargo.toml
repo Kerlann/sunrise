@@ -11,19 +11,22 @@ description = "The platform's public API: what the Sunrise layer and mods may us
 # NBT, compression, and region-file reads and writes.
 world = ["dep:sunrise-world"]
 # A server's own files: server.properties, the op, white and ban lists, the user cache.
-server-files = ["dep:sunrise-server-files", "dep:sunrise-java-properties"]
+server-files = ["dep:sunrise-server-files", "dep:sunrise-server-profiles-http", "dep:sunrise-java-properties"]
 
 mod-build = ["dep:sunrise-mod-api-gen"]
+# Proxy-aware HTTP used by the game-file preparer and the server manager.
+http-proxy = ["dep:sunrise-proxy"]
 
 [dependencies]
-sunrise-guest-stack = { path = "../sunrise-guest-stack" }
 sunrise-mod-api-gen = { path = "../sunrise-mod-api-gen", optional = true }
 sunrise-core = { path = "../sunrise-core" }
 sunrise-system = { path = "../sunrise-system" }
 sunrise-bench = { path = "../sunrise-bench" }
 sunrise-perf-format = { path = "../sunrise-perf-format" }
 sunrise-world = { path = "../sunrise-world", optional = true }
+sunrise-proxy = { path = "../sunrise-proxy", optional = true }
 sunrise-server-files = { path = "../sunrise-server-files", optional = true }
+sunrise-server-profiles-http = { path = "../sunrise-server-profiles-http", optional = true }
 sunrise-java-properties = { path = "../sunrise-java-properties", optional = true }
 # The game's extension points, re-exported as `hooks`.
 sunrise-hooks = { path = "../sunrise-hooks" }

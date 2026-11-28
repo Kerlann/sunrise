@@ -1,4 +1,4 @@
-"""Execute release shell steps with optional archives present and absent."""
+"""Execute release shell steps with every archive present, and with one missing."""
 
 import base64
 import hashlib
@@ -10,19 +10,13 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from tests.os_support import BASH, POSIX_BASH
 
 ROOT = Path(__file__).resolve().parents[1]
 REQUIRED = {
     "sunrise-linux-x86_64.tar.gz", "sunrise-windows-x64.zip", "sunrise-macos-arm64.zip",
-    "sunrise-macos-x64.zip", "sunrise-server-linux-x86_64.tar.gz", "sunrise-source.tar.gz", "sunrise-release.json",
+    "sunrise-server-linux-x86_64.tar.gz", "sunrise-source.tar.gz", "sunrise-release.json",
 }
-OPTIONAL = "sunrise-windows-arm64.zip"
-MUSL = "sunrise-linux-musl-x86_64.tar.gz"
-# The bash on PATH, as in test_pr_ready: Windows' CreateProcess looks in System32 before PATH, so a bare "bash"
-# there is WSL's, which gets none of the steps' env and none of the host's paths.
-BASH = shutil.which("bash")
-POSIX_BASH = BASH is not None and not (
-    os.name == "nt" and os.path.dirname(os.path.normcase(BASH)).endswith(os.path.normcase(r"\system32")))
 
 
 def run_step(containing):
@@ -37,18 +31,18 @@ def run_step(containing):
 @unittest.skipUnless(POSIX_BASH and shutil.which("openssl") and shutil.which("sha256sum"),
                      "release shell checks require a bash that is not WSL's, OpenSSL and sha256sum")
 class OptionalReleaseAssetsTests(unittest.TestCase):
-    def test_sign_and_publish_with_each_optional_archive_combination(self):
-        for repository, arm64 in product(("sunrise-org/sunrise", "horizon-rust/horizon"), (False, True)):
-            with self.subTest(repository=repository, arm64=arm64), tempfile.TemporaryDirectory() as folder:
+    def test_sign_and_publish_need_every_platform(self):
+        for repository, missing in product(("sunrise-org/sunrise", "horizon-rust/horizon"),
+                                           (None, "sunrise-macos-arm64.zip")):
+            with self.subTest(repository=repository, missing=missing), tempfile.TemporaryDirectory() as folder:
                 root = Path(folder)
                 dist = root / "dist"
                 dist.mkdir()
-                present = REQUIRED | ({OPTIONAL} if arm64 else set())
+                present = REQUIRED - {missing}
                 # The fork's Nightly carries its SDK's index in its signed sums; upstream's has no SDK.
                 if repository == "sunrise-org/sunrise":
                     present |= {"sdk.json"}
-                # A musl archive must never be signed or uploaded by the main release jobs, even if present.
-                for name in present | {MUSL}:
+                for name in present:
                     (dist / name).write_text(name)
                 script_dir = root / "tools/ci"
                 script_dir.mkdir(parents=True)
@@ -60,6 +54,9 @@ class OptionalReleaseAssetsTests(unittest.TestCase):
                            RELEASE_SIGNING_KEY="", RELEASE_SIGNING_KEY_NEXT="")
                 signed = subprocess.run([BASH, "-e", "-c", run_step('sign_release.sh "$SIGN_FOR"')],
                                         cwd=root, env=env, text=True, capture_output=True)
+                if missing:
+                    self.assertNotEqual(signed.returncode, 0)
+                    continue
                 self.assertEqual(signed.returncode, 0, signed.stderr)
                 # Windows' sha256sum defaults to binary mode, marked by a * before each name.
                 sums = {name.removeprefix("*"): digest for digest, name in
@@ -89,9 +86,6 @@ gh() {
                 files = {Path(name).name for name in (root / "published").read_text().splitlines()}
                 self.assertEqual(files, present | {"SHA256SUMS", "SHA256SUMS.sig", "SHA256SUMS.v2.sig", "smoke-test.json",
                                                    "nightly-notes.md"})
-                if not arm64:
-                    self.assertIn(f"::warning::{OPTIONAL} is missing", signed.stdout)
-                    self.assertIn(f"::warning::{OPTIONAL} is missing", published.stdout)
 
     def test_a_stable_release_has_a_nightlys_assets_both_signed_for_its_tag(self):
         # A launcher checks a stable release as signed_digest does: SHA256SUMS signed for "horizon release <tag>".
@@ -99,8 +93,8 @@ gh() {
             root = Path(folder)
             dist = root / "dist"
             dist.mkdir()
-            present = REQUIRED | {OPTIONAL, "sdk.json"}
-            for name in present | {MUSL}:
+            present = REQUIRED | {"sdk.json"}
+            for name in present:
                 (dist / name).write_text(name)
             (root / "tools/ci").mkdir(parents=True)
             shutil.copy(ROOT / "tools/ci/sign_release.sh", root / "tools/ci")
@@ -153,19 +147,19 @@ gh() {
             self.assertNotIn("--target", command)
             self.assertNotIn("--prerelease", command)
 
-    def test_a_snapshot_is_signed_for_its_channel_and_published_under_its_own_tag(self):
+    def test_a_dev_build_is_signed_for_its_channel_and_published_under_its_own_tag(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             dist = root / "dist"
             dist.mkdir()
-            present = REQUIRED | {OPTIONAL}
-            for name in present | {MUSL}:
+            present = REQUIRED
+            for name in present:
                 (dist / name).write_text(name)
             (root / "tools/ci").mkdir(parents=True)
             shutil.copy(ROOT / "tools/ci/sign_release.sh", root / "tools/ci")
             env = dict(os.environ, GITHUB_REPOSITORY="horizon-rust/horizon", EPHEMERAL="yes", SHA="0123456789abcdef",
-                       SHORT="0123456", DATE="2026-11-13", KIND="snapshot", SIGN_FOR="snapshot", ALSO_FOR="snapshot-2026-11-13-0123456",
-                       TAG="snapshot-2026-11-13-0123456", RELEASE_SIGNING_KEY="", RELEASE_SIGNING_KEY_NEXT="")
+                       SHORT="0123456", DATE="2026-11-13", KIND="dev", SIGN_FOR="dev", ALSO_FOR="dev-2026-11-13-0123456",
+                       TAG="dev-2026-11-13-0123456", RELEASE_SIGNING_KEY="", RELEASE_SIGNING_KEY_NEXT="")
             signed = subprocess.run([BASH, "-e", "-c", run_step('sign_release.sh "$SIGN_FOR"')],
                                     cwd=root, env=env, text=True, capture_output=True)
             self.assertEqual(signed.returncode, 0, signed.stderr)
@@ -176,17 +170,19 @@ python3() { :; }
 gh() { printf '%s\\n' "$@" > gh-args; for arg in "$@"; do case "$arg" in dist/*) test -f "$arg" || return 1; esac; done; }
 """
             published = subprocess.run([BASH, "-e", "-c", stubs + run_step('gh release create "$TAG"')],
-                                       cwd=root, env=env, text=True, capture_output=True)
+                                       cwd=root, env=dict(env, GITHUB_STEP_SUMMARY=str(root / "summary")),
+                                       text=True, capture_output=True)
             self.assertEqual(published.returncode, 0, published.stderr)
             args = (root / "gh-args").read_text().splitlines()
-            self.assertEqual(args[:3], ["release", "create", "snapshot-2026-11-13-0123456"])
-            self.assertIn("Snapshot 2026-11-13 · 0123456", args)
+            self.assertEqual(args[:3], ["release", "create", "dev-2026-11-13-0123456"])
+            self.assertIn("Dev 2026-11-13 · 0123456", args)
             self.assertIn("--prerelease", args)
+            self.assertIn("--draft", args)
             self.assertNotIn("nightly", args)
             files = {Path(arg).name for arg in args if arg.startswith("dist/")}
             self.assertEqual(files, present | {"SHA256SUMS", "SHA256SUMS.sig", "SHA256SUMS.v2.sig", "smoke-test.json",
                                                "nightly-notes.md"})
-            # A snapshot's version signed beside the nightly channel is refused before anything is signed.
+            # A Dev build's version signed beside the nightly channel is refused before anything is signed.
             refused = subprocess.run([BASH, "-e", "-c", run_step('sign_release.sh "$SIGN_FOR"')], cwd=root,
                                      env=dict(env, KIND="nightly", SIGN_FOR="nightly"), text=True, capture_output=True)
             self.assertNotEqual(refused.returncode, 0)

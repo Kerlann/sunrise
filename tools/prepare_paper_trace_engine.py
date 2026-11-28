@@ -7,8 +7,8 @@ import sys
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / 'tools'))
-import lab
+sys.path.insert(0, str(ROOT))
+from tools import lab
 
 fixture = ROOT / 'tools/fixtures/paper-trace-mod'
 manifest = tomllib.loads((fixture / 'sunrise-mod.toml').read_text())
@@ -25,7 +25,8 @@ cargo += '[patch.crates-io]\n'
 for name, patch in tomllib.loads((ROOT / 'Cargo.toml').read_text())['patch']['crates-io'].items():
     cargo += f'{name}={{path={quote(ROOT / patch["path"])}}}\n'
 (project / 'Cargo.toml').write_text(cargo)
-# Match the game's Windows stack allowance for this executable, on GNU and MSVC.
+# This standalone trace executable constructs the dedicated Game on the main thread.
+# Reserve enough stack on Windows for that path, even when built outside the game packages.
 (project / 'build.rs').write_text('fn main() { if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {'
     'let arg = if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") '
     '{"/STACK:8388608"} else {"-Wl,--stack,8388608"}; println!("cargo:rustc-link-arg={arg}"); }}')

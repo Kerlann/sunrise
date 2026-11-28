@@ -38,6 +38,10 @@ pub mod world {
 #[cfg(feature = "server-files")]
 pub use sunrise_server_files as server_files;
 
+/// Online account lookups and Minecraft Services public-key fetches over HTTPS (`sunrise-server-profiles-http`).
+#[cfg(feature = "server-files")]
+pub use sunrise_server_profiles_http as server_profiles_http;
+
 /// `java.util.Properties` and the JDK's date text, for the files a server keeps in that format.
 #[cfg(feature = "server-files")]
 pub use sunrise_java_properties as java_properties;
@@ -79,6 +83,15 @@ pub mod lang {
 pub mod mod_rows {
     pub use sunrise_hooks::mod_rows::{Row, register};
 }
+
+/// Vanilla's own item catalogs, as the engine loaded them (docs/layers.md, "Item catalog").
+pub mod items {
+    pub use sunrise_hooks::items::creative_order;
+}
+
+/// Proxy selection and connection pooling for HTTP requests to caller-supplied URLs.
+#[cfg(feature = "http-proxy")]
+pub use sunrise_proxy as proxy;
 
 /// The game's own release: [`release::VERSION`] is what its Mods screen row shows.
 pub use sunrise_core::release;
@@ -133,6 +146,3 @@ pub mod mod_build {
     /// The shared mod API and source generator.
     pub use sunrise_mod_api_gen as api_gen;
 }
-
-/// Establish the executable stack policy before starting the game or supervisor.
-pub use sunrise_guest_stack::prepare_main as prepare_main_stack;

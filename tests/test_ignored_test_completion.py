@@ -3,13 +3,18 @@ import contextlib
 import io
 import json
 import os
+import re
 from pathlib import Path
 import tempfile
 import subprocess
+import sys
 import unittest
 from unittest.mock import patch
 
 from tools.ci import ignored_tests
+
+# What precedes a test run's own command: GNU timeout and the run's limit, where the platform has them.
+LIMIT = len(ignored_tests.time_limit())
 
 
 def target(count, results, summary):
@@ -34,9 +39,26 @@ class IgnoredTests(unittest.TestCase):
         with patch.object(ignored_tests.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, output)) as run, \
                 contextlib.redirect_stdout(io.StringIO()):
             ignored_tests.run("sunrise-client", [])
-        stacks = [call.kwargs["env"].get("RUST_MIN_STACK") for call in run.call_args_list if call.args[0][:2] == ["cargo", "test"]]
+        stacks = [call.kwargs["env"].get("RUST_MIN_STACK") for call in run.call_args_list if call.args[0][LIMIT:LIMIT + 2] == ["cargo", "test"]]
         self.assertTrue(stacks)
         self.assertEqual(set(stacks), {str(16 * 1024 * 1024)})
+
+    def test_daily_tests_require_a_gpu_adapter_in_cargo_and_prebuilt_binaries(self):
+        output = target(1, "test gpu_case ... ok\n", summary(passed=1))
+        result = subprocess.CompletedProcess([], 0, output)
+        with patch.dict(os.environ, {"SUNRISE_GPU_TESTS_REQUIRE_ADAPTER": "0"}), \
+                patch.object(ignored_tests.subprocess, "run", return_value=result) as run, \
+                patch.object(ignored_tests.ignored_shards, "workspace_members",
+                             return_value={"example": ("crates/example", ".")}), \
+                patch.object(ignored_tests, "workspace_features", return_value={}), \
+                contextlib.redirect_stdout(io.StringIO()):
+            ignored_tests.run("example", [])
+            ignored_tests.run("example", [], only=(["lib"], ["gpu_case"]),
+                              binaries={"lib": "/fake/example-tests"})
+        commands = {tuple(call.args[0][LIMIT:])[:2]: call.kwargs["env"]
+                    for call in run.call_args_list if len(call.args[0]) > LIMIT}
+        self.assertEqual(commands[("cargo", "test")]["SUNRISE_GPU_TESTS_REQUIRE_ADAPTER"], "1")
+        self.assertEqual(commands[("/fake/example-tests", "--ignored")]["SUNRISE_GPU_TESTS_REQUIRE_ADAPTER"], "1")
 
     def test_success_and_multiple_targets(self):
         output = target(1, "test first ... ok\n", summary(passed=1))
@@ -52,6 +74,36 @@ class IgnoredTests(unittest.TestCase):
                   "test synced ... ok\n" + summary(passed=1))
         result, _ = self.run_output(output)
         self.assertEqual(result, {"synced": True})
+
+    def test_a_failed_runs_full_output_is_kept_privately_and_not_printed(self):
+        panic = ("\n---- bad stdout ----\nthread 'bad' panicked at crates/example/src/lib.rs:3:5:\n"
+                 "synthetic payload 4.2 from the data\n")
+        failed = target(1, "test bad ... FAILED\n", summary(failed=1)) + panic
+        with tempfile.TemporaryDirectory() as private, \
+                patch.dict(os.environ, {"IGNORED_TESTS_PRIVATE_LOGS": private}):
+            kept = Path(private)
+            # A non-zero exit, and a run that exited 0 although a test reported FAILED: both keep the output.
+            for code in (101, 0):
+                with self.subTest(code=code):
+                    _, log = self.run_output(failed, code)
+                    self.assertEqual((kept / "example.test.log").read_text(), failed)
+                    self.assertEqual(re.findall(r"kept privately on the runner: (\S+)", log), ["example.test.log"])
+                    self.assertNotIn("synthetic payload", log)
+                    (kept / "example.test.log").unlink()
+            # A split leg whose listing fails keeps the listing's output under the leg's name.
+            listing = subprocess.CompletedProcess([], 101, "listed text on stdout\n",
+                                                  "error[E0425]: private compiler text\n")
+            with patch.object(ignored_tests.subprocess, "run", return_value=listing), \
+                    contextlib.redirect_stdout(io.StringIO()) as log:
+                self.assertIsNone(ignored_tests.run("example", [], 1, 2))
+            self.assertEqual((kept / "example#1of2.list.log").read_text(),
+                             "listed text on stdout\nerror[E0425]: private compiler text\n")
+            self.assertNotIn("private compiler text", log.getvalue())
+            self.assertNotIn("listed text on stdout", log.getvalue())
+            (kept / "example#1of2.list.log").unlink()
+            # A passing run keeps nothing.
+            self.run_output(target(1, "test good ... ok\n", summary(passed=1)))
+            self.assertEqual(list(kept.iterdir()), [])
 
     def test_known_failure_is_still_available_to_policy(self):
         result, _ = self.run_output(target(2, "test good ... ok\ntest bad ... FAILED\n", summary(passed=1, failed=1)), 101)
@@ -176,6 +228,61 @@ class IgnoredTests(unittest.TestCase):
             self.assertIsNone(ignored_tests.run("example", []))
         self.assertEqual(ignored_tests._stopped["still_running"],
                          [f"identity withheld (longer than {ignored_tests.IDENTITY_CHARS} characters)"])
+
+    def test_a_run_stopped_at_its_time_limit_names_the_tests_still_running(self):
+        # A hung test held both client halves until the job limit cancelled them, naming nothing (daily 44814607973).
+        output = (target(3, "test done ... ok\ntest game::dragon::hangs has been running for over 60 seconds\n"
+                            "test game::wind::finished_late has been running for over 60 seconds\n"
+                            "test game::wind::finished_late ... ok\n", ""))
+        with patch.object(ignored_tests.subprocess, "run",
+                          return_value=subprocess.CompletedProcess([], ignored_tests.TIMED_OUT, output)) as run, \
+                contextlib.redirect_stdout(io.StringIO()) as log:
+            self.assertIsNone(ignored_tests.run("example", []))
+        if LIMIT:
+            self.assertEqual(run.call_args.args[0][:LIMIT], ["timeout", f"{ignored_tests.TEST_RUN_LIMIT}s"])
+        self.assertEqual(ignored_tests._stopped["reason"], "tests still running at the time limit (a hung test)")
+        self.assertEqual(ignored_tests._stopped["ended_by"], f"the {ignored_tests.TEST_RUN_LIMIT} s limit")
+        self.assertEqual(ignored_tests._stopped["still_running"], ["game::dragon::hangs"])
+        # What finished before the limit still counts.
+        self.assertEqual(ignored_tests._reported, {"done": True, "game::wind::finished_late": True})
+        self.assertIn("still running past 60 s: game::dragon::hangs", log.getvalue())
+
+    def test_one_executable_stopped_at_the_limit_stops_the_daily_rows_run_but_not_the_next_executable(self):
+        ran = []
+
+        def execute(command, **_):
+            executable = command[LIMIT]
+            ran.append(Path(executable).name)
+            code = ignored_tests.TIMED_OUT if executable.endswith("/a") else 0
+            return subprocess.CompletedProcess(command, code, "")
+
+        with tempfile.TemporaryDirectory() as folder, \
+                patch.object(ignored_tests.ignored_shards, "workspace_members", return_value={"pkg": (folder, ".")}), \
+                patch.object(ignored_tests.subprocess, "run", side_effect=execute):
+            done = ignored_tests.run_binaries("pkg", {"lib": f"{folder}/a", "test:b": f"{folder}/b"}, ["--ignored"], {})
+        self.assertEqual(ran, ["a", "b"])
+        self.assertEqual(done.returncode, ignored_tests.TIMED_OUT)
+
+    def test_prebuilt_executables_get_their_folder_first_in_the_library_path_keeping_its_spelling(self):
+        seen = []
+
+        def execute(command, **kwargs):
+            seen.append(kwargs["env"])
+            return subprocess.CompletedProcess(command, 0, "")
+
+        with tempfile.TemporaryDirectory() as folder, \
+                patch.object(ignored_tests.ignored_shards, "workspace_members", return_value={"pkg": (folder, ".")}), \
+                patch.object(ignored_tests.subprocess, "run", side_effect=execute):
+            deps = Path(folder, "deps")
+            # Windows' variable is `PATH`, which its environment may spell `Path`: one entry, the old value kept after.
+            with patch.object(ignored_tests, "LIBRARY_PATH", "PATH"):
+                ignored_tests.run_binaries("pkg", {"lib": str(deps / "a")}, [], {"Path": "old"})
+            with patch.object(ignored_tests, "LIBRARY_PATH", "LD_LIBRARY_PATH"):
+                ignored_tests.run_binaries("pkg", {"lib": str(deps / "a")}, [], {})
+        expected = os.pathsep.join([str(deps), folder])
+        self.assertEqual(seen[0]["Path"], expected + os.pathsep + "old")
+        self.assertNotIn("PATH", seen[0])
+        self.assertEqual(seen[1]["LD_LIBRARY_PATH"], expected)
 
     def test_the_report_names_the_run_in_progress_before_it_ends(self):
         # A job stopped at its time limit kills this script too: what it wrote before the run is what is uploaded.
@@ -304,13 +411,22 @@ class IgnoredTests(unittest.TestCase):
 
     def test_prebuilt_executables_report_like_cargo_test_and_a_killed_one_is_a_crash(self):
         with tempfile.TemporaryDirectory() as folder:
-            passing, killed = Path(folder, "passes"), Path(folder, "killed")
-            passing.write_text("#!/bin/sh\necho 'running 1 tests'\necho 'test a ... ok'\n"
-                               "echo 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out'\n")
-            killed.write_text("#!/bin/sh\necho 'running 1 tests'\nkill -9 $$\n")
-            for script in (passing, killed):
-                script.chmod(0o755)
-            with contextlib.redirect_stdout(io.StringIO()):
+            passing, killed = Path(folder, "passes.py"), Path(folder, "killed.py")
+            passing.write_text("print('running 1 tests')\nprint('test a ... ok')\n"
+                               "print('test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out')\n")
+            killed.write_text("import os\nprint('running 1 tests', flush=True)\nos.kill(os.getpid(), 9)\n")
+            run = subprocess.run
+
+            def through_python(command, **kwargs):
+                # The stand-in executables are Python scripts, which not every platform runs by themselves.
+                at = next((index for index, word in enumerate(command) if word in (str(passing), str(killed))), None)
+                if at is None:
+                    return run(command, **kwargs)
+                return run([*command[:at], sys.executable, *command[at:]], **kwargs)
+
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    patch.object(ignored_tests.subprocess, "run", side_effect=through_python), \
+                    patch.object(ignored_tests, "workspace_features", return_value={}):
                 self.assertEqual(ignored_tests.run("sunrise-relay", [], only=(["lib"], ["a"]),
                                                    binaries={"lib": str(passing)}), {"a": True})
                 self.assertIsNone(ignored_tests.run("sunrise-relay", [], only=(["lib", "test:it"], ["a", "b"]),
@@ -362,7 +478,7 @@ class IgnoredTests(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(ignored_tests.run("sunrise-relay", [], only=(["lib", "test:tunnel"], ["a", "b"])),
                              {"a": True, "b": True})
-        command = execute.call_args.args[0]
+        command = execute.call_args.args[0][LIMIT:]
         # The features the workspace build turns on, as verify compiled the test.
         self.assertEqual(command[:command.index("--")],
                          ["cargo", "test", "-p", "sunrise-relay", "--features", "fixture,index", "--lib", "--test", "tunnel",
@@ -384,17 +500,18 @@ class IgnoredTests(unittest.TestCase):
             self.assertEqual(ignored_tests.run("sunrise-mod-package", [], only=(["lib"], ["holder::tests::slow"])),
                              {"holder::tests::slow": True})
         self.assertEqual(execute.call_args_list[0].args[0], prepare)
-        self.assertEqual(execute.call_args_list[1].args[0][:2], ["cargo", "test"])
-        # A failed build stops the run, saying why, before any test runs.
-        with patch.object(ignored_tests.subprocess, "run", return_value=subprocess.CompletedProcess([], 101, "error: x\n")) as execute, \
-                patch.object(ignored_tests, "workspace_features", return_value={}), contextlib.redirect_stdout(io.StringIO()):
+        self.assertEqual(execute.call_args_list[1].args[0][LIMIT:LIMIT + 2], ["cargo", "test"])
+        # A failed build stops the run, saying why, before any test runs, and keeps the build's output privately.
+        with tempfile.TemporaryDirectory() as private, \
+                patch.dict(os.environ, {"IGNORED_TESTS_PRIVATE_LOGS": private}), \
+                patch.object(ignored_tests.subprocess, "run",
+                             return_value=subprocess.CompletedProcess([], 101, "error: private build text\n")) as execute, \
+                patch.object(ignored_tests, "workspace_features", return_value={}), \
+                contextlib.redirect_stdout(io.StringIO()):
             self.assertIsNone(ignored_tests.run("sunrise-mod-package", [], only=(["lib"], ["holder::tests::slow"])))
+            self.assertEqual((Path(private) / "sunrise-mod-package.build.log").read_text(), "error: private build text\n")
         self.assertEqual(execute.call_count, 1)
         self.assertEqual(ignored_tests._stopped["reason"], "what the tests need could not be built")
-        # verify builds it with the same command.
-        workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/dyna-ci.yml").read_text()
-        self.assertEqual(workflow.count("ignored_shards.py --prepare sunrise-mod-package"), 1)
-        self.assertNotIn("--example holder_actor", workflow)
 
     def test_a_parent_that_crashes_after_its_childs_same_count_summary_did_not_complete(self):
         # A fixture reruns its own test in a child, which reports FAILED and a one-test summary;
@@ -418,8 +535,23 @@ class IgnoredTests(unittest.TestCase):
                         summary(passed=2))
         result, log = self.run_output(output)
         self.assertEqual(result, {"fixture::case": True, "other": True})
-        self.assertIn("example: test result: ok. 2 passed", log)
-        self.assertNotIn("example: test result: ok. 1 passed", log)
+        self.assertEqual([line for line in log.splitlines() if line.startswith("example: test result:")],
+                         ["example: test result: 2 passed; 0 failed; 0 ignored; 0 measured;"])
+
+    def test_a_completed_target_prints_the_parsed_counters(self):
+        completion = ("test result: SYNTHETIC_LABEL. 1 passed; 2 failed; 3 ignored; 4 measured; "
+                      "SYNTHETIC_TAIL\n")
+        output = target(10, "test good ... ok\ntest bad ... FAILED\ntest worse ... FAILED\n", completion)
+        result, log = self.run_output(output, 101)
+        self.assertEqual(result, {"good": True, "bad": False, "worse": False})
+        self.assertIn("example: test result: 1 passed; 2 failed; 3 ignored; 4 measured;\n", log)
+        self.assertNotIn("SYNTHETIC_", log)
+
+    def test_an_oversized_last_summary_does_not_complete_a_target(self):
+        result, log = self.run_output(target(1, "test good ... ok\n", summary(passed=1) + summary(passed="9" * 5000)))
+        self.assertIsNone(result)
+        self.assertIn("test target did not finish", log)
+        self.assertNotIn("example: test result:", log)
 
     def test_a_target_whose_last_summary_is_a_childs_did_not_complete(self):
         # The parent started two tests; only the child's one-test summary follows.
@@ -440,7 +572,7 @@ class IgnoredTests(unittest.TestCase):
         self.assertIsNone(result)
 
     def test_missing_summary_even_after_parsed_failure(self):
-        result, _ = self.run_output(target(2, "test bad ... FAILED\n", ""), 101)
+        result, _ = self.run_output(target(2, "test bad ... FAILED\ntest skipped ... ignored\n", ""), 101)
         self.assertIsNone(result)
 
     def test_child_summary_cannot_hide_aborted_parent(self):

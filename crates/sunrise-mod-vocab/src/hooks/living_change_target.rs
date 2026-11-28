@@ -20,11 +20,13 @@ pub trait Hooks {
     /// piglin again by its entity id after the hook; a piglin that is removed is
     /// skipped.
     #[hook(
+        receiver = "read",
+        dispatch = "api_carrier",
         side = "server",
         contract = "cancel",
         out = "cancel",
         host = "read",
-        target = "sunrise_client::game::native_hooks::living_change_target::NativeHookHost<'_>::native_living_change_target",
+        target = "sunrise_gameplay_common::game::native_hooks::living_change_target::NativeHookHost<'_>::native_living_change_target",
         neoforge = "LivingChangeTargetEvent",
         cancellable = true
     )]

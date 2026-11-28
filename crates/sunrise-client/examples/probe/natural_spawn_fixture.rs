@@ -46,7 +46,7 @@ use sunrise_client::{
         },
         spawner::{
             SpawnDataExt, Spawner, SpawnerAdded, SpawnerEvent, SpawnerExt, SpawnerLevel,
-            SpawnerSpawn,
+            SpawnerSpawn, SpawnerTypeFacts,
         },
         species::{self, Baby},
         trial_spawner::{
@@ -99,8 +99,8 @@ struct Shared<'a> {
     structures: &'a StructureSpawns,
     collision: &'a BlockCollisionRegistry<'a>,
     air: BlockStateId,
-    /// Every entity type id (`entity-types.json`).
-    entity_types: &'a HashSet<String>,
+    /// Every entity type's registry row (`entity-types.json`).
+    entity_types: &'a HashMap<String, SpawnerTypeFacts>,
 }
 struct World<'a> {
     border: sunrise_core::geometry::border::BorderGeometry,
@@ -335,11 +335,14 @@ impl NaturalLevel for World<'_> {
                 .any(|(id, b)| id == "minecraft:shulker" && b.intersects(grown))
     }
     fn unobstructed(&self, bounds: Aabb) -> bool {
+        let Ok(shape) = sunrise_core::geometry::VoxelShape::from_box(bounds) else {
+            return false;
+        };
         !self
             .entities
             .borrow()
             .iter()
-            .any(|(_, b)| b.intersects(bounds))
+            .any(|(_, b)| spawn_selection::blocks_spawn_shape(&shape, bounds, *b))
     }
     fn spawn_mobs(&self) -> bool {
         self.spawn_mobs
@@ -368,8 +371,8 @@ impl SpawnerLevel for World<'_> {
     fn spawner_blocks_work(&self) -> bool {
         self.spawners_work
     }
-    fn entity_exists(&self, id: &str) -> bool {
-        self.s.types.types.contains_key(id) || self.s.entity_types.contains(id)
+    fn spawner_type(&self, id: &str) -> Option<SpawnerTypeFacts> {
+        self.s.entity_types.get(id).copied()
     }
     fn count_entities(&self, id: &str, bounds: Aabb) -> usize {
         self.entities
@@ -529,13 +532,13 @@ pub fn main() -> sunrise_client::Result<()> {
     let facts = BlockFacts::load(root, registry)?;
     let data = MobData::load(
         &sunrise_assets::resource_source::ResourceRoot::directory(root.to_path_buf()),
-        &facts,
-    );
+        facts.states.len(),
+    )?;
     let defaults = sunrise_world::item_defaults::read(root)?;
     let items = Items::catalog(root, &PackOverlay::NONE, &defaults)?;
     // Trial spawner rewards: the loot tables and the configs.
     let loot = if input.contains("mode=trial") || input.contains("mode=vault") {
-        sunrise_client::mobs::trial_spawner::load_registry(root);
+        install_trial_spawner_configs(root);
         Some(std::sync::Arc::new(sunrise_world::loot::LootData::load(
             root,
             &PackOverlay::NONE,
@@ -550,17 +553,15 @@ pub fn main() -> sunrise_client::Result<()> {
     ))?;
     let structures = StructureSpawns::load(root);
     let collision = collisions::load(root, registry)?;
-    let entity_types: HashSet<String> = fs::read(root.join("entity-types.json"))
-        .ok()
-        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-        .and_then(|v| {
-            v.as_object().map(|o| {
-                o.keys()
-                    .map(|k| sunrise_client::command::args::normalize(k))
-                    .collect()
-            })
-        })
-        .unwrap_or_default();
+    let builtin = sunrise_protocol::registry::Builtin::load(&root.join("registries.json"))?;
+    let ids = &builtin
+        .get("minecraft:entity_type")
+        .ok_or("missing entity type registry")?
+        .names;
+    let entity_types = SpawnerTypeFacts::load_registered(
+        root,
+        ids.iter().map(String::as_str).filter(|id| !id.is_empty()),
+    )?;
     let shared = Shared {
         facts: &facts,
         data: &data,
@@ -787,11 +788,7 @@ pub fn main() -> sunrise_client::Result<()> {
         let mut spawn = |l: &World, r: &SpawnRequest, _: &mut LegacyRandom| -> Option<Spawned> {
             let bounds = neutral_box(l, r);
             l.entities.borrow_mut().push((r.entity.to_owned(), bounds));
-            Some(Spawned {
-                bounds,
-                school: true,
-                cluster_size: None,
-            })
+            Some(Spawned { school: true })
         };
         let mode = get("mode", "chunk");
         if mode == "spawner" {
@@ -905,6 +902,7 @@ pub fn main() -> sunrise_client::Result<()> {
                     chunk,
                     [v[0], v[1], v[2]],
                     &mut spawn,
+                    &mut |_, _, vanilla| vanilla,
                     &mut trace,
                 );
             } else {
@@ -919,6 +917,7 @@ pub fn main() -> sunrise_client::Result<()> {
                         &categories,
                         chunk,
                         &mut spawn,
+                        &mut |_, _, vanilla| vanilla,
                         &mut trace,
                     );
                 }
@@ -975,7 +974,6 @@ fn spawner_case(
                 ));
                 Some(SpawnerAdded {
                     id: spawned.len() as u32,
-                    bounds,
                     mob: true,
                 })
             };
@@ -1462,4 +1460,34 @@ fn vault_events(
             )),
         }
     }
+}
+
+/// The root's own `trial_spawner` files as the world's registry (no packs in this fixture).
+fn install_trial_spawner_configs(root: &std::path::Path) {
+    use sunrise_client::mobs::trial_spawner::TrialConfigExt;
+    let base = root.join("data/minecraft/trial_spawner");
+    let mut configs = std::collections::HashMap::new();
+    let mut stack = vec![base.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let id = path.with_extension("");
+            let id = id
+                .strip_prefix(&base)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            let value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            let config = sunrise_client::mobs::trial_spawner::TrialConfig::decode(
+                &sunrise_client::scoreboard::json_to_tag(&value),
+            );
+            configs.insert(format!("minecraft:{id}"), config.unwrap());
+        }
+    }
+    sunrise_client::mobs::trial_spawner::install(configs);
 }

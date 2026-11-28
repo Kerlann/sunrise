@@ -92,10 +92,7 @@ impl OptionsUi {
         let mut rows = ListRows::default();
         let page = self.page();
         let cx = (w / 2.0).floor();
-        if matches!(
-            page,
-            Page::Video | Page::Controls | Page::KeyBinds | Page::ModBrowser
-        ) {
+        if matches!(page, Page::Video | Page::Controls | Page::KeyBinds) {
             self.settings_search.x = cx - 100.0;
             self.settings_search.y = 17.0;
         }
@@ -128,9 +125,9 @@ impl OptionsUi {
                 let entries = [
                     ("options.skinCustomisation", Some(Page::Skin)),
                     ("options.sounds", Some(Page::Sound)),
-                    // Video Settings... opens Sunrise's graphics screen, which holds every
-                    // video option, as Sodium's replaces vanilla's.
-                    ("options.video", Some(Page::Graphics)),
+                    // OptionsScreen's Video Settings button: VideoSettingsScreen. Sunrise's
+                    // graphics settings are on Sunrise Settings.
+                    ("options.video", Some(Page::Video)),
                     ("options.controls", Some(Page::Controls)),
                     ("options.language", Some(Page::Language)),
                     ("options.chat", Some(Page::Chat)),
@@ -257,22 +254,6 @@ impl OptionsUi {
                 });
                 let row_left = cx - 170.0;
                 let scrollbar_x = row_left + 340.0 + 6.0 + 2.0;
-                // VideoSettingsScreen.addTitle: a changed graphics API needs a restart.
-                if page == Page::Video && s.sunrise.api != s.startup_api {
-                    out.push(Widget {
-                        x: 0.0,
-                        y: 15.0,
-                        w,
-                        h: 9.0,
-                        kind: WKind::Text {
-                            text: tr("options.restartRequired"),
-                            color: rgba(223, 80, 80, 255),
-                            centered: true,
-                        },
-                        list: false,
-                        row: 0,
-                    });
-                }
                 let list_start = out.len();
                 let mut y = top + 2.0 - self.scroll;
                 let mut last_category = "";
@@ -371,6 +352,60 @@ impl OptionsUi {
                         Act::ResetKey(name_static),
                     );
                     out.push(if s.keys.is_default(name) {
+                        inactive(reset)
+                    } else {
+                        reset
+                    });
+                    y += 20.0;
+                    rows.end(&mut out, y);
+                }
+                // Sunrise's own keys, under a category of their own after vanilla's: the same
+                // bindings the Gameplay page sets.
+                let sunrise: Vec<_> = crate::extras::KEYS
+                    .iter()
+                    .filter(|(_, caption)| {
+                        query.is_empty() || lang::get(caption).to_lowercase().contains(&query)
+                    })
+                    .collect();
+                if !sunrise.is_empty() {
+                    rows.begin(&out, y);
+                    out.push(section_title(tr(crate::extras::KEY_CATEGORY), y, w));
+                    y += 20.0;
+                    rows.end(&mut out, y);
+                }
+                for &&(name, caption) in &sunrise {
+                    rows.begin(&out, y);
+                    out.push(Widget {
+                        x: row_left + 2.0,
+                        y: y + 6.0,
+                        w: 200.0,
+                        h: 9.0,
+                        kind: WKind::Text {
+                            text: tr(caption),
+                            color: u32::MAX,
+                            centered: false,
+                        },
+                        list: false,
+                        row: 0,
+                    });
+                    let key = s.extras.key(name).unwrap_or("key.keyboard.unknown");
+                    let mut message = keybinds::display_name(key);
+                    if self.selected_key == Some(name) {
+                        message = Text::literal("> ")
+                            .append(message.with_style(&Style {
+                                color: Some(text::WHITE),
+                                underlined: Some(true),
+                                ..Style::default()
+                            }))
+                            .append(" <")
+                            .with_color(text::YELLOW);
+                    }
+                    let reset_x = scrollbar_x - 50.0 - 10.0;
+                    let change_x = reset_x - 5.0 - 75.0;
+                    out.push(button(change_x, y, 75.0, message, Act::Key(name)));
+                    let reset = button(reset_x, y, 50.0, tr("controls.reset"), Act::ResetKey(name));
+                    let default = crate::extras::Extras::default();
+                    out.push(if default.key(name) == s.extras.key(name) {
                         inactive(reset)
                     } else {
                         reset
@@ -558,12 +593,12 @@ impl OptionsUi {
             // Drawn by `pack_screen` and `mods_screen`.
             Page::Packs | Page::Mods => {}
             _ => {
-                if matches!(page, Page::Video | Page::Controls | Page::ModBrowser) {
+                if matches!(page, Page::Video | Page::Controls) {
                     top = 38.0;
                 }
                 out.push(Widget {
                     x: 0.0,
-                    y: if matches!(page, Page::Video | Page::Controls | Page::ModBrowser) {
+                    y: if matches!(page, Page::Video | Page::Controls) {
                         4.0
                     } else {
                         12.0
@@ -578,6 +613,22 @@ impl OptionsUi {
                     list: false,
                     row: 0,
                 });
+                // VideoSettingsScreen.addTitle: a changed graphics API needs a restart.
+                if page == Page::Video && s.sunrise.api != s.startup_api {
+                    out.push(Widget {
+                        x: 0.0,
+                        y: 15.0,
+                        w,
+                        h: 9.0,
+                        kind: WKind::Text {
+                            text: tr("options.restartRequired"),
+                            color: rgba(223, 80, 80, 255),
+                            centered: true,
+                        },
+                        list: false,
+                        row: 0,
+                    });
+                }
                 let list_start = out.len();
                 let mut y = top + 2.0 - self.scroll;
                 for row in self.list_rows(s) {

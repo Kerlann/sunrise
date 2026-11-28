@@ -1,5 +1,4 @@
 //! The `player_start_tracking` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0147
 
 pub trait Hooks {
     /// A client started tracking an entity (NeoForge's
@@ -18,11 +17,13 @@ pub trait Hooks {
     /// remove or teleport entities from here. No player's state is swapped in.
     /// Server-side.
     #[hook(
+        target = "sunrise_gameplay::game::native_hooks::base::ServerGame<'_>::native_player_start_tracking",
+        dispatch = "flat",
         side = "server",
         contract = "listen",
         version = 2,
         neoforge = "PlayerEvent.StartTracking",
         cancellable = false
     )]
-    fn player_start_tracking();
+    fn player_start_tracking(player: u128, name: &str, entity: u32, uuid: u128, kind: &str);
 }

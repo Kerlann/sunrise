@@ -6,11 +6,11 @@ use crate::{ItemStack, ModelError, ModelRef};
 /// What [`DrawContext::model_3d`](crate::DrawContext::model_3d) draws.
 #[derive(Clone, Debug, PartialEq)]
 // exhaustive: an item or a model are the only things a screen can ask to have drawn in 3D; a new kind of subject is a new method, so a mod may match without a wildcard
-#[derive(sunrise_mod_api_macros::Wire)]
-pub enum Gui3dSubject {
-    /// An item as `item_stack` draws it in a slot, without its count or decorations: its model's
-    /// `gui` display transform first, then the view's `transform`.
-    Item(ItemStack),
+// no wire: the item stack is borrowed for an in-process draw.
+pub enum Gui3dSubject<'a> {
+    /// A stack borrowed for the draw. The item is drawn as in a slot, without its count or
+    /// decorations: its model's `gui` display transform first, then the view's `transform`.
+    Item(&'a ItemStack),
     /// A resolved standalone model (`RenderAssets::model`): its 0 to 1 cube about its centre,
     /// drawn full bright and shaded by face, as the blocks of a scene are.
     Model(ModelRef),
@@ -59,12 +59,15 @@ pub enum Gui3dError {
     /// The context has no game to draw in (a server, or a drawing surface with none).
     Unavailable,
     /// `at`, `size` or a transform component is not finite, or `size` is not positive, or the
-    /// transform sends a corner of the subject somewhere that is not finite.
+    /// transform sends a corner of the subject somewhere that is not finite. An air stack
+    /// does not use its view.
     NotFinite,
-    /// The item stack is empty, or its item is unknown.
+    /// The item key is unknown or its item is absent from the current registry; air is a no-op.
     UnknownItem,
     /// The model handle is stale or names no model.
     Model(ModelError),
+    /// The item's component overrides could not be converted for drawing.
+    InvalidStack,
 }
 
 impl std::fmt::Display for Gui3dError {
@@ -72,8 +75,9 @@ impl std::fmt::Display for Gui3dError {
         match self {
             Self::Unavailable => f.write_str("no game to draw the model in"),
             Self::NotFinite => f.write_str("the view or transform is not finite"),
-            Self::UnknownItem => f.write_str("the stack is empty or its item is unknown"),
+            Self::UnknownItem => f.write_str("the item key does not name a registered item"),
             Self::Model(error) => write!(f, "the model cannot be drawn: {error:?}"),
+            Self::InvalidStack => f.write_str("the item's component overrides cannot be drawn"),
         }
     }
 }

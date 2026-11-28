@@ -2,7 +2,9 @@
 //! the worldgen workers, and on the server thread when a sapling grows. No game
 //! is at hand there, so a hook gets the server's [`WorldgenContext`] instead.
 use crate::{
-    native_load_context::WorldgenContext, registry::BlockStateId, worldgen::structure::Rotation,
+    native_load_context::WorldgenContext,
+    registry::{BlockRegistry, BlockStateId},
+    worldgen::structure::{Mirror, Rotation},
 };
 use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 
@@ -47,13 +49,22 @@ pub trait TreeGrowAccess: WorldgenRandom {
     fn block_state(&mut self, pos: [i32; 3]) -> Option<BlockStateId>;
 }
 
+/// A ground provider's block state could not cross the mod boundary.
+#[derive(Debug, PartialEq, Eq)]
+pub struct InvalidGroundState;
+
 /// A ground provider a mod put in place of the tree decorator's own, as the
 /// executable's adapter hands it over. `Send + Sync` because neighbouring
 /// chunks decorate at once on worker threads.
 pub trait ModGroundProvider: Send + Sync {
-    /// The state to place at `pos`, or None to try the next position down the
-    /// column (`AlterGroundEvent.StateProvider.getState`).
-    fn state_at(&self, access: &mut dyn GroundAccess, pos: [i32; 3]) -> Option<BlockStateId>;
+    /// The checked state to place at `pos`, or `Ok(None)` to try the next position
+    /// down the column (`AlterGroundEvent.StateProvider.getState`). An invalid
+    /// state is an error, not a request to try another position.
+    fn state_at(
+        &self,
+        access: &mut dyn GroundAccess,
+        pos: [i32; 3],
+    ) -> Result<Option<BlockStateId>, InvalidGroundState>;
 }
 
 /// The tree whose ground `AlterGroundDecorator.place` alters: the decorator
@@ -65,6 +76,8 @@ pub struct AlterGroundTree<'a> {
     pub roots: &'a [[i32; 3]],
     /// Never empty: the decorator fires nothing for a tree without them.
     pub positions: &'a [[i32; 3]],
+    /// The registry the placement reads and writes, if the world supplies one.
+    pub registry: Option<&'a BlockRegistry>,
 }
 
 /// Feature-generation hooks, installed before any world opens.
@@ -76,6 +89,9 @@ pub struct NativeWorldgenHooks {
     /// `below_trunk_provider`.
     #[allow(clippy::option_option)]
     pub on_tree_grow: fn(&mut dyn TreeGrowAccess, [i32; 3]) -> Option<Option<BlockStateId>>,
+    /// `mirror`: the state a template places at `pos` for `state` mirrored by `mirror`,
+    /// starting from `table`, the game's own mirrored state.
+    pub mirror: fn(BlockStateId, [i32; 3], Mirror, BlockStateId) -> BlockStateId,
     /// `rotate`: the state a template places at `pos` for `state`, already mirrored, turned
     /// by `rotation`, starting from `table`, the game's own turned state.
     pub rotate: fn(BlockStateId, [i32; 3], Rotation, BlockStateId) -> BlockStateId,
@@ -125,6 +141,20 @@ pub(crate) fn on_tree_grow(
     pos: [i32; 3],
 ) -> Option<Option<BlockStateId>> {
     (HOOKS.get()?.on_tree_grow)(access, pos)
+}
+
+/// The state the parts of `state`'s block place at `pos` for `state` mirrored by `mirror`,
+/// starting from the game's own `table`; `table` before the hooks are installed.
+pub(crate) fn mirror(
+    state: BlockStateId,
+    pos: [i32; 3],
+    mirror: Mirror,
+    table: BlockStateId,
+) -> BlockStateId {
+    match HOOKS.get() {
+        Some(hooks) => (hooks.mirror)(state, pos, mirror, table),
+        None => table,
+    }
 }
 
 /// The state the parts of `state`'s block place at `pos` for `state` turned by `rotation`,

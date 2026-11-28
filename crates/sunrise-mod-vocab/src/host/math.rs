@@ -9,6 +9,5 @@ pub trait MathHost {
     /// Java Math operations. This read allocates nothing on the native path.
     /// It identifies behavior, not the machine. See [`MathProfile`] for the algorithms
     /// selected by each profile.
-    #[access(Metadata)]
     fn math_profile(&self) -> MathProfile;
 }

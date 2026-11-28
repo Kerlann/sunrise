@@ -22,9 +22,9 @@ fn main() {
     println!("cargo:rustc-env=SUNRISE_RUSTC_VERSION={release}");
 }
 
-/// Release and SDK builds name their commit; any other build is `dev`, never a git call whose answer goes stale.
+/// Release and SDK builds name their commit; any other build is `local`, never a git call whose answer goes stale.
 fn game_build_id(named: Option<String>) -> String {
-    named.unwrap_or_else(|| "dev".to_owned())
+    named.unwrap_or_else(|| "local".to_owned())
 }
 
 /// This crate's lang files (`assets/lang/<code>.json`) as a static `Files` value, as
@@ -54,8 +54,8 @@ mod tests {
     use super::game_build_id;
 
     #[test]
-    fn a_build_that_names_no_commit_is_dev() {
-        assert_eq!(game_build_id(None), "dev");
+    fn a_build_that_names_no_commit_is_local() {
+        assert_eq!(game_build_id(None), "local");
         assert_eq!(game_build_id(Some("abc123".into())), "abc123");
     }
 }

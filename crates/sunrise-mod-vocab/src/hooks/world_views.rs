@@ -1,5 +1,4 @@
 //! The `world_views` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0349
 
 pub trait Hooks {
     /// Asked once as each frame is built (not on the title screen's panorama): push the world
@@ -76,5 +75,5 @@ that a clip plane leaves out what is behind it and that a child's picture is thi
         target = "mod_render::render::world_views",
         neoforge = "none (Sunrise-only; NeoForge has no counterpart)"
     )]
-    fn world_views();
+    fn world_views(views: &mut WorldViews<'_>);
 }

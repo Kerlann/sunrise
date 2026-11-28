@@ -1,0 +1,1 @@
+sunrise-sim menu::equip_movement::tests::menus_without_actor_or_equipment_candidates_do_not_ask_can_equip lib daily resources

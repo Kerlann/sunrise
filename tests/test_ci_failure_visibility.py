@@ -1,6 +1,7 @@
 """Synthetic diagnostics only: never use prepared resource output as a fixture."""
 import contextlib
 import io
+import json
 import subprocess
 import os
 from pathlib import Path
@@ -8,9 +9,14 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from tests.test_ci_concurrency import yaml, ROOT
+from tests.git_fixture import isolated_git_env
+from tests.os_support import BASH, needs_runner_shell, needs_symlinks
+from tests.test_ci_concurrency import ROOT
 from tests.test_ignored_test_completion import IgnoredTests, target, summary
 from tools.ci import ignored_tests
+from tools.ci import vendored_yaml
+
+yaml = vendored_yaml.load()
 
 
 class Visibility(unittest.TestCase):
@@ -25,6 +31,52 @@ class Visibility(unittest.TestCase):
         self.assertIn("assertion equality failed", log)
         self.assertNotIn("PRIVATE_RESOURCE", log)
 
+    def test_screen_effect_event_loop_error_keeps_details_private(self):
+        name = "screen_effect::draw"
+        canary_path = "/synthetic/screen-effect-canary/display.sock"
+        canary_token = "synthetic-screen-effect-token"
+        output = target(1, f"test {name} ... FAILED\n\n---- {name} stdout ----\n"
+                        f"screen-effect event loop error: backend denied {canary_path} ({canary_token})\n",
+                        summary(failed=1))
+        process = subprocess.CompletedProcess([], 101, output)
+        with tempfile.TemporaryDirectory() as folder:
+            private = Path(folder) / "private"
+            report = Path(folder) / "report.json"
+            with patch.dict(os.environ, {"IGNORED_TESTS_PRIVATE_LOGS": str(private)}), \
+                    patch.object(ignored_tests, "listed_entries", return_value=[]), \
+                    patch.object(ignored_tests.subprocess, "run", return_value=process), \
+                    contextlib.redirect_stdout(io.StringIO()) as stdout, \
+                    contextlib.redirect_stderr(io.StringIO()) as stderr:
+                self.assertEqual(ignored_tests.main(["example"], report), 1)
+            self.assertEqual((private / "example.test.log").read_text(), output)
+            report_text = report.read_text()
+        self.assertIn("screen-effect event loop error: details withheld", stdout.getvalue().splitlines())
+        public = stdout.getvalue() + stderr.getvalue() + report_text
+        self.assertNotIn(canary_path, public)
+        self.assertNotIn(canary_token, public)
+        self.assertEqual([(item["test"], item["kind"]) for item in json.loads(report_text)["problems"]],
+                         [(name, "failed")])
+
+    def test_repeated_event_loop_errors_share_the_diagnostic_budget(self):
+        name = "画面::draw"
+        output = target(1, f"test {name} ... FAILED\n" + "screen-effect event loop error: synthetic\n" * 120,
+                        summary(failed=1))
+        failure = f"  failed test: {name}\n  panic context missing from captured output\n"
+        category = "screen-effect event loop error: details withheld\n"
+        records = (failure + category * 3).encode("utf-8")
+        process = subprocess.CompletedProcess([], 101, output)
+        with patch.object(ignored_tests, "FAILURE_TOTAL_BYTES", len(records)), \
+                patch.object(ignored_tests, "listed_entries", return_value=[]), \
+                patch.object(ignored_tests.subprocess, "run", return_value=process):
+            with contextlib.redirect_stdout(io.StringIO()) as standalone:
+                self.assertEqual(ignored_tests.run_leg("example", []), {name: False})
+            with contextlib.redirect_stdout(io.StringIO()) as shared:
+                self.assertEqual(ignored_tests.main(["example", "other"]), 1)
+        for log in (standalone, shared):
+            payload = "".join(line for line in log.getvalue().splitlines(keepends=True)
+                              if line.startswith(("  failed test:", "  panic context", "screen-effect", "::error::")))
+            self.assertEqual(payload.encode("utf-8"), records)
+
     def test_unquoted_compiler_payloads_are_never_published(self):
         with contextlib.redirect_stdout(io.StringIO()) as log:
             ignored_tests.compile_diagnostics("error: PRIVATE_RESOURCE_CONTENT\n"
@@ -32,6 +84,32 @@ class Visibility(unittest.TestCase):
                                               "error: mismatched types PRIVATE_RESOURCE_CONTENT\n")
         self.assertNotIn("PRIVATE_RESOURCE_CONTENT", log.getvalue())
         self.assertIn("error[E0308]: custom diagnostic payload withheld", log.getvalue())
+
+    def test_only_tracked_compiler_locations_are_published(self):
+        tracked = 'crates/example/src/lib.rs'
+        lines = lambda path: ['fn tracked() {}'] if path == tracked else None
+        with patch.object(ignored_tests, 'source_lines', side_effect=lines), \
+                contextlib.redirect_stdout(io.StringIO()) as log:
+            ignored_tests.compile_diagnostics(f"error[E0425]: PRIVATE\n  --> {tracked}:1:1\n"
+                                              "error[E0609]: PRIVATE\n"
+                                              "  --> /build/PRIVATE_RUNNER/out/generated.rs:3:9\n"
+                                              "error[E0599]: PRIVATE\n  --> target/PRIVATE/gen.rs:1:1\n")
+        text = log.getvalue()
+        self.assertIn(f"compiler:   --> {tracked}:1:1", text)
+        self.assertIn("compiler source: fn tracked() {}", text)
+        self.assertEqual(text.count("--> location withheld (not a tracked Rust source)"), 2)
+        for heading in ("error[E0425]", "error[E0609]", "error[E0599]"):
+            self.assertIn(heading, text)
+        self.assertNotIn("PRIVATE", text)
+
+    def test_locations_past_the_output_budget_are_not_looked_up(self):
+        output = "".join(f"error[E0425]: PRIVATE\n  --> crates/example/src/f{i}.rs:1:1\n" for i in range(15))
+        with patch.object(ignored_tests, 'source_lines', return_value=None) as lookup, \
+                contextlib.redirect_stdout(io.StringIO()) as log:
+            ignored_tests.compile_diagnostics(output)
+        # 30 headings: the first 20 are shown, ten of them locations; the other ten are only counted.
+        self.assertEqual(lookup.call_count, 10)
+        self.assertIn("compiler diagnostics truncated: 10 more headings", log.getvalue())
 
     def test_codeless_build_failures_keep_category_not_payload(self):
         for message, expected in (
@@ -56,18 +134,21 @@ class Visibility(unittest.TestCase):
             self.assertNotIn('len=3', log)
             self.assertNotIn('index=4', log)
 
+    @needs_symlinks
     def test_source_comes_from_head_not_private_worktree(self):
         with tempfile.TemporaryDirectory() as folder:
             old = os.getcwd()
             try:
                 os.chdir(folder)
-                subprocess.run(["git", "init", "-q"], check=True)
+                env = isolated_git_env()
+                subprocess.run(["git", "init", "-q"], env=env, check=True)
                 path = Path("crates/example/src/lib.rs")
                 path.parent.mkdir(parents=True)
                 path.write_text('panic!("checked-in reason");\n')
                 Path("crates/link.rs").symlink_to("/tmp/private.rs")
-                subprocess.run(["git", "add", str(path), "crates/link.rs"], check=True)
-                subprocess.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "fixture"], check=True)
+                subprocess.run(["git", "add", str(path), "crates/link.rs"], env=env, check=True)
+                subprocess.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.com",
+                                "commit", "-qm", "fixture"], env=env, check=True)
                 path.write_text("PRIVATE_WORKTREE")
                 Path("crates/private.rs").write_text("PRIVATE_UNTRACKED")
                 ignored_tests.source_lines.cache_clear()
@@ -109,13 +190,15 @@ class Visibility(unittest.TestCase):
 
     def test_list_failure_preserves_compiler_headings_not_source(self):
         process = subprocess.CompletedProcess([], 101, "", "error[E0308]: mismatched types\n"
-                    " --> src/lib.rs:12:3\nerror: expected `SECRET`, found `OTHER`\n"
+                    " --> crates/example/src/lib.rs:12:3\nerror: expected `SECRET`, found `OTHER`\n"
                     " PRIVATE_RESOURCE\n")
-        with patch.object(ignored_tests.subprocess, "run", return_value=process) as run, contextlib.redirect_stdout(io.StringIO()) as log:
+        with patch.object(ignored_tests.subprocess, "run", return_value=process) as run, \
+                patch.object(ignored_tests, "source_lines", return_value=[""] * 12), \
+                contextlib.redirect_stdout(io.StringIO()) as log:
             self.assertIsNone(ignored_tests.run("example", [], 1, 2))
         self.assertEqual(run.call_count, 1)
         self.assertIn("mismatched types", log.getvalue())
-        self.assertIn("src/lib.rs:12:3", log.getvalue())
+        self.assertIn("crates/example/src/lib.rs:12:3", log.getvalue())
         self.assertNotIn("SECRET", log.getvalue())
         self.assertNotIn("PRIVATE_RESOURCE", log.getvalue())
 
@@ -128,10 +211,11 @@ class Visibility(unittest.TestCase):
         self.assertLess(len(log.getvalue()), 7500)
         self.assertNotIn("private unexpected payload", log.getvalue())
 
+    @needs_runner_shell
     def test_data_end_memory_telemetry_is_bounded_best_effort(self):
         steps = yaml.safe_load((ROOT / '.github/workflows/ignored-tests.yml').read_text())["jobs"]["ignored-tests-shards"]["steps"]
         step = next(s for s in steps if s.get("name") == "Record data-leg end and compiler cache")
-        self.assertEqual(step["if"], "always()")
+        self.assertEqual(step["if"], "always() && steps.seed.outcome == 'success'")
         script = step["run"]
         self.assertIn("/sys/fs/cgroup/$metric", script)
         self.assertIn("memory.peak memory.max memory.swap.peak memory.swap.max", script)
@@ -143,7 +227,7 @@ class Visibility(unittest.TestCase):
             # Exercise the actual shell under errexit; absent/invalid files cannot fail it.
             script = script.replace("/sys/fs/cgroup/", folder + "/")
             script = script.replace("sccache --show-stats", "false")
-            result = subprocess.run(["bash", "-e", "-c", script], capture_output=True, text=True)
+            result = subprocess.run([BASH, "-e", "-c", script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("memory_peak_bytes=123456", result.stdout)
         self.assertIn("memory_max_bytes=max", result.stdout)
@@ -162,14 +246,42 @@ class Visibility(unittest.TestCase):
         self.assertNotIn("clippy", fmt["run"])
         self.assertIn("clippy", native["run"])
         self.assertNotIn("continue-on-error", native)
-        for name in ("Lint native targets", "Lint the server build without sound or controllers"):
-            step = next(s for s in steps if s.get("name") == name)
-            self.assertLess(steps.index(fmt), steps.index(step))
-            self.assertLess(steps.index(step), steps.index(final))
-            self.assertNotIn("formatting", step.get("if", ""))
+        self.assertLess(steps.index(fmt), steps.index(native))
+        self.assertLess(steps.index(native), steps.index(final))
+        self.assertNotIn("formatting", native.get("if", ""))
         self.assertIn("failure()", final["if"])
         self.assertIn("!cancelled()", final["if"])
-        for name in ("native-lint", "server-lint"):
-            step = next(s for s in steps if s.get("id") == name)
-            self.assertIn("!cancelled()", step["if"])
-            self.assertNotIn("success()", step["if"])
+        self.assertIn("!cancelled()", native["if"])
+        self.assertNotIn("success()", native["if"])
+
+    @needs_runner_shell
+    def test_server_lint_failure_fails_the_step(self):
+        # A failing server lint must propagate non-zero exit and print its output unfolded.
+        steps = yaml.safe_load((ROOT / '.github/workflows/dyna-ci.yml').read_text())["jobs"]["lint"]["steps"]
+        native = next(s for s in steps if s.get("id") == "native-lint")
+        script = native["run"]
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            runner_temp = tmp_path / "runner_temp"
+            runner_temp.mkdir()
+            fake_ci = tmp_path / "tools" / "ci"
+            fake_ci.mkdir(parents=True)
+            # Stub check_warnings.py: fail if --target-dir is present (server lint), succeed otherwise
+            (fake_ci / "check_warnings.py").write_text(
+                "import sys\n"
+                "if '--target-dir' in sys.argv:\n"
+                "    print('Simulated server clippy failure')\n"
+                "    sys.exit(1)\n"
+                "sys.exit(0)\n"
+            )
+            env = {
+                **os.environ,
+                "RUNNER_TEMP": str(runner_temp),
+                "GITHUB_OUTPUT": str(tmp_path / "github_output"),
+                "JOBS": "-j4",
+            }
+            res = subprocess.run([BASH, "-c", script], cwd=tmp_path, env=env, capture_output=True, text=True)
+            self.assertNotEqual(res.returncode, 0)
+            self.assertIn("Server lint failed:", res.stdout)
+            self.assertIn("Simulated server clippy failure", res.stdout)
+            self.assertIn("workspace_lint=success", (tmp_path / "github_output").read_text())

@@ -7,7 +7,6 @@ pub trait ItemEntitiesHost {
     /// Side: both.
     /// Narrows an entity to a dropped item, or None for another kind, a
     /// stale handle, a client, or an item temporarily taken out for ticking.
-    #[access(WorldOnly)]
     fn item_entity(&self, entity: EntityRef) -> Option<ItemEntityRef>;
 }
 /// The handles' reads of the `item_entities` area, implemented by the game and reached through [`Backend`].
@@ -16,28 +15,29 @@ pub trait ItemEntitiesHost {
 #[sunrise_mod_api_macros::host_area]
 pub trait ItemEntitiesBackend {
     /// Side: server.
-    /// `ItemEntity.getItem`: the complete stack, or None if unavailable.
-    #[access(WorldOnly)]
-    fn item_entity_stack(&self, item: ItemEntityRef) -> Option<ItemStack>;
+    /// Lend `ItemEntity.getItem` once, as in [`ItemEntityRef::with_stack`].
+    #[manual_handle]
+    fn item_entity_stack(
+        &self,
+        item: ItemEntityRef,
+        read: &mut dyn for<'a> FnMut(ItemStackView<'a>),
+    ) -> Option<()>;
     /// Side: server.
-    /// The signed pickup delay; the legacy infinite sentinel reads as vanilla's
-    /// 32767. None also covers a stored value outside i32.
-    #[access(WorldOnly)]
+    /// The signed pickup delay (`ItemEntity.pickupDelay`). `32767` is vanilla's
+    /// infinite-delay sentinel (`set_never_pickup`). `None` when the handle is
+    /// unavailable or outside a server.
     fn item_entity_pickup_delay(&self, item: ItemEntityRef) -> Option<i32>;
     /// Side: server.
     /// `ItemEntity.getAge`, including negative lifetime sentinels.
-    #[access(WorldOnly)]
     fn item_entity_age(&self, item: ItemEntityRef) -> Option<i32>;
     /// Side: server.
     /// The UUID set by `ItemEntity.setTarget`, limiting pickup to that player;
     /// None also means an unavailable item. This is not the thrower.
-    #[access(WorldOnly)]
     fn item_entity_target(&self, item: ItemEntityRef) -> Option<u128>;
     /// Side: server.
     /// `ItemEntity.getOwner`: the thrower as a resolved entity, not the pickup
     /// target. None for no thrower, an unloaded or different-level thrower,
     /// an unavailable handle, or one Sunrise cannot resolve.
-    #[access(WorldOnly)]
     fn item_entity_owner(&self, item: ItemEntityRef) -> Option<EntityRef>;
 }
 /// The handles' writes of the `item_entities` area, implemented by the game and reached through [`BackendMut`].
@@ -46,47 +46,65 @@ pub trait ItemEntitiesBackend {
 #[sunrise_mod_api_macros::host_area]
 pub trait ItemEntitiesBackendMut {
     /// Side: server.
-    /// Writes a nonempty complete stack using `ItemEntity.setItem`. Empty
-    /// stacks are refused: vanilla discards the item on its next tick. To
-    /// remove an item entity, use the removal handle. False also for an
+    /// Writes a stack using `ItemEntity.setItem`. Passing `None` or an air stack
+    /// stores an empty stack, which normal `ItemEntity.tick` discards on its next
+    /// tick (use the removal handle to discard immediately). `Ok(false)` for an
     /// unavailable item or outside a server.
     ///
-    /// This scope is the port's own transactional requirement. NeoForge adds
-    /// no event, deferral or drop capture around a block entity's tick; newly
-    /// spawned items join immediately. With no scope open, the engine behaves
-    /// exactly as vanilla for these item operations: writes are immediate,
-    /// the overlay stays absent, and nothing is staged.
-    ///
-    /// During a mod block-entity tick this write is proposed, not published:
-    /// later Parts read the proposal, and it commits only with the accepted
-    /// final block-entity snapshot. A stale item or rejected listener response
-    /// rejects the whole tick proposal. Outside that scope writes are immediate.
-    /// Pickup delay and target changes, spawning, motion, block changes and
-    /// non-item removals are deliberately immediate, not rolled back with it.
-    #[access(WorldOnly)]
+    /// The new stack is visible immediately. This write joins the item's level's
+    /// innermost transaction, if any; abort restores the old stack for the same resident
+    /// item. A block-entity tick does not open a transaction automatically;
+    /// use the tick scope's `transaction` to commit this write and a subject
+    /// edit together.
     fn item_entity_set_stack(
         &mut self,
         item: ItemEntityRef,
-        stack: ItemStack,
+        stack: Option<ItemStack>,
     ) -> Result<bool, StackWriteError>;
     /// Side: server.
-    /// `ItemEntity.setPickUpDelay`.
-    #[access(WorldOnly)]
+    /// `ItemEntity.setPickUpDelay`. An open transaction restores the previous delay on abort.
     fn item_entity_set_pickup_delay(&mut self, item: ItemEntityRef, ticks: i32) -> bool;
     /// Side: server.
     /// `ItemEntity.setDefaultPickUpDelay`: ten ticks.
-    #[access(WorldOnly)]
     fn item_entity_set_default_pickup_delay(&mut self, item: ItemEntityRef) -> bool;
     /// Side: server.
     /// `ItemEntity.setNoPickUpDelay`.
-    #[access(WorldOnly)]
     fn item_entity_set_no_pickup_delay(&mut self, item: ItemEntityRef) -> bool;
     /// Side: server.
     /// `ItemEntity.setNeverPickUp`: the infinite-delay sentinel 32767.
-    #[access(WorldOnly)]
     fn item_entity_set_never_pickup(&mut self, item: ItemEntityRef) -> bool;
     /// Side: server.
     /// `ItemEntity.setTarget`; None allows any player to pick it up.
-    #[access(WorldOnly)]
+    /// An open transaction restores the previous target on abort.
     fn item_entity_set_target(&mut self, item: ItemEntityRef, target: Option<u128>) -> bool;
+    /// Side: server.
+    /// `ItemEntity.playerTouch(player)` now: the pickup the game's own pass runs when the item
+    /// meets the player, with its pickup-delay and target checks, `item_picked_up` and
+    /// `item_picked_up_post`, `Inventory.add` (what does not fit stays on the ground), the
+    /// statistic, the advancement criterion, and the take animation and sound. `Ok` of the count
+    /// the inventory took: 0 when the delay, the target, a mod or a full inventory refused it.
+    /// `Err(Stale)` for a stale player or item handle or a dead player (the game's pickup skips
+    /// the dead), and `Err(Unavailable)` on a client.
+    ///
+    /// Not transactional: the pickup commits at once, its take packet and sound included.
+    /// Inside an open transaction it is refused with `Err(InTransaction)` and nothing is done.
+    fn player_touch_item(
+        &mut self,
+        player: PlayerRef,
+        item: ItemEntityRef,
+    ) -> Result<u32, PickupError>;
+    /// Side: server.
+    /// `ExperienceOrb.playerTouch(player)` now, wherever the orb is: refused while the player's
+    /// `takeXpDelay` runs (`Ok(false)`); else `pickup_xp` fires first and a veto, or a listener
+    /// that removes the orb, refuses it (`Ok(false)`). Otherwise the delay is set to 2, one of
+    /// the orb's count is taken with the take animation and sound, its value goes through
+    /// Mending and the rest to the player's experience, and a one-count orb is discarded.
+    /// `Ok(true)` when taken. The same for the host's own player and for a LAN guest. `Err` as
+    /// for `player_touch_item`, including `Err(InTransaction)`: the orb's take, Mending and the
+    /// experience commit at once and are refused inside an open transaction.
+    fn player_touch_orb(
+        &mut self,
+        player: PlayerRef,
+        orb: ExperienceOrbRef,
+    ) -> Result<bool, PickupError>;
 }

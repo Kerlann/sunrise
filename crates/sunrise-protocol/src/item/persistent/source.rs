@@ -1,12 +1,15 @@
 //! Canonical values to the pinned stream codec, with explicit registry lookup.
 use super::{Ids, builtin_component_id, component_name, is_native_component};
-use crate::item::{Component, Stack};
-use crate::{
-    Error, Result,
-    buf::{Reader, Writer},
+use crate::item::{
+    Component, Stack,
+    component::{BUNDLE_CONTENTS, CHARGED_PROJECTILES},
 };
-use sunrise_core::nbt::{self, Tag};
-use sunrise_world::component_value::{Template, Value, effective_patch};
+use crate::{Error, Result, buf::Reader};
+use sunrise_core::{
+    nbt::{self, Tag},
+    vanilla_bytes::Writer,
+};
+use sunrise_world::component_value::{Template, Value, consume_effects::Admitted, effective_patch};
 
 fn err(s: impl Into<String>) -> Error {
     Error::new(s.into())
@@ -222,20 +225,7 @@ const GROUP: &[&str] = &[
     "any", "mainhand", "offhand", "hand", "feet", "legs", "chest", "head", "armor", "body",
     "saddle",
 ];
-const ANIMATION: &[&str] = &[
-    "none",
-    "eat",
-    "drink",
-    "block",
-    "bow",
-    "trident",
-    "crossbow",
-    "spyglass",
-    "toot_horn",
-    "brush",
-    "bundle",
-    "spear",
-];
+use sunrise_core::use_animation::NAMES as ANIMATION;
 fn patch_kind(name: &str, ids: &dyn Ids) -> Result<i32> {
     if let Some(kind) = builtin_component_id(name) {
         return Ok(kind);
@@ -253,43 +243,101 @@ pub fn template_from_parts(
     patch: &[(String, Option<Value>)],
     ids: &dyn Ids,
 ) -> Result<Stack> {
+    template_from_parts_at_depth(item, count, patch, ids, 0)
+}
+
+fn template_from_parts_at_depth(
+    item: &str,
+    count: i32,
+    patch: &[(String, Option<Value>)],
+    ids: &dyn Ids,
+    mut depth: u32,
+) -> Result<Stack> {
+    struct PendingList<'a, P> {
+        parent: Stack,
+        patch: P,
+        kind: i32,
+        remaining: std::slice::Iter<'a, Value>,
+        children: Vec<Stack>,
+    }
+
+    // Typed stack lists need the caller's registry, not a structural stream read with
+    // default IDs. Suspend the parent on the heap while building each child in order.
+    // Each suspended list adds one enclosing component, shared by all its children.
+    let mut parents = Vec::new();
+    let mut stack = Stack::new(template_item_id(item, count, ids)?, count);
+    let mut patch = effective_patch(patch);
+    loop {
+        let child = if let Some((name, value)) = patch.next() {
+            let kind = patch_kind(name, ids)?;
+            let Some(value) = value else {
+                stack.removed.push(kind);
+                continue;
+            };
+            if !matches!(kind, CHARGED_PROJECTILES | BUNDLE_CONTENTS) {
+                let component = component_from_stream_value(kind, value, ids, depth)?;
+                stack.added.push((kind, component));
+                continue;
+            }
+            let mut remaining = stack_list(value, depth)?.iter();
+            let Some(first) = remaining.next() else {
+                stack.added.push((kind, Component::Stacks(Vec::new())));
+                continue;
+            };
+            parents.push(PendingList {
+                parent: stack,
+                patch,
+                kind,
+                remaining,
+                children: Vec::new(),
+            });
+            depth += 1;
+            first
+        } else {
+            let Some(mut pending) = parents.pop() else {
+                return Ok(stack);
+            };
+            pending.children.push(stack);
+            if let Some(next) = pending.remaining.next() {
+                parents.push(pending);
+                next
+            } else {
+                stack = pending.parent;
+                patch = pending.patch;
+                stack
+                    .added
+                    .push((pending.kind, Component::Stacks(pending.children)));
+                depth -= 1;
+                continue;
+            }
+        };
+        let t = canonical_template(child)?;
+        stack = Stack::new(template_item_id(&t.item, t.count, ids)?, t.count);
+        patch = effective_patch(&t.patch);
+    }
+}
+
+fn template_item_id(item: &str, count: i32, ids: &dyn Ids) -> Result<i32> {
     if count == 0 || item == "minecraft:air" {
         return Err(err("empty native template"));
     }
-    let item = ids
-        .id("minecraft:item", item)
+    ids.id("minecraft:item", item)
         .filter(|id| *id > 0)
-        .ok_or_else(|| err(format!("unknown or empty item {item}")))?;
-    let mut stack = Stack::new(item, count);
-    for (name, value) in effective_patch(patch) {
-        let kind = patch_kind(name, ids)?;
-        if let Some(value) = value {
-            stack
-                .added
-                .push((kind, component_from_value(kind, value, ids)?));
-        } else {
-            stack.removed.push(kind);
-        }
+        .ok_or_else(|| err(format!("unknown or empty item {item}")))
+}
+fn canonical_template(v: &Value) -> Result<&Template> {
+    match v {
+        Value::Template(t) => Ok(t),
+        _ => Err(err("expected canonical template")),
     }
-    Ok(stack)
 }
 fn template(w: &mut Writer, v: &Value, ids: &dyn Ids, depth: u32) -> Result<()> {
-    let Value::Template(t) = v else {
-        return Err(err("expected canonical template"));
-    };
-    template_body(w, t, ids, depth)
+    template_body(w, canonical_template(v)?, ids, depth)
 }
 /// `depth` counts the components enclosing this template, as the stream reader counts them:
 /// a component inside the template is encoded at the same depth and is the one that adds a level.
 fn template_body(w: &mut Writer, t: &Template, ids: &dyn Ids, depth: u32) -> Result<()> {
-    if t.count == 0 || t.item == "minecraft:air" {
-        return Err(err("empty native template"));
-    }
-    let item = ids
-        .id("minecraft:item", &t.item)
-        .filter(|id| *id > 0)
-        .ok_or_else(|| err(format!("unknown or empty item {}", t.item)))?;
-    w.varint(item);
+    w.varint(template_item_id(&t.item, t.count, ids)?);
     w.varint(t.count);
     let (added, removed) = effective_patch(&t.patch).fold((0, 0), |(added, removed), (_, v)| {
         if v.is_some() {
@@ -325,26 +373,90 @@ pub fn component_from_tag(kind: i32, value: &Tag, ids: &dyn Ids) -> Result<Compo
     .map_err(err)?;
     component_from_value(kind, &value, ids)
 }
+/// Encode retained effects and project newly materialized template effects for the caller.
+pub fn component_from_admitted_tag(
+    kind: i32,
+    value: &Tag,
+    ids: &dyn Ids,
+    admitted: &dyn Fn(&Tag) -> Option<Admitted>,
+    projected: &dyn Fn(&Admitted),
+) -> Result<Component> {
+    let name = component_name(kind).ok_or_else(|| err("unknown component type"))?;
+    let value = sunrise_world::component_value::source::from_admitted_component_tag(
+        name,
+        value,
+        is_native_component,
+        admitted,
+        projected,
+    )
+    .map_err(err)?;
+    component_from_value(kind, &value, ids)
+}
+
 pub fn component_from_value(kind: i32, value: &Value, ids: &dyn Ids) -> Result<Component> {
     let name = component_name(kind).ok_or_else(|| err(format!("unknown component type {kind}")))?;
-    component_from_value_named(kind, value, ids).map_err(|error| err(format!("{name}: {error}")))
+    let result = if matches!(kind, CHARGED_PROJECTILES | BUNDLE_CONTENTS) {
+        stack_list(value, 0).and_then(|entries| {
+            let mut stacks = Vec::new();
+            for entry in entries {
+                let t = canonical_template(entry)?;
+                stacks.push(template_from_parts_at_depth(
+                    &t.item, t.count, &t.patch, ids, 1,
+                )?);
+            }
+            Ok(Component::Stacks(stacks))
+        })
+    } else {
+        component_from_stream_value(kind, value, ids, 0)
+    };
+    result.map_err(|error| err(format!("{name}: {error}")))
 }
-fn component_from_value_named(kind: i32, value: &Value, ids: &dyn Ids) -> Result<Component> {
+
+fn stack_list(value: &Value, depth: u32) -> Result<&[Value]> {
+    check_component_depth(depth)?;
+    list(value)
+}
+
+fn component_from_stream_value(
+    kind: i32,
+    value: &Value,
+    ids: &dyn Ids,
+    depth: u32,
+) -> Result<Component> {
     if let Some(name) = crate::item::custom::name(kind) {
+        check_component_depth(depth)?;
         patch_kind(name, ids)?;
         return Ok(Component::Nbt(value.to_tag().map_err(err)?));
     }
     let mut w = Writer::new();
-    encode(kind, value, &mut w, ids, 0)?;
-    if !matches!(kind,0..=4|6|9..=13|17..=21|30|45|47|48|50..=53|55..=58|63|65|69..=72|74|75|109)
-        || matches!(
-            (kind, value),
-            (63, Value::Map(_)) | (109, Value::StreamOnly(_))
-        )
-        || kind == 74
-            && list(value)?
-                .iter()
-                .any(|v| !matches!(field(v, "pattern"), Some(Value::String(_))))
+    encode(kind, value, &mut w, ids, depth)?;
+    if !matches!(
+        kind,
+        0..=4
+            | 6
+            | 9..=13
+            | 17..=21
+            | 30
+            | 35
+            | 45
+            | 47
+            | 48
+            | 50
+            | 53
+            | 55..=58
+            | 63
+            | 65
+            | 69..=72
+            | 74
+            | 75
+            | 109
+    ) || matches!(
+        (kind, value),
+        (63, Value::Map(_)) | (109, Value::StreamOnly(_))
+    ) || kind == 74
+        && list(value)?
+            .iter()
+            .any(|v| !matches!(field(v, "pattern"), Some(Value::String(_))))
     {
         return Ok(Component::Raw(w.data));
     }
@@ -374,32 +486,57 @@ fn effect_details(w: &mut Writer, v: &Value, depth: u32) -> Result<()> {
         effect_details(w, v, depth + 1)
     })
 }
-fn consume(w: &mut Writer, v: &Value, ids: &dyn Ids) -> Result<()> {
-    let kind = named(
-        need(v, "type")?,
-        &[
-            "minecraft:apply_effects",
-            "minecraft:remove_effects",
-            "minecraft:clear_all_effects",
-            "minecraft:teleport_randomly",
-            "minecraft:play_sound",
-        ],
-    )?;
-    w.varint(kind);
-    match kind {
-        0 => {
-            sequence(w, list(need(v, "effects")?)?, |w, v| effect(w, v, ids))?;
-            w.f32(f(v, "probability", 1.0)?);
+fn consume_list(w: &mut Writer, effects: &[Value], ids: &dyn Ids) -> Result<()> {
+    use crate::item::consume_effects::{REGISTRY, builtin_id};
+
+    let mut wire = Writer::new();
+    let mut count = 0;
+    for value in effects {
+        if let Value::RegisteredConsumeEffect(effect) = value {
+            if let Some(id) = ids.id(REGISTRY, &effect.name) {
+                wire.varint(id);
+                wire.bytes(&effect.wire);
+                count += 1;
+            } else {
+                log::warn!(
+                    "Cannot synchronize consume effect {}: no peer registry ID",
+                    effect.name
+                );
+            }
+            continue;
         }
-        1 => holders(w, need(v, "effects")?, "minecraft:mob_effect", ids)?,
-        2 => (),
-        3 => {
-            w.f32(f(v, "diameter", 16.0)?);
-            w.bool(b(v, "directional_particles", true)?);
+        let name = string(need(value, "type")?)?;
+        let Some(kind) = builtin_id(&name) else {
+            // Gameplay-only hook kinds have no stream form. Keep their siblings.
+            log::warn!("Cannot synchronize consume effect {name}: no admitted Wire value");
+            continue;
+        };
+        wire.varint(ids.id(REGISTRY, &name).unwrap_or(kind));
+        match kind {
+            0 => {
+                sequence(&mut wire, list(need(value, "effects")?)?, |w, v| {
+                    effect(w, v, ids)
+                })?;
+                wire.f32(f(value, "probability", 1.0)?);
+            }
+            1 => holders(
+                &mut wire,
+                need(value, "effects")?,
+                "minecraft:mob_effect",
+                ids,
+            )?,
+            2 => (),
+            3 => {
+                wire.f32(f(value, "diameter", 16.0)?);
+                wire.bool(b(value, "directional_particles", true)?);
+            }
+            4 => sound(&mut wire, need(value, "sound")?, ids)?,
+            _ => unreachable!("built-in consume-effect type"),
         }
-        4 => sound(w, need(v, "sound")?, ids)?,
-        _ => unreachable!(),
+        count += 1;
     }
+    w.varint(count);
+    w.bytes(&wire.data);
     Ok(())
 }
 fn explosion(w: &mut Writer, v: &Value) -> Result<()> {
@@ -532,13 +669,17 @@ fn predicate(w: &mut Writer, v: &Value, ids: &dyn Ids, depth: u32) -> Result<()>
     }
     Ok(())
 }
-fn encode(kind: i32, v: &Value, w: &mut Writer, ids: &dyn Ids, depth: u32) -> Result<()> {
+fn check_component_depth(depth: u32) -> Result<()> {
     if depth >= crate::item::MAX_NESTING {
         return Err(err(format!(
             "component nesting exceeds {}",
             crate::item::MAX_NESTING
         )));
     }
+    Ok(())
+}
+fn encode(kind: i32, v: &Value, w: &mut Writer, ids: &dyn Ids, depth: u32) -> Result<()> {
+    check_component_depth(depth)?;
     if let Some(name) = crate::item::custom::name(kind) {
         patch_kind(name, ids)?;
         return nbt(w, v);
@@ -683,12 +824,10 @@ fn encode_leaf(kind: i32, v: &Value, w: &mut Writer, ids: &dyn Ids) -> Result<()
         }
         24 => {
             w.f32(f(v, "consume_seconds", 1.6)?);
-            w.varint(named_default(v, "animation", 1, ANIMATION)?);
+            w.varint(named_default(v, "animation", 1, &ANIMATION)?);
             sound_default(w, v, "sound", "minecraft:entity.generic.eat", ids)?;
             w.bool(b(v, "has_consume_particles", true)?);
-            sequence(w, values(v, "on_consume_effects")?, |w, v| {
-                consume(w, v, ids)
-            })?;
+            consume_list(w, values(v, "on_consume_effects")?, ids)?;
         }
         26 => {
             w.f32(float(need(v, "seconds")?)?);
@@ -764,7 +903,7 @@ fn encode_leaf(kind: i32, v: &Value, w: &mut Writer, ids: &dyn Ids) -> Result<()
             }
             sound_default(w, v, "shearing_sound", "minecraft:item.shears.snip", ids)?;
         }
-        36 => sequence(w, values(v, "death_effects")?, |w, v| consume(w, v, ids))?,
+        36 => consume_list(w, values(v, "death_effects")?, ids)?,
         37 => blocks(w, v, ids)?,
         38 => {
             w.bool(b(v, "deals_knockback", true)?);
@@ -1169,7 +1308,7 @@ mod tests {
         let value = component_value(
             16,
             &Component::Raw(w.data.clone()),
-            &NameLookup(&registry_name),
+            &NameLookup::new(&registry_name),
         )
         .unwrap();
         assert_eq!(value.to_tag().unwrap(), expected);
@@ -1198,21 +1337,18 @@ mod tests {
             w.varint(display);
             w.data
         };
+        let names = NameLookup::new(&registry_name);
         for bytes in [
             one(3, 0, 0, 0),
             one(0, 3, 0, 0),
             one(0, 0, 11, 0),
             one(0, 0, 0, 3),
         ] {
-            assert!(
-                component_value(16, &Component::Raw(bytes), &NameLookup(&registry_name)).is_err()
-            );
+            assert!(component_value(16, &Component::Raw(bytes), &names).is_err());
         }
         let mut trailing = one(0, 0, 0, 0);
         trailing.push(0);
-        assert!(
-            component_value(16, &Component::Raw(trailing), &NameLookup(&registry_name)).is_err()
-        );
+        assert!(component_value(16, &Component::Raw(trailing), &names).is_err());
         assert!(component_value(16, &Component::Raw(one(0, 0, 0, 0)), &NoNames).is_err());
         for source in [
             r#"[{type:"gravity",id:"test:x",amount:1d,operation:"add_value",slot:"any"}]"#,

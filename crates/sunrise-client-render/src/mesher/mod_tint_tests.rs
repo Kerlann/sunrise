@@ -96,9 +96,8 @@ fn registered_layers_replace_vanilla_and_each_reader_asks_its_method() {
         return;
     };
     let assets = Assets::load(&root).unwrap();
-    let render = assets
-        .reload(&ResourceRoot::directory(root.clone()))
-        .unwrap();
+    let render =
+        crate::assets::RenderAssets::load(&ResourceRoot::directory(root.clone()), &assets).unwrap();
     let facts = BlockFacts::load(&root, assets.registry).unwrap();
     let visibility = crate::models::load_visibility(&root, assets.registry).unwrap();
     let mut tables = MeshTables::new(&assets, &render, &facts, visibility, None).unwrap();
@@ -216,9 +215,8 @@ fn the_mesher_asks_a_mod_source_once_per_block_with_the_world_around_it() {
     let assets = Assets::load(&root).unwrap();
     let facts = BlockFacts::load(&root, assets.registry).unwrap();
     let biomes = Biomes::load(&ResourceRoot::directory(root.clone())).unwrap();
-    let render = assets
-        .reload(&ResourceRoot::directory(root.clone()))
-        .unwrap();
+    let render =
+        crate::assets::RenderAssets::load(&ResourceRoot::directory(root.clone()), &assets).unwrap();
     let visibility = crate::models::load_visibility(&root, assets.registry).unwrap();
     let mut tables = MeshTables::new(&assets, &render, &facts, visibility.clone(), None).unwrap();
     let values = tint_values(assets.registry);
@@ -264,6 +262,7 @@ fn the_mesher_asks_a_mod_source_once_per_block_with_the_world_around_it() {
         cutout_leaves: true,
         opaque_ice: false,
         translucent_layers: &[],
+        layer_overrides: &[],
         leaf_culling: LeafCullingMode::Off,
         hidden_states: &[],
         part_tables: Default::default(),
@@ -438,9 +437,8 @@ fn a_block_tinted_by_a_mod_resolver_meshes_with_its_colour_and_follows_its_input
     let assets = Assets::load(&root).unwrap();
     let facts = BlockFacts::load(&root, assets.registry).unwrap();
     let mut biomes = Biomes::load(&ResourceRoot::directory(root.clone())).unwrap();
-    let render = assets
-        .reload(&ResourceRoot::directory(root.clone()))
-        .unwrap();
+    let render =
+        crate::assets::RenderAssets::load(&ResourceRoot::directory(root.clone()), &assets).unwrap();
     let visibility = crate::models::load_visibility(&root, assets.registry).unwrap();
     let mut tables = MeshTables::new(&assets, &render, &facts, visibility.clone(), None).unwrap();
     let [foliage, _] = test_resolvers();
@@ -477,6 +475,7 @@ fn a_block_tinted_by_a_mod_resolver_meshes_with_its_colour_and_follows_its_input
             cutout_leaves: true,
             opaque_ice: false,
             translucent_layers: &[],
+            layer_overrides: &[],
             leaf_culling: LeafCullingMode::Off,
             hidden_states: &[],
             part_tables: Default::default(),

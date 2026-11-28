@@ -23,7 +23,7 @@ fn key(output: &EffectiveOutput) -> Key {
 /// An output whose resources or swapchain configuration failed, with the capabilities it
 /// failed on.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct Rejected {
+pub(crate) struct Rejected {
     key: Key,
     caps: OutputCapabilities,
 }
@@ -395,8 +395,7 @@ impl Renderer {
 
     /// Whether this renderer's frame is the one a renderer made now would draw in
     /// (`requested_frame`). Under `SUNRISE_HDR_FRAME=float` the game makes the renderer again
-    /// when it isn't (docs/design/hdr-linear-light.md, "When it changes"), and the new one
-    /// takes this one's world (`take_world`).
+    /// when it isn't, and the new one takes this one's world (`take_world`).
     pub fn frame_follows(
         &self,
         settings: &crate::graphics::Graphics,
@@ -844,7 +843,7 @@ mod tests {
             auto.event(100, lost, Some(Pq));
             auto.frames(100, 390);
             assert_eq!(auto.applied, fresh, "{lost:?}");
-            assert!(auto.applied.requests_hdr(HdrMode::Auto) && auto.applied.display().hdr);
+            assert!(auto.applied.requests_hdr(HdrMode::Auto) && auto.applied.hdr_on());
             auto.event(400, Some(true), Some(Pq));
             auto.frames(400, 1500);
             assert_eq!((auto.applied, auto.since), (fresh, None), "{lost:?}");

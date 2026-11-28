@@ -31,7 +31,7 @@ message Capture {
   repeated SlowEvent slow = 12;
   // live: one per block per thread.
   repeated SpanBlock span_blocks = 13;
-  // live: start, every 10 s, stop.
+  // live: start and periodic; dedicated server also at stop.
   repeated MemorySnapshot memory = 14;
   // live: one per second per thread while the timeline is on.
   repeated TimelineChunk timeline = 15;
@@ -408,6 +408,9 @@ message Overhead {
   uint64 heap_samples = 10;
   // Time the allocating threads spent recording them.
   uint64 heap_sample_ns = 11;
+  // Elapsed work in completed memory snapshot stages, across all their threads.
+  // Does not include time waiting for a request or reply.
+  uint64 memory_snapshot_ns = 12;
 }
 
 // Per thread, per block of block_s (default 5 s); span[i] ran under parent[i] (string ids, 0 for a root).

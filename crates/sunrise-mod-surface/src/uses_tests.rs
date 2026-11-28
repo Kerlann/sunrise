@@ -25,6 +25,7 @@ fn handle(id: &str, signature: &str, refs: &[&str]) -> Function {
             signature: signature.into(),
             impl_generics: String::new(),
             refs: strings(refs),
+            behaviour_versions: Default::default(),
         },
     )
 }
@@ -255,9 +256,9 @@ pub(crate) fn base() -> Pieces {
                 &["type:PlayerRef", "trait:ServerHost", "type:Text"],
             ),
             handle(
-                "handle:PlayerRef::inventory",
-                "fn inventory(self) -> Inventory",
-                &["type:PlayerRef", "type:Inventory"],
+                "handle:PlayerRef::with_inventory",
+                "fn with_inventory<R>(self, read: impl for<'a> FnOnce(InventoryView<'a>) -> R) -> Option<R>",
+                &["type:PlayerRef", "type:InventoryView"],
             ),
         ],
         types: vec![
@@ -275,7 +276,7 @@ pub(crate) fn base() -> Pieces {
                 false,
                 vec![field("type:Text.content", "String", &["type:Text"])],
             ),
-            api_type("type:Inventory", "", false, vec![]),
+            api_type("type:InventoryView", "", false, vec![]),
             api_type("type:Unrelated", "", false, vec![]),
         ],
         capabilities: vec![Capability::new(
@@ -354,7 +355,7 @@ impl Hooks for Mod {
     // block_broken is for later; Unrelated too.
     fn player_logged_in(&self, host: &mut dyn ServerHost, event: &mut PlayerLoggedInEvent) {
         let stack = ItemStack { count: 1 };
-        let _ = event.player.inventory();
+        let _ = event.player.with_inventory(host, |_| ());
         host.give_item(event.player, stack);
         let _ = "Particles and block_broken in a string";
     }
@@ -414,14 +415,14 @@ fn the_list_is_what_the_source_and_manifest_name_and_what_their_signatures_reach
         ids(&uses),
         [
             "capability:registries",
-            "handle:PlayerRef::inventory",
+            "handle:PlayerRef::with_inventory",
             "hook:player_logged_in",
             "hook:player_logged_in.player",
             "method:Hooks::player_logged_in",
             "method:ServerHost::give_item",
             "trait:Hooks",
             "trait:ServerHost",
-            "type:Inventory",
+            "type:InventoryView",
             "type:ItemStack",
             "type:ItemStack.count",
             "type:PlayerLoggedInEvent",
@@ -447,8 +448,8 @@ fn the_list_is_what_the_source_and_manifest_name_and_what_their_signatures_reach
     assert_eq!(origin("hook:player_logged_in.player"), at(9));
     assert_eq!(origin("capability:registries"), Origin::Manifest);
     assert_eq!(
-        origin("type:Inventory"),
-        Origin::Via("handle:PlayerRef::inventory".into())
+        origin("type:InventoryView"),
+        Origin::Via("handle:PlayerRef::with_inventory".into())
     );
     let base = base().build();
     let hashes: std::collections::BTreeMap<&str, &str> = base.entries().collect();
@@ -477,8 +478,8 @@ fn the_list_is_what_the_source_and_manifest_name_and_what_their_signatures_reach
 #[test]
 fn the_first_place_is_the_first_file_then_line_whatever_the_order_given() {
     let sources = [
-        ("src/b.rs", "\n\nfn f(_: Inventory) {}"),
-        ("src/a.rs", "\nfn f(_: Inventory) {}"),
+        ("src/b.rs", "\n\nfn f(_: InventoryView) {}"),
+        ("src/a.rs", "\nfn f(_: InventoryView) {}"),
     ];
     let uses = uses(sources, &ManifestFacts::default(), &base().build()).unwrap();
     assert_eq!(
@@ -631,10 +632,6 @@ fn a_used_hook_whose_version_changed_is_named() {
             let mut surface = base().build();
             surface.schema = 2;
             let old_surface = surface.to_json();
-            assert!(matches!(
-                Surface::read(old_surface.as_bytes()),
-                Err(crate::ReadError::Schema(2))
-            ));
             table.pin_hook_versions(old_surface.as_bytes()).unwrap();
         }
         table
@@ -877,10 +874,10 @@ fn a_name_after_a_path_to_its_owner_is_that_member_not_a_type_of_the_same_name()
 #[test]
 fn a_type_reached_only_through_a_used_signature_changing_is_named() {
     let mut target = base();
-    target.replace_type(api_type("type:Inventory", "<'a>", false, vec![]));
+    target.replace_type(api_type("type:InventoryView", "<'a>", false, vec![]));
     assert_eq!(
         verdict(target),
-        Fit::DoesNotFit(vec![misfit("type:Inventory", Change::Changed)])
+        Fit::DoesNotFit(vec![misfit("type:InventoryView", Change::Changed)])
     );
 }
 
@@ -888,7 +885,7 @@ fn a_type_reached_only_through_a_used_signature_changing_is_named() {
 fn several_misfits_come_sorted_and_worded() {
     let mut target = base();
     target.hooks[0] = hook("player_logged_in", "u128", &["type:PlayerLoggedInEvent"]);
-    target.types.retain(|t| t.id != "type:Inventory");
+    target.types.retain(|t| t.id != "type:InventoryView");
     target.replace_type(api_type(
         "type:PlayerLoggedInEvent",
         "",
@@ -903,7 +900,7 @@ fn several_misfits_come_sorted_and_worded() {
         words(verdict(target)),
         [
             "the argument `player_logged_in.player` (changed)",
-            "the type `Inventory` (removed)",
+            "the type `InventoryView` (removed)",
             "the field `PlayerLoggedInEvent.player` (changed)",
         ]
     );
@@ -1000,13 +997,13 @@ fn a_same_named_method_of_an_unrelated_trait_is_not_pulled_in() {
 
 #[test]
 fn a_member_counts_when_its_owner_is_reached_and_not_otherwise() {
-    // `inventory` is a method of `PlayerRef`, which the source never names: it is reached
+    // `with_inventory` is a method of `PlayerRef`, which the source never names: it is reached
     // through the hook method's event type's field.
     let uses = scan(MOD);
-    assert!(ids(&uses).contains(&"handle:PlayerRef::inventory"));
-    assert!(ids(&uses).contains(&"type:Inventory"));
+    assert!(ids(&uses).contains(&"handle:PlayerRef::with_inventory"));
+    assert!(ids(&uses).contains(&"type:InventoryView"));
     // A member whose owner nothing reaches is dropped.
-    let alone = scan("fn f(x: X) { x.inventory() }");
+    let alone = scan("fn f(x: X) { x.with_inventory(host, |_| ()) }");
     assert_eq!(ids(&alone), ["capability:registries"]);
 }
 
@@ -1025,6 +1022,8 @@ fn the_list_does_not_depend_on_the_order_of_sources() {
 fn a_table_reads_back_and_judges_like_the_list() {
     let uses = scan(MOD);
     let table = UsesTable::read(uses.table("afe471c").to_json().as_bytes()).unwrap();
+    // No split game-code fingerprint: the schema published tools read.
+    assert_eq!(table.schema, 3);
     assert_eq!(table.made_for, "afe471c");
     assert_eq!(table.entries, uses.entries().cloned().collect::<Vec<_>>());
     let mut target = base();
@@ -1083,9 +1082,10 @@ fn an_older_list_cannot_tell_a_literal_from_a_doubt_so_a_new_field_is_left_to_th
 #[test]
 fn bad_tables_are_refused_by_kind() {
     let refused = |text: &[u8]| UsesTable::read(text).unwrap_err();
+    let future = USES_SCHEMA + 1;
     assert_eq!(
-        refused(br#"{"schema":4,"made_for":"x","entries":[]}"#),
-        UsesError::Schema(4)
+        refused(format!(r#"{{"schema":{future},"made_for":"x","entries":[]}}"#).as_bytes()),
+        UsesError::Schema(future)
     );
     assert!(matches!(refused(b"not json"), UsesError::Json(_)));
     assert!(matches!(
@@ -2697,6 +2697,7 @@ fn legacy_tables_match_either_hash_of_an_unchanged_method_and_function() {
             signature: "fn get(&self) -> u8".into(),
             impl_generics: "<T: Copy>".into(),
             refs: strings(&["type:Value"]),
+            behaviour_versions: Default::default(),
         },
     );
     let assemble = |method, functions| {

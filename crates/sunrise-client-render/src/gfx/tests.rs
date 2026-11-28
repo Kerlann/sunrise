@@ -216,19 +216,51 @@ fn gpu_culling_is_offered_where_counts_are_drawn_and_vanilla_never_draws_flat() 
 
 /// The pack-flat rule: with Translucent Batching translucent quads have an arena of
 /// their own, unless a shader pack's terrain programs or its shadow pass alone can
-/// draw flat (a pack picked and not loaded yet counts as drawing terrain).
+/// draw flat (a pack picked and not loaded yet counts as drawing terrain), or a
+/// `shaders/` pack's per-section draws read the section arena's pages.
 #[test]
 fn translucent_quads_stay_in_the_section_arena_while_a_pack_can_draw_flat() {
-    // (batching, flat draws, the pack's terrain, its shadow pass)
+    // (batching, flat draws, pages read per section, the pack's terrain, its shadow pass)
     let split = super::translucent_split;
-    assert!(split(true, true, false, false));
-    assert!(!split(true, true, true, false));
-    assert!(!split(true, true, false, true));
-    assert!(!split(true, true, true, true));
-    // Without flat draws, or with them off, the pack draws per section, from either.
-    assert!(split(true, false, true, true));
-    assert!(!split(false, true, false, false));
-    assert!(!split(false, false, false, false));
+    assert!(split(true, true, false, false, false));
+    assert!(!split(true, true, false, true, false));
+    assert!(!split(true, true, false, false, true));
+    assert!(!split(true, true, false, true, true));
+    // Without flat draws, or with them off, the pack draws per section: from either arena
+    // as attributes alone, from the section arena while it reads the pages.
+    assert!(split(true, false, false, true, true));
+    assert!(!split(true, false, true, true, true));
+    assert!(!split(false, true, false, false, false));
+    assert!(!split(false, false, false, false, false));
+}
+
+/// Without a shader pack reading them, the section arena's pages are vertex buffers alone, as
+/// before per-section terrain read its pages: on a device whose storage bindings (128 MiB) are
+/// smaller than `PAGE_BYTES`, a page still holds 256 MiB of 24-byte vertices, in whole blocks
+/// (11184640); only pages storage too are cut to the binding (5592320).
+#[test]
+fn arena_pages_are_storage_only_while_flat_draws_or_a_pack_read_them() {
+    use super::arena::{Arena, PAGE_BYTES};
+    let limits = wgpu::Limits {
+        max_buffer_size: 1 << 30,
+        max_storage_buffer_binding_size: 128 << 20,
+        ..Default::default()
+    };
+    let stride = std::mem::size_of::<crate::mesher::TerrainVertex>() as u64;
+    let page = |storage: bool| {
+        let usage = if storage {
+            wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::STORAGE
+        } else {
+            wgpu::BufferUsages::VERTEX
+        };
+        Arena::page_limit(&limits, stride, usage, PAGE_BYTES)
+    };
+    // (flat draws, a pack's per-section draws reading the pages)
+    assert!(!super::arena_storage(false, false));
+    assert_eq!(page(super::arena_storage(false, false)), 11184640);
+    assert!(super::arena_storage(true, false));
+    assert!(super::arena_storage(false, true));
+    assert_eq!(page(super::arena_storage(false, true)), 5592320);
 }
 
 /// No large translucent page starts to shrink until `SHRINK_SETTLE` after terrain
@@ -253,37 +285,6 @@ fn shrinking_starts_once_terrain_has_settled() {
     assert!(gate.may_start(now + SHRINK_RETRY, COMPACT_BUDGET));
 }
 
-#[test]
-fn the_mirror_sees_each_point_where_its_reflection_is() {
-    use glam::{Mat4, Vec3, Vec4};
-    let view_proj = super::world_projection(70.0, 1.5, 512.0)
-        * Mat4::look_to_rh(Vec3::ZERO, Vec3::new(0.3, -0.4, -1.0), Vec3::Y);
-    let plane = -3.25;
-    let mirror = super::view::mirror_view_projection(view_proj, plane);
-    for p in [Vec3::new(1.0, 2.0, -9.0), Vec3::new(-4.0, -1.5, -20.0)] {
-        let reflected = Vec3::new(p.x, 2.0 * plane - p.y, p.z);
-        let a = mirror * Vec4::from((p, 1.0));
-        let b = view_proj * Vec4::from((reflected, 1.0));
-        assert!((a - b).abs().max_element() < 1e-4, "{a} {b}");
-    }
-}
-#[test]
-fn the_mirrors_sky_rays_are_the_cameras_reflected() {
-    use glam::{Mat4, Vec3, Vec4};
-    // A camera looking down: its mirror looks up, by as much.
-    let forward = Vec3::new(0.3, -0.64, -1.0).normalize();
-    let view = Mat4::look_to_rh(Vec3::ZERO, forward, Vec3::Y);
-    let mirrored = super::view::mirror_inverse_view(view.inverse().to_cols_array_2d(), -3.25);
-    let ray = Mat4::from_cols_array_2d(&mirrored) * Vec4::new(0.0, 0.0, -1.0, 0.0);
-    let reflected = Vec3::new(forward.x, -forward.y, forward.z);
-    assert!((ray.truncate() - reflected).length() < 1e-5, "{ray}");
-    // The view's origin, the camera, goes to the mirror's eye.
-    let eye = Mat4::from_cols_array_2d(&mirrored) * Vec4::W;
-    assert!(
-        (eye.truncate() - Vec3::new(0.0, -6.5, 0.0)).length() < 1e-5,
-        "{eye}"
-    );
-}
 #[test]
 fn scaled_screenshots_follow_resolution_scale_and_quality_within_limits() {
     use super::screenshot::scaled_screenshot_factor as factor;
@@ -619,7 +620,12 @@ fn special_material_batches_preserve_quad_order_and_offsets() {
     let mut batch = super::EntityBatch::default();
     let counts = batch.update(&entities, &quad(3, 5), &quad(0, 6), &quad(0, 8), false);
     let vertices = &batch.combined;
-    assert_eq!(counts, [4, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(
+        counts,
+        [
+            4, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+        ]
+    );
     assert_eq!(
         vertices
             .as_chunks::<4>()
@@ -630,6 +636,39 @@ fn special_material_batches_preserve_quad_order_and_offsets() {
         [0, 1, 3, 4, 11, 2, 7, 9, 10, 5, 6, 8]
     );
 }
+#[test]
+fn classic_additive_draws_only_the_uploaded_prefix() {
+    use super::{DRAGON_RAYS_OVERLAY, draw_frame::classic_additive_runs};
+
+    let quad = |layer, light| {
+        [super::Vertex {
+            pos: [0.0; 3],
+            uv: [0.0; 2],
+            layer,
+            color: u32::MAX,
+            light,
+            normal: [0; 4],
+            glint_uv: [0.0; 2],
+        }; 4]
+    };
+    let additive = [
+        quad(0, 1),
+        quad(DRAGON_RAYS_OVERLAY, 2),
+        quad(DRAGON_RAYS_OVERLAY, 3),
+    ];
+    let additive = additive.as_flattened();
+    let mut batch = super::EntityBatch::default();
+    let counts = batch.update_within(&quad(0, 0), additive, &[], &[], &[], false, 3);
+    assert_eq!(
+        batch.combined.iter().map(|v| v.light).collect::<Vec<_>>(),
+        [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2]
+    );
+    assert_eq!(
+        classic_additive_runs(additive, counts.additive).collect::<Vec<_>>(),
+        [(false, 0..6), (true, 6..12)]
+    );
+}
+
 #[test]
 fn software_adapters_are_last_resort() {
     use super::is_software;
@@ -758,6 +797,15 @@ fn shaders_translate_to_hlsl_for_directx_12_and_glsl_for_opengl() {
         std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src")),
         &mut files,
     );
+    // The pack's own helpers (`pack_post.wgsl`) moved to sunrise-render-shaderpack's
+    // `pack_post`.
+    wgsl_files(
+        std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../sunrise-render-shaderpack/src"
+        )),
+        &mut files,
+    );
     assert!(files.len() >= 10, "{files:?}");
     // Improved transparency's files are appended to terrain.wgsl and entity.wgsl.
     let mut sources: Vec<(std::path::PathBuf, String)> = Vec::new();
@@ -771,8 +819,9 @@ fn shaders_translate_to_hlsl_for_directx_12_and_glsl_for_opengl() {
         } else if name == "rt_unpack.wgsl" {
             // Appended to terrain.wgsl (`ray_scene`'s `Unpacker`), on ray tracing devices.
             continue;
+        } else if name == "entity.wgsl" {
+            sources.push((path, super::entity_shader()));
         } else if name == "terrain.wgsl"
-            || name == "entity.wgsl"
             || name == "stars.wgsl"
             || name == "custom_sky.wgsl"
             || name == "border.wgsl"
@@ -1126,29 +1175,25 @@ fn section_instance_carries_the_fade_in_the_step() {
     let step = 1.0 / crate::mesher::UV_STEPS;
     // Fully visible (the option Off) is exactly the record from before the fade.
     assert_eq!(
-        section_instance([1.0, 2.0, 3.0], 0, 1.0),
+        section_instance([1.0, 2.0, 3.0], 1.0),
         [1.0, 2.0, 3.0, step]
     );
     for visibility in [0.0_f32, 0.25, 0.5, 0.999] {
-        let w = section_instance([0.0; 3], 0, visibility)[3];
+        let w = section_instance([0.0; 3], visibility)[3];
         let bits = w.to_bits();
         assert_eq!(f32::from_bits(bits & 0xff80_0000), step);
         let read = 1.0 - (bits & 0x7f_ffff) as f32 / 8_388_608.0;
         assert!((read - visibility).abs() < 1e-6, "{visibility}: {read}");
     }
-    // A section fading in over far terrain keeps its dither code unchanged.
-    assert_eq!(section_instance([0.0; 3], 7, 0.5)[3], -(7.0 + step));
 }
-/// A section as `Renderer::upload_mesh` makes one, with `solid` and
-/// `translucent` quads, fading in over far terrain since `fading`.
-fn section(solid: u32, translucent: u32, fading: Option<std::time::Instant>) -> super::SectionGpu {
+/// A section with the given solid and translucent quad counts.
+fn section(solid: u32, translucent: u32) -> super::SectionGpu {
     super::SectionGpu {
         page: 0,
         start: 0,
         translucent_at: (0, u64::from(solid) * 4),
         solid,
         solid_slots: u64::from(solid) * 4,
-        packed_far: false,
         packed: false,
         sides: crate::mesher::Sides::unsorted(solid),
         translucent,
@@ -1157,85 +1202,58 @@ fn section(solid: u32, translucent: u32, fading: Option<std::time::Instant>) -> 
         flat_id: None,
         gpu_id: None,
         gpu_fading: false,
-        fading,
-        leaving: None,
         animated_layers: Box::new([]),
     }
 }
-/// A section's fade (`SectionGpu::drawn_faded`) only ends as time goes on,
-/// never while it leaves or is held, and by its `fade_end`, at most 10 ms
-/// after it has (a fade-in over far terrain is whole 9.4 ms before
-/// `lod::FADE`): fading in over far terrain or not, first uploaded or not,
-/// both, at every chunk fade-in time, in 1 ms steps over 3 s and at its end.
+/// At every chunk fade-in time, in 1 ms steps over 3 s and at its end.
 #[test]
 fn a_fade_ends_by_its_deadline_and_never_comes_back() {
     use super::FadeInputs;
-    use crate::fast_hash::{FxHashMap, FxHashSet};
+    use crate::fast_hash::FxHashMap;
     use std::time::{Duration, Instant};
     let ms = Duration::from_millis;
     // The steps start at `zero`; what began `t` ms before it began off the steps.
     let zero = Instant::now() + Duration::from_secs(3);
     let ago = |t: u64| zero - ms(t) + Duration::from_micros(370);
     let key = (3, 5, -2);
-    // Neither leaving nor held, leaving, held, both.
-    let states = [(false, false), (true, false), (false, true), (true, true)];
-    for fading in [None, Some(0), Some(300), Some(590), Some(700)] {
-        for up in [None, Some(0), Some(1), Some(740), Some(2_500)] {
-            let uploaded: FxHashMap<_, _> = up.map(|t| (key, ago(t))).into_iter().collect();
-            for (leaving, held) in states {
-                let mut s = section(1, 0, fading.map(ago));
-                s.leaving = leaving.then(|| ago(250));
-                let retiring: FxHashSet<_> = held.then_some(key).into_iter().collect();
-                for fade_ms in [0, 1, 50, 300, 750, 2_000] {
-                    let case = (fading, up, leaving, held, fade_ms);
-                    let at = |now: Instant| FadeInputs {
-                        now,
-                        fade_ms,
-                        uploaded: &uploaded,
-                        retiring: &retiring,
-                    };
-                    let faded = |now: Instant| s.drawn_faded(key, at(now));
-                    let end = s.fade_end(key, at(zero));
-                    if leaving || held {
-                        assert!(end.is_none(), "{case:?}: an end");
-                    }
-                    let mut was = true;
-                    for t in 0..=3_000 {
-                        let now = zero + ms(t);
-                        let is = faded(now);
-                        assert!(was || !is, "{case:?}: faded again at {t} ms");
-                        was = is;
-                        if leaving || held {
-                            assert!(is, "{case:?}: whole at {t} ms");
-                        } else if end.is_none_or(|end| now >= end) {
-                            assert!(!is, "{case:?}: faded at {t} ms, past its end");
-                        }
-                    }
-                    if let Some(end) = end {
-                        assert!(!faded(end), "{case:?}: faded at its end");
-                        assert!(faded(end - ms(10)), "{case:?}: whole 10 ms before it");
-                    }
+    let s = section(1, 0);
+    for up in [None, Some(0), Some(1), Some(740), Some(2_500)] {
+        let uploaded: FxHashMap<_, _> = up.map(|t| (key, ago(t))).into_iter().collect();
+        for fade_ms in [0, 1, 50, 300, 750, 2_000] {
+            let case = (up, fade_ms);
+            let at = |now: Instant| FadeInputs {
+                now,
+                fade_ms,
+                uploaded: &uploaded,
+            };
+            let faded = |now: Instant| s.drawn_faded(key, at(now));
+            let end = s.fade_end(key, at(zero));
+            let mut was = true;
+            for t in 0..=3_000 {
+                let now = zero + ms(t);
+                let is = faded(now);
+                assert!(was || !is, "{case:?}: faded again at {t} ms");
+                was = is;
+                if end.is_none_or(|end| now >= end) {
+                    assert!(!is, "{case:?}: faded at {t} ms, past its end");
                 }
+            }
+            if let Some(end) = end {
+                assert!(!faded(end), "{case:?}: faded at its end");
+                assert!(faded(end - ms(10)), "{case:?}: whole 10 ms before it");
             }
         }
     }
 }
 /// GPU culling's fading sections over 5 s of 16 ms frames, with no device
-/// (`mark_fades`): some 2,000 sections come, fading in as vanilla does or
-/// over far terrain, are meshed again, leave over far terrain, are held while
-/// it comes in and let go, and go, while the chunk fade-in time goes 750 ms,
-/// 2 s, Off and 750 ms. After every frame the GPU keeps only whole sections,
-/// the walk lists every other one, each record's flag is its section's, and
-/// a flagged section that neither leaves nor is held still faded a frame
-/// before. Each kind of event flags sections, and thousands go back. Once
-/// GPU culling is switched off (`forget_records`), every mark is the one a
-/// section has while it is off.
+/// (`mark_fades`): sections upload, re-mesh and unload while the fade-in time changes.
+/// Only whole sections are drawn by the GPU, and switching it off restores every walk mark.
 #[test]
 #[ignore = "daily"]
 fn fading_sections_go_to_the_cpu_and_come_back() {
     use super::{
-        FadeInputs, SectionGpu, SectionKey, decide_fade, forget_records, gpu_culling, hold_fading,
-        mark_fades,
+        FadeInputs, SectionGpu, SectionKey, decide_fade, forget_records, gpu_culling, mark_fades,
+        section_fade,
     };
     use crate::fast_hash::{FxHashMap, FxHashSet};
     use std::time::{Duration, Instant};
@@ -1248,31 +1266,20 @@ fn fading_sections_go_to_the_cpu_and_come_back() {
     struct Sim {
         sections: super::resident::Resident<SectionGpu>,
         records: gpu_culling::Records,
-        fades: gpu_culling::Fades,
+        fades: section_fade::Fades,
         uploaded: FxHashMap<SectionKey, Instant>,
-        retiring: FxHashSet<SectionKey>,
     }
     impl Sim {
-        /// `Renderer::upload` at `at`: a new section, fading in over far
-        /// terrain if `far`, or one meshed again.
-        fn upload(&mut self, key: SectionKey, quads: (u32, u32), far: bool, at: Instant) {
-            self.retiring.remove(&key);
-            let fading = match self.sections.find(key) {
-                Some(old) => old.fading,
-                None => far.then_some(at),
-            };
-            if fading.is_none() {
-                self.uploaded.entry(key).or_insert(at);
-            }
+        fn upload(&mut self, key: SectionKey, quads: (u32, u32), at: Instant) {
+            self.uploaded.entry(key).or_insert(at);
             self.release(key);
-            let mut s = section(quads.0, quads.1, fading);
+            let mut s = section(quads.0, quads.1);
             if s.gpu_recorded(key, ROWS) {
                 if let Some(fade_ms) = self.fades.fade_ms {
                     let f = FadeInputs {
                         now: at,
                         fade_ms,
                         uploaded: &self.uploaded,
-                        retiring: &self.retiring,
                     };
                     s.gpu_fading = decide_fade(&s, key, &mut self.fades, f);
                 }
@@ -1286,23 +1293,6 @@ fn fading_sections_go_to_the_cpu_and_come_back() {
             if let Some(id) = self.sections.remove(key).and_then(|s| s.gpu_id) {
                 self.records.remove(id);
             }
-        }
-        /// `Renderer::leave_section`: its column gone (`remove_columns`), or
-        /// no longer left out by far terrain while held (`set_lod_cutout`).
-        fn leave(&mut self, key: SectionKey, at: Instant) {
-            self.uploaded.remove(&key);
-            if let Some(s) = self.sections.find_mut(key)
-                && s.leaving.is_none()
-            {
-                s.leaving = Some(at);
-                hold_fading(&mut self.sections, &mut self.records, key);
-            }
-        }
-        /// `Renderer::remove_columns`' held section: far terrain comes in under it.
-        fn hold(&mut self, key: SectionKey) {
-            self.uploaded.remove(&key);
-            self.retiring.insert(key);
-            hold_fading(&mut self.sections, &mut self.records, key);
         }
         fn flagged(&self, key: SectionKey) -> bool {
             self.sections.find(key).is_some_and(|s| s.gpu_fading)
@@ -1327,12 +1317,10 @@ fn fading_sections_go_to_the_cpu_and_come_back() {
     let mut sim = Sim::default();
     for r in 0..4_096 {
         if next().is_multiple_of(2) {
-            sim.upload(key(r), quads(next()), next().is_multiple_of(2), start);
+            sim.upload(key(r), quads(next()), start);
         }
     }
-    // Flags set by an upload, `leave_section`, a held section and a fade-in
-    // time (GPU culling switched on in the first frame), and dropped.
-    let (mut set_by, mut handed_back) = ([0; 4], 0);
+    let (mut set_by, mut handed_back) = ([0; 2], 0);
     let mut last = start;
     for frame in 0..=312 {
         let now = start + FRAME * frame;
@@ -1343,25 +1331,8 @@ fn fading_sections_go_to_the_cpu_and_come_back() {
             let was = sim.flagged(k);
             let kind = match (r >> 20) % 16 {
                 0..=7 => {
-                    sim.upload(k, quads(r >> 12), (r >> 24).is_multiple_of(2), at);
+                    sim.upload(k, quads(r >> 12), at);
                     0
-                }
-                8 | 9 => {
-                    sim.leave(k, at);
-                    1
-                }
-                10 | 11 => {
-                    sim.hold(k);
-                    2
-                }
-                12 => {
-                    // Far terrain no longer leaves a held section's column out.
-                    let held = sim.retiring.iter().next().copied();
-                    if let Some(held) = held {
-                        sim.retiring.remove(&held);
-                        sim.leave(held, at);
-                    }
-                    continue;
                 }
                 _ => {
                     sim.uploaded.remove(&k);
@@ -1372,17 +1343,6 @@ fn fading_sections_go_to_the_cpu_and_come_back() {
             if !was && sim.flagged(k) {
                 set_by[kind] += 1;
             }
-        }
-        // Those faded out go (`release_left`).
-        let gone = |t: Instant| now.saturating_duration_since(t) >= super::lod::FADE;
-        let left: Vec<SectionKey> = sim
-            .sections
-            .iter()
-            .filter(|(_, s, _)| s.leaving.is_some_and(gone))
-            .map(|(k, ..)| k)
-            .collect();
-        for k in left {
-            sim.release(k);
         }
         let flagged_before: FxHashSet<SectionKey> = sim
             .sections
@@ -1395,7 +1355,6 @@ fn fading_sections_go_to_the_cpu_and_come_back() {
             now,
             fade_ms,
             uploaded: &sim.uploaded,
-            retiring: &sim.retiring,
         };
         mark_fades(&mut sim.sections, &mut sim.records, &mut sim.fades, ROWS, f);
         let a_frame_before = FadeInputs {
@@ -1421,13 +1380,11 @@ fn fading_sections_go_to_the_cpu_and_come_back() {
             }
             if s.gpu_fading {
                 flagged += 1;
-                set_by[3] += usize::from(!flagged_before.contains(&k));
-                if s.leaving.is_none() && !sim.retiring.contains(&k) {
-                    assert!(
-                        s.drawn_faded(k, a_frame_before),
-                        "frame {frame}, {k:?}: flagged a frame after its fade"
-                    );
-                }
+                set_by[1] += usize::from(!flagged_before.contains(&k));
+                assert!(
+                    s.drawn_faded(k, a_frame_before),
+                    "frame {frame}, {k:?}: flagged a frame after its fade"
+                );
             } else {
                 handed_back += usize::from(flagged_before.contains(&k));
             }
@@ -1436,7 +1393,6 @@ fn fading_sections_go_to_the_cpu_and_come_back() {
         last = now;
     }
     assert!(set_by.iter().all(|&n| n > 20), "flags set {set_by:?}");
-    // Over a thousand: the half of the uploads over far terrain come in whole.
     assert!(handed_back > 1_000, "{handed_back} handed back");
     // Switched off with sections still flagged: none keeps a record or a
     // flag, and each is marked as while GPU culling is off.
@@ -1503,41 +1459,6 @@ fn texture_filtering_samplers() {
         [2, 4, 8],
         "Options.maxAnisotropyValue is 1 << bit"
     );
-}
-#[test]
-fn distant_tiles_repeat_their_sprite_under_the_clamped_sampler() {
-    // terrain.wgsl's tile_uv, evaluated by naga as a constant expression.
-    let source = super::terrain_shader();
-    let body = source.split("fn tile_uv(").nth(1).unwrap();
-    let body = body.split("return ").nth(1).unwrap();
-    let expr = &body[..body.find(';').unwrap()];
-    let tile_uv = |u: f32, v: f32| -> [f32; 2] {
-        let uv = format!("vec2<f32>({u:?}, {v:?})");
-        let wgsl = format!("const UV: vec2<f32> = {};", expr.replace("uv", &uv));
-        let module = naga::front::wgsl::parse_str(&wgsl).unwrap();
-        let (_, constant) = module.constants.iter().next().unwrap();
-        let naga::Expression::Compose { components, .. } =
-            &module.global_expressions[constant.init]
-        else {
-            panic!("{wgsl}");
-        };
-        components
-            .iter()
-            .map(|&c| match module.global_expressions[c] {
-                naga::Expression::Literal(naga::Literal::F32(x)) => x,
-                ref e => panic!("{e:?}"),
-            })
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap()
-    };
-    // A section's sprite UVs, edges included, stay where the clamped sampler reads them.
-    for (u, v) in [(0.0, 1.0), (0.25, 0.75), (1.0, 0.0)] {
-        assert_eq!(tile_uv(u, v), [u, v]);
-    }
-    // A merged face's UV counts blocks: each takes the sprite from its own corner.
-    assert_eq!(tile_uv(1.25, 2.0), [0.25, 1.0]);
-    assert_eq!(tile_uv(1023.5, 3.75), [0.5, 0.75]);
 }
 #[test]
 fn shader_globals_match_the_rust_layout() {

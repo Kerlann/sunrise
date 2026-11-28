@@ -4,7 +4,7 @@ use super::screenshot::{hdr10_to_rgb16, padded_row};
 use super::{Result, ScreenshotRequest, square_downscale};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
-pub(super) struct Reader {
+pub(crate) struct Reader {
     pub device: wgpu::Device,
     /// The renderer's: a wait on a lost device is refused (`in_flight::poll_live`).
     pub device_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -88,7 +88,7 @@ impl Reader {
 type Outcome = std::result::Result<PendingScreenshot, String>;
 
 #[derive(Default)]
-pub(super) struct Readbacks(
+pub(crate) struct Readbacks(
     Vec<Receiver<Outcome>>,
     #[cfg(test)] Vec<std::thread::JoinHandle<()>>,
 );
@@ -155,11 +155,11 @@ mod tests {
     #[ignore = "daily"]
     fn a_background_save_writes_the_png_off_the_render_thread() {
         let _gpu = crate::gfx::test_gpu::lock();
-        let instance = crate::gfx::test_gpu::instance();
-        let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
+        let Some(adapter) = crate::gfx::test_gpu::adapter() else {
             return;
         };
-        let Ok((device, queue)) = pollster::block_on(adapter.request_device(&Default::default()))
+        let Some((device, queue)) =
+            crate::gfx::test_gpu::optional_device_with(&adapter, &Default::default())
         else {
             return;
         };

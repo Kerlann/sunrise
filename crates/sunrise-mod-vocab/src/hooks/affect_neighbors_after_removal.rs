@@ -9,13 +9,21 @@ pub trait Hooks {
     /// at once, as the block's own override would. Answered from inside the level's write: it
     /// reads, and cannot write blocks or spawn entities.
     #[hook(
+        receiver = "read",
+        dispatch = "flat",
         side = "server",
         contract = "collect",
         out = "updates",
         scope = "block",
         key = "state",
-        target = "sunrise_client::game::native_hooks::affect_neighbors_after_removal::GameLevel<'_>::native_affect_neighbors_after_removal",
+        target = "sunrise_gameplay_common::game::native_hooks::affect_neighbors_after_removal::GameLevel<'_>::native_affect_neighbors_after_removal",
         neoforge = "none (vanilla Block.affectNeighborsAfterRemoval; NeoForge adds no event or extension for it)"
     )]
-    fn affect_neighbors_after_removal();
+    fn affect_neighbors_after_removal(
+        dimension: LevelDimension,
+        pos: BlockPos,
+        state: BlockState,
+        moved: bool,
+        updates: &mut Vec<NeighbourUpdate>,
+    );
 }

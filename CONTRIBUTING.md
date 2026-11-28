@@ -4,8 +4,9 @@ Thanks for helping. Sunrise is Minecraft: Java Edition 26.3 rewritten in Rust, a
 everything is that **it plays exactly like vanilla**. This page is the short version of how we work; questions are
 welcome on [Discord](https://discord.gg/playsunrise).
 
-This repository holds the game and the launcher, plus the tools, tests and docs that build, check and release them.
-The website (playsunrise.net) is built in a separate repository from this one's README, `docs/api/` and roadmap. Anything
+This repository holds the game, server and mod tools, plus the tests and docs that build, check and release them.
+The launcher lives in [sunrise-org/sunrise-launcher](https://github.com/sunrise-org/sunrise-launcher), and the website
+(playsunrise.net) is built in `sunrise-org/sunny` from this repository's README, `docs/api/`, modding book and roadmap. Anything
 else (videos, Discord and other community material) lives elsewhere.
 
 **Where to start: [playsunrise.net/hub](https://playsunrise.net/hub).** It shows what is being done now and next
@@ -15,15 +16,31 @@ queue (the hub, or `/suggest` on Discord) rather than to issues, which are for b
 
 **Mod-related pull requests come here too.** Sunrise is where the mod API is built: the mod API, native hooks and
 events for mods, native mods, content mods (`.smod`), mixins, `cargo sunrise-mod`, `sunrise-mods`, mod
-builds and the registry, and their docs ([mods](docs/mods.md), [native mods](docs/native-mods.md)). A change to the mod
+builds and the registry, and their docs ([modding book](docs/modding/src/introduction.md), [native mods](docs/modding/src/how-to/native-mods.md)). A change to the mod
 API follows its clean-break rules ([AGENTS.md](AGENTS.md#mod-api-the-clean-break)).
+
+When adding a native hook, keep its declaration under `crates/sunrise-mod-vocab/src/hooks/` and wire the engine
+function named by its target. Vocabulary generation does not read engine bodies, so it cannot tell whether
+those targets fire the hooks. `verify-static` runs `bash tools/ci/check_hook_wiring.sh` separately, without
+changing any sources.
+The check follows the declared Rust module to the target body, including conditional files and inline modules.
+It checks non-test `cfg` branches using supported build targets' Rust cfgs, including `cfg!` conditions, and
+does not count calls in closures that are never invoked. When a hook uses a client-library or world bridge,
+the bridge must invoke the slot and every reachable installer call must bind a callback that reaches the
+dispatcher. For slots upstream of a catalog target, the gameplay entry point must also call the bridge.
+A native render replacement slot is intentionally empty, so the check starts at the installed renderer callback.
+`cargo run -p xtask -- mod-api` fills a new game hook's placeholder during authoring; a placeholder left in the
+checkout fails the wiring check.
 
 ## Build it
 
 - **Prerequisites:** Rust (stable), Python 3.11+, JDK 25, git 2.38 or newer, and on Linux the ALSA and udev headers
   (`libasound2-dev libudev-dev`).
-- **Resources:** Sunrise never downloads the game; it prepares its resources from your own copy of Minecraft 26.3, as
-  described in [Build from source](README.md#build-from-source).
+- **Resources:** Client preparation reads your own copy of Minecraft 26.3, as in [Build from source](README.md#build-from-source).
+  Only the launcher downloads client files, for a signed-in account that owns the game. For a dedicated server,
+  `sunrise-prepare --server` and `sunrise-server init` may download Mojang's free `server.jar` and Java runtime from
+  Mojang's URLs, with SHA-1 checks, on the server owner's machine or in CI. Never commit, publish or ship Mojang's
+  files or data derived from them.
 - **Commands:**
 
   ```sh
@@ -64,11 +81,13 @@ by area. A pull request never adds one, and isn't held back by one it didn't add
 - **No workarounds.** When a harness differs, fix the cause until it matches bit for bit. Never add a tolerance,
   rounding, a special case or a compensating patch to make it pass. Removing a workaround, or a tolerance from a
   harness, is welcome when the harnesses stay bit-exact: smaller code is a goal.
-- **Sunrise's own features** (the launcher, the new menus) follow [the design system](docs/design-system.md) and are
+- **Sunrise's own features** (the new menus and overlays) follow [the design system](docs/design-system.md) and are
   off by default wherever they would change the vanilla look.
 - **Three layers: engine, platform, Sunrise.** Vanilla code never depends on the platform (mods, shader packs,
   Sunrise-only settings) or on Sunrise (Discord, Play with Friends, telemetry), and the platform never
   depends on Sunrise. [docs/layers.md](docs/layers.md) says where a new feature goes; CI checks the dependencies.
+- **A file an open pull request touches waits.** Before moving or splitting one, run
+  `python3 tools/hotspots/open_prs.py --from-gh <paths>` and leave the held files out of this change.
 - **Everything players run is Rust.** Python and Java are fine for dev tools and harness drivers in `tools/`, never
   for player-facing code.
 - **No game files in the repo.** Never commit game files, decompiled source or prepared resources (`.local/`):
@@ -126,7 +145,8 @@ python3 tools/pr_ready.py --base upstream/main   # or origin/main if you work on
 ```
 
 It looks at what your branch changes and runs what matters: rustfmt, clippy with warnings denied, the tests of the
-crates you touched (and the launcher's), generated files, `Cargo.lock` and the Python tests. It runs the
+crates you touched, generated files, `Cargo.lock` and the Python tests (one test file per
+worker; `--serial-python` runs them in one process, as CI does). It runs the
 vanilla harnesses locally only when your branch changes a harness, an oracle, a probe or the runner; otherwise it
 lists the ones your change can affect. The daily checks the automatic harnesses after the merge. `--harnesses` runs them on your
 machine anyway, and a change to mod content, assets, blocks or items also runs the `#[ignore]`d content-root tests;
@@ -161,8 +181,8 @@ still fails by binary name. Move a network test with `tools/ci/move_to_daily.py`
 - If a daily run fails on a test your pull request added or touched, an issue is filed that names the test, where it
   panicked and the pull requests merged since the last green daily run. The fix is an ordinary pull request.
 
-Three kinds of build: a **snapshot**, from main's head on request, needs only the gate tier and no in-game tests
-(it is published as `snapshot-<date>-<short>`, which no launcher offers, to test packages and platforms after a
+Three kinds of build: a **Dev build**, from a commit on main on request, needs only the gate tier and no in-game tests
+(it is published as `dev-<date>-<short>`, installed only by explicit tag, to test packages and platforms after a
 merge); the **nightly** is published by the daily run when every part of it is green; a **release** is cut from a
 nightly.
 
@@ -194,10 +214,10 @@ claimed whole: claim one of the issues a tracker lists, or open one for the part
 A claim with no open pull request linking the issue (`Fixes #123` in the description, or a draft) is released after
 5 days, with a comment: open a draft early. Agents claim the same way.
 
-You can hold at most 5 claimed issues that no open pull request of yours links. A sixth `/claim` is refused with a
+You can hold at most 10 claimed issues that no open pull request of yours links. An eleventh `/claim` is refused with a
 comment that gives the count; opening a pull request for one of them, or `/unclaim` on one, frees a slot. The
-repository's collaborators, and the trusted contributors listed in the repository variable `CLAIM_LIMIT_EXEMPT`, are
-not limited.
+repository's owners, members and collaborators, the council and the trusted reviewers, and the trusted contributors
+listed in the repository variable `CLAIM_LIMIT_EXEMPT`, are not limited.
 
 When your pull request changes the same functions as another open one, or closes the same issue, a bot comment names
 it (edited on every push, never repeated): talk to its author in the thread before you both finish the same work.
@@ -266,8 +286,8 @@ How Sunrise is run, and how people join the Team or lead a group: [GOVERNANCE.md
 
 ## Licence and DCO
 
-Sunrise's code is under the [PolyForm Shield licence](LICENSE), and so is what you contribute: it comes in under the same
-licence it goes out under, and you keep your copyright. There is no CLA. Instead, sign off every commit (`git commit -s`)
+Sunrise's code is under the licence in [LICENSE](LICENSE): PolyForm Shield 1.0.0 with the Sunrise Additional Terms,
+version 1.0 or later. Your contribution comes in under that same licence, and you keep your copyright. There is no CLA. Instead, sign off every commit (`git commit -s`)
 to certify the [Developer Certificate of Origin](https://developercertificate.org/): that you wrote it, or have the
 right to submit it under the project's licence. The DCO check fails a pull request with a commit that isn't signed off;
 `git rebase --signoff origin/main` fixes a branch.

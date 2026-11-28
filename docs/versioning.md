@@ -7,7 +7,9 @@ Until 0.2 the game was tagged by date (`v2026.10.19.15`) and the launcher counte
 From 0.2 both follow [semantic versioning](https://semver.org) and share one release line: **Sunrise 0.2.x** is the
 game and the launcher of the 0.2 line.
 
-**Since 2026-10-28 the game ships only Nightlies** ([release-flow.md](release-flow.md#nightly-only)): no new `vX.Y.Z`
+**Since 2026-10-28 the game ships Nightlies** (and stable `26.3-<semver>` releases, each published from the approved head of `release/26.3`, which is cut from a
+green daily's commit and takes later fixes by pull request;
+[release-flow.md](release-flow.md#the-nightly-and-stable-releases)): no new `vX.Y.Z`
 game tag is made, and a game build is named `nightly-<date>-<commit>` (its release title, "Nightly <date> ·
 <commit>"), which launchers and servers rank after every `vX.Y.Z`. The launcher keeps its `launcher@X.Y.Z` tags on
 the release line. What follows describes the `vX.Y.Z` game tags as they were.
@@ -21,7 +23,7 @@ the release line. What follows describes the `vX.Y.Z` game tags as they were.
 | Release title | `Sunrise 0.2.3: <what changed>` | `Sunrise launcher 0.2.1` |
 | The program says | `sunrise-server 0.2.3`, `v0.2.3` in crash reports | `sunrise-launcher 0.2.1` |
 
-- **The line** (`MAJOR.MINOR`) is in `.github/release-line.txt`, one line such as `0.2`. Ludovic decides when it
+- **The line** (`MAJOR.MINOR`) is in `.github/release-line.txt`, one line such as `0.2`. The maintainers decide when it
   moves; moving it is a one-line pull request (`0.3`), and the new line's first releases (`v0.3.0`,
   `launcher@0.3.0`) go out as soon as it merges. Without the file, the release train keeps the tags from before
   0.2. A `feature` label no longer bumps anything: it only lists the change under **New**.
@@ -49,7 +51,7 @@ A tag is a 0.2 tag when it is `v` or `launcher@` followed by exactly three numbe
 major below 1000; a date's first number is a year, so `v2026.10.21` never is. The rule is written once per
 language, with the same tests: `crates/sunrise-server/src/update.rs` (`newer`), `https://github.com/sunrise-org/sunrise-launcher/blob/main/src/backend.rs`
 (`release_order`), `tools/release_train.py` (`tag_key`) and
-the website's `src/versions.js` (horizon-rust/horizon-site).
+the website's `src/versions.js` (`sunrise-org/sunny`).
 
 ## The workflows
 

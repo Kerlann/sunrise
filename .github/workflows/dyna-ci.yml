@@ -1,6 +1,6 @@
 name: dyna-checks
-# What the run tests, readable in the run list: a dispatch with `pr` runs on ref main but tests that pull request's head,
-# so it is named for it and never read as main's CI; the prepared-output dispatch likewise.
+# What the run tests, readable in the run list: a dispatch with `pr` runs on ref main but tests that pull request's
+# test merge with its base, so it is named for it and never read as main's CI; the prepared-output dispatch likewise.
 run-name: "${{ inputs.pr && format('PR #{0} gate', inputs.pr) || inputs.prepare-output-check && 'prepared output check' || github.event.pull_request.title || github.event.head_commit.message || github.workflow }}"
 # A contributor's pull request (its head in a fork) gets the cheap checks (verify-static, format); the heavy ones
 # (everything that compiles) run on main's pushes, dispatches, and same-repository rollup or sync pull requests
@@ -28,7 +28,7 @@ on:
         type: boolean
         default: false
       pr:
-        description: Run the heavy checks on this pull request's head (a fork's too) and post them on it
+        description: Test a verified merge of this pull request (a fork's too) with its live base and post results on its head
         type: string
         default: ''
 defaults:
@@ -42,7 +42,7 @@ concurrency:
   # main head needs a gate, and a burst of merges otherwise held a Dyna runner per job of every merge's run, ahead
   # of the rollup gates queued behind them. None of its jobs publishes or writes shared state.
   # A dispatch for a pull request (`pr`) is grouped by that pull request, never by main's head; any other dispatch
-  # (a snapshot's gate) by its commit, and it always finishes.
+  # (for a Dev build) by its commit, and it always finishes.
   # A main push run started again (a later attempt) is a release's gate: release.yml re-runs a commit's gate that the
   # next push cancelled before it publishes that commit (tools/release_train.py gate_again). It is grouped by its
   # commit and always finishes.
@@ -90,9 +90,11 @@ jobs:
       actions: read
       pull-requests: read
     outputs:
-      # Whether the heavy jobs run (tools/ci/pr_gate.py); a dispatch with `pr` runs them on that head.
+      # Whether the heavy jobs run (tools/ci/pr_gate.py); a dispatch with `pr` verifies the test merge against the
+      # live base before handing it off (`pr_merge`), and reports on the head (`pr_sha`).
       heavy: ${{ steps.gate.outputs.heavy == 'false' && 'false' || 'true' }}
       pr_sha: ${{ steps.gate.outputs.pr_sha }}
+      pr_merge: ${{ steps.gate.outputs.pr_merge }}
       # Whether this run's code may use our own runners: never a fork's pull request, dispatched or not.
       trusted: ${{ steps.gate.outputs.trusted || ((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'true' || 'false') }}
       # Off where selection needs none, and on a main push whose tree its merged head's pull_request run already
@@ -227,6 +229,8 @@ jobs:
       - env:
           GH_TOKEN: ${{ github.token }}
           RECOVERY_REF: ${{ github.head_ref || github.ref_name }}
+          # `changes` already validated this input. The replacement selects the PR's live test merge.
+          RECOVERY_PR: ${{ inputs.pr }}
         run: python3 tools/ci/boat_watch.py
 
   # The conflict-hotspot churn report (tools/hotspots/README.md), on the nightly schedule only, on GitHub's runner:
@@ -296,7 +300,7 @@ jobs:
       RUNNER_KIND: ${{ needs.changes.outputs.self_hosted == 'true' && needs.changes.outputs.trusted == 'true' && 'dyna' || startsWith(needs.changes.outputs.hosted_label, 'boat') && 'boat' || 'github' }}
     steps:
       - name: Require successful check selection
-        if: needs.changes.result != 'success'
+        if: needs.changes.result != 'success' || (github.event_name == 'workflow_dispatch' && inputs.pr != '' && needs.changes.outputs.pr_merge == '')
         run: exit 1
       - name: Documentation needs no Rust lint
         if: needs.changes.outputs.rust_required == 'false'
@@ -311,8 +315,9 @@ jobs:
       # Not diff-selected: any tracked file can contain a captured tool notice.
       - uses: actions/checkout@v4
         with:
-          # A dispatch with `pr`: that pull request's head; otherwise this event's commit.
-          ref: ${{ needs.changes.outputs.pr_sha }}
+          # A dispatch with `pr`: that pull request's test merge with its base, as a pull_request run checks out;
+          # otherwise this event's commit.
+          ref: ${{ needs.changes.outputs.pr_merge }}
       # The tree this gate checks, so a main push of the same tree can take its verdict (tools/ci/gate_reuse.py). Only
       # where the tree's own dyna-ci.yml runs (a push, a pull_request's test merge): a `pr` dispatch runs main's
       # definition on another tree. Best-effort: a failed record only loses the saving.
@@ -392,21 +397,62 @@ jobs:
         id: formatting
         run: |
           python3 tools/ci/format_scan.py
-      - name: Lint native targets
+      - name: Lint native targets and server build
         if: ${{ !cancelled() && steps.setup.outcome == 'success' && (needs.changes.outputs.rust_required != 'false') }}
         id: native-lint
-        run: python3 tools/ci/check_warnings.py cargo clippy $JOBS --keep-going --workspace --all-targets
+        run: |
+          # Split JOBS into two complementary counts that sum to it, at least 1 each.
+          # When JOBS is empty (e.g. GitHub-hosted runners), run the two lints sequentially
+          # to avoid doubling the runner's default parallelism.
+          if [ -n "${JOBS:-}" ]; then
+            n=${JOBS#-j}
+            j_native="-j$(( (n + 1) / 2 ))"
+            j_server="-j$(( n / 2 ))"
+            [ "$j_server" = "-j0" ] && j_server="-j1"
+          else
+            j_native=""
+            j_server=""
+          fi
+
+          status_native=0
+          status_server=0
+
+          if [ -n "$j_server" ]; then
+            python3 tools/ci/check_warnings.py cargo clippy $j_server --keep-going --target-dir target/server-lint \
+              -p sunrise-client -p sunrise-game -p sunrise-mod-host --all-targets --no-default-features \
+              > "$RUNNER_TEMP/server-lint.log" 2>&1 &
+            server_pid=$!
+
+            python3 tools/ci/check_warnings.py cargo clippy $j_native --keep-going --workspace --all-targets || status_native=$?
+            wait "$server_pid" || status_server=$?
+          else
+            python3 tools/ci/check_warnings.py cargo clippy --keep-going --workspace --all-targets || status_native=$?
+            python3 tools/ci/check_warnings.py cargo clippy --keep-going --target-dir target/server-lint \
+              -p sunrise-client -p sunrise-game -p sunrise-mod-host --all-targets --no-default-features \
+              > "$RUNNER_TEMP/server-lint.log" 2>&1 || status_server=$?
+          fi
+
+          if [ "$status_native" -eq 0 ]; then
+            echo "workspace_lint=success" >> "$GITHUB_OUTPUT"
+          else
+            echo "workspace_lint=failure" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [ "$status_server" -ne 0 ]; then
+            echo "Server lint failed:"
+            cat "$RUNNER_TEMP/server-lint.log"
+          fi
+
+          if [ "$status_native" -ne 0 ] || [ "$status_server" -ne 0 ]; then
+            exit 1
+          fi
       # The full boundary audit: the mod API's generated signatures (mod_api_generated*.rs, written by sunrise-mod-vocab's
       # build script during the lint above), which the source-only check cannot see. Only Cargo's build-script outputs
       # are scanned: the persistent target holds far more.
       - name: Check generated mod API signatures
         id: generated_api_boundary
-        if: ${{ !cancelled() && steps.setup.outcome == 'success' && needs.changes.outputs.rust_required != 'false' && steps.native-lint.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && needs.changes.outputs.rust_required != 'false' && steps.native-lint.outputs.workspace_lint == 'success' }}
         run: python3 tools/ci/check_api_boundary.py --generated-root target/debug/build
-      - name: Lint the server build without sound or controllers
-        if: ${{ !cancelled() && steps.setup.outcome == 'success' && (needs.changes.outputs.rust_required != 'false') }}
-        id: server-lint
-        run: python3 tools/ci/check_warnings.py cargo clippy $JOBS --keep-going -p sunrise-client -p sunrise-game -p sunrise-mod-host --all-targets --no-default-features
       # The prebuilt SDK's own feature graph: a release --lib build with prefer-dynamic and warnings rejected, as
       # tools/prebuilt_game.py builds it, for the host and for the Windows archive (system-allocator there,
       # cargo_features). The checks above unify test and dev features (test-support) into one host build, which hid
@@ -480,27 +526,26 @@ jobs:
   verify:
     needs: changes
     if: ${{ always() && !cancelled() && needs.changes.result != 'skipped' && (needs.changes.result != 'success' || needs.changes.outputs.heavy == 'true') }}
-    runs-on: ${{ needs.changes.outputs.rust_required == 'false' && (needs.changes.outputs.self_hosted == 'true' && needs.changes.outputs.trusted == 'true' && 'dyna-small' || 'ubuntu-latest') || needs.changes.outputs.self_hosted == 'true' && 'dyna-large' || !inputs.github-fallback && needs.changes.outputs.forced_github != 'true' && vars.SELF_HOSTED_CI == 'all' && needs.changes.outputs.trusted == 'true' && fromJSON('["self-hosted", "linux", "playsunrise-ci"]') || needs.changes.outputs.hosted_label || 'ubuntu-latest' }}
+    # Stopgap for sunrise#5839 on the next line: verify alone on dyna-xlarge, back to dyna-large once the gate's peak line shows the sunrise-client lib-test compile at or under 12 GiB.
+    runs-on: ${{ needs.changes.outputs.rust_required == 'false' && (needs.changes.outputs.self_hosted == 'true' && needs.changes.outputs.trusted == 'true' && 'dyna-small' || 'ubuntu-latest') || needs.changes.outputs.self_hosted == 'true' && 'dyna-xlarge' || !inputs.github-fallback && needs.changes.outputs.forced_github != 'true' && vars.SELF_HOSTED_CI == 'all' && needs.changes.outputs.trusted == 'true' && fromJSON('["self-hosted", "linux", "playsunrise-ci"]') || needs.changes.outputs.hosted_label || 'ubuntu-latest' }}
     timeout-minutes: ${{ needs.changes.outputs.self_hosted == 'true' && 50 || 45 }}
-    # Dyna's runner image now carries lavapipe, Mesa's software Vulkan driver, for ignored-tests' `gpu` tests.
-    # verify's tests were written to skip GPU work when no adapter exists, and one of them
-    # (gfx::frame_gen::optical_flow, horizon-rust/horizon#8627) fails on lavapipe, so verify hides the driver and runs
-    # exactly as before. ignored-tests is where the GPU tests run.
+    # GPU device tests belong in the daily on lavapipe, not in verify. Hide Vulkan and disallow GL so that
+    # a stray plain GPU test fails on every runner rather than running or silently skipping.
     env:
       VK_ICD_FILENAMES: /nonexistent/no-vulkan-in-verify.json
       VK_DRIVER_FILES: /nonexistent/no-vulkan-in-verify.json
-      # With Vulkan hidden, a runner with Mesa's GL software adapter (boat's image) would still run the GPU tests,
-      # on GL, and fail (#2841); Vulkan only leaves every runner with no adapter, so GPU tests skip here everywhere.
       WGPU_BACKEND: vulkan
+      SUNRISE_GPU_TESTS_REQUIRE_ADAPTER: '1'
       RUNNER_KIND: ${{ needs.changes.outputs.self_hosted == 'true' && 'dyna' || !inputs.github-fallback && needs.changes.outputs.forced_github != 'true' && vars.SELF_HOSTED_CI == 'all' && needs.changes.outputs.trusted == 'true' && 'other' || startsWith(needs.changes.outputs.hosted_label, 'boat') && 'boat' || 'github' }}
     steps:
       - name: Require successful check selection
-        if: needs.changes.result != 'success'
+        if: needs.changes.result != 'success' || (github.event_name == 'workflow_dispatch' && inputs.pr != '' && needs.changes.outputs.pr_merge == '')
         run: exit 1
       - uses: actions/checkout@v4
         with:
-          # A dispatch with `pr`: that pull request's head; otherwise this event's commit.
-          ref: ${{ needs.changes.outputs.pr_sha }}
+          # A dispatch with `pr`: that pull request's test merge with its base, as a pull_request run checks out;
+          # otherwise this event's commit.
+          ref: ${{ needs.changes.outputs.pr_merge }}
       - uses: actions/setup-python@v5
         if: needs.changes.outputs.tooling_required != 'false' && (env.RUNNER_KIND == 'github' || env.RUNNER_KIND == 'boat')
         with:
@@ -551,14 +596,15 @@ jobs:
             export PATH="$CARGO_HOME/bin:$PATH"
           fi
           bash tools/ci/rustup_install.sh --profile minimal --component rustfmt --component clippy
-      # Registry dependencies, from the snapshot ci-cache.yml publishes from main every 6 hours; pull requests only
-      # read it. The workspace crates are rebuilt: their snapshot was 3 GB of the repository's 10 GB of caches.
+      # Registry dependencies, from the snapshot ci-cache.yml publishes from main every 6 hours. The workspace
+      # crates are rebuilt: their snapshot was 3 GB of the repository's 10 GB of caches. A dispatch with `pr`
+      # checks out a PR merge even on ref main, so it can restore but must not save.
       # Profile overrides in Cargo.toml are part of rust-cache's key; unchanged dependencies still restore.
       - uses: Swatinem/rust-cache@v2
         if: needs.changes.outputs.rust_required != 'false' && (env.RUNNER_KIND == 'github' || env.RUNNER_KIND == 'boat')
         with:
           shared-key: verify-deps
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' && inputs.pr == '' }}
       - name: Use persistent verify build artifacts
         if: needs.changes.outputs.rust_required != 'false' && needs.changes.outputs.self_hosted == 'true'
         run: |
@@ -598,11 +644,6 @@ jobs:
       - name: Setup done
         id: setup
         run: 'true'
-      - name: Build the runtime holder test actor
-        id: actor
-        if: ${{ !cancelled() && steps.setup.outcome == 'success' && (needs.changes.outputs.rust_required != 'false') }}
-        # The command lives in tools/ci/ignored_shards.py PREPARE, which the daily run uses too.
-        run: python3 tools/ci/ignored_shards.py --prepare sunrise-mod-package $JOBS
       # Compile first, apart from running: the build's time and its slowest units show on their own.
       - name: Build Rust core test binaries
         id: core_build
@@ -634,6 +675,15 @@ jobs:
             echo "::error::The --keep-going build passed, but it builds a different graph and does not clear the failed test build: check the errors above, including any 'signal 9' (a compile killed, usually for memory), before rerunning."
           fi
           exit 1
+      # The runner's memory once the test build ends, compiled or killed: its peak against the cap, and what the
+      # cgroup holds (anon: processes; file: page cache; shmem: the tmpfs checkout and /tmp).
+      - name: Memory after the test build
+        if: ${{ !cancelled() && needs.changes.outputs.rust_required != 'false' && needs.changes.outputs.self_hosted == 'true' }}
+        continue-on-error: true
+        run: |
+          echo "memory.max $(cat /sys/fs/cgroup/memory.max) memory.peak $(cat /sys/fs/cgroup/memory.peak)" | tee -a "$GITHUB_STEP_SUMMARY"
+          grep '^oom_kill ' /sys/fs/cgroup/memory.events | tee -a "$GITHUB_STEP_SUMMARY"
+          grep -E '^(anon|file|shmem|file_dirty|file_writeback) ' /sys/fs/cgroup/memory.stat | tee -a "$GITHUB_STEP_SUMMARY"
       # What bounds the build: the slowest compile units, from the report --timings writes.
       - name: Slowest compile units
         if: ${{ !cancelled() && needs.changes.outputs.rust_required != 'false' }}
@@ -645,7 +695,7 @@ jobs:
       # The guard library is built here only; the daily run does not preload it. Unix sockets remain available.
       - name: Test Rust core and voxel kernel correctness
         id: test_rust_core_and_voxel_kernel_correctness
-        if: ${{ !cancelled() && steps.setup.outcome == 'success' && (needs.changes.outputs.rust_required != 'false') && steps.core_build.outcome == 'success' && steps.actor.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && (needs.changes.outputs.rust_required != 'false') && steps.core_build.outcome == 'success' }}
         run: |
           cc -shared -fPIC -O2 -Wall -Wextra -Werror tools/ci/network_guard.c -o target/network_guard.so
           python3 tools/ci/run_test_binaries.py --jobs 3 --time-limits 2,5 --network-guard target/network_guard.so --no-data-skips -- cargo test $JOBS --profile test --workspace --lib --bins --tests
@@ -656,41 +706,17 @@ jobs:
       - name: Build the source stage generator (test profile)
         id: stage
         if: ${{ !cancelled() && steps.setup.outcome == 'success' && (needs.changes.outputs.rust_required != 'false' && (github.event_name == 'pull_request' || inputs.pr != '')) }}
-        run: |
-          started=$SECONDS
-          cargo build $JOBS --locked --profile test -p sunrise-mod-api-gen --bin sunrise-stage --message-format=json-render-diagnostics > "$RUNNER_TEMP/stage-artifacts.jsonl"
-          echo "Stage generator build: $((SECONDS - started))s"
-          python3 - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          artifacts = [json.loads(line) for line in Path(os.environ["RUNNER_TEMP"], "stage-artifacts.jsonl").read_text().splitlines()]
-          executables = {item["executable"] for item in artifacts
-                         if item.get("reason") == "compiler-artifact"
-                         and item["target"]["name"] == "sunrise-stage"
-                         and "bin" in item["target"]["kind"]
-                         and not item["profile"]["test"] and item.get("executable")}
-          if len(executables) != 1:
-              raise SystemExit(f"expected one normal sunrise-stage executable, got {executables}")
-          executable = str(Path(executables.pop()).resolve(strict=True))
-          if "\r" in executable or "\n" in executable:
-              raise SystemExit("sunrise-stage executable path must not contain CR or LF")
-          with open(os.environ["GITHUB_ENV"], "a") as environment:
-              environment.write(f"SUNRISE_STAGE_TOOL={executable}\n")
-          PY
+        run: python3 tools/ci/surface_report.py --build-tool
       - name: Report the mod API surface change
         id: report_the_mod_api_surface_change
-        # What this pull request changes in what mods can name, in the job summary: the head's sunrise-stage exports
-        # the merge base and this tree, then classifies the diff (tools/ci/surface_report.py). It fails when this
-        # tree cannot be exported, when the base can be read neither by this tree's tool nor by its own, for a
-        # stale or unreadable new change note, and, with tools/ci/surface.toml's gate on, for a breaking change no
-        # new note declares.
+        # Each tree's own sunrise-stage exports its stable API; the head's tool reads both engine catalogs and
+        # classifies the diff in the job summary. The report fails if either surface cannot be exported or compared,
+        # for a stale or unreadable new change note, and, with tools/ci/surface.toml's gate on, for a breaking change
+        # no new note declares.
         if: ${{ !cancelled() && steps.setup.outcome == 'success' && (needs.changes.outputs.rust_required != 'false' && (github.event_name == 'pull_request' || inputs.pr != '')) && steps.stage.outcome == 'success' }}
         env:
           EVENT: ${{ github.event_name }}
           PR: ${{ inputs.pr }}
-          GH_TOKEN: ${{ github.token }}
         run: python3 tools/ci/surface_report.py
       - name: Test Rust documentation examples
         id: test_rust_documentation_examples
@@ -760,26 +786,27 @@ jobs:
     # finishes in 8 to 11 minutes, so eight CPUs only took a large slot from the gate's compiling jobs.
     runs-on: ${{ needs.changes.outputs.heavy == 'false' && 'ubuntu-latest' || needs.changes.outputs.rust_required == 'false' && (needs.changes.outputs.self_hosted == 'true' && needs.changes.outputs.trusted == 'true' && 'dyna-small' || 'ubuntu-latest') || needs.changes.outputs.trusted != 'true' && 'ubuntu-latest' || needs.changes.outputs.self_hosted == 'true' && 'dyna-medium' || !inputs.github-fallback && needs.changes.outputs.forced_github != 'true' && vars.SELF_HOSTED_CI == 'all' && needs.changes.outputs.trusted == 'true' && fromJSON('["self-hosted", "linux", "playsunrise-ci"]') || needs.changes.outputs.hosted_label || 'ubuntu-latest' }}
     timeout-minutes: ${{ needs.changes.outputs.self_hosted == 'true' && needs.changes.outputs.trusted == 'true' && 20 || 45 }}
-    # Dyna's runner image now carries lavapipe, Mesa's software Vulkan driver, for ignored-tests' `gpu` tests.
-    # verify's tests were written to skip GPU work when no adapter exists, and one of them
-    # (gfx::frame_gen::optical_flow, horizon-rust/horizon#8627) fails on lavapipe, so verify hides the driver and runs
-    # exactly as before. ignored-tests is where the GPU tests run.
+    # pull-requests: read is for reading the live pull request body in `Launcher mirrors`; no write scope.
+    permissions:
+      contents: read
+      pull-requests: read
+    # Use verify's hidden-GPU environment so a stray plain GPU test fails instead of silently skipping.
     env:
       VK_ICD_FILENAMES: /nonexistent/no-vulkan-in-verify.json
       VK_DRIVER_FILES: /nonexistent/no-vulkan-in-verify.json
-      # With Vulkan hidden, a runner with Mesa's GL software adapter (boat's image) would still run the GPU tests,
-      # on GL, and fail (#2841); Vulkan only leaves every runner with no adapter, so GPU tests skip here everywhere.
       WGPU_BACKEND: vulkan
+      SUNRISE_GPU_TESTS_REQUIRE_ADAPTER: '1'
       RUNNER_KIND: ${{ needs.changes.outputs.heavy == 'false' && 'github' || needs.changes.outputs.trusted != 'true' && 'github' || needs.changes.outputs.self_hosted == 'true' && 'dyna' || !inputs.github-fallback && needs.changes.outputs.forced_github != 'true' && vars.SELF_HOSTED_CI == 'all' && needs.changes.outputs.trusted == 'true' && 'other' || startsWith(needs.changes.outputs.hosted_label, 'boat') && 'boat' || 'github' }}
     steps:
       - name: Require successful check selection
-        if: needs.changes.result != 'success'
+        if: needs.changes.result != 'success' || (github.event_name == 'workflow_dispatch' && inputs.pr != '' && needs.changes.outputs.pr_merge == '')
         run: exit 1
       - uses: actions/checkout@v4
         id: checkout
         with:
-          # A dispatch with `pr`: that pull request's head; otherwise this event's commit.
-          ref: ${{ needs.changes.outputs.pr_sha }}
+          # A dispatch with `pr`: that pull request's test merge with its base, as a pull_request run checks out;
+          # otherwise this event's commit.
+          ref: ${{ needs.changes.outputs.pr_merge }}
       # Public-tree ranges and sync ancestry need full history of this exact commit,
       # not every branch and tag. The Rust job only needs its checkout's HEAD and tracked files.
       - name: Fetch this commit's history
@@ -826,6 +853,49 @@ jobs:
       - name: Check generated extension tag catalog
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: python3 tools/ci/surface_extension_tags.py --check
+      # Dyna's runner image has no GitHub CLI; the launcher mirror check below reads the pull request with it.
+      - name: GitHub CLI for the launcher mirror check
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && github.event_name == 'pull_request' }}
+        run: bash tools/ci/ensure_gh.sh
+      # The launcher's copies of game crates move only when the pull request says which copy must follow. A pull
+      # request's body is read live from the API, never from the event file, which keeps the body as it was at the
+      # push: editing the body then re-running the job decides, with no new push. A body that cannot be read fails the
+      # step; it never falls back to the event's. The body is only data, written to a file and read by the check.
+      - name: Launcher mirrors
+        id: launcher_mirrors
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if [ -n "$BASE_SHA" ]; then
+            response="$RUNNER_TEMP/launcher-mirrors-pull-request.json"
+            body="$RUNNER_TEMP/launcher-mirrors-pull-request-body.md"
+            if ! gh api "repos/$GITHUB_REPOSITORY/pulls/${PR_NUMBER:?}" > "$response"; then
+              echo "::error::Could not read pull request #$PR_NUMBER from the GitHub API, so its launcher-mirror: line cannot be checked. Re-run the job."
+              exit 1
+            fi
+            # A pull request with no description has `"body": null`: an empty body, not a failure.
+            if ! python3 - "$response" "$body" <<'PY'
+          import json, sys
+          from pathlib import Path
+          text = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["body"]
+          if text is not None and not isinstance(text, str):
+              raise SystemExit("the pull request body is not text")
+          Path(sys.argv[2]).write_text(text or "", encoding="utf-8")
+          PY
+            then
+              echo "::error::The GitHub API's answer for pull request #$PR_NUMBER has no readable body, so its launcher-mirror: line cannot be checked. Re-run the job."
+              exit 1
+            fi
+            python3 tools/ci/check_launcher_mirrors.py --base "$BASE_SHA" --pull-request-merge --pr-body-file "$body"
+          else
+            python3 tools/ci/check_launcher_mirrors.py
+          fi
+      - name: Check native hook wiring
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && needs.changes.outputs.rust_required != 'false' }}
+        run: bash tools/ci/check_hook_wiring.sh
       # A pull request adds only its own commits to main, so it reads those; main's pushes read every ref's history.
       - name: Keep game artifacts out of Git
         id: keep_game_artifacts_out_of_git
@@ -864,19 +934,23 @@ jobs:
         id: vocabulary_state_has_explicit_ownership
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: python3 tools/check_mod_vocabulary_state.py
-      # The gated Host methods that can only refuse by unwinding (#3123): the list only shrinks.
-      - name: Unwinding Host methods only shrink
-        id: unwinding_host_methods_only_shrink
-        if: ${{ !cancelled() && steps.setup.outcome == 'success' && github.event_name == 'pull_request' }}
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: python3 tools/ci/check_unwinding_methods.py "$BASE_SHA"
+      - name: Gameplay crates follow layer rules
+        id: gameplay_crates_follow_layer_rules
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: python3 tools/ci/check_gameplay_layers.py
       # One file per topic in tools/ci/ignored-tests/: well-formed rows, each test in one file, nothing else in the
       # folder, no file at the retired single-list path.
       - name: Ignored-test policy files read cleanly
         id: ignored_test_policy_files_read_cleanly
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
-        run: python3 tools/ci/check_ignored_test_rows.py
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 tools/ci/check_ignored_test_rows.py ${BASE_SHA:+--base "$BASE_SHA" --pull-request-merge}
+      # Modules are plain mod items: a file under a crate's src/ that nothing declares is never compiled.
+      - name: Every crate source file is compiled
+        id: every_crate_source_file_is_compiled
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: python3 tools/ci/check_unreached_sources.py
       # tools/port_map/: a row that names a Sunrise function still finds it, or is listed in
       # tools/ci/port_map_known_stale.txt, which only shrinks (tools/ci/check_port_map_paths.py).
       - name: Port-map rows find their function
@@ -884,7 +958,7 @@ jobs:
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: python3 tools/ci/check_port_map_paths.py ${BASE_SHA:+--base "$BASE_SHA"}
+        run: python3 tools/ci/check_port_map_paths.py ${BASE_SHA:+--base "$BASE_SHA" --pull-request-merge}
       - name: Fetch locked Cargo dependencies for the vanilla build check
         id: extras_fetch
         if: ${{ !cancelled() && steps.setup.outcome == 'success' && runner.os == 'Linux' && needs.changes.outputs.rust_required != 'false' }}
@@ -903,17 +977,27 @@ jobs:
         id: process_starting_tests_are_daily_tests
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: python3 tools/ci/check_process_tests.py
+      # Its one rustc outgrew the 16 GiB parity runner (#4896): a harness runs a fixture from lab.parity_fixtures().
+      - name: Parity harnesses do not build the client lib test
+        id: parity_harnesses_do_not_build_the_client_lib_test
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: python3 tools/ci/check_parity_harness_builds.py
       # A test that reruns its own test executable by --exact must select it ignored or not, or a daily one checks nothing.
       - name: Test reruns select ignored tests too
         id: test_reruns_select_ignored_tests_too
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: python3 tools/ci/reexec_include_ignored.py --check
-      # The nested workspaces (telemetry server, registry and probes) take game crates by path: a crate that
+      # The nested workspaces (telemetry server and probes) take game crates by path: a crate that
       # gains a dependency must refresh their own Cargo.lock too, or their --locked builds refuse after merge.
       - name: Nested workspaces' lockfiles are current
         id: nested_workspaces_lockfiles_are_current
         if: ${{ !cancelled() && steps.setup.outcome == 'success' && (needs.changes.outputs.rust_required != 'false') }}
         run: python3 tools/ci/check_nested_locks.py
+      # Frame hooks run with Game::renderer taken out (sunrise#5858): their files reach the GPU through Game::mod_gpu().
+      - name: Frame-hook files do not read the renderer
+        id: frame_hook_files_do_not_read_the_renderer
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: python3 tools/ci/check_mod_gpu_access.py
       # docs/layers.md: a crate depends only on its own layer or a lower one; today's exceptions only shrink.
       - name: Crates follow the layers
         id: crates_follow_the_layers
@@ -975,7 +1059,9 @@ jobs:
   # alone holds the write permission, and only for commit statuses.
   pr-status:
     needs: [changes, lint, verify, verify-static]
-    if: always() && github.event_name == 'workflow_dispatch' && inputs.pr != '' && needs.changes.outputs.pr_sha != ''
+    if: >-
+      always() && github.event_name == 'workflow_dispatch' && inputs.pr != '' && needs.changes.result == 'success' &&
+      needs.changes.outputs.pr_sha != '' && needs.changes.outputs.pr_merge != ''
     # Five seconds of status posts after the gate: nothing waits on it, so it takes none of Dyna's counted runners.
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -986,6 +1072,7 @@ jobs:
       - env:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ needs.changes.outputs.pr_sha }}
+          MERGE: ${{ needs.changes.outputs.pr_merge }}
           RESULTS: ${{ toJSON(needs) }}
           RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -995,7 +1082,7 @@ jobs:
           for job in ("lint", "verify", "verify-static"):
               result = json.loads(os.environ["RESULTS"])[job]["result"]
               body = {"state": states.get(result, "error"), "context": f"dispatched/{job}",
-                      "description": f"dyna-checks dispatched on this head: {result}", "target_url": os.environ["RUN"]}
+                      "description": f"{result} on test merge {os.environ['MERGE']}", "target_url": os.environ["RUN"]}
               request = urllib.request.Request(
                   f"{os.environ['GITHUB_API_URL']}/repos/{os.environ['GITHUB_REPOSITORY']}/statuses/{os.environ['SHA']}",
                   data=json.dumps(body).encode(), method="POST",

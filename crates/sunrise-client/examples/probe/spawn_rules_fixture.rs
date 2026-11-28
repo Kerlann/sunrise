@@ -229,8 +229,8 @@ pub fn main() -> sunrise_client::Result<()> {
     let facts = BlockFacts::load(root, registry)?;
     let data = MobData::load(
         &sunrise_assets::resource_source::ResourceRoot::directory(root.to_path_buf()),
-        &facts,
-    );
+        facts.states.len(),
+    )?;
     let defaults = sunrise_world::item_defaults::read(root)?;
     let items = Items::tags_only(root, &PackOverlay::NONE, &defaults)?;
     let types = MobTypes::load(root)?;
@@ -315,7 +315,7 @@ pub fn main() -> sunrise_client::Result<()> {
                 kind.height as f32,
             );
             let obstruction =
-                spawn_selection::spawn_obstruction(s, &level, bounds, Some(&[]), x0, y, z0);
+                spawn_selection::spawn_obstruction(s, &level, bounds, true, x0, y, z0);
             let _ = writeln!(out, "{name} {obstruction}");
             continue;
         }
@@ -323,7 +323,7 @@ pub fn main() -> sunrise_client::Result<()> {
         let s = kind.species;
         let ok = spawn_rules::is_spawn_position_ok(c["type"], s, &level, x0, y, z0);
         let rules = spawn_rules::check_spawn_rules(
-            kind,
+            kind.into(),
             &level,
             reason(&get("reason", "natural")),
             &mut random,

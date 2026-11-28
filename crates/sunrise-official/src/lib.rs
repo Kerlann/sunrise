@@ -133,7 +133,7 @@ const LAYERS: &[&dyn hud::Layer] = &[
     &sunrise_perf_overlay::LAYER,
 ];
 
-/// The text of Sunrise's own rows, loaded with the game's.
+/// Sunrise's official text (its rows and the launcher page), loaded with the game's.
 static LANG: &lang::Files = &[("en_us", include_str!("../assets/lang/en_us.json"))];
 
 /// Registers Sunrise's in-game parts with the game. The executable calls it before it runs the
@@ -145,6 +145,7 @@ pub fn register() {
     let late = late.chain(std::iter::once(lang::register(LANG)));
     #[cfg(feature = "sunrise-extras")]
     let late = late.chain(std::iter::once(lang::register(sunrise_reconnect::LANG)));
+    let late = late.chain(std::iter::once(lang::register(sunrise_discord::LANG)));
     let late = late.chain(PAGES.iter().copied().map(pages::register));
     for result in late.chain(LAYERS.iter().copied().map(hud::register)) {
         if let Err(e) = result {

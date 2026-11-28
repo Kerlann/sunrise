@@ -89,6 +89,9 @@ const KEY: &str = "discordPresence";
 const LABEL: &str = "sunrise.extras.discord_presence";
 const ABOUT: &str = "sunrise.extras.discord_presence.tooltip";
 
+/// The switch's localized label and tooltip, registered only with the crate.
+pub static LANG: &sunrise_platform::lang::Files = include!(concat!(env!("OUT_DIR"), "/locales.rs"));
+
 /// The process-wide switch (off until Sunrise has a Discord application).
 static ON: AtomicBool = AtomicBool::new(false);
 
@@ -150,7 +153,7 @@ impl Store for Setting {
     }
 }
 
-/// The switch's row in the Extras page's Multiplayer group, for
+/// The switch's row in Sunrise Settings' Gameplay page, in its Multiplayer group, for
 /// `sunrise_platform::pages::register`.
 pub static SECTION: Section = Section;
 
@@ -569,6 +572,19 @@ fn open(path: &std::path::Path) -> io::Result<Box<dyn Pipe>> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn its_text_lives_in_its_own_lang_folder() {
+        assert!(LANG.iter().any(|(code, _)| *code == "en_us"));
+        for (code, body) in LANG {
+            serde_json::from_str::<Value>(body)
+                .unwrap_or_else(|e| panic!("{code}.json does not parse: {e}"));
+        }
+        let en_us = LANG.iter().find(|(code, _)| *code == "en_us").unwrap().1;
+        let text: Value = serde_json::from_str(en_us).unwrap();
+        assert!(text.get(LABEL).is_some_and(Value::is_string));
+        assert!(text.get(ABOUT).is_some_and(Value::is_string));
+    }
+
     fn world(play: Play, dimension: Dimension) -> Status {
         Status::World {
             play,
@@ -711,7 +727,7 @@ mod tests {
         assert_eq!(limit.wait(t + WINDOW), Duration::from_secs(1));
     }
 
-    /// The switch as the player's settings and the Extras page see it. The only test that
+    /// The switch as the player's settings and the Gameplay page see it. The only test that
     /// touches the presence's statics.
     #[test]
     fn the_switch_clears_the_activity_at_once() {

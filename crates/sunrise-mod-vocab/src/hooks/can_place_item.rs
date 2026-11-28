@@ -17,9 +17,13 @@ pub trait Hooks {
     /// Menus use `menu_slot_rules` instead (`Slot.mayPlace`).
     ///
     /// Seed a filter from an accepted write, not this query. Default `ITEMS` and `STORAGE`
-    /// writes to engine-managed slots emit `contents_changed` at root commit. A provider
-    /// writing its own storage can issue an explicit `set_changed` or seed the filter itself.
+    /// writes to engine-managed slots emit `contents_changed` on commit (after source
+    /// settlement when the commit happens during `menu_quick_move`). A provider writing its
+    /// own storage can issue an explicit `set_changed` or seed the filter itself.
     #[hook(
+        target = "sunrise_gameplay_common::game::native_hooks::can_place_item::native_can_place_item",
+        receiver = "associated",
+        dispatch = "flat",
         side = "server",
         version = 2,
         contract = "replace",
@@ -28,5 +32,12 @@ pub trait Hooks {
         key = "entity",
         neoforge = "none (vanilla Container.canPlaceItem; the item capability wraps this decision)"
     )]
-    fn can_place_item();
+    fn can_place_item(
+        entity: &ModBlockEntity,
+        pos: BlockPos,
+        state: mod_api::BlockState,
+        slot: usize,
+        stack: &mod_api::ItemStack,
+        allowed: &mut Option<bool>,
+    );
 }

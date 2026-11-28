@@ -21,7 +21,7 @@ fn identifier(namespace: &str, path: &str) -> Option<String> {
     if namespace.is_empty() || path.is_empty() {
         return None;
     }
-    sunrise_client_core::identifier::parse_identifier(&format!("{namespace}:{path}"))
+    sunrise_game_data::identifier::parse_identifier(&format!("{namespace}:{path}"))
 }
 
 /// The id of a resource path ending in `.<ext>`: `assets/<ns>/<folder>/<p>` is `<ns>:<p>`, any
@@ -158,7 +158,7 @@ fn load_model(
     let model = root
         .read_to_string(resource)
         .map_err(|e| e.to_string())
-        .and_then(|text| CuboidModel::from_json(&text).map_err(|e| e.to_string()));
+        .and_then(|text| crate::mod_model_loaders::decode_model(&text).map_err(|e| e.to_string()));
     let mut model = match model {
         Ok(model) => model,
         Err(e) => {

@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.git_fixture import isolated_git_env
 from tools.ci import nightly_set as ns
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -176,10 +177,12 @@ class AllowTests(unittest.TestCase):
 
     def test_the_commands_workflows_fetch_the_council_file(self):
         # They check out main sparsely: a file left out of the list reads as missing, and the council loses its powers.
-        for name in ("nightly-command", "triage-command", "claim-command"):
+        for name in ("nightly-command", "triage-command", "fork-claim"):
             text = (ROOT / ".github" / "workflows" / f"{name}.yml").read_text()
-            checkout = text[text.index("sparse-checkout: |"):text.index("sparse-checkout-cone-mode")]
-            self.assertIn(ns.COUNCIL, checkout, name)
+            checkouts = [part.split("sparse-checkout-cone-mode", 1)[0] for part in text.split("sparse-checkout: |")[1:]]
+            self.assertTrue(checkouts, name)
+            for checkout in checkouts:  # every job: each one reads nightly_set, which reads the council at import
+                self.assertIn(ns.COUNCIL, checkout, name)
 
     def test_paused_stops_reviewers_not_ludovic(self):
         reviewers = ns.read_reviewers(self.LIST + "paused  # Ludovic, 2026-10-29\n")
@@ -207,7 +210,7 @@ class AllowTests(unittest.TestCase):
 
 class WorkflowIdTests(unittest.TestCase):
     def test_every_command_workflow_passes_the_authors_id(self):
-        for name in ("nightly-command.yml", "triage-command.yml", "claim-command.yml"):
+        for name in ("nightly-command.yml", "triage-command.yml", "fork-claim.yml"):
             text = (ROOT / ".github/workflows" / name).read_text()
             self.assertIn("AUTHOR_ID: ${{ github.event.comment.user.id }}", text, name)
 
@@ -288,7 +291,7 @@ class SetTests(unittest.TestCase):
 
 def sh(repo, *args, env=None):
     return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True,
-                          env={**os.environ, **(env or {})}).stdout.strip()
+                          env=isolated_git_env(**(env or {}))).stdout.strip()
 
 
 class AssemblyTests(unittest.TestCase):
@@ -361,8 +364,8 @@ class StateTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.origin, self.repo = Path(self.tmp.name, "origin.git"), Path(self.tmp.name, "work")
-        subprocess.run(["git", "init", "-q", "--bare", str(self.origin)], check=True)
-        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
+        sh(self.tmp.name, "init", "-q", "--bare", str(self.origin))
+        sh(self.tmp.name, "init", "-q", str(self.repo))
         sh(self.repo, "remote", "add", "origin", str(self.origin))
 
     def tearDown(self):
@@ -378,7 +381,7 @@ class StateTests(unittest.TestCase):
     def test_a_run_that_pushed_first_is_kept(self):
         ns.update_state(lambda st, b: ({"prs": [1]}, b, "one"), "t", cwd=str(self.repo))
         other = Path(self.tmp.name, "other")
-        subprocess.run(["git", "init", "-q", str(other)], check=True)
+        sh(self.tmp.name, "init", "-q", str(other))
         sh(other, "remote", "add", "origin", str(self.origin))
         seen = []
 
