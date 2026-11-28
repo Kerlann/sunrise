@@ -51,10 +51,7 @@ pub fn is_unobstructed<W: EntityObstructionWorld>(
         .obstruction_candidates(excluded.map(|e| e.identity), bounds)
         .map_err(ObstructionError::World)?;
     for entity in candidates {
-        if excluded.is_some_and(|e| e.identity == entity.identity)
-            || entity.spectator
-            || !entity.bounds.intersects(bounds)
-        {
+        if excluded.is_some_and(|e| e.identity == entity.identity) || entity.spectator {
             continue;
         }
         if entity.removed
