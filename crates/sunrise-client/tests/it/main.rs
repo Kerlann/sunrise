@@ -1,6 +1,9 @@
 //! The integration tests of this crate, linked into one binary: a binary per file linked the crate and its
 //! dependencies again for every file. A new test file goes in this folder with a `mod` line here.
 
+#[used]
+static KEEP_TEST_PLATFORM: fn() = mod_platform::__private::test_platform::keep;
+
 #[cfg(feature = "client")]
 mod cut_layout;
 mod datapack_biome_sync;
