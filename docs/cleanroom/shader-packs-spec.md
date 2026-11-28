@@ -435,8 +435,8 @@ Defaults marked "true" for the shadow-content keys are not stated by `[OF-SP]`; 
 | `beacon.beam.depth` | bool | the opaque inner beam writes depth (all depth buffers) | A, default false |
 
 The default blend for translucent geometry is `SRC_ALPHA ONE_MINUS_SRC_ALPHA ONE ONE_MINUS_SRC_ALPHA` `[IR:rendering]`.
-Composite-style programs draw with blending disabled `[OF-SH Color Attachments]`; `blend.<program> = off`, or no
-`blend.<program>`, keeps it so. An observation with Iris 1.11.7 and a probe pack of Sunrise's own (commit
+Composite-style programs default to blending off `[OF-SH Color Attachments]`; `blend.<program> = off`, or no
+`blend.<program>`, keeps it so. The rules for explicit `blend.*` keys follow. An observation with Iris 1.11.7 and a probe pack of Sunrise's own (commit
 `0582226502`, provenance-log.md 2026-11-27) adds, for `blend.*` on these programs:
 
 - `blend.<program>` with factors blends every buffer a deferred or composite program writes. The recorded reading: a

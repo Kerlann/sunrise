@@ -492,8 +492,10 @@ the full list.
   - `final`: the loader reads `blend.final` and drops its per-buffer lines, but `final` writes the screen target
     without blending, so neither has an effect.
   - `setup`: compute only, no colour outputs; `blend.*` has no effect.
-  - A value that is not four valid factor names (wrong count, an unknown or lower-case name) counts as no
-    `blend.<program>` (blending off in these programs); such a per-buffer line is dropped.
+  - `off` is a valid value, distinct from an invalid or absent key: a per-buffer `off` is retained and overrides the
+    program's blending. A value that is neither `off` nor four valid factor names (wrong count, an unknown or
+    lower-case name) counts as no `blend.<program>` (blending off in these programs); such a per-buffer line is
+    dropped.
   - Factors apply only to an output whose buffer format wgpu reports as blendable
     (`TextureFormatFeatureFlags::BLENDABLE`); any other output is written without
     blending.
@@ -506,6 +508,6 @@ the full list.
   deferred and composite, `off` on composite2, per-buffer lines dropped on composite and composite1),
   `post::buffer_blend_tests::buffer_blends_use_colortex_numbers_and_preserve_explicit_off` (`sunrise-shaders`:
   per-buffer suffixes resolve to colortex numbers, `off` kept) and the daily GPU test
-  `pack_post::tests::a_composite_program_blends_onto_its_buffer` (`sunrise-render-shaderpack`: the observed 0.625).
+  `pack_post::tests::a_composite_program_blends_onto_its_buffer` (`sunrise-render-shaderpack`: a quantized pixel close to the recorded 0.625, not that value exactly).
   No test holds yet the shadowcomp per-buffer blend, `final` without blending, invalid values in a composite
   program, or the blendable-format gate.
