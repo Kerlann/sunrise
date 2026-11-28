@@ -1536,7 +1536,9 @@ impl ItemStack {
         self.data().and_then(|d| d.potion.as_deref())
     }
     /// `PotionContents.customEffects` as saved: (id, duration, amplifier). Both
-    /// default to 0 like `MobEffectInstance.CODEC`.
+    /// default to 0 like `MobEffectInstance.CODEC`. The amplifier is
+    /// `ExtraCodecs.UNSIGNED_BYTE`: a saved number narrows to a byte and reads
+    /// back unsigned (`-56b` and `-56` are 200, `256` is 0), not clamped (#6850).
     pub fn custom_potion_effects(&self) -> Vec<(String, i32, i32)> {
         let Some((_, Tag::List(list))) = self
             .data()
@@ -1549,7 +1551,7 @@ impl ItemStack {
                 Some((
                     string(e.get("id")?)?,
                     e.get("duration").and_then(int).unwrap_or(0) as i32,
-                    e.get("amplifier").and_then(int).unwrap_or(0).clamp(0, 255) as i32,
+                    e.get("amplifier").and_then(unsigned_byte).unwrap_or(0),
                 ))
             })
             .collect()
@@ -1728,6 +1730,13 @@ pub fn set_level(list: &mut Levels, id: &str, level: u32) {
 fn levels_tag(levels: &Levels) -> Tag {
     Tag::compound(levels.iter().map(|(id, l)| (&**id, Tag::Int(*l as i32))))
 }
+/// `ExtraCodecs.UNSIGNED_BYTE`: any numeric tag narrows to a byte first, then
+/// reads as unsigned (`-56b` and `-56` are 200, `256` is 0). Shared with the
+/// brewing colour/tooltip path so both read a custom amplifier the same way.
+pub fn unsigned_byte(t: &Tag) -> Option<i32> {
+    int(t).map(|v| i32::from(v as u8))
+}
+
 fn int(t: &Tag) -> Option<i64> {
     match t {
         Tag::Byte(v) => Some(i64::from(*v)),
@@ -4055,6 +4064,44 @@ mod tests {
                 .unwrap()
                 .get("minecraft:custom_name"),
             Some(&sunrise_game_data::scoreboard::json_to_tag(&styled))
+        );
+    }
+
+    /// `ExtraCodecs.UNSIGNED_BYTE`: an amplifier narrows to a byte first, then reads
+    /// unsigned. `-56b`/`-56` are 200 (not clamped to 0); `256` is 0 (not clamped to
+    /// 255), matching vanilla 26.3 (#6850).
+    #[test]
+    fn issue_6850_potion_amplifier_decodes_an_unsigned_byte() {
+        let decode = |amplifier: Tag| {
+            let effects = Tag::compound([(
+                "custom_effects",
+                Tag::List(vec![Tag::compound([
+                    ("id", Tag::String("minecraft:speed".into())),
+                    ("duration", Tag::Int(100)),
+                    ("amplifier", amplifier),
+                ])]),
+            )]);
+            let mut stack = ItemStack::new("minecraft:potion", 1);
+            stack
+                .data_mut()
+                .set_loot_component("minecraft:potion_contents", &Some(effects));
+            stack.custom_potion_effects()
+        };
+        assert_eq!(
+            decode(Tag::Byte(-56)),
+            [("minecraft:speed".to_owned(), 100, 200)]
+        );
+        assert_eq!(
+            decode(Tag::Int(-56)),
+            [("minecraft:speed".to_owned(), 100, 200)]
+        );
+        assert_eq!(
+            decode(Tag::Int(256)),
+            [("minecraft:speed".to_owned(), 100, 0)]
+        );
+        assert_eq!(
+            decode(Tag::Int(200)),
+            [("minecraft:speed".to_owned(), 100, 200)]
         );
     }
 
