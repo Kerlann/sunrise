@@ -204,7 +204,7 @@ pub(crate) mod tests {
                 }
             }
             game.server.tickets.0.update(None);
-            game.player = Some(PlayerMotion::new(game.motion, Vec3::new(8.5, 64.0, 8.5)).unwrap());
+            game.player = Some(PlayerMotion::new(game.motion, Vec3::new(8.5, 64.0, 8.5)));
             game.border.set_center([8.0, 8.0]).unwrap();
             game.border.set_size(2.0).unwrap();
             let mut scratch = SpawnScratch::default();

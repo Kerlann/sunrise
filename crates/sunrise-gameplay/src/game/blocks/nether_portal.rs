@@ -1411,6 +1411,14 @@ impl crate::game::ServerGame<'_> {
                 | Target::Bolt(_)
         ) {
             let mut tag = self.command_target_nbt(target)?;
+            // This path moves the body alone: its riders stay in the level, as
+            // `removeAfterChangingDimensions` leaves them, and only the vehicle
+            // tree path (`send_through_portal`) carries riders with a vehicle.
+            // A read now builds the live `Passengers` tree, so drop it here: the
+            // destination would otherwise recreate a rider that never moved.
+            if let Tag::Compound(c) = &mut tag {
+                c.remove(&"Passengers".into());
+            }
             if let Err(error) =
                 super::persist::write_attachments(&mut tag, id, &self.common.entity_attachments)
             {

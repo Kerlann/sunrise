@@ -154,7 +154,7 @@ pub fn load_world_rest<P: RestPresentation + Sync>(
     };
     let load_mobs = || -> Result<_> {
         let _step = startup::step("rest.mobs");
-        let catalog = &resources.motion().attributes;
+        let catalog = resources.motion().attributes();
         let mut types = presentation.mob_types(root, item_defaults, catalog)?;
         // #845: the declared sets take their types' rows — the merged rows
         // the live attribute map's catalog took in core (the template's with

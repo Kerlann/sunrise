@@ -152,7 +152,7 @@ macro_rules! game_side {
             player_equipment: $crate::acting_equipment!($s),
             hit_borrows: $crate::game::native_surface::HitBorrows {
                 living_types: $s.res.living_type_keys(),
-                attributes: &$s.motion.attributes,
+                attributes: $s.motion.attributes(),
                 player_effects: &$s.potions.effects,
                 player_uuid: $crate::game::Side::lan_acting_uuid({
                     use $crate::game::SideGame as _;
@@ -206,7 +206,7 @@ macro_rules! game_side {
             player_equipment: $crate::acting_equipment!($s),
             hit_borrows: $crate::game::native_surface::HitBorrows {
                 living_types: $s.res.living_type_keys(),
-                attributes: &$s.motion.attributes,
+                attributes: $s.motion.attributes(),
                 player_effects: &$s.potions.effects,
                 player_uuid,
                 player_attachments: &$s.player_state.attachments,
@@ -4123,6 +4123,9 @@ pub mod native_resources;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_fixtures;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_resource_cache;
 
 #[cfg(test)]
 mod native_entity_refs {

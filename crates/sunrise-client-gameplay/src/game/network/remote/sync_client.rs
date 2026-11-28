@@ -593,7 +593,7 @@ impl crate::game::ClientGame<'_> {
                 player.velocity = delta;
             }
             None => {
-                let mut player = PlayerMotion::new(self.common.motion, position)?;
+                let mut player = PlayerMotion::new(self.common.motion, position);
                 // The id the server gave, for the hooks the motion fires.
                 player.entity_id = self.own_entity_id();
                 // Entity.noPhysics starts false until Player.tick() resolves PlayerInfo;

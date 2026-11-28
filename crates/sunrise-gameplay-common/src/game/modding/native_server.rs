@@ -795,8 +795,7 @@ impl ScopedPlayerState {
         let mut motion = PlayerMotion::new(
             resources,
             sunrise_core::geometry::Vec3::new(position[0], position[1], position[2]),
-        )
-        .map_err(|_| ActionRefused::InvalidSetup)?;
+        );
         motion.shift_key_down = setup.secondary_use;
         let mut inventory = vec![None; 36];
         inventory[0] = setup

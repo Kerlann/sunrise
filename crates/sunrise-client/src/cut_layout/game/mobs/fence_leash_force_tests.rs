@@ -78,7 +78,7 @@ fn game<'a>(
     for x in 0..3 {
         game.load_ticking_neighbourhood(x, 0);
     }
-    game.player = Some(PlayerMotion::new(game.motion, Vec3::new(24.5, 201.0, 12.5)).unwrap());
+    game.player = Some(PlayerMotion::new(game.motion, Vec3::new(24.5, 201.0, 12.5)));
     let net = NetConfig {
         announce: false,
         ..NetConfig::lan(0, "fence-leash-test".into(), 2)

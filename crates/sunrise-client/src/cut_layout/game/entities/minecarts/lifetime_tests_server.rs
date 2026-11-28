@@ -305,8 +305,7 @@ fn disabled_tnt_rule_discards_primed_carts_but_keeps_unprimed_ticks() {
                 cart.fall_distance = 10.0;
                 game.carts.push(cart);
                 if ridden {
-                    game.player =
-                        Some(sunrise_sim::motion::PlayerMotion::new(game.motion, start).unwrap());
+                    game.player = Some(sunrise_sim::motion::PlayerMotion::new(game.motion, start));
                     super::super::native_entity_refs::tests::bind_local_player(game, 70, 70);
                     game.riding = Some(71);
                     assert!(game.tick_cart_riding(Keys::default()));

@@ -283,13 +283,10 @@ fn entity_sounds_bound_sounds_particles_and_level_events_defer_inside_transactio
             crate::game::integrated_pair::with_integrated_pair(|pair| {
                 let at = [3.0, 64.0, 5.0];
                 let client = &mut *pair.client;
-                client.player = Some(
-                    sunrise_sim::motion::PlayerMotion::new(
-                        client.motion,
-                        sunrise_core::geometry::Vec3::new(at[0], at[1], at[2]),
-                    )
-                    .unwrap(),
-                );
+                client.player = Some(sunrise_sim::motion::PlayerMotion::new(
+                    client.motion,
+                    sunrise_core::geometry::Vec3::new(at[0], at[1], at[2]),
+                ));
                 client
                     .test_audio_mut()
                     .set_listener(at, [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]);
@@ -317,8 +314,7 @@ fn entity_sounds_bound_sounds_particles_and_level_events_defer_inside_transactio
                     sunrise_sim::motion::PlayerMotion::new(
                         game.motion,
                         sunrise_core::geometry::Vec3::new(at[0], at[1], at[2]),
-                    )
-                    .unwrap(),
+                    ),
                 );
                 let mut portal_plays = |game: &mut sunrise_gameplay::game::ServerGame<'_>| {
                     fence(game);

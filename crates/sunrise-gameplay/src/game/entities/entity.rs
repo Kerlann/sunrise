@@ -1589,7 +1589,7 @@ macro_rules! hit_reads_of {
             .map(|epoch| sunrise_sim::health::HitReads {
                 epoch,
                 living_types: $game.common.res.living_type_keys(),
-                attributes: &$game.common.motion.attributes,
+                attributes: $game.common.motion.attributes(),
                 player_effects: Some(&$game.common.potions.effects),
                 player_equipment: acting_equipment!($game.common),
                 player_uuid: $game.server.lan_acting_uuid,

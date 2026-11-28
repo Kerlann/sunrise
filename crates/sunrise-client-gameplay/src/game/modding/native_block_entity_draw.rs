@@ -504,6 +504,10 @@ pub struct BlockEntityDraw<'v> {
     reserved_quads: usize,
     /// Inside a mod's submit that `block_entity` dispatched: another `block_entity` is refused.
     nested: bool,
+    /// A first-person hand or arm draw (`in_first_person`): its vertices join the hand's,
+    /// which are drawn from the shared atlas by a pass of their own, so `textured_quad` is
+    /// refused.
+    first_person: bool,
 }
 
 /// One element (`block`, `model`, `terrain_model`, `cube` or `quad`) drawn under
@@ -775,6 +779,7 @@ impl<'v> BlockEntityDraw<'v> {
             quad_capacity: sunrise_client::gfx::EntityQuadCapacity::default_device(),
             reserved_quads: 0,
             nested: false,
+            first_person: false,
         }
     }
 
@@ -982,6 +987,13 @@ impl<'v> BlockEntityDraw<'v> {
     /// Track normals from the rigid first-person view transform through listener draws.
     pub(in crate::game) fn track_normal_pose(mut self) -> Self {
         self.normal_pose = Some(ModelNormals::from_rotation(self.pose));
+        self
+    }
+
+    /// A first-person hand or arm draw (`render_hand`, `render_arm`): what it draws joins the
+    /// hand's vertices, and `textured_quad` is refused.
+    pub(in crate::game) fn in_first_person(mut self) -> Self {
+        self.first_person = true;
         self
     }
 
@@ -1217,8 +1229,8 @@ impl<'v> BlockEntityDraw<'v> {
     /// A quad of `corners` showing a dynamic texture: `quad`'s shading and light, UVs in the
     /// texture's own unit square, and the texture named in the vertices (`overlay` is the
     /// render type, `handle` the texture) for the renderer to bind when it draws. False, with
-    /// nothing appended, for a first-person hand draw, a coordinate that is not finite, or a
-    /// quad the batch has no room for.
+    /// nothing appended, for a first-person hand or arm draw (`in_first_person`), a coordinate
+    /// that is not finite, or a quad the batch has no room for.
     pub(in crate::game) fn textured_quad(
         &mut self,
         corners: [[f32; 3]; 4],
@@ -1228,7 +1240,7 @@ impl<'v> BlockEntityDraw<'v> {
         tint: u32,
     ) -> bool {
         // The hand's vertices are drawn from the shared atlas by a pass of their own.
-        if self.normal_pose.is_some()
+        if self.first_person
             || !corners
                 .iter()
                 .flatten()
@@ -1882,6 +1894,7 @@ impl crate::game::ClientGame<'_> {
                 quad_capacity: self.entity_quad_capacity(),
                 reserved_quads: self.entity_batch_reserved_quads(),
                 nested: false,
+                first_person: false,
             };
             let now = view.game_time;
             let mut kept = self.client.kept_block_entities.borrow_mut();
@@ -2069,8 +2082,10 @@ impl crate::game::ClientGame<'_> {
     }
     /// Keeps what this call drew, with neither `native_block_entity_submit` nor
     /// `native_block_entity_render_bounding_box` called until its state, block entity,
-    /// light or resource packs change. Parts marked with `spin` keep turning on the
-    /// animation clock; other geometry stays as submitted. Do not bake frame-dependent
+    /// light, resource packs or the font's glyph cache change. A kept draw not drawn for
+    /// `KEPT_FOR` ticks is dropped, and one that fills the quad batch is not kept, even
+    /// when it fits exactly (it may have been cut short). Parts marked with `spin` keep
+    /// turning on the animation clock; other geometry stays as submitted. Do not bake frame-dependent
     /// values into kept vertices: item glint and time-dependent item models stop
     /// where they were, and neighboring blocks do not invalidate the cache.
     pub(in crate::game) fn native_draw_keep(&self, draw: &mut BlockEntityDraw) {
@@ -4531,7 +4546,7 @@ pub mod tests {
     }
 
     /// A coordinate that is not finite refuses the quad and appends nothing; so does a
-    /// first-person hand draw.
+    /// first-person hand or arm draw.
     #[test]
     fn a_textured_quad_refuses_non_finite_input_and_the_hand() {
         use sunrise_client::gfx::DYNAMIC_TEXTURE_SOLID_OVERLAY as SOLID;
@@ -4543,7 +4558,7 @@ pub mod tests {
         uv[3][0] = f32::INFINITY;
         assert!(!d.textured_quad(CORNERS, uv, SOLID, 7, 0xFFFFFF));
         assert!(d.vertices.is_empty());
-        d.normal_pose = Some(ModelNormals::from_rotation(Mat4::IDENTITY));
+        d.first_person = true;
         assert!(!d.textured_quad(CORNERS, UNIT_UV, SOLID, 7, 0xFFFFFF));
         assert!(d.vertices.is_empty());
     }

@@ -829,9 +829,10 @@ mod tests {
             remote.logged_in = true;
             remote.entity_id = 7;
             remote.profile = 42;
-            game.common.player = Some(
-                sunrise_sim::motion::PlayerMotion::new(game.common.motion, Position::ZERO).unwrap(),
-            );
+            game.common.player = Some(sunrise_sim::motion::PlayerMotion::new(
+                game.common.motion,
+                Position::ZERO,
+            ));
             game.spawn_entity(15, DRAGON, [0.0; 3], [0.0; 3]);
             let tracked = game.entity(15).expect("tracked dragon handle");
             let part = game.entity(16).expect("dragon part handle");

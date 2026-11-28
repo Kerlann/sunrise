@@ -824,6 +824,55 @@ pub struct Graphics {
     /// not `shaderPack`, which versions before the clean-room rewrite saved and which stays
     /// ignored.
     pub shader_pack: String,
+    /// Iris compatibility (Sunrise Settings › Shaders), by the pack's file or folder name in
+    /// `shaderpacks/`, for the packs where the player chose On or Off; any other pack is on
+    /// Auto. Kept by name, apart from the pack's own options and profiles, so a pack replaced
+    /// under the same name keeps it. Each is a `shaderPackIrisCompat:<on|off>:<name>` line.
+    pub iris_compat: std::collections::BTreeMap<String, IrisCompat>,
+}
+
+/// Whether a shader pack gets `IS_IRIS` and `IRIS_VERSION`, the macros that select its Iris path
+/// (decision D-8 in docs/cleanroom/).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IrisCompat {
+    /// When its programs test them (`sunrise_shaders::asks_for_identity`).
+    #[default]
+    Auto,
+    On,
+    Off,
+}
+
+impl IrisCompat {
+    /// The mode after this one, as the switch steps it (before it with `back`).
+    pub fn step(self, back: bool) -> Self {
+        match (self, back) {
+            (Self::Auto, false) | (Self::Off, true) => Self::On,
+            (Self::On, false) | (Self::Auto, true) => Self::Off,
+            (Self::Off, false) | (Self::On, true) => Self::Auto,
+        }
+    }
+    /// Its word in `sunrise-graphics.txt`; Auto is never written.
+    fn key(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+}
+
+impl Graphics {
+    /// The Iris compatibility chosen for pack `name`.
+    pub fn iris_compat_of(&self, name: &str) -> IrisCompat {
+        self.iris_compat.get(name).copied().unwrap_or_default()
+    }
+    /// Chooses `mode` for pack `name`; Auto forgets the choice.
+    pub fn set_iris_compat(&mut self, name: &str, mode: IrisCompat) {
+        match mode {
+            IrisCompat::Auto => _ = self.iris_compat.remove(name),
+            mode => _ = self.iris_compat.insert(name.to_owned(), mode),
+        }
+    }
 }
 impl Default for Graphics {
     fn default() -> Self {
@@ -879,6 +928,7 @@ impl Default for Graphics {
             translucent_batching: true,
             hdr_smooth_gradients: true,
             shader_pack: String::new(),
+            iris_compat: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -1049,6 +1099,18 @@ impl Graphics {
                 "hdrSmoothGradients" => g.hdr_smooth_gradients = flag(g.hdr_smooth_gradients),
                 "graphicsApi" => g.api = GraphicsApi::from_name(value).unwrap_or_default(),
                 "pickedShaderPack" => g.shader_pack = value.to_owned(),
+                // The mode, then the pack's name, which may hold `:` itself; a later line wins.
+                "shaderPackIrisCompat" => {
+                    let (mode, name) = value.split_once(':').unwrap_or((value, ""));
+                    let mode = match mode {
+                        "on" => IrisCompat::On,
+                        "off" => IrisCompat::Off,
+                        _ => continue,
+                    };
+                    if !name.is_empty() {
+                        g.set_iris_compat(name, mode);
+                    }
+                }
                 // Keys older versions saved that no setting or store reads: dropped on the next save.
                 "level" | "shaderPack" | "hdrKey" | "cullLeaves" | "translucentBatching" => {}
                 key => g.unclaimed.push((key.to_owned(), value.to_owned())),
@@ -1139,6 +1201,9 @@ impl Graphics {
         );
         if let Some(driver) = &self.hdr_failed_start {
             text += &format!("hdrFailedStart:{driver}\n");
+        }
+        for (name, mode) in &self.iris_compat {
+            text += &format!("shaderPackIrisCompat:{}:{name}\n", mode.key());
         }
         text
     }
@@ -1503,6 +1568,11 @@ mod tests {
             translucent_batching: false,
             hdr_smooth_gradients: false,
             shader_pack: "Golden Hour".into(),
+            iris_compat: [
+                ("Golden Hour".to_owned(), IrisCompat::Off),
+                ("Dawn: v2.zip".to_owned(), IrisCompat::On),
+            ]
+            .into(),
         };
         assert_eq!(Graphics::parse(&g.serialize()), g);
         // A legacy marker's hold, which names no driver, round-trips too; none writes no line.
@@ -1648,6 +1718,49 @@ mod tests {
                 "workers:abc\nsky:maybe\ncullLeaves:true\nentityCulling:maybe\nleafCulling:maybe\n"
             ),
             Graphics::default()
+        );
+    }
+
+    /// Iris compatibility is kept by pack name, one line each: a name with `:` in it, a
+    /// later line over an earlier one, and Auto chosen again forgets the pack; an unknown mode
+    /// or a line without a name is ignored. Nothing is written while every pack is on Auto.
+    #[test]
+    fn iris_compatibility_is_kept_by_pack_name() {
+        let g = Graphics::parse(
+            "shaderPackIrisCompat:off:A.zip\nshaderPackIrisCompat:on:B: v2\n\
+             shaderPackIrisCompat:on:A.zip\nshaderPackIrisCompat:maybe:C\n\
+             shaderPackIrisCompat:off\nshaderPackIrisCompat:auto:D\n",
+        );
+        assert_eq!(
+            g.iris_compat,
+            [
+                ("A.zip".to_owned(), IrisCompat::On),
+                ("B: v2".to_owned(), IrisCompat::On),
+            ]
+            .into()
+        );
+        assert!(g.unclaimed.is_empty(), "{:?}", g.unclaimed);
+        assert_eq!(g.iris_compat_of("C"), IrisCompat::Auto);
+        let mut g = g;
+        g.set_iris_compat("B: v2", IrisCompat::Off);
+        g.set_iris_compat("A.zip", IrisCompat::Auto);
+        let text = g.serialize();
+        assert!(
+            text.contains("\nshaderPackIrisCompat:off:B: v2\n"),
+            "{text}"
+        );
+        assert!(!text.contains("A.zip"), "{text}");
+        assert_eq!(Graphics::parse(&text).iris_compat, g.iris_compat);
+        assert!(!Graphics::default().serialize().contains("IrisCompat"));
+        // The switch steps Auto, On, Off and back round.
+        let steps: Vec<_> = std::iter::successors(Some(IrisCompat::Auto), |m| Some(m.step(false)))
+            .take(4)
+            .collect();
+        use IrisCompat::{Auto, Off, On};
+        assert_eq!(steps, [Auto, On, Off, Auto]);
+        assert_eq!(
+            (Auto.step(true), Off.step(true), On.step(true)),
+            (Off, On, Auto)
         );
     }
 

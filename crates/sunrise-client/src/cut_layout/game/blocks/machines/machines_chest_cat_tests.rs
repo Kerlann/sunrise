@@ -36,9 +36,10 @@ fn game<'a>(
                 .unwrap();
         }
     }
-    game.player = Some(
-        sunrise_sim::motion::PlayerMotion::new(game.motion, Vec3::new(8.5, 64.0, 8.5)).unwrap(),
-    );
+    game.player = Some(sunrise_sim::motion::PlayerMotion::new(
+        game.motion,
+        Vec3::new(8.5, 64.0, 8.5),
+    ));
     for command in [
         "forceload add 0 0",
         "fill 0 63 0 15 63 15 stone",

@@ -1090,7 +1090,7 @@ fn run_test_world(
         registry,
         facts,
         fluid_tables: &motion.fluids,
-        attributes: &motion.attributes,
+        attributes: motion.attributes(),
         movement: &motion.blocks,
         collision,
         suffocation,

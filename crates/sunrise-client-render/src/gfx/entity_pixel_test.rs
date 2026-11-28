@@ -1246,6 +1246,7 @@ fn render_pack_with(
         &screen,
         &probe_frame(&hud),
         &Default::default(),
+        Default::default(),
         [SIZE; 2],
         [SIZE; 2],
         &[],

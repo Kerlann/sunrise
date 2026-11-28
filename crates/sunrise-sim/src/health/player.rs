@@ -2,7 +2,8 @@
 #[derive(Clone)]
 pub struct HealthResources {
     pub damage: Catalog,
-    pub ids: PlayerFloatIds,
+    ids: PlayerFloatIds,
+    initial_floats: SyncedFloats,
 }
 impl HealthResources {
     pub fn load(root: &Path) -> Result<Self> {
@@ -14,15 +15,31 @@ impl HealthResources {
         root: &Path,
         conditions: &sunrise_world::conditions::LoadConditions,
     ) -> Result<Self> {
-        let read = |name: &str| -> Result<serde_json::Value> {
-            Ok(serde_json::from_slice(&fs::read(root.join(name))?)?)
-        };
-        let ids = read("player-float-ids.json")?;
+        let float_schema = root.join("player-float-ids.json");
+        let ids: serde_json::Value = sunrise_world::json_file::read(&float_schema)?;
         let id = |name: &str| -> Result<u8> {
-            Ok(u8::try_from(
-                ids[name].as_u64().ok_or("missing player float ID")?,
-            )?)
+            ids[name]
+                .as_u64()
+                .and_then(|id| u8::try_from(id).ok())
+                .ok_or_else(|| {
+                    format!("{}: invalid or missing {name} ID", float_schema.display()).into()
+                })
         };
+        let ids = PlayerFloatIds {
+            health: id("health")?,
+            absorption: id("absorption")?,
+        };
+        let initial_floats = SyncedFloats::new(&[
+            FloatValue {
+                id: ids.health,
+                value: 1.0,
+            },
+            FloatValue {
+                id: ids.absorption,
+                value: 0.0,
+            },
+        ])
+        .map_err(|error| format!("{}: {error}", float_schema.display()))?;
         let damage = Catalog::load(
             root,
             &sunrise_world::loot::PackOverlay {
@@ -37,10 +54,8 @@ impl HealthResources {
         }
         Ok(Self {
             damage,
-            ids: PlayerFloatIds {
-                health: id("health")?,
-                absorption: id("absorption")?,
-            },
+            ids,
+            initial_floats,
         })
     }
     /// A world's frozen damage registry at open, or reloaded tags against
@@ -58,6 +73,7 @@ impl HealthResources {
                 Catalog::load(root, overlay)?
             },
             ids: self.ids,
+            initial_floats: self.initial_floats.clone(),
         })
     }
     pub fn landing_source(&self, source: LandingDamage) -> DamageTypeId {
@@ -204,35 +220,18 @@ pub struct PlayerHealth {
     pub last_hurt_mob: Option<(u32, i32)>,
 }
 impl PlayerHealth {
-    pub fn new(resources: &HealthResources, attributes: &mut Attributes) -> Result<Self> {
-        let ids = resources.ids;
-        let mut data = SyncedFloats::new(&[
-            FloatValue {
-                id: ids.health,
-                value: 1.0,
-            },
-            FloatValue {
-                id: ids.absorption,
-                value: 0.0,
-            },
-        ])?;
-        let mut ignored = Vec::new();
-        let mut observer = Updates(&mut ignored);
-        let maximum = attributes
-            .key("minecraft:max_health")
-            .ok_or("missing max health")?;
-        let maximum = attributes
-            .value(
-                Some(maximum),
-                sunrise_world::attribute_map::ValueKind::Computed,
-            )
-            .map_err(|e| io::Error::other(format!("health attribute: {e:?}")))?
-            as f32;
-        PlayerAttributeHealth::new(attributes, &mut data, ids, false, &mut observer)?
-            .set_health(maximum)?;
+    pub(crate) fn initial(resources: &HealthResources, maximum: f32) -> Result<Self> {
+        let mut data = resources.initial_floats.clone();
+        // Keep the initial synchronized update's dirty and non-default state.
+        data.set(
+            resources.ids.health,
+            sunrise_world::living_health::clamp(maximum, maximum),
+            false,
+            &mut Updates(&mut Vec::new()),
+        )?;
         Ok(Self {
             data,
-            ids,
+            ids: resources.ids,
             food: FoodData::default(),
             hurt: HurtState {
                 no_action_time: 0,

@@ -53,8 +53,7 @@ pub(crate) mod tests {
         super::super::native_guest_turn_tests::with_guests(|game| {
             // A player whose file was saved 7 ticks into its cooldown, before its first body.
             let body =
-                sunrise_sim::motion::PlayerMotion::new(game.motion, Vec3::new(0.5, 64.0, 0.5))
-                    .unwrap();
+                sunrise_sim::motion::PlayerMotion::new(game.motion, Vec3::new(0.5, 64.0, 0.5));
             game.server.lan.as_mut().unwrap().hub.update_guest(12, |g| {
                 g.motion = None;
                 g.loaded_body = Some(sunrise_sim::lan::guest::SavedBody::of(&body));
@@ -107,13 +106,10 @@ pub(crate) mod tests {
                     g.sleeping = sleeping;
                     g.vehicle = riding.then_some(99);
                     g.motion = body.then(|| {
-                        Box::new(
-                            sunrise_sim::motion::PlayerMotion::new(
-                                game.common.motion,
-                                Vec3::new(3.5, 64.0, 5.5),
-                            )
-                            .unwrap(),
-                        )
+                        Box::new(sunrise_sim::motion::PlayerMotion::new(
+                            game.common.motion,
+                            Vec3::new(3.5, 64.0, 5.5),
+                        ))
                     });
                     if dead {
                         g.motion.as_mut().unwrap().set_health(0.0, false).unwrap();
@@ -138,13 +134,10 @@ pub(crate) mod tests {
             game.server.lan.as_mut().unwrap().hub.update_guest(12, |g| {
                 g.sleeping = false;
                 g.vehicle = Some(99);
-                g.motion = Some(Box::new(
-                    sunrise_sim::motion::PlayerMotion::new(
-                        game.common.motion,
-                        Vec3::new(3.5, 64.0, 5.5),
-                    )
-                    .unwrap(),
-                ));
+                g.motion = Some(Box::new(sunrise_sim::motion::PlayerMotion::new(
+                    game.common.motion,
+                    Vec3::new(3.5, 64.0, 5.5),
+                )));
             });
             let threshold = game
                 .ui
@@ -193,13 +186,10 @@ pub(crate) mod tests {
                 game.world.set(3, 64, 5, portal).unwrap();
                 game.server.lan.as_mut().unwrap().hub.update_guest(12, |g| {
                     g.position = [3.5, 64.0, 5.5];
-                    g.motion = Some(Box::new(
-                        sunrise_sim::motion::PlayerMotion::new(
-                            game.common.motion,
-                            Vec3::new(3.5, 64.0, 5.5),
-                        )
-                        .unwrap(),
-                    ));
+                    g.motion = Some(Box::new(sunrise_sim::motion::PlayerMotion::new(
+                        game.common.motion,
+                        Vec3::new(3.5, 64.0, 5.5),
+                    )));
                 });
                 // A survival player whose wait reaches the portal's transition time this tick.
                 let threshold = game.ui.rules.int_at(

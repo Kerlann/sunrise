@@ -673,7 +673,7 @@ pub(crate) mod tests {
             ));
             std::fs::create_dir_all(&scratch).unwrap();
             game.server.world_root = scratch.clone();
-            game.player = Some(PlayerMotion::new(game.motion, Vec3::new(4.5, 62.0, 4.5)).unwrap());
+            game.player = Some(PlayerMotion::new(game.motion, Vec3::new(4.5, 62.0, 4.5)));
             game.player.as_mut().unwrap().ground.on_ground = true;
             game.creative = false;
             game.build_registries();
@@ -1769,8 +1769,7 @@ pub(crate) mod tests {
             let motion = sunrise_sim::motion::PlayerMotion::new(
                 game.motion,
                 sunrise_core::geometry::Vec3::new(3.0, 64.0, 5.0),
-            )
-            .unwrap();
+            );
             game.server
                 .lan
                 .as_mut()
@@ -2115,6 +2114,71 @@ pub(crate) mod tests {
         });
     }
 
+    /// A fake player takes the next ID from the shared counter whatever its top bit (#6374):
+    /// one created just past `i32::MAX` holds the full ID and its UUID, is found again by the
+    /// same call, and is not listed as an online player.
+    #[test]
+    #[ignore = "daily"]
+    fn a_fake_player_takes_an_id_past_the_signed_boundary() {
+        use sunrise_sim::lan::{NetConfig, hub::HubConfig};
+        with_game(|game| {
+            let config = HubConfig {
+                default_game_mode: 0,
+                guest_commands: false,
+                force_game_mode: false,
+                hardcore: false,
+                view_distance: 10,
+                simulation_distance: 10,
+                dimension: "minecraft:overworld".into(),
+                allow_flight: false,
+                seed: 0,
+                max_players: 20,
+                integrated: false,
+                levels: Default::default(),
+                level_seeds: Default::default(),
+            };
+            game.lan_host(
+                sunrise_gameplay::game::server_side::lan::LanSettings {
+                    port: 0,
+                    guest_commands: false,
+                    force_game_mode: false,
+                },
+                NetConfig {
+                    announce: false,
+                    ..NetConfig::lan(0, "boundary".into(), 2)
+                },
+                config,
+            )
+            .unwrap();
+            game.server.next_entity = 0x7FFF_FFFF;
+            let level = game.level(game.dim.id()).unwrap();
+            let made = game.fake_player(level, 4321, "boundary").unwrap();
+            assert_eq!(made.entity().id(), 0x8000_0000);
+            assert_eq!(made.uuid(), 4321);
+            assert_eq!(game.server.next_entity, 0x8000_0000);
+            // The same call finds the same fake again.
+            assert_eq!(game.fake_player(level, 4321, "boundary"), Some(made));
+            assert_eq!(game.server.next_entity, 0x8000_0000);
+            let guest = game
+                .server
+                .lan
+                .as_ref()
+                .unwrap()
+                .hub
+                .guests
+                .iter()
+                .find(|g| g.uuid == 4321)
+                .unwrap();
+            assert_eq!(guest.entity_id as u32, 0x8000_0000);
+            assert!(!guest.participates_online());
+            assert_eq!(game.player_is_fake(made), Some(true));
+            assert!(
+                game.player(4321).is_none(),
+                "a fake is not an online player"
+            );
+        });
+    }
+
     #[test]
     #[ignore = "daily"]
     fn connectionless_guest_has_no_transport() {
@@ -2178,7 +2242,7 @@ pub(crate) mod tests {
                         .loop_context(sunrise_world::native_load_context::LoopSide::Server, []),
                 ),
             );
-            let motion = PlayerMotion::new(game.motion, Vec3::ZERO).unwrap();
+            let motion = PlayerMotion::new(game.motion, Vec3::ZERO);
             let fake = Guest::connectionless(fake_id, 2, "fake".into(), 2, [0.0; 3], motion);
             assert!(fake.placed && fake.motion.is_some());
             assert!(fake.loaded && fake.client_loaded());
@@ -4855,8 +4919,7 @@ pub(crate) mod tests {
             remote.logged_in = true;
             remote.entity_id = 7;
             remote.profile = 42;
-            let mut local =
-                sunrise_sim::motion::PlayerMotion::new(game.motion, Vec3::ZERO).unwrap();
+            let mut local = sunrise_sim::motion::PlayerMotion::new(game.motion, Vec3::ZERO);
             local.entity_id = 7;
             game.player = Some(local);
             game.spawn_entity(15, "minecraft:pig", [2.0, 0.0, 0.0], [0.0; 3]);
@@ -4941,8 +5004,7 @@ pub(crate) mod tests {
                 .unwrap()
                 .id("minecraft:player")
                 .unwrap();
-            let mut local =
-                sunrise_sim::motion::PlayerMotion::new(game.motion, Vec3::ZERO).unwrap();
+            let mut local = sunrise_sim::motion::PlayerMotion::new(game.motion, Vec3::ZERO);
             local.entity_id = 7;
             game.player = Some(local);
             game.spawn_entity(15, "minecraft:pig", [2.0, 0.0, 0.0], [0.0; 3]);
@@ -5026,8 +5088,7 @@ pub(crate) mod tests {
             remote.logged_in = true;
             remote.entity_id = 7;
             remote.profile = 42;
-            let mut local =
-                sunrise_sim::motion::PlayerMotion::new(game.motion, Vec3::ZERO).unwrap();
+            let mut local = sunrise_sim::motion::PlayerMotion::new(game.motion, Vec3::ZERO);
             local.entity_id = 7;
             game.player = Some(local);
             game.spawn_entity(15, "minecraft:pig", [2.0, 0.0, 0.0], [0.0; 3]);

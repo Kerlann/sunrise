@@ -200,7 +200,7 @@ pub(crate) fn setup_game<'a>(
     let mut game = sunrise_gameplay::game::game_tests::tests::server_game(resources);
     game.options.dedicated = None;
     let mut player =
-        sunrise_sim::motion::PlayerMotion::new(game.motion, Vec3::new(4.5, 64.0, 17.5)).unwrap();
+        sunrise_sim::motion::PlayerMotion::new(game.motion, Vec3::new(4.5, 64.0, 17.5));
     player.client_loaded = true;
     game.player = Some(player);
     sunrise_gameplay::game::native_entity_refs::tests::bind_local_player(

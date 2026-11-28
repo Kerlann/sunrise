@@ -743,7 +743,7 @@ fn step_on_edits_grounded_bodies_before_inside_effects_and_settle() {
                     assert!(clear_calls().is_empty());
 
                     let position = Vec3::new(4.5, 64.0, 4.5);
-                    let mut player = PlayerMotion::new(game.motion, position).unwrap();
+                    let mut player = PlayerMotion::new(game.motion, position);
                     player.entity_id = 77;
                     player.ground.on_ground = true;
                     player.shift_key_down = true;
@@ -829,7 +829,7 @@ fn step_on_edits_grounded_bodies_before_inside_effects_and_settle() {
                     };
                     let seat = Vec3::new(8.5, 64.0, 4.5);
                     game.world.set(8, 63, 4, stone).unwrap();
-                    game.player = Some(PlayerMotion::new(game.motion, seat).unwrap());
+                    game.player = Some(PlayerMotion::new(game.motion, seat));
                     bind_local_player(game, 80, 1);
                     game.server.lan_acting = Some(2);
                     game.server.lan_acting_name = Some("boat_step".into());
@@ -1487,7 +1487,7 @@ fn contact_hurt_uses_the_player_creative_and_frost_walker_bypass_tag() {
                     game.server_items = Some(Arc::new(items));
                     let resources = game.motion;
                     let new_player = || {
-                        let mut player = PlayerMotion::new(resources, at).unwrap();
+                        let mut player = PlayerMotion::new(resources, at);
                         player.ground.on_ground = true;
                         player.invulnerable = creative;
                         player

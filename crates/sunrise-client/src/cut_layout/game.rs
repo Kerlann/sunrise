@@ -30,6 +30,9 @@ mod native_player_post_effects_tests;
 #[cfg(all(test, feature = "client"))]
 #[path = "game/interface/pack_layer_frame_tests.rs"]
 mod pack_layer_frame_tests;
+#[cfg(all(test, feature = "client"))]
+#[path = "game/interface/pack_tag_id_frame_tests.rs"]
+mod pack_tag_id_frame_tests;
 #[cfg(test)]
 #[path = "game/modding/quiet_write_tests.rs"]
 mod quiet_write_tests;

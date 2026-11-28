@@ -268,7 +268,11 @@ pub trait BlockEntityDrawContext {
     }
     /// Keeps what this call drew, with neither `block_entity_submit` nor
     /// `block_entity_render_bounding_box` called until its state, block entity,
-    /// light or resource packs change. Parts marked with `spin` keep turning on the
+    /// light, resource packs or the font's glyph cache change. A kept draw not drawn
+    /// for 100 ticks is dropped, and the next frame that draws the block submits it
+    /// again. A draw that fills the frame's entity quad batch is not kept (it may have
+    /// been cut short; a later frame with room extracts it again), even when it fits
+    /// exactly. Parts marked with `spin` keep turning on the
     /// animation clock (`animation_time`); other geometry stays as submitted. Do not bake frame-dependent
     /// values into kept vertices: item glint and time-dependent item models stop
     /// where they were, and neighboring blocks do not invalidate the cache.
@@ -403,7 +407,7 @@ pub trait BlockEntityDrawContext {
     /// false, appending nothing, when `render_type` is not one of the three texture-taking
     /// built-ins or is stale, when no dynamic texture named by it is live, when a corner or UV
     /// is not finite, when the frame's batch has no room for the quad, or in a first-person hand
-    /// draw. It never panics.
+    /// or arm draw (`render_hand`, `render_arm`). It never panics.
     fn textured_quad(
         &mut self,
         render_type: RenderTypeRef,

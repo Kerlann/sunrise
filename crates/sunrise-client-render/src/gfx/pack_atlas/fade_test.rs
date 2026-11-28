@@ -47,7 +47,7 @@ fn terrain_fade_reaches_pack_pixels_through_real_instances() {
     );
     std::fs::create_dir_all(folder.0.join("shaders")).unwrap();
     // The initializer, varying and integer output are independent probe code. The program reads
-    // `mc_chunkFade` unguarded: Sunrise defines no `IRIS_FEATURE_*` (spec OQ-2).
+    // `mc_chunkFade` unguarded, so the same program runs whether the pack lists the flag or not.
     let vertex = "#version 330\nout vec4 observation;\n\
         float first = mc_chunkFade;\n\
         void main() {\n\
