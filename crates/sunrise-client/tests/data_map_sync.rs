@@ -222,7 +222,7 @@ fn join_spanning_reload_resends_current_tags_before_data_maps() {
         registry: "minecraft:item".into(),
         tags: vec![TagEntry {
             name: "test:fuels".into(),
-            entries: vec![1],
+            ids: vec![1],
         }],
     });
     let mut initial_maps = BTreeMap::new();
@@ -282,7 +282,7 @@ fn join_spanning_reload_resends_current_tags_before_data_maps() {
         registry: "minecraft:item".into(),
         tags: vec![TagEntry {
             name: "test:fuels".into(),
-            entries: vec![1, 2],
+            ids: vec![1, 2],
         }],
     });
     host.hub.sync = Arc::new(reloaded_sync);
@@ -318,7 +318,7 @@ fn join_spanning_reload_resends_current_tags_before_data_maps() {
                                 && reg
                                     .tags
                                     .iter()
-                                    .any(|t| t.name == "test:fuels" && t.entries == vec![1, 2])
+                                    .any(|t| t.name == "test:fuels" && t.ids == vec![1, 2])
                         }) {
                             saw_reloaded_tags = true;
                         }

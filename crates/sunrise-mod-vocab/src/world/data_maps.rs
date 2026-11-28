@@ -1040,7 +1040,11 @@ mod tests {
     #[test]
     fn panic_poison_keys_by_registry_and_map_id() {
         struct EmptyHooks;
-        impl crate::Hooks for EmptyHooks {}
+        impl crate::Hooks for EmptyHooks {
+            fn subscribed(&self) -> &'static [Option<crate::HookId>] {
+                &[]
+            }
+        }
 
         let previous = crate::runtime::TEST_MODS.get();
         let _ = crate::runtime::install(Arc::from([crate::runtime::ModEntry::new(
@@ -1107,7 +1111,11 @@ mod tests {
         use std::sync::atomic::AtomicUsize;
 
         struct EmptyHooks;
-        impl crate::Hooks for EmptyHooks {}
+        impl crate::Hooks for EmptyHooks {
+            fn subscribed(&self) -> &'static [Option<crate::HookId>] {
+                &[]
+            }
+        }
 
         let previous = crate::runtime::TEST_MODS.get();
         let _ = crate::runtime::install(Arc::from([crate::runtime::ModEntry::new(

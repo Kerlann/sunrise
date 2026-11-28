@@ -647,17 +647,14 @@ fn two_separately_built_mods_share_data_maps_mergers_and_load_conditions() {
     hello.extend_from_slice(&0x0001_0002_0003_0004_0005_0006_0007_0008u128.to_be_bytes());
     send_packet(&mut stream, 0, &hello);
 
-    loop {
-        let (id, _payload) = recv_packet(&mut stream);
-        match id {
-            2 => {
-                // LoginFinished -> LoginAcknowledged (3)
-                send_packet(&mut stream, 3, &[]);
-                break;
-            }
-            0 => panic!("login disconnected by server"),
-            other => panic!("unexpected login packet id {other}"),
+    let (id, _payload) = recv_packet(&mut stream);
+    match id {
+        2 => {
+            // LoginFinished -> LoginAcknowledged (3)
+            send_packet(&mut stream, 3, &[]);
         }
+        0 => panic!("login disconnected by server"),
+        other => panic!("unexpected login packet id {other}"),
     }
 
     // Configuration: send ClientInformation + minecraft:brand("sunrise").
