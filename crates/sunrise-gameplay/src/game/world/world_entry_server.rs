@@ -1003,12 +1003,17 @@ impl crate::game::ServerGame<'_> {
         let gameplay = Arc::new(sunrise_sim::patrol::GameplayAttributes::load(
             root, &overlay,
         )?);
+        let table = &self.common.res.behaviours().table;
+        let block_id = |block: &str| table.block_by_name(block).map(|id| u32::from(id.0));
+        let block_maps =
+            crate::game::server_side::neoforge_block_maps::load(&overlay, &registries, block_id);
         let data_maps = DataMaps::load(
             mod_api::__private::installed_data_maps(),
             &overlay,
             &registries,
         )
         .with_builtins(builtin)
+        .with_block_maps(block_maps.as_deref())
         .with_biome_keys(mod_api::__private::BiomeKeys::new(
             next_biome_keys_session(),
             biomes.table.registered_keys().iter().cloned(),
@@ -1095,6 +1100,7 @@ impl crate::game::ServerGame<'_> {
                 stations,
                 reload_sources: reload.then_some(sources),
                 data_maps,
+                block_maps,
                 pack_tags: Arc::new(pack_tags),
                 gameplay,
                 test_environments,

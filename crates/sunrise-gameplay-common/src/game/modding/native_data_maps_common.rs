@@ -411,6 +411,21 @@ impl DataMaps {
         self
     }
 
+    /// Publish the resolved forward rows of NeoForge's built-in block maps (`neoforge:flammable`,
+    /// `neoforge:oxidizables`, `neoforge:waxables`) alongside the other built-in data maps so
+    /// server reads and `synced_snapshot` carry the real rows (or empty maps on removal).
+    pub fn with_block_maps(mut self, block_maps: Option<&sunrise_world::level::BlockMaps>) -> Self {
+        let by_block = self.maps.entry("minecraft:block".to_owned()).or_default();
+        let entries = block_maps.map_or_else(
+            sunrise_world::level::BlockMaps::empty_nbt_maps,
+            sunrise_world::level::BlockMaps::nbt_maps,
+        );
+        for (id, values) in entries {
+            by_block.insert(id.to_owned(), values);
+        }
+        self
+    }
+
     /// The registries with a loaded type, in id order: what `data_maps_updated` names.
     pub fn registries(&self) -> Vec<String> {
         self.maps.keys().cloned().collect()
