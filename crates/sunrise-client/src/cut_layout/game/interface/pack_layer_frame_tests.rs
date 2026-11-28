@@ -3,6 +3,7 @@ use std::sync::Arc;
 use sunrise_client_gameplay::game::ClientGame;
 use sunrise_client_gameplay::game::native_hooks::particle_count_tests::frame_scene;
 use sunrise_client_render::gfx::ScreenshotRequest;
+use sunrise_client_render::graphics::IrisCompat;
 use sunrise_gameplay_common::game::test_fixtures::run_fresh_cases;
 use sunrise_gameplay_common::game::{Screen, tables::GameItems as _};
 use sunrise_shaders::RenderLayer;
@@ -227,8 +228,14 @@ fn terrain_layer_rule_frames(name: &str, flat: bool) {
             assert!(pixel != RED && pixel != GREEN, "{native:?}");
         }
 
-        game.client.settings.sunrise.shader_pack = pack.to_str().unwrap().to_owned();
-
+        let pack_name = pack.to_str().unwrap();
+        // This pack uses no identity macros. Skip Auto's scan so this frame starts the pipeline
+        // build and sections can settle before a later frame installs the pipelines.
+        game.client
+            .settings
+            .sunrise
+            .set_iris_compat(pack_name, IrisCompat::Off);
+        game.client.settings.sunrise.shader_pack = pack_name.to_owned();
         drawn_frame(game);
         assert!(game.client.pack_ids.is_some(), "the pack loads");
         settle(game);
