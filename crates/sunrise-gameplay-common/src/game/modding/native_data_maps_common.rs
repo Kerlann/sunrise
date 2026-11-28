@@ -287,14 +287,20 @@ pub fn load_maps<V: Clone, R>(
         let map = data_map_files::load_registered(
             reg.id(),
             registry,
-            reg.supports_tags(),
             overlay,
-            |tag| registries.tag(registry, tag),
-            |raw| decode_entry_wrapper(raw, &|v| decode_value(map_id, v)),
-            |rem| decode_remover(map_id, rem),
-            |entry| registries.contains(registry, entry),
-            |entry, existing, incoming| merge(reg, entry, existing, incoming),
-            |entry, existing, remover| remove_partial(reg, entry, existing, remover),
+            data_map_files::LayerCodecs {
+                decode_value: |raw| decode_entry_wrapper(raw, &|v| decode_value(map_id, v)),
+                decode_remover: |rem| decode_remover(map_id, rem),
+            },
+            data_map_files::LayerPolicy {
+                supports_tags: reg.supports_tags(),
+                tags: |tag| registries.tag(registry, tag),
+                known: |entry| registries.contains(registry, entry),
+                merge: |entry, existing, incoming| merge(reg, entry, existing, incoming),
+                remove_partial: |entry, existing, remover| {
+                    remove_partial(reg, entry, existing, remover)
+                },
+            },
         );
         by_map.insert(map_id.to_owned(), map);
     }

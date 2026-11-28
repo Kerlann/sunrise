@@ -3,38 +3,6 @@
 use super::*;
 use crate::{Identifier, LoadCondition};
 
-/// Built-in `neoforge:*` condition paths (`sunrise_world::conditions::BuiltinCondition`).
-const BUILTIN_NEOFORGE_CONDITIONS: &[&str] = &[
-    "mod_loaded",
-    "always",
-    "never",
-    "feature_flags_enabled",
-    "registered",
-    "tag_empty",
-    "not",
-    "and",
-    "or",
-];
-
-/// Built-in `fabric:*` condition paths (`sunrise_world::conditions::FABRIC_BUILTINS`).
-const BUILTIN_FABRIC_CONDITIONS: &[&str] = &[
-    "true",
-    "false",
-    "not",
-    "and",
-    "or",
-    "all_mods_loaded",
-    "any_mods_loaded",
-    "tags_populated",
-    "features_enabled",
-    "registry_contains",
-];
-
-fn is_builtin_condition(id: &Identifier) -> bool {
-    (id.namespace() == "neoforge" && BUILTIN_NEOFORGE_CONDITIONS.contains(&id.path()))
-        || (id.namespace() == "fabric" && BUILTIN_FABRIC_CONDITIONS.contains(&id.path()))
-}
-
 impl LoadConditionsRegistrar for PartRegistrar {
     fn register_load_condition_erased(&mut self, id: &str, condition: Box<dyn LoadCondition>) {
         let Some(parsed) = Identifier::parse_namespaced(id) else {
@@ -44,7 +12,7 @@ impl LoadConditionsRegistrar for PartRegistrar {
             ));
             return;
         };
-        if is_builtin_condition(&parsed) {
+        if mod_vocab::__private::is_builtin_condition(&parsed) {
             self.refused.push(format!(
                 "mod {} cannot register condition {parsed}: that ID is built in",
                 self.mod_id

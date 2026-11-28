@@ -150,23 +150,21 @@ impl<T: Clone, R> File<T, R> {
             );
         }
     }
+}
 
-    fn apply<I: IntoIterator<Item: AsRef<str>>>(
-        self,
-        map: &mut BTreeMap<String, T>,
-        tags: &impl Fn(&str) -> I,
-        known: impl Fn(&str) -> bool,
-        context: &str,
-    ) {
-        self.apply_with_hooks(
-            map,
-            tags,
-            known,
-            &|_, _, incoming| Ok(incoming.clone()),
-            &|_, _, _| Err("data map does not support partial removers".into()),
-            context,
-        );
-    }
+/// Tag resolution, membership, and merge/removal hooks shared by one pack-layer walk.
+pub struct LayerPolicy<FT, FK, FM, FR> {
+    pub supports_tags: bool,
+    pub tags: FT,
+    pub known: FK,
+    pub merge: FM,
+    pub remove_partial: FR,
+}
+
+/// Value and partial-remover decoders for `load_registered`.
+pub struct LayerCodecs<FV, FR> {
+    pub decode_value: FV,
+    pub decode_remover: FR,
 }
 
 pub fn entry_value(raw: &Value) -> Result<&Value, String> {
@@ -262,17 +260,21 @@ fn decode_with_removers<T, R, V: DeserializeOwned>(
     })
 }
 
-/// Pack-order loading shared by raw mod maps and typed builtin codecs. Each
-/// value decodes before target membership, so even an unknown target cannot
-/// conceal a bad value and allow the rest of that file to apply.
-fn merge_versions<T: Clone, I: IntoIterator<Item: AsRef<str>>>(
+/// Pack-order loading shared by raw mod maps, registered maps, and typed builtin codecs.
+/// Each value decodes before target membership, so even an unknown target cannot conceal a
+/// bad value and allow the rest of that file to apply.
+fn merge_versions<T: Clone, R, I: IntoIterator<Item: AsRef<str>>>(
     id: &Identifier,
     registry: &str,
     mut map: BTreeMap<String, T>,
     overlay: &sunrise_world::loot::PackOverlay<'_>,
-    tags: impl Fn(&str) -> I,
-    prepare: impl Fn(&[u8], &str) -> Result<File<T>, String>,
-    known: impl Fn(&str) -> bool,
+    policy: LayerPolicy<
+        impl Fn(&str) -> I,
+        impl Fn(&str) -> bool,
+        impl Fn(&str, &T, &T) -> Result<T, String>,
+        impl Fn(&str, &T, &R) -> Result<Option<T>, String>,
+    >,
+    prepare: impl Fn(&[u8], &str) -> Result<File<T, R>, String>,
 ) -> (BTreeMap<String, T>, bool) {
     let (namespace, path) = (id.namespace(), id.path());
     let directory = folder(registry);
@@ -285,8 +287,18 @@ fn merge_versions<T: Clone, I: IntoIterator<Item: AsRef<str>>>(
                 layer + 1
             );
             match prepare(bytes, &source) {
-                Ok(file) => {
-                    file.apply(&mut map, &tags, &known, &source);
+                Ok(mut file) => {
+                    if !policy.supports_tags {
+                        file.filter_disallowed_tags(id, registry, &source);
+                    }
+                    file.apply_with_hooks(
+                        &mut map,
+                        &policy.tags,
+                        &policy.known,
+                        &policy.merge,
+                        &policy.remove_partial,
+                        &source,
+                    );
                     applied = true;
                 }
                 Err(error) => log::error!(
@@ -296,6 +308,24 @@ fn merge_versions<T: Clone, I: IntoIterator<Item: AsRef<str>>>(
         }
     }
     (map, applied)
+}
+
+fn default_policy<T: Clone, I: IntoIterator<Item: AsRef<str>>>(
+    tags: impl Fn(&str) -> I,
+    known: impl Fn(&str) -> bool,
+) -> LayerPolicy<
+    impl Fn(&str) -> I,
+    impl Fn(&str) -> bool,
+    impl Fn(&str, &T, &T) -> Result<T, String>,
+    impl Fn(&str, &T, &()) -> Result<Option<T>, String>,
+> {
+    LayerPolicy {
+        supports_tags: true,
+        tags,
+        known,
+        merge: |_, _, incoming: &T| Ok(incoming.clone()),
+        remove_partial: |_, _, _| Err("data map does not support partial removers".into()),
+    }
 }
 
 pub fn load<T: Clone, I: IntoIterator<Item: AsRef<str>>>(
@@ -312,7 +342,7 @@ pub fn load<T: Clone, I: IntoIterator<Item: AsRef<str>>>(
         registry,
         map,
         overlay,
-        tags,
+        default_policy(tags, known),
         |bytes, context| {
             decode(bytes, |mut raw: Value| {
                 // A value's own conditions are NeoForge's element conditions alone.
@@ -333,43 +363,40 @@ pub fn load<T: Clone, I: IntoIterator<Item: AsRef<str>>>(
                 value(&raw).map(Some)
             })
         },
-        known,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn load_registered<T: Clone, R, I: IntoIterator<Item: AsRef<str>>>(
     id: &Identifier,
     registry: &str,
-    supports_tags: bool,
     overlay: &sunrise_world::loot::PackOverlay<'_>,
-    tags: impl Fn(&str) -> I,
-    decode_value: impl Fn(&Value) -> Result<(bool, T), String>,
-    decode_remover: impl Fn(&Value) -> Result<R, String>,
-    known: impl Fn(&str) -> bool,
-    merge: impl Fn(&str, &T, &T) -> Result<T, String>,
-    remove_partial: impl Fn(&str, &T, &R) -> Result<Option<T>, String>,
+    codecs: LayerCodecs<
+        impl Fn(&Value) -> Result<(bool, T), String>,
+        impl Fn(&Value) -> Result<R, String>,
+    >,
+    policy: LayerPolicy<
+        impl Fn(&str) -> I,
+        impl Fn(&str) -> bool,
+        impl Fn(&str, &T, &T) -> Result<T, String>,
+        impl Fn(&str, &T, &R) -> Result<Option<T>, String>,
+    >,
 ) -> BTreeMap<String, T> {
-    let (namespace, path) = (id.namespace(), id.path());
-    let directory = folder(registry);
-    let wanted = format!("data_maps/{namespace}:{directory}/{path}");
-    let mut map = BTreeMap::new();
-    if let Some((_, versions)) = overlay.files.iter().find(|(key, _)| *key == wanted) {
-        for (layer, bytes) in versions.iter().enumerate() {
-            let source = format!(
-                "data/{namespace}/data_maps/{directory}/{path}.json (layer {})",
-                layer + 1
-            );
-            let prepared = decode_with_removers(
+    merge_versions(
+        id,
+        registry,
+        BTreeMap::new(),
+        overlay,
+        policy,
+        |bytes, source| {
+            decode_with_removers(
                 bytes,
                 |mut raw: Value| {
                     // A value's own conditions are NeoForge's element conditions alone.
                     const KEY: &str = sunrise_world::conditions::NEOFORGE_KEY;
                     if let Some(conditions) = raw.get(KEY)
-                        && !overlay.conditions.allows_file_isolated(
-                            &serde_json::json!({ KEY: conditions }),
-                            &source,
-                        )?
+                        && !overlay
+                            .conditions
+                            .allows_file_isolated(&serde_json::json!({ KEY: conditions }), source)?
                     {
                         return Ok(None);
                     }
@@ -379,31 +406,13 @@ pub fn load_registered<T: Clone, R, I: IntoIterator<Item: AsRef<str>>>(
                     {
                         raw = payload;
                     }
-                    decode_value(&raw).map(Some)
+                    (codecs.decode_value)(&raw).map(Some)
                 },
-                &decode_remover,
-            );
-            match prepared {
-                Ok(mut file) => {
-                    if !supports_tags {
-                        file.filter_disallowed_tags(id, registry, &source);
-                    }
-                    file.apply_with_hooks(
-                        &mut map,
-                        &tags,
-                        &known,
-                        &merge,
-                        &remove_partial,
-                        &source,
-                    );
-                }
-                Err(error) => log::error!(
-                    "Sunrise: data map {id} on {registry}: {source}: file skipped: {error}"
-                ),
-            }
-        }
-    }
-    map
+                &codecs.decode_remover,
+            )
+        },
+    )
+    .0
 }
 
 pub struct NumberCodec<F> {
@@ -447,7 +456,7 @@ pub fn load_numeric<T: Clone, I: IntoIterator<Item: AsRef<str>>>(
         registry,
         map,
         overlay,
-        tags,
+        default_policy(tags, known),
         |bytes, context| {
             decode(bytes, |raw: Box<RawValue>| {
                 let payload = if raw.get().trim_start().starts_with('{') {
@@ -470,7 +479,6 @@ pub fn load_numeric<T: Clone, I: IntoIterator<Item: AsRef<str>>>(
                 (codec.decode)(&payload).map(Some)
             })
         },
-        known,
     )
 }
 

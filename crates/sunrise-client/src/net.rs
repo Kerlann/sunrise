@@ -508,6 +508,20 @@ impl LocalInventory {
     }
 }
 
+struct StartRequest<'a> {
+    address: &'a str,
+    name: &'a str,
+    auth: Option<Arc<AuthSession>>,
+    info: cfg::ClientInformation,
+    lang: Arc<Language>,
+    local: Option<sunrise_protocol::connection::Pipe>,
+    transfer_from: Option<Cookies>,
+    resources: Arc<ItemData>,
+    reports: Arc<crate::chunk_io::Reports>,
+    inventory: LocalInventory,
+    lan: bool,
+}
+
 impl Session {
     /// A number of its own for each connection, never 0: entity ids are per connection, so what
     /// is kept by id goes when it changes.
@@ -525,9 +539,19 @@ impl Session {
         reports: Arc<crate::chunk_io::Reports>,
         inventory: LocalInventory,
     ) -> Self {
-        Self::start(
-            address, name, auth, info, lang, None, None, resources, reports, inventory, false,
-        )
+        Self::start(StartRequest {
+            address,
+            name,
+            auth,
+            info,
+            lang,
+            local: None,
+            transfer_from: None,
+            resources,
+            reports,
+            inventory,
+            lan: false,
+        })
     }
     /// `ClientHandshakePacketListenerImpl.handleHello`: LAN entries can continue
     /// after session authentication fails; the server still decides whether to admit them.
@@ -542,9 +566,19 @@ impl Session {
         reports: Arc<crate::chunk_io::Reports>,
         inventory: LocalInventory,
     ) -> Self {
-        Self::start(
-            address, name, auth, info, lang, None, None, resources, reports, inventory, true,
-        )
+        Self::start(StartRequest {
+            address,
+            name,
+            auth,
+            info,
+            lang,
+            local: None,
+            transfer_from: None,
+            resources,
+            reports,
+            inventory,
+            lan: true,
+        })
     }
     /// `ConnectScreen.startConnecting` for a `transfer`: the cookies the
     /// server stored carry to the new connection (`TransferState`).
@@ -559,19 +593,19 @@ impl Session {
         reports: Arc<crate::chunk_io::Reports>,
         inventory: LocalInventory,
     ) -> Self {
-        Self::start(
+        Self::start(StartRequest {
             address,
             name,
             auth,
             info,
             lang,
-            None,
-            Some(cookies),
+            local: None,
+            transfer_from: Some(cookies),
             resources,
             reports,
             inventory,
-            false,
-        )
+            lan: false,
+        })
     }
     /// Join an integrated server through memory (`Connection.connectToLocalServer`). The
     /// hello still names the signed-in account (`Minecraft.handleClientLogin`'s
@@ -587,19 +621,19 @@ impl Session {
         reports: Arc<crate::chunk_io::Reports>,
         inventory: LocalInventory,
     ) -> Self {
-        Self::start(
-            "local",
+        Self::start(StartRequest {
+            address: "local",
             name,
             auth,
             info,
             lang,
-            Some(pipe),
-            None,
+            local: Some(pipe),
+            transfer_from: None,
             resources,
             reports,
             inventory,
-            false,
-        )
+            lan: false,
+        })
     }
     /// A lightweight offline session without background network IO.
     pub fn replay(name: &str) -> Self {
@@ -622,20 +656,20 @@ impl Session {
             payload_output: std::sync::OnceLock::new(),
         }
     }
-    #[allow(clippy::too_many_arguments)]
-    fn start(
-        address: &str,
-        name: &str,
-        auth: Option<Arc<AuthSession>>,
-        info: cfg::ClientInformation,
-        lang: Arc<Language>,
-        local: Option<sunrise_protocol::connection::Pipe>,
-        transfer_from: Option<Cookies>,
-        resources: Arc<ItemData>,
-        reports: Arc<crate::chunk_io::Reports>,
-        inventory: LocalInventory,
-        lan: bool,
-    ) -> Self {
+    fn start(req: StartRequest<'_>) -> Self {
+        let StartRequest {
+            address,
+            name,
+            auth,
+            info,
+            lang,
+            local,
+            transfer_from,
+            resources,
+            reports,
+            inventory,
+            lan,
+        } = req;
         let (send, events) = event_channel();
         let payload_events = send.clone();
         let captured_payloads = crate::raw_payloads::Transport::capture(

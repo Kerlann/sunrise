@@ -24,6 +24,40 @@ impl dyn Registrar + '_ {
     }
 }
 
+/// Built-in `neoforge:*` condition paths (`sunrise_world::conditions::BuiltinCondition`).
+pub const BUILTIN_NEOFORGE_CONDITIONS: &[&str] = &[
+    "mod_loaded",
+    "always",
+    "never",
+    "feature_flags_enabled",
+    "registered",
+    "tag_empty",
+    "not",
+    "and",
+    "or",
+];
+
+/// Built-in `fabric:*` condition paths (`DefaultResourceConditionTypes`).
+pub const BUILTIN_FABRIC_CONDITIONS: &[&str] = &[
+    "true",
+    "false",
+    "not",
+    "and",
+    "or",
+    "all_mods_loaded",
+    "any_mods_loaded",
+    "tags_populated",
+    "features_enabled",
+    "registry_contains",
+];
+
+/// Whether `id` is a built-in NeoForge or Fabric load condition (single source of truth
+/// shared by startup registration validation and the world condition evaluator).
+pub fn is_builtin_condition(id: &crate::Identifier) -> bool {
+    (id.namespace() == "neoforge" && BUILTIN_NEOFORGE_CONDITIONS.contains(&id.path()))
+        || (id.namespace() == "fabric" && BUILTIN_FABRIC_CONDITIONS.contains(&id.path()))
+}
+
 /// All startup-frozen custom load conditions in the current installed epoch (`TEST_PARTS`
 /// first, then the process-wide `INSTALLED`).
 pub fn installed_load_conditions() -> &'static [RegisteredLoadCondition] {
