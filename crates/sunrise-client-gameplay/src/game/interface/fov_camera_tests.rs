@@ -6,7 +6,7 @@ use mod_api::{
     client::camera::CameraType,
 };
 use std::sync::{Arc, Mutex};
-use sunrise_client::options_file::V as OptV;
+use sunrise_client::{mouse::MouseLook, options_file::V as OptV};
 use sunrise_core::geometry::Vec3;
 use sunrise_items::items::ItemStack;
 use sunrise_protocol::{
@@ -62,6 +62,33 @@ fn with_spectator(kind: &str, test: impl FnOnce(&mut Game<'_>, &Calls)) {
                 .unwrap();
             test(game, &calls);
         });
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn spyglass_mouse_sensitivity_only_applies_in_first_person() {
+    with_client_game(|game| {
+        game.common.using = Some((0, 0));
+        game.common.use_start.item = Some(ItemStack::new("minecraft:spyglass", 1));
+        game.client.smooth_camera = false;
+        game.apply_camera_type(CameraType::FirstPerson);
+
+        let mut first_person_mouse = MouseLook::default();
+        first_person_mouse.add_motion(1.0, 0.0);
+        let first_person_turn = first_person_mouse
+            .handle_accumulated_movement(1.0, true, true, game.look_options())
+            .unwrap();
+        assert!(game.look_options().scoping);
+
+        game.apply_camera_type(CameraType::ThirdPersonBack);
+        let mut third_person_mouse = MouseLook::default();
+        third_person_mouse.add_motion(1.0, 0.0);
+        let third_person_turn = third_person_mouse
+            .handle_accumulated_movement(1.0, true, true, game.look_options())
+            .unwrap();
+        assert!(!game.look_options().scoping);
+        assert_ne!(first_person_turn, third_person_turn);
     });
 }
 
