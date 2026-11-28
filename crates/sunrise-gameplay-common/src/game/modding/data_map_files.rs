@@ -6,6 +6,33 @@ use sunrise_core::identifier::Identifier;
 
 type RawObject = BTreeMap<String, Box<RawValue>>;
 
+/// Deserializes a JSON object preserving its exact source key order (matching NeoForge's
+/// `DataMapFile.codec` / `ExtraCodecs.strictUnboundedMap` `ImmutableMap` iteration order).
+struct OrderedMap<V>(Vec<(String, V)>);
+
+impl<'de, V: DeserializeOwned> serde::Deserialize<'de> for OrderedMap<V> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct MapVisitor<V>(std::marker::PhantomData<V>);
+        impl<'de, V: DeserializeOwned> serde::de::Visitor<'de> for MapVisitor<V> {
+            type Value = OrderedMap<V>;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a JSON object")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut entries = Vec::with_capacity(map.size_hint().unwrap_or(0));
+                while let Some((key, value)) = map.next_entry::<String, V>()? {
+                    entries.push((key, value));
+                }
+                Ok(OrderedMap(entries))
+            }
+        }
+        deserializer.deserialize_map(MapVisitor(std::marker::PhantomData))
+    }
+}
+
 enum Key {
     Entry(String),
     Tag(String),
@@ -188,13 +215,28 @@ fn read_field<T: DeserializeOwned>(raw: &mut RawObject, field: &str) -> Result<O
 }
 
 fn decode_removals<R>(
-    raw: Option<Value>,
+    raw: Option<Box<RawValue>>,
     decode_remover: impl Fn(&Value) -> Result<R, String>,
 ) -> Result<Vec<Removal<R>>, String> {
     let Some(raw) = raw else {
         return Ok(Vec::new());
     };
-    match raw {
+    let trimmed = raw.get().trim_start();
+    if trimmed.starts_with('{') {
+        let OrderedMap(entries) = serde_json::from_str::<OrderedMap<Value>>(raw.get())
+            .map_err(|e| format!("remove: {e}"))?;
+        return entries
+            .iter()
+            .map(|(key, remover)| {
+                Ok(Removal::Partial(
+                    Key::decode(key)?,
+                    decode_remover(remover)?,
+                ))
+            })
+            .collect();
+    }
+    let parsed: Value = serde_json::from_str(raw.get()).map_err(|e| format!("remove: {e}"))?;
+    match parsed {
         Value::Array(items) => items
             .iter()
             .map(|removal| {
@@ -216,15 +258,6 @@ fn decode_removals<R>(
                 }
             })
             .collect(),
-        Value::Object(entries) => entries
-            .iter()
-            .map(|(key, remover)| {
-                Ok(Removal::Partial(
-                    Key::decode(key)?,
-                    decode_remover(remover)?,
-                ))
-            })
-            .collect(),
         _ => Err("remove: expected array or object".into()),
     }
 }
@@ -243,9 +276,9 @@ fn decode_with_removers<T, R, V: DeserializeOwned>(
 ) -> Result<File<T, R>, String> {
     let mut raw: RawObject = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
     let replace = read_field::<bool>(&mut raw, "replace")?.unwrap_or_default();
-    let entries =
-        read_field::<BTreeMap<String, V>>(&mut raw, "values")?.ok_or("missing data map values")?;
-    let remove = decode_removals(read_field::<Value>(&mut raw, "remove")?, decode_remover)?;
+    let OrderedMap(entries) =
+        read_field::<OrderedMap<V>>(&mut raw, "values")?.ok_or("missing data map values")?;
+    let remove = decode_removals(raw.remove("remove"), decode_remover)?;
     let mut values = Vec::new();
     for (key, raw) in entries {
         let key = Key::decode(&key)?;
@@ -575,5 +608,62 @@ mod condition_tests {
         );
         assert!(applied);
         assert_eq!(values, BTreeMap::from([("minecraft:stick".to_owned(), 2)]));
+    }
+
+    #[test]
+    fn overlapping_direct_and_tag_entries_follow_file_order_with_noncommutative_merger() {
+        let id = Identifier::parse("test:order").unwrap();
+        let run = |body: &[u8]| {
+            let files = vec![("data_maps/test:item/order".to_owned(), vec![body.to_vec()])];
+            let overlay = sunrise_world::loot::PackOverlay {
+                files: &files,
+                ..sunrise_world::loot::PackOverlay::default()
+            };
+            load_registered(
+                &id,
+                "minecraft:item",
+                &overlay,
+                LayerCodecs {
+                    decode_value: |raw: &Value| {
+                        if let Some(obj) = raw.as_object()
+                            && let Some(v) = obj.get("value")
+                        {
+                            let replace =
+                                obj.get("replace").and_then(Value::as_bool).unwrap_or(false);
+                            return Ok((replace, v.as_i64().unwrap()));
+                        }
+                        Ok((false, raw.as_i64().unwrap()))
+                    },
+                    decode_remover: |_: &Value| Ok(()),
+                },
+                LayerPolicy {
+                    supports_tags: true,
+                    tags: |tag: &str| {
+                        if tag == "test:fuels" {
+                            vec!["minecraft:coal".to_owned()]
+                        } else {
+                            Vec::new()
+                        }
+                    },
+                    known: |_| true,
+                    // Non-commutative: existing * 10 + incoming.
+                    merge: |_, existing, incoming| Ok(existing * 10 + incoming),
+                    remove_partial: |_, _, _| Err("unsupported".into()),
+                },
+            )
+        };
+
+        // Direct key before #tag: 2 then 5 -> 25.
+        let direct_first = run(br##"{"values":{"minecraft:coal":2,"#test:fuels":5}}"##);
+        assert_eq!(direct_first.get("minecraft:coal"), Some(&25));
+
+        // #tag before direct key: 5 then 2 -> 52.
+        let tag_first = run(br##"{"values":{"#test:fuels":5,"minecraft:coal":2}}"##);
+        assert_eq!(tag_first.get("minecraft:coal"), Some(&52));
+
+        // Entry replace on the second overlapping entry resets rather than merging.
+        let replaced =
+            run(br##"{"values":{"minecraft:coal":2,"#test:fuels":{"value":5,"replace":true}}}"##);
+        assert_eq!(replaced.get("minecraft:coal"), Some(&5));
     }
 }
