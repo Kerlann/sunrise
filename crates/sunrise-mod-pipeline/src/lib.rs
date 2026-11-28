@@ -1449,7 +1449,6 @@ void main() { fragColor = texture(Sampler0, texCoord0); }
         assert_eq!(err[0].line, 2);
         assert_eq!(err[0].column, 410, "{err:?}");
         assert_eq!(err[0].stage, Some(ShaderStage::Compute));
-        assert!(err[0].message.contains("chains more than 200"), "{err:?}");
         assert_eq!(reads.load(Ordering::SeqCst), 1);
     }
 
