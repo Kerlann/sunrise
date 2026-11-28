@@ -189,6 +189,11 @@ already, comes back as the error. On the client the settings appear on your mod'
 - Settings writes made in a config listener’s `Reloading` or `Unloading` callback are live: the value and its notification
   stand even if the writing listener later panics. Only that listener is disabled; later listeners still run.
 
+Keys you register with `Registrar::register_key_mapping` are listed first on the same page as Key Binds rows,
+above the settings, and in Options > Controls. Both places rebind and reset one player-chosen key. A mod with its
+own config screen (below) gets that screen from Config instead of the generated page: its mappings stay in
+Options > Controls only.
+
 Keep the keys returned by your registration. There is no live raw mod-id read/write path. `ConfigContext`,
 `ReloadContext` and `ClientReloadListenerContext` allow typed reads without giving out a mutable host.
 
