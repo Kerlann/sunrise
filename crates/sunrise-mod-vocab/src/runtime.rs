@@ -66,8 +66,10 @@ pub(crate) fn client_hook_name(subscribed: &[Option<HookId>]) -> Option<&'static
 /// The ordered list of named mods shared by the client and server.
 pub type Mods = Arc<[ModEntry]>;
 
-type NamedPoison =
-    std::collections::HashMap<(usize, &'static str), std::collections::BTreeSet<Identifier>>;
+type NamedPoison = std::collections::HashMap<
+    (usize, &'static str),
+    std::collections::BTreeSet<(Option<Identifier>, Identifier)>,
+>;
 
 type PoisonKey = (&'static str, Option<usize>);
 type PoisonSets = Box<[Option<std::collections::HashSet<PoisonKey>>]>;
@@ -617,6 +619,7 @@ pub(crate) fn contain_callback<T>(
 pub(crate) fn session_named_callback_enabled(
     callback: Callback,
     owner: &'static str,
+    scope: Option<&Identifier>,
     id: &Identifier,
 ) -> bool {
     installed().is_some_and(|installed| {
@@ -629,13 +632,14 @@ pub(crate) fn session_named_callback_enabled(
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .get(&(callback.index(), owner))
-                .is_some_and(|poisoned| poisoned.contains(id))
+                .is_some_and(|poisoned| poisoned.contains(&(scope.cloned(), id.clone())))
     })
 }
 
 pub(crate) fn call_session_named_callback<T>(
     callback: Callback,
     owner: &'static str,
+    scope: Option<&Identifier>,
     id: &Identifier,
     operation: &'static str,
     call: impl FnOnce() -> T,
@@ -650,13 +654,16 @@ pub(crate) fn call_session_named_callback<T>(
                 .unwrap_or_else(|e| e.into_inner())
                 .entry((callback.index(), owner))
                 .or_default()
-                .insert(id.clone())
+                .insert((scope.cloned(), id.clone()))
         });
         if first {
             log_and_queue_named_panic(installed(), operation, owner, Some(id), payload);
         }
     })
-    .ok_or_else(|| format!("mod {owner}: {operation} ({id}) panicked"))
+    .ok_or_else(|| match scope {
+        Some(scope) => format!("mod {owner}: {operation} ({id} on {scope}) panicked"),
+        None => format!("mod {owner}: {operation} ({id}) panicked"),
+    })
 }
 
 /// Check the session's enablement for a callback identified across reloads or peers.
@@ -667,7 +674,7 @@ pub fn session_callback_enabled(
     owner: &'static str,
     id: &Identifier,
 ) -> bool {
-    session_named_callback_enabled(Callback::Hook(hook), owner, id)
+    session_named_callback_enabled(Callback::Hook(hook), owner, None, id)
 }
 
 /// Invoke an enabled named callback through the same failure boundary as a hook subscriber.
@@ -680,7 +687,7 @@ pub fn call_session_callback<T>(
     operation: &'static str,
     call: impl FnOnce() -> T,
 ) -> Result<T, String> {
-    call_session_named_callback(Callback::Hook(hook), owner, id, operation, call)
+    call_session_named_callback(Callback::Hook(hook), owner, None, id, operation, call)
 }
 
 /// Retained wrappers may delegate engine paint. The engine's own panic keeps its usual policy.

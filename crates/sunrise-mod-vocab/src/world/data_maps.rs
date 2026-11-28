@@ -397,26 +397,28 @@ impl RegisteredDataMap {
     pub fn merge(&self, entry: &Identifier, existing: &Tag, incoming: &Tag) -> Result<Tag, String> {
         if self.merge_poisoned.load(Ordering::Acquire) {
             return Err(format!(
-                "mod {}: data_map_merge ({}) is disabled after an earlier panic",
-                self.owner_mod, self.id_str
+                "mod {}: data_map_merge ({} on {}) is disabled after an earlier panic",
+                self.owner_mod, self.id_str, self.registry_str
             ));
         }
         if crate::runtime::installed().is_some()
             && !crate::runtime::session_named_callback_enabled(
                 crate::runtime::Callback::DataMapMerge,
                 self.owner_mod,
+                Some(&self.registry),
                 &self.id,
             )
         {
             self.merge_poisoned.store(true, Ordering::Release);
             return Err(format!(
-                "mod {}: data_map_merge ({}) is disabled after an earlier panic",
-                self.owner_mod, self.id_str
+                "mod {}: data_map_merge ({} on {}) is disabled after an earlier panic",
+                self.owner_mod, self.id_str, self.registry_str
             ));
         }
         match crate::runtime::call_session_named_callback(
             crate::runtime::Callback::DataMapMerge,
             self.owner_mod,
+            Some(&self.registry),
             &self.id,
             "data_map_merge",
             || (self.merge)(entry, existing, incoming),
@@ -438,26 +440,28 @@ impl RegisteredDataMap {
     ) -> Result<Option<Tag>, String> {
         if self.remove_poisoned.load(Ordering::Acquire) {
             return Err(format!(
-                "mod {}: data_map_remove ({}) is disabled after an earlier panic",
-                self.owner_mod, self.id_str
+                "mod {}: data_map_remove ({} on {}) is disabled after an earlier panic",
+                self.owner_mod, self.id_str, self.registry_str
             ));
         }
         if crate::runtime::installed().is_some()
             && !crate::runtime::session_named_callback_enabled(
                 crate::runtime::Callback::DataMapRemove,
                 self.owner_mod,
+                Some(&self.registry),
                 &self.id,
             )
         {
             self.remove_poisoned.store(true, Ordering::Release);
             return Err(format!(
-                "mod {}: data_map_remove ({}) is disabled after an earlier panic",
-                self.owner_mod, self.id_str
+                "mod {}: data_map_remove ({} on {}) is disabled after an earlier panic",
+                self.owner_mod, self.id_str, self.registry_str
             ));
         }
         match crate::runtime::call_session_named_callback(
             crate::runtime::Callback::DataMapRemove,
             self.owner_mod,
+            Some(&self.registry),
             &self.id,
             "data_map_remove",
             || (self.remove_partial)(entry, existing, remover),
@@ -1006,5 +1010,70 @@ mod tests {
             data_map_entries(&Bare, "minecraft:block", "test:hardness"),
             Err(DataMapError::Unavailable)
         );
+    }
+
+    #[test]
+    fn panic_poison_keys_by_registry_and_map_id() {
+        struct EmptyHooks;
+        impl crate::Hooks for EmptyHooks {}
+
+        let previous = crate::runtime::TEST_MODS.get();
+        let _ = crate::runtime::install(Arc::from([crate::runtime::ModEntry::new(
+            "poison_test",
+            Box::new(EmptyHooks),
+        )]));
+
+        let item_reg = Identifier::parse_namespaced("minecraft:item").unwrap();
+        let block_reg = Identifier::parse_namespaced("minecraft:block").unwrap();
+        let shared_id = Identifier::parse_namespaced("poison_test:shared").unwrap();
+        let entry = Identifier::parse_namespaced("minecraft:stone").unwrap();
+
+        let item_map = RegisteredDataMap::from_raw(
+            "poison_test",
+            item_reg,
+            shared_id.clone(),
+            RawDataMap::new("minecraft:item", "poison_test:shared")
+                .merge(|_, _, _| panic!("boom merge"))
+                .remove_partial(|_, _, _| panic!("boom remove")),
+        );
+        let block_map = RegisteredDataMap::from_raw(
+            "poison_test",
+            block_reg,
+            shared_id,
+            RawDataMap::new("minecraft:block", "poison_test:shared")
+                .merge(|_, existing, incoming| match (existing, incoming) {
+                    (Tag::Int(a), Tag::Int(b)) => Ok(Tag::Int(a + b)),
+                    _ => Ok(incoming.clone()),
+                })
+                .remove_partial(|_, existing, _| Ok(Some(existing.clone()))),
+        );
+
+        let merge_err = item_map
+            .merge(&entry, &Tag::Int(1), &Tag::Int(2))
+            .unwrap_err();
+        assert!(merge_err.contains("minecraft:item") && merge_err.contains("poison_test:shared"));
+        assert!(item_map.merge(&entry, &Tag::Int(1), &Tag::Int(2)).is_err());
+
+        // Same owner and map id on another registry stays enabled.
+        assert_eq!(
+            block_map.merge(&entry, &Tag::Int(3), &Tag::Int(4)),
+            Ok(Tag::Int(7))
+        );
+
+        let remove_err = item_map
+            .remove_partial(&entry, &Tag::Int(1), &Tag::Int(2))
+            .unwrap_err();
+        assert!(remove_err.contains("minecraft:item") && remove_err.contains("poison_test:shared"));
+        assert!(
+            item_map
+                .remove_partial(&entry, &Tag::Int(1), &Tag::Int(2))
+                .is_err()
+        );
+        assert_eq!(
+            block_map.remove_partial(&entry, &Tag::Int(9), &Tag::Int(1)),
+            Ok(Some(Tag::Int(9)))
+        );
+
+        crate::runtime::TEST_MODS.set(previous);
     }
 }
