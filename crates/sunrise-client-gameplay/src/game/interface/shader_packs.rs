@@ -165,6 +165,42 @@ fn await_identity_scans() {
     });
 }
 
+/// The game's frames up to the loader, as `render_with_hooks` runs them: the frame follows the
+/// pick, then the loader runs.
+#[cfg(test)]
+pub(super) fn loader_frame(game: &mut crate::game::ClientGame<'_>) {
+    let sky = sunrise_level::environment::Sky::default();
+    let camera = glam::DVec3::new(0.5, 65.5, 0.5);
+    game.follow_frame();
+    game.shader_pack_inputs(camera, camera, 0.0, &sky);
+}
+
+/// Frames until the pick runs, installed for `wanted` (its dimension and served answer), with
+/// nothing building: a finished build counts only once a frame has taken and installed it.
+/// At most 60 s.
+#[cfg(test)]
+pub(super) fn settle_shader_pack(
+    game: &mut crate::game::ClientGame<'_>,
+    wanted: (i32, Option<Tonemap>),
+) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        loader_frame(game);
+        let renderer = game.client.renderer.0.as_ref().unwrap();
+        if !renderer.shader_pack_building()
+            && renderer.shader_pack_kind() == Some("iris")
+            && renderer.shader_pack_loaded_for() == Some(wanted)
+        {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the pack never settled"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 /// Why pack `name` at `path` runs with Iris compatibility under the switch `mode` (decision D-8),
 /// for the log: On, or Auto and where the pack asks (`auto_identity`); `Some(None)`: it runs
 /// without. `None`: on Auto, its scan is still running (never with `wait`).
@@ -219,6 +255,20 @@ pub(in crate::game::client_side) fn read_shader_options(
     let mut options = ShaderOptions::new(name.to_owned(), options, screens, lang, chosen);
     options.iris_compat = compat;
     Some(options)
+}
+
+/// The macros the Shader Options page reads the pick with, in game and on the title screen:
+/// the standard set, then `renderer`'s (`Renderer::define_pack_macros`: its device's feature
+/// answers, such as `IRIS_FEATURE_PER_BUFFER_BLENDING`, among them), as the load reads it. With
+/// no renderer made yet, the standard set alone, so the device's answers are not there.
+pub(in crate::game) fn shader_options_macros(
+    renderer: Option<&sunrise_client::gfx::Renderer>,
+) -> Macros {
+    let mut macros = Macros::standard();
+    if let Some(renderer) = renderer {
+        renderer.define_pack_macros(&mut macros);
+    }
+    macros
 }
 
 /// Saves the values chosen on the Shader Options page; none chosen removes the file.
@@ -1015,6 +1065,32 @@ fn pack_tags<'a>(
 }
 
 impl crate::game::ClientGame<'_> {
+    /// Drops the running or building pack when the pick changed to `picked`.
+    fn apply_shader_pack_pick(&mut self, picked: &str) {
+        if self.client.native_shaders.picked != picked {
+            picked.clone_into(&mut self.client.native_shaders.picked);
+            self.client.native_shaders.identity_build = None;
+            self.client.native_shaders.identity_seen = None;
+            self.client.native_shaders.identity_recheck = false;
+            self.set_translucent_layers(Vec::new());
+            self.client.pack_ids = None;
+            if let Some(renderer) = &mut self.client.renderer.0 {
+                renderer.drop_shader_packs();
+            }
+        }
+    }
+    /// A title screen frame, which loads no pack and resolves no pack path: shaders turned off in
+    /// the settings still drop the pack now, and the cancelled builds that have ended are joined,
+    /// as `shader_pack_inputs` does in a world, so neither keeps its GPU objects until a world
+    /// draws.
+    pub(in crate::game::client_side) fn shader_pack_title_frame(&mut self) {
+        if picked_pack(&self.client.settings).is_empty() {
+            self.apply_shader_pack_pick("");
+        }
+        if let Some(renderer) = &self.client.renderer.0 {
+            renderer.reap_pack_builds();
+        }
+    }
     /// Resolves the loaded pack's ids again when the world's tags its `%tag` entries (4.1) were
     /// resolved against were replaced (a server's tags, `/reload`, another world), and hands
     /// the renderer the terrain's. Nothing for a pack whose entries name no tag.
@@ -1103,17 +1179,7 @@ impl crate::game::ClientGame<'_> {
         } else {
             path.to_string_lossy().into_owned()
         };
-        if self.client.native_shaders.picked != picked {
-            self.client.native_shaders.picked = picked.clone();
-            self.client.native_shaders.identity_build = None;
-            self.client.native_shaders.identity_seen = None;
-            self.client.native_shaders.identity_recheck = false;
-            self.set_translucent_layers(Vec::new());
-            self.client.pack_ids = None;
-            if let Some(renderer) = &mut self.client.renderer.0 {
-                renderer.drop_shader_packs();
-            }
-        }
+        self.apply_shader_pack_pick(&picked);
         let dimension = match self.common.dim {
             Dim::Overworld | Dim::Extra(_) => 0,
             Dim::Nether => -1,
@@ -1559,10 +1625,7 @@ impl crate::game::ClientGame<'_> {
 
     /// The Shader Options page opened: the picked pack's options, screens and names.
     pub(in crate::game::client_side) fn open_shader_options(&mut self) {
-        let mut macros = Macros::standard();
-        if let Some(renderer) = &self.client.renderer.0 {
-            renderer.define_pack_macros(&mut macros);
-        }
+        let macros = shader_options_macros(self.client.renderer.0.as_deref());
         let name = &self.client.settings.sunrise.shader_pack;
         let mode = self.client.settings.sunrise.iris_compat_of(name);
         self.client.settings.shader_options =
@@ -2963,13 +3026,17 @@ pub(in crate::game) mod native_pack_tests {
             "iris.features.required = SSBO NO_SUCH_FEATURE\nnot a pair\n\
              sunrise.hdr = maybe\n",
         );
-        let expected = [
-            "the pack requires `NO_SUCH_FEATURE`, which is not supported yet",
-            "shaders.properties:2: not a key=value line",
-        ];
-        assert_eq!(load(&mut state, &others, false, None), expected);
+        // The first names the flag, the second the file and line: not the English of either.
+        let order_of = |logged: &[String]| {
+            let flag = logged[0].split('`').nth(1).map(str::to_owned);
+            (flag, logged[1].starts_with("shaders.properties:2:"))
+        };
+        let expected = (Some("NO_SUCH_FEATURE".to_owned()), true);
+        let without_switch = load(&mut state, &others, false, None);
+        assert_eq!(without_switch.len(), 2, "{without_switch:?}");
+        assert_eq!(order_of(&without_switch), expected);
         let with_switch = load(&mut state, &others, true, None);
-        assert_eq!(with_switch[..2], expected);
+        assert_eq!(order_of(&with_switch), expected);
         assert_eq!(with_switch.len(), 3, "{with_switch:?}");
         assert!(names_value(&with_switch[2], 3, "sunrise.hdr", "maybe"));
 

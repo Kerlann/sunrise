@@ -125,6 +125,7 @@ pub mod content_identity;
 pub mod control;
 pub mod crafting;
 pub mod cushion;
+pub mod custom_registry_net;
 pub mod data_cmd;
 pub mod datapack_net;
 pub mod debugworld;

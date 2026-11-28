@@ -11,6 +11,7 @@ use super::nether_portal::Plan;
 use super::respawn_anchor::RespawnConfig;
 use super::respawn_position::Respawn;
 use super::{Dim, Mob, lan::LanHost, minecarts};
+use crate::game::state_seam::{ActorInLevel, LevelId, PlayerId, PlayerWrite, active_views};
 use std::ops::ControlFlow;
 use sunrise_core::{geometry::Vec3, position::BlockPos};
 use sunrise_gameplay_common::game::end_state::GatewayJob;
@@ -53,6 +54,7 @@ impl TravelCause {
 /// A trip under way: the player is in the destination's level, whose
 /// chunks are loading around `target`.
 pub struct Trip {
+    arrival_actor: Option<ActorInLevel>,
     pub conn: u32,
     pub dim: Dim,
     /// The level the player came from: the vehicle it rides waits there
@@ -318,6 +320,7 @@ impl crate::game::ServerGame<'_> {
             return;
         }
         self.server.server_trips.push(Trip {
+            arrival_actor: None,
             conn,
             dim: self.common.dim,
             source: self.common.dim,
@@ -498,6 +501,14 @@ impl crate::game::ServerGame<'_> {
         };
         let at = Vec3::new(g.position[0], g.position[1], g.position[2]);
         let seen_credits = g.seen_credits;
+        let actor = if name == "end_portal" {
+            LevelId::loaded(self, self.common.dim).map(|level| ActorInLevel {
+                player: PlayerId::guest(g),
+                level,
+            })
+        } else {
+            None
+        };
         // EndGatewayBlock.getPortalDestination: none without its block entity.
         let gateway_ok = name != "end_gateway"
             || self
@@ -560,6 +571,7 @@ impl crate::game::ServerGame<'_> {
                     }
                 } else if self.server_player_travel_allowed(conn, Dim::End, TravelCause::EndPortal)
                 {
+                    let conn = actor.map_or(conn, |actor| actor.resume_connection(self, conn));
                     self.start_server_trip(conn, Dim::End, None);
                 }
             }
@@ -947,7 +959,10 @@ impl crate::game::ServerGame<'_> {
                 || self.common.boats.iter().any(|b| b.id == *id)
                 || self.common.carts.iter().any(|c| c.id == *id)
         });
+        let player =
+            (target == Dim::End && plan.is_none() && g.spectator()).then(|| PlayerId::guest(g));
         let source = self.common.dim;
+        let source_level = player.and_then(|_| LevelId::loaded(self, source));
         let end = plan.is_none();
         // Coordinates scale by the levels' coordinate scales (8 between the Overworld
         // and the Nether); an End portal has fixed destinations.
@@ -987,11 +1002,16 @@ impl crate::game::ServerGame<'_> {
             if let Some(hold) = menu_hold {
                 self.resume_menu_opens(hold);
             }
-            if let Err(e) = self.enter_level(source) {
+            if let Err(e) = self.enter_level(
+                source_level.map_or(source, |level| level.restore_dimension(self, source)),
+            ) {
                 log::error!("could not reopen {}: {e}", source.id());
             }
             return;
         };
+        let arrival_actor = player
+            .zip(LevelId::loaded(self, target))
+            .map(|(player, level)| ActorInLevel { player, level });
         let destination = match plan {
             Some(plan) => self.arrival_centre(&plan),
             None => scaled,
@@ -1011,6 +1031,7 @@ impl crate::game::ServerGame<'_> {
             .hub
             .begin_level_change(i, at, yaw, None, PLAYER_DELAY, &ctx);
         self.send_player_command_tree(conn);
+        let i = arrival_actor.map_or(i, |actor| actor.resume_transfer_slot(self, source_level, i));
         let ctx = server_ctx!(self);
         if let Some(host) = self.server.lan.as_mut() {
             host.hub.finish_level_change(i, change, true, &ctx);
@@ -1027,6 +1048,7 @@ impl crate::game::ServerGame<'_> {
             }
         });
         self.server.server_trips.push(Trip {
+            arrival_actor,
             conn,
             dim: target,
             source,
@@ -1045,7 +1067,9 @@ impl crate::game::ServerGame<'_> {
             hold: false,
             left: Some(source),
         });
-        if let Err(e) = self.enter_level(source) {
+        if let Err(e) = self
+            .enter_level(source_level.map_or(source, |level| level.restore_dimension(self, source)))
+        {
             log::error!("could not reopen {}: {e}", source.id());
         }
     }
@@ -1126,6 +1150,7 @@ impl crate::game::ServerGame<'_> {
         }
         self.server.server_trips.retain(|t| !t.is(conn));
         let trip = Trip {
+            arrival_actor: None,
             conn,
             dim,
             source,
@@ -1314,6 +1339,7 @@ impl crate::game::ServerGame<'_> {
             return;
         }
         self.server.server_trips.push(Trip {
+            arrival_actor: None,
             conn,
             dim: self.common.dim,
             source: self.common.dim,
@@ -1382,10 +1408,15 @@ impl crate::game::ServerGame<'_> {
             let nether = trip.plan.is_some();
             let portal = trip.end || nether;
             self.resolve_arrivals();
-            let Some(host) = self.server.lan.as_ref() else {
+            let slot = trip
+                .arrival_actor
+                .map_or(i, |actor| actor.resume_slot(self, i));
+            let Some((_, player)) =
+                active_views(self, trip.arrival_actor.map(|actor| actor.level), slot)
+            else {
                 return;
             };
-            let source_yaw = host.hub.guests[i].yaw;
+            let source_yaw = player.guest.yaw;
             let (position, yaw) = if let Some(job) = trip.gateway {
                 match self.resolve_gateway(job, trip.target) {
                     Ok(at) => (at, source_yaw),
@@ -1403,6 +1434,9 @@ impl crate::game::ServerGame<'_> {
                     Some(arrival) => arrival,
                     None => self.end_arrival(entering, trip.target, &mut trip.finder),
                 };
+                let slot = trip
+                    .arrival_actor
+                    .map_or(i, |actor| actor.resume_slot(self, i));
                 match arrival {
                     Ok(Some((at, [turned, tilted]))) => {
                         // EndPortalBlock.getPortalDestination: PLACE_PORTAL_TICKET.
@@ -1410,7 +1444,9 @@ impl crate::game::ServerGame<'_> {
                         if let Some(pitch) = tilted
                             && let Some(host) = self.server.lan.as_mut()
                         {
-                            host.hub.guests.update(i, |guest| guest.pitch = pitch);
+                            PlayerWrite::update(&mut host.hub.guests, slot, |view| {
+                                view.guest.pitch = pitch
+                            });
                         }
                         (at, turned.unwrap_or(source_yaw))
                     }
@@ -1446,6 +1482,9 @@ impl crate::game::ServerGame<'_> {
                 self.arrive_vehicle(trip.source, vehicle, position, vehicle_yaw);
             }
             // Player.getDimensionChangingDelay.
+            let slot = trip
+                .arrival_actor
+                .map_or(i, |actor| actor.resume_slot(self, i));
             let Some(host) = self.server.lan.as_mut() else {
                 return;
             };
@@ -1464,16 +1503,17 @@ impl crate::game::ServerGame<'_> {
                     // The End exit uses the player's absolute respawn transition.
                     0
                 };
-                host.hub.land(i, at, yaw, relatives);
+                host.hub.land(slot, at, yaw, relatives);
             } else {
-                host.hub.guests.update(i, |g| {
+                PlayerWrite::update(&mut host.hub.guests, slot, |view| {
+                    let g = view.guest;
                     g.yaw = yaw;
                     if let Some(body) = g.motion.as_mut() {
                         body.yaw = yaw;
                         body.position = position;
                     }
                 });
-                host.hub.teleport(i, Some(at));
+                host.hub.teleport(slot, Some(at));
             }
             self.tell_mods_changed_dimension(trip.conn, trip.left, trip.dim);
         }
@@ -1533,6 +1573,7 @@ impl crate::game::ServerGame<'_> {
         };
         let left = parked
             .portal_states
+            .entities
             .remove(&id)
             .map_or(0, |state| state.cooldown);
         // All object-owned metadata moves, including rejected intermediate bodies;
@@ -1556,7 +1597,13 @@ impl crate::game::ServerGame<'_> {
         }
         self.admit_transferred_object(vehicle);
         // The source may have ticked while the player's destination was loading.
-        self.server.portals.entities.entry(id).or_default().cooldown = carried.unwrap_or(left);
+        self.server
+            .portals
+            .level
+            .entities
+            .entry(id)
+            .or_default()
+            .cooldown = carried.unwrap_or(left);
     }
 
     /// Tells the mods of the teleports a command made inside a level, with
@@ -1706,6 +1753,7 @@ impl crate::game::ServerGame<'_> {
                 self.tell_mods_changed_dimension(t.conn, Some(source), t.dim);
                 self.server.server_trips.retain(|trip| !trip.is(t.conn));
                 self.server.server_trips.push(Trip {
+                    arrival_actor: None,
                     conn: t.conn,
                     dim: t.dim,
                     source,

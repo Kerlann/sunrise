@@ -48,6 +48,131 @@ fn shadow_cache_key_tracks_world_and_time_changes() {
     );
 }
 
+#[test]
+fn shadow_uniforms_hash_tracks_mod_frame_uniforms_and_previous_values() {
+    use std::hash::Hasher;
+
+    let hash_one = |uniforms: &[(Option<usize>, String, u32)],
+                    mod_uniforms: &[(usize, bool, u32)],
+                    frame_uniforms: &[crate::pack_uniforms::Value],
+                    mod_table: &ModUniformTable| {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        execution::hash_pass_uniforms(
+            "shadowcomp",
+            uniforms,
+            mod_uniforms,
+            frame_uniforms,
+            mod_table,
+            &mut hasher,
+        );
+        hasher.finish()
+    };
+
+    let decls = [
+        ModUniformDecl {
+            name: "uFloat".into(),
+            ty: ModUniformType::Float,
+            previous_name: Some("prevUFloat".into()),
+        },
+        ModUniformDecl {
+            name: "uInt".into(),
+            ty: ModUniformType::Int,
+            previous_name: None,
+        },
+        ModUniformDecl {
+            name: "uVec2".into(),
+            ty: ModUniformType::Vec2,
+            previous_name: None,
+        },
+        ModUniformDecl {
+            name: "uVec3".into(),
+            ty: ModUniformType::Vec3,
+            previous_name: None,
+        },
+        ModUniformDecl {
+            name: "uVec4".into(),
+            ty: ModUniformType::Vec4,
+            previous_name: None,
+        },
+        ModUniformDecl {
+            name: "uMat3".into(),
+            ty: ModUniformType::Mat3,
+            previous_name: None,
+        },
+        ModUniformDecl {
+            name: "uMat4".into(),
+            ty: ModUniformType::Mat4,
+            previous_name: None,
+        },
+    ];
+    let mut table = ModUniformTable::new(&decls);
+    table.advance_frame();
+
+    let all_mod = [
+        (0, false, 64),
+        (1, false, 68),
+        (2, false, 72),
+        (3, false, 80),
+        (4, false, 96),
+        (5, false, 112),
+        (6, false, 160),
+    ];
+    let baseline = hash_one(&[], &all_mod, &[], &table);
+
+    let variants = [
+        ("uFloat", ModUniformValue::Float(0.25)),
+        ("uFloat", ModUniformValue::Float(-0.0)),
+        ("uInt", ModUniformValue::Int(7)),
+        ("uVec2", ModUniformValue::Vec2([0.0, 1.0])),
+        ("uVec3", ModUniformValue::Vec3([0.0, 0.0, 1.0])),
+        ("uVec4", ModUniformValue::Vec4([0.0, 0.0, 0.0, 1.0])),
+        (
+            "uMat3",
+            ModUniformValue::Mat3([[0.0; 3], [0.0; 3], [0.0, 0.0, 2.0]]),
+        ),
+        (
+            "uMat4",
+            ModUniformValue::Mat4([[0.0; 4], [0.0; 4], [0.0; 4], [0.0, 0.0, 0.0, 3.0]]),
+        ),
+    ];
+    for (name, next) in variants {
+        let mut t = ModUniformTable::new(&decls);
+        assert!(t.set(name, next));
+        t.advance_frame();
+        assert_ne!(
+            hash_one(&[], &all_mod, &[], &t),
+            baseline,
+            "{name} = {next:?} must change the shadow uniform hash"
+        );
+    }
+
+    // Previous-frame alias tracking: frame 1 sets current = prev = 0.25; frame 2 updates current
+    // to 0.75 while prev stays 0.25; frame 3 advances prev to 0.75; frame 4 stays steady.
+    let mut hist = ModUniformTable::new(&decls);
+    let curr_only = [(0, false, 64)];
+    let prev_only = [(0, true, 64)];
+    assert!(hist.set("uFloat", ModUniformValue::Float(0.25)));
+    hist.advance_frame();
+    let curr_f1 = hash_one(&[], &curr_only, &[], &hist);
+    let prev_f1 = hash_one(&[], &prev_only, &[], &hist);
+
+    assert!(hist.set("uFloat", ModUniformValue::Float(0.75)));
+    hist.advance_frame();
+    let curr_f2 = hash_one(&[], &curr_only, &[], &hist);
+    let prev_f2 = hash_one(&[], &prev_only, &[], &hist);
+    assert_ne!(curr_f2, curr_f1, "current changed on frame 2");
+    assert_eq!(prev_f2, prev_f1, "previous stayed 0.25 on frame 2");
+
+    hist.advance_frame();
+    let curr_f3 = hash_one(&[], &curr_only, &[], &hist);
+    let prev_f3 = hash_one(&[], &prev_only, &[], &hist);
+    assert_eq!(curr_f3, curr_f2, "current stayed 0.75 on frame 3");
+    assert_ne!(prev_f3, prev_f2, "previous advanced to 0.75 on frame 3");
+
+    hist.advance_frame();
+    assert_eq!(hash_one(&[], &prev_only, &[], &hist), prev_f3);
+}
+
 /// Two textures with a sampler each become two textures sharing one sampler variable.
 #[test]
 fn samplers_of_a_kind_share_one_variable() {
@@ -599,168 +724,31 @@ fn an_image_without_an_entry_reads_zero() {
 #[test]
 #[ignore = "daily"]
 fn a_composite_program_blends_onto_its_buffer() {
-    let _gpu = crate::test_gpu::lock();
-    let Some(adapter) = crate::test_gpu::adapter() else {
-        return;
-    };
-    // A pass's pipeline layout has six bind group slots.
-    let desc = wgpu::DeviceDescriptor {
-        required_limits: adapter.limits(),
-        ..Default::default()
-    };
-    let Some((device, queue)) = crate::test_gpu::optional_device_with(&adapter, &desc) else {
-        return;
-    };
-    let dir = std::env::temp_dir().join(format!("hz-composite-blend-{}", std::process::id()));
-    let shaders = dir.join("shaders");
-    std::fs::create_dir_all(&shaders).unwrap();
-    let file = |name: &str, text: &str| std::fs::write(shaders.join(name), text).unwrap();
-    file(
-        "composite.vsh",
-        "#version 120\nvoid main() { gl_Position = ftransform(); }\n",
-    );
-    file(
-        "composite.fsh",
-        "#version 120\n/* DRAWBUFFERS:3 */\n\
-         void main() { gl_FragData[0] = vec4(0.25, 0.25, 1.0, 0.25); }\n",
-    );
-    let pack = sunrise_shaders::Pack::open(&dir).unwrap();
-    let properties = sunrise_shaders::Properties::parse(
+    use super::blend_target_tests::{VSH, draw, program};
+
+    let p = program(
+        &[
+            ("composite.vsh", VSH),
+            (
+                "composite.fsh",
+                "#version 120\n/* DRAWBUFFERS:3 */\n\
+                 void main() { gl_FragData[0] = vec4(0.25, 0.25, 1.0, 0.25); }\n",
+            ),
+        ],
         "blend.composite = SRC_ALPHA ONE_MINUS_SRC_ALPHA ONE ZERO\n",
-        &sunrise_shaders::Macros::default(),
+        "composite",
     );
-    let mut post = sunrise_shaders::load_post(
-        &pack,
-        "",
-        &properties,
-        &sunrise_shaders::Macros::standard(),
-        &Default::default(),
-    );
-    std::fs::remove_dir_all(&dir).unwrap();
-    let program = post.programs.remove(0);
-    let buffers = crate::pack_images::Buffers::new(
-        &device,
-        Default::default(),
-        Default::default(),
-        wgpu::ShaderStages::FRAGMENT,
-    );
-    let stand_ins = std::cell::RefCell::new(Vec::new());
-    let mismatches = std::cell::RefCell::new(std::collections::HashSet::new());
-    let pack = Resources {
-        textures: &[],
-        images: &[],
-        left_out: &[],
-        buffers: &buffers,
-        indices: None,
-        gpu: Gpu::of(&adapter, device.features()),
-        storable: 0,
-        rgb: 0,
-        packed: [None; BUFFERS],
-        released: std::cell::Cell::new(("", 0)),
-        stand_ins: &stand_ins,
-        shadow_linear: 0,
-        jobs: None,
-        mod_depth_targets: &[],
-        mod_uniforms: &[],
-        display_uniforms: false,
-        mod_uniform_mismatches: &mismatches,
-        mod_depth_target: std::cell::Cell::new(None),
-        depth_compare: std::cell::Cell::new(wgpu::CompareFunction::LessEqual),
-        mod_depth_bias: Default::default(),
-        mod_vertex: Default::default(),
-    };
-    let draws = crate::pack_draw::DrawUniforms::new(&device);
-    let mut notes = Vec::new();
-    let pass = build_pass(
-        &device,
-        program,
-        &[T::Rgba8Unorm; BUFFERS],
-        None,
-        T::Rgba8Unorm,
-        &mut notes,
-        None,
-        &[],
-        &draws.layout,
-        &pack,
-        false,
-        false,
-    )
-    .unwrap_or_else(|| panic!("the pass builds: {notes:?}"));
     // colortex3 holds (0.75, 0.5, 0.25, 0.5) before the pass.
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: None,
-        size: wgpu::Extent3d {
-            width: 64,
-            height: 1,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: T::Rgba8Unorm,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let view = texture.create_view(&Default::default());
-    let head = [64.0f32, 1.0, 1.0 / 64.0, 1.0];
-    queue.write_buffer(&pass.ubo, 0, bytemuck::cast_slice(&head));
-    let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: None,
-        layout: &pass.layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: pass.ubo.as_entire_binding(),
-        }],
-    });
-    let mut encoder = device.create_command_encoder(&Default::default());
     let before = wgpu::Color {
         r: 0.75,
         g: 0.5,
         b: 0.25,
         a: 0.5,
     };
-    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        color_attachments: &[attach(
-            &view,
-            wgpu::Operations {
-                load: wgpu::LoadOp::Clear(before),
-                store: wgpu::StoreOp::Store,
-            },
-        )],
-        ..Default::default()
-    });
-    {
-        // Loaded, as `PackPost::render` attaches a buffer a composite pass writes.
-        let load = wgpu::Operations {
-            load: wgpu::LoadOp::Load,
-            store: wgpu::StoreOp::Store,
-        };
-        let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            color_attachments: &[attach(&view, load)],
-            ..Default::default()
-        });
-        rp.set_pipeline(pass.render());
-        rp.set_bind_group(0, &group, &[]);
-        rp.draw(0..6, 0..1);
-    }
-    let read = device.create_buffer(&wgpu::BufferDescriptor {
-        label: None,
-        size: 256,
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-    encoder.copy_texture_to_buffer(
-        texture.as_image_copy(),
-        wgpu::TexelCopyBufferInfo {
-            buffer: &read,
-            layout: wgpu::TexelCopyBufferLayout::default(),
-        },
-        texture.size(),
-    );
-    queue.submit([encoder.finish()]);
-    read.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-    let texel: Vec<u8> = read.slice(..).get_mapped_range().unwrap()[..4].to_vec();
+    let Some(texels) = draw(p, &[T::Rgba8Unorm; BUFFERS], &[(T::Rgba8Unorm, before)]) else {
+        return;
+    };
+    let texel = &texels[0];
     // rgb = 0.25 × src + 0.75 × dst, alpha = the source's.
     let expected = [0.625, 0.4375, 0.4375, 0.25].map(|v: f32| v * 255.0);
     for (got, want) in texel.iter().zip(expected) {
