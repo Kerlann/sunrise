@@ -3,6 +3,7 @@
 
 Reads this run's jobs (names, conclusions and step names from the Actions API, never a log) and the legs' verdict
 files (tools/ci/ignored_tests.py --report: test identity, kind, panic location, policy file), then:
+- a hardware-GPU test skipped for lack of an adapter: names it as skipped in the summary, not as a pass;
 - every leg green: moves the tag `daily-green` to the commit;
 - a failing test: files `Daily: <crate> <test>` (label `bug`) with its panic location, this run as the first that
   saw it and as suspects the pull requests merged since the previous daily run that changed its package's folders
@@ -722,6 +723,19 @@ def main(call=api, run_git=git, query=graphql):
     text = render(actions, writes) + (
         f"\nSDK legs ({', '.join(SDK_LEGS)}): {'green' if sdk_green else 'not green'}; "
         f"sdk-publish {'publishes' if sdk_green else 'does not publish'} sdk-<sha> on a writing run.\n")
+    skipped = set()
+    for job in leg_jobs(jobs, all_legs):
+        report = report_for(job, reports) or {}
+        for entry in report.get("skipped", ()):
+            if not isinstance(entry, dict) or entry.get("reason") != "hardware-gpu":
+                continue
+            package, test = entry.get("package"), entry.get("test")
+            if (isinstance(package, str) and SHARD_NAME.fullmatch(package)
+                    and isinstance(test, str) and TEST_NAME.fullmatch(test)):
+                skipped.add((package, test))
+    if skipped:
+        text += "\n### Skipped hardware-GPU tests (no hardware Vulkan adapter)\n\n"
+        text += "".join(f"- `{package} {test}`: SKIPPED (`hardware-gpu`)\n" for package, test in sorted(skipped))
     print(text)
     if env.get("GITHUB_STEP_SUMMARY"):
         with open(env["GITHUB_STEP_SUMMARY"], "a") as summary:
