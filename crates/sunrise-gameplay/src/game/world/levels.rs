@@ -2988,12 +2988,14 @@ mod tests {
     #[ignore = "daily"]
     fn production_level_swap_exchanges_all_six_subsystems_and_keeps_siblings() {
         use crate::game::native_entity_refs::tests::with_game;
+        use std::rc::Rc;
         use sunrise_core::{geometry::Vec3, position::BlockPos};
         use sunrise_gameplay_common::game::end_state::{
             Arriving, EndFlash, EndLevelState, EyeOfEnder, GatewayArrival, GatewayJob,
         };
         use sunrise_level::{
             block_entity_ticks::{Bell, ConduitServer, EndGateway, Ticker},
+            chunk::Chunk,
             sculk::WardenSpawnTracker,
             shulker_box::{Shulker, ShulkerStatus},
         };
@@ -3003,7 +3005,9 @@ mod tests {
             patrol::PatrolSpawner,
             raid::Raids,
             save::LevelShape,
+            ticket_levels::SpawnTicketKind,
         };
+        use sunrise_world::registry::BlockStateId;
 
         mod_platform::testing::with_mods(Vec::new().into(), || {
             with_game(|game| {
@@ -3015,7 +3019,50 @@ mod tests {
                     Some(Default::default()),
                 ));
 
-                // Lazy-open Nether from Overworld and verify locator parking and raid load.
+                // Populate Overworld level bundles before lazy-opening Nether so we also
+                // verify a lazily opened level starts with the default empty bundle state.
+                let grass = game
+                    .common
+                    .pack
+                    .assets
+                    .registry
+                    .default_state("minecraft:grass_block")
+                    .unwrap()
+                    .0;
+                let mut chunk_ow = Chunk::with_layout(-7, -8, game.common.world.layout());
+                chunk_ow.set(0, 64, 0, grass);
+                let chunk_ow = Arc::new(chunk_ow);
+                let facts = game.common.res.facts();
+                let behaviours = game.common.res.behaviours();
+                game.server.chunk_ticking.tickets.add_portal((-2, -3));
+                game.server
+                    .chunk_ticking
+                    .tickets
+                    .add_spawn((-4, -5), SpawnTicketKind::Player);
+                let (_, mask_ow) = game
+                    .server
+                    .chunk_ticking
+                    .random_tick_sections
+                    .next_masked(
+                        (-7, -8),
+                        &chunk_ow,
+                        facts,
+                        |id| behaviours.random_tick_candidate(BlockStateId(id)),
+                        0,
+                    )
+                    .unwrap();
+                game.server.knot_state.knot_ids = [([-1, 70, -2], 402)].into_iter().collect();
+                game.server.knot_state.broken_knots = vec![[-3, 71, -4]];
+                let ow_broken_ptr = game.server.knot_state.broken_knots.as_ptr();
+                game.server.lan_queues.block_events = vec![([-5, 72, -6], 4, 5, 6)];
+                let ow_block_events_ptr = game.server.lan_queues.block_events.as_ptr();
+                game.server.lan_queues.entity_events = vec![(602, 7)];
+                let ow_entity_events_ptr = game.server.lan_queues.entity_events.as_ptr();
+                game.server.lan_queues.critical_hits = vec![(None, 602, false)];
+                let ow_crit_ptr = game.server.lan_queues.critical_hits.as_ptr();
+
+                // Lazy-open Nether from Overworld and verify locator parking, raid load,
+                // and default bundle state on the newly opened level.
                 let terrain_ow = make_flat_terrain(game, 11111);
                 let terrain_nether = make_flat_terrain(game, 22222);
                 game.common.end.set_locator(Some(terrain_ow.clone()));
@@ -3023,6 +3070,56 @@ mod tests {
                 assert_eq!(game.dim, Dim::Nether);
                 assert_eq!(game.server.raiding.0.level.loaded, Some(Dim::Nether));
                 assert!(game.server.levels.0.order.contains(&Dim::Nether));
+                assert!(
+                    game.server
+                        .chunk_ticking
+                        .tickets
+                        .portal_tickets()
+                        .is_empty()
+                );
+                assert!(
+                    game.server
+                        .chunk_ticking
+                        .tickets
+                        .spawn_areas()
+                        .next()
+                        .is_none()
+                );
+                assert!(
+                    game.server
+                        .chunk_ticking
+                        .tickets
+                        .levels()
+                        .random_tick_bounds()
+                        .is_none()
+                );
+                let (_, fresh_nether_mask) = game
+                    .server
+                    .chunk_ticking
+                    .random_tick_sections
+                    .next_masked(
+                        (-7, -8),
+                        &chunk_ow,
+                        game.common.res.facts(),
+                        |id| {
+                            game.common
+                                .res
+                                .behaviours()
+                                .random_tick_candidate(BlockStateId(id))
+                        },
+                        0,
+                    )
+                    .unwrap();
+                assert!(!Rc::ptr_eq(&fresh_nether_mask, &mask_ow));
+                game.server
+                    .chunk_ticking
+                    .random_tick_sections
+                    .remove(&(-7, -8));
+                assert!(game.server.knot_state.knot_ids.is_empty());
+                assert!(game.server.knot_state.broken_knots.is_empty());
+                assert!(game.server.lan_queues.block_events.is_empty());
+                assert!(game.server.lan_queues.entity_events.is_empty());
+                assert!(game.server.lan_queues.critical_hits.is_empty());
                 assert!(Arc::ptr_eq(
                     &game
                         .server
@@ -3032,6 +3129,42 @@ mod tests {
                         .unwrap(),
                     &terrain_ow
                 ));
+
+                // Populate active (Nether) level bundles with distinct payloads.
+                let mut chunk_n = Chunk::with_layout(3, 4, game.common.world.layout());
+                chunk_n.set(0, 64, 0, grass);
+                let chunk_n = Arc::new(chunk_n);
+                game.server.chunk_ticking.tickets.add_portal((6, 7));
+                game.server
+                    .chunk_ticking
+                    .tickets
+                    .add_spawn((8, 9), SpawnTicketKind::Search);
+                let (_, mask_n) = game
+                    .server
+                    .chunk_ticking
+                    .random_tick_sections
+                    .next_masked(
+                        (3, 4),
+                        &chunk_n,
+                        game.common.res.facts(),
+                        |id| {
+                            game.common
+                                .res
+                                .behaviours()
+                                .random_tick_candidate(BlockStateId(id))
+                        },
+                        0,
+                    )
+                    .unwrap();
+                game.server.knot_state.knot_ids = [([1, 64, 2], 301)].into_iter().collect();
+                game.server.knot_state.broken_knots = vec![[3, 65, 4]];
+                let n_broken_ptr = game.server.knot_state.broken_knots.as_ptr();
+                game.server.lan_queues.block_events = vec![([5, 66, 6], 1, 2, 3)];
+                let n_block_events_ptr = game.server.lan_queues.block_events.as_ptr();
+                game.server.lan_queues.entity_events = vec![(501, 2)];
+                let n_entity_events_ptr = game.server.lan_queues.entity_events.as_ptr();
+                game.server.lan_queues.critical_hits = vec![(Some(9), 501, true)];
+                let n_crit_ptr = game.server.lan_queues.critical_hits.as_ptr();
 
                 // Populate active (Nether) per-level fields and unswapped siblings.
                 game.server.creaking.level.scanned = [(10, 11)].into_iter().collect();
@@ -3326,6 +3459,68 @@ mod tests {
                 assert_eq!(game.server.sculk.level.index.order, vec![(-4, 70, -5)]);
                 assert_eq!(game.server.sculk.level.known.len(), 1);
                 assert!(game.server.sculk.level.known.contains(&(-4, -5)));
+                assert_eq!(
+                    game.server
+                        .chunk_ticking
+                        .tickets
+                        .portal_tickets()
+                        .iter()
+                        .map(|t| t.chunk)
+                        .collect::<Vec<_>>(),
+                    vec![(-2, -3)]
+                );
+                assert_eq!(
+                    game.server
+                        .chunk_ticking
+                        .tickets
+                        .spawn_areas()
+                        .map(|(c, _)| c)
+                        .collect::<Vec<_>>(),
+                    vec![(-4, -5)]
+                );
+                let (_, ow_after_first) = game
+                    .server
+                    .chunk_ticking
+                    .random_tick_sections
+                    .next_masked(
+                        (-7, -8),
+                        &chunk_ow,
+                        game.common.res.facts(),
+                        |id| {
+                            game.common
+                                .res
+                                .behaviours()
+                                .random_tick_candidate(BlockStateId(id))
+                        },
+                        0,
+                    )
+                    .unwrap();
+                assert!(Rc::ptr_eq(&ow_after_first, &mask_ow));
+                assert_eq!(
+                    game.server.knot_state.knot_ids.get(&[-1, 70, -2]),
+                    Some(&402)
+                );
+                assert_eq!(game.server.knot_state.knot_ids.len(), 1);
+                assert_eq!(game.server.knot_state.broken_knots, vec![[-3, 71, -4]]);
+                assert_eq!(game.server.knot_state.broken_knots.as_ptr(), ow_broken_ptr);
+                assert_eq!(
+                    game.server.lan_queues.block_events,
+                    vec![([-5, 72, -6], 4, 5, 6)]
+                );
+                assert_eq!(
+                    game.server.lan_queues.block_events.as_ptr(),
+                    ow_block_events_ptr
+                );
+                assert_eq!(game.server.lan_queues.entity_events, vec![(602, 7)]);
+                assert_eq!(
+                    game.server.lan_queues.entity_events.as_ptr(),
+                    ow_entity_events_ptr
+                );
+                assert_eq!(
+                    game.server.lan_queues.critical_hits,
+                    vec![(None, 602, false)]
+                );
+                assert_eq!(game.server.lan_queues.critical_hits.as_ptr(), ow_crit_ptr);
 
                 {
                     let parked_n = game.server.levels.0.parked.get(&Dim::Nether).unwrap();
@@ -3374,6 +3569,47 @@ mod tests {
                     assert_eq!(parked_n.sculk.index.order, vec![(2, 64, 3)]);
                     assert_eq!(parked_n.sculk.known.len(), 1);
                     assert!(parked_n.sculk.known.contains(&(2, 3)));
+                    assert_eq!(
+                        parked_n
+                            .chunk_ticking
+                            .tickets
+                            .portal_tickets()
+                            .iter()
+                            .map(|t| t.chunk)
+                            .collect::<Vec<_>>(),
+                        vec![(6, 7)]
+                    );
+                    assert_eq!(
+                        parked_n
+                            .chunk_ticking
+                            .tickets
+                            .spawn_areas()
+                            .map(|(c, _)| c)
+                            .collect::<Vec<_>>(),
+                        vec![(8, 9)]
+                    );
+                    assert_eq!(parked_n.knot_state.knot_ids.get(&[1, 64, 2]), Some(&301));
+                    assert_eq!(parked_n.knot_state.knot_ids.len(), 1);
+                    assert_eq!(parked_n.knot_state.broken_knots, vec![[3, 65, 4]]);
+                    assert_eq!(parked_n.knot_state.broken_knots.as_ptr(), n_broken_ptr);
+                    assert_eq!(
+                        parked_n.lan_queues.block_events,
+                        vec![([5, 66, 6], 1, 2, 3)]
+                    );
+                    assert_eq!(
+                        parked_n.lan_queues.block_events.as_ptr(),
+                        n_block_events_ptr
+                    );
+                    assert_eq!(parked_n.lan_queues.entity_events, vec![(501, 2)]);
+                    assert_eq!(
+                        parked_n.lan_queues.entity_events.as_ptr(),
+                        n_entity_events_ptr
+                    );
+                    assert_eq!(
+                        parked_n.lan_queues.critical_hits,
+                        vec![(Some(9), 501, true)]
+                    );
+                    assert_eq!(parked_n.lan_queues.critical_hits.as_ptr(), n_crit_ptr);
                 }
 
                 // Return transition: Overworld -> Nether restores both sides completely.
@@ -3428,6 +3664,65 @@ mod tests {
                 assert_eq!(game.server.sculk.level.index.order, vec![(2, 64, 3)]);
                 assert_eq!(game.server.sculk.level.known.len(), 1);
                 assert!(game.server.sculk.level.known.contains(&(2, 3)));
+                assert_eq!(
+                    game.server
+                        .chunk_ticking
+                        .tickets
+                        .portal_tickets()
+                        .iter()
+                        .map(|t| t.chunk)
+                        .collect::<Vec<_>>(),
+                    vec![(6, 7)]
+                );
+                assert_eq!(
+                    game.server
+                        .chunk_ticking
+                        .tickets
+                        .spawn_areas()
+                        .map(|(c, _)| c)
+                        .collect::<Vec<_>>(),
+                    vec![(8, 9)]
+                );
+                let (_, n_after_return) = game
+                    .server
+                    .chunk_ticking
+                    .random_tick_sections
+                    .next_masked(
+                        (3, 4),
+                        &chunk_n,
+                        game.common.res.facts(),
+                        |id| {
+                            game.common
+                                .res
+                                .behaviours()
+                                .random_tick_candidate(BlockStateId(id))
+                        },
+                        0,
+                    )
+                    .unwrap();
+                assert!(Rc::ptr_eq(&n_after_return, &mask_n));
+                assert_eq!(game.server.knot_state.knot_ids.get(&[1, 64, 2]), Some(&301));
+                assert_eq!(game.server.knot_state.knot_ids.len(), 1);
+                assert_eq!(game.server.knot_state.broken_knots, vec![[3, 65, 4]]);
+                assert_eq!(game.server.knot_state.broken_knots.as_ptr(), n_broken_ptr);
+                assert_eq!(
+                    game.server.lan_queues.block_events,
+                    vec![([5, 66, 6], 1, 2, 3)]
+                );
+                assert_eq!(
+                    game.server.lan_queues.block_events.as_ptr(),
+                    n_block_events_ptr
+                );
+                assert_eq!(game.server.lan_queues.entity_events, vec![(501, 2)]);
+                assert_eq!(
+                    game.server.lan_queues.entity_events.as_ptr(),
+                    n_entity_events_ptr
+                );
+                assert_eq!(
+                    game.server.lan_queues.critical_hits,
+                    vec![(Some(9), 501, true)]
+                );
+                assert_eq!(game.server.lan_queues.critical_hits.as_ptr(), n_crit_ptr);
 
                 let parked_ow = game.server.levels.0.parked.get(&Dim::Overworld).unwrap();
                 assert_eq!(parked_ow.creaking.scanned.len(), 1);
@@ -3470,6 +3765,44 @@ mod tests {
                 assert_eq!(parked_ow.sculk.index.order, vec![(-4, 70, -5)]);
                 assert_eq!(parked_ow.sculk.known.len(), 1);
                 assert!(parked_ow.sculk.known.contains(&(-4, -5)));
+                assert_eq!(
+                    parked_ow
+                        .chunk_ticking
+                        .tickets
+                        .portal_tickets()
+                        .iter()
+                        .map(|t| t.chunk)
+                        .collect::<Vec<_>>(),
+                    vec![(-2, -3)]
+                );
+                assert_eq!(
+                    parked_ow
+                        .chunk_ticking
+                        .tickets
+                        .spawn_areas()
+                        .map(|(c, _)| c)
+                        .collect::<Vec<_>>(),
+                    vec![(-4, -5)]
+                );
+                assert_eq!(parked_ow.knot_state.knot_ids.get(&[-1, 70, -2]), Some(&402));
+                assert_eq!(parked_ow.knot_state.knot_ids.len(), 1);
+                assert_eq!(parked_ow.knot_state.broken_knots, vec![[-3, 71, -4]]);
+                assert_eq!(parked_ow.knot_state.broken_knots.as_ptr(), ow_broken_ptr);
+                assert_eq!(
+                    parked_ow.lan_queues.block_events,
+                    vec![([-5, 72, -6], 4, 5, 6)]
+                );
+                assert_eq!(
+                    parked_ow.lan_queues.block_events.as_ptr(),
+                    ow_block_events_ptr
+                );
+                assert_eq!(parked_ow.lan_queues.entity_events, vec![(602, 7)]);
+                assert_eq!(
+                    parked_ow.lan_queues.entity_events.as_ptr(),
+                    ow_entity_events_ptr
+                );
+                assert_eq!(parked_ow.lan_queues.critical_hits, vec![(None, 602, false)]);
+                assert_eq!(parked_ow.lan_queues.critical_hits.as_ptr(), ow_crit_ptr);
             });
         });
     }
