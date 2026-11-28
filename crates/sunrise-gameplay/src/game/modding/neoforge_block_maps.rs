@@ -78,7 +78,7 @@ pub(in crate::game) fn load(
             }
             Ok(transform(name))
         },
-        |_, _| Err("data map does not support partial removers".into()),
+        |_, _| -> Result<(), String> { Err("data map does not support partial removers".into()) },
         |_, _, _, incoming| Ok(incoming.clone()),
         |_, _, _, _| Err("data map does not support partial removers".into()),
     );

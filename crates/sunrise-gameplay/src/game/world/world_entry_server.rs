@@ -195,7 +195,7 @@ impl crate::game::ServerGame<'_> {
         self.install_registry_snapshots();
         if let Err(error) = self.install_fluid_interactions() {
             self.finish_close_world_server();
-            return Err(error);
+            return Err(error.into());
         }
         self.install_profession_save_snapshots();
         self.install_level_environments();

@@ -313,5 +313,3 @@ fn remember_shutdown(
     log::error!("{error}");
     failure.get_or_insert(error);
 }
-
-use sunrise_gameplay_common::game::tables::WorldTablesExt as _;
