@@ -96,7 +96,7 @@ fn a_render_arm_textured_quad_is_refused_as_a_hand_draw() {
                 game.client.dynamic_textures.bind(1, 64);
                 game.client
                     .dynamic_textures
-                    .create("arm-texture", &texture, [2, 2], 1, &[0x7f; 16], |_| Ok(()))
+                    .create("arm-texture", &texture, [2, 2], 1, &[0x7f; 16])
                     .unwrap();
                 let render_type = game
                     .client
