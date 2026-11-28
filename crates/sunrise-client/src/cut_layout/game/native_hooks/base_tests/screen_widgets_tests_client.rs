@@ -3706,33 +3706,35 @@ fn press_id_and_mutating_widgets_from_screen_input_hooks_and_lazy_discovery() {
                 "press(id) must return false when the click does not reach the Inventory widget"
             );
 
-            // `press(id)` on a station screen (Crafting Table) must also return false when no
-            // station widget takes the click (never true from station_click's slot-miss fallback).
-            game.open_station_client(
-                sunrise_gameplay_common::game::stations_common::Station::new_kind(
-                    sunrise_gameplay_common::game::stations_common::Kind::Crafting,
-                    [0, 64, 0],
-                ),
+            // `press(id)` on a real station screen (Stonecutter) must also return false when no
+            // station widget takes the click (never true from station_click's slot-miss fallback),
+            // leaving the station open and its slots untouched.
+            let mut stonecutter = sunrise_gameplay_common::game::stations_common::Station::new(
+                sunrise_gameplay_common::game::stations_common::Kind::Stonecutter,
+                [0, 64, 0],
             );
-            game.common.level.recipe_book.open = [true; 4];
-            game.observe_screen();
-            let station_filter_id = {
-                let widgets = game.screen_widgets().unwrap();
-                widgets
-                    .children()
-                    .iter()
-                    .find(|c| {
-                        c.message.as_ref() == Some(&filter_all)
-                            || c.message.as_ref() == Some(&filter_craftable)
-                    })
-                    .expect("Crafting station exposes open RecipeBookComponent filter button")
-                    .id
-            };
-            game.common.level.recipe_book.open = [false; 4];
+            stonecutter.inputs[0] =
+                Some(sunrise_items::items::ItemStack::new("minecraft:stone", 1));
+            game.open_station_client(stonecutter);
+            assert!(game.screen_widgets().unwrap().set_visible(tab_id, true));
             assert!(
-                !game.screen_widgets().unwrap().press(station_filter_id),
-                "press(id) on a station must return false when no widget takes the click"
+                !game.screen_widgets().unwrap().press(tab_id),
+                "press(id) on a station must return false when no station widget takes the click"
             );
+            assert!(
+                game.common.station.as_ref().is_some_and(|s| {
+                    s.kind == sunrise_gameplay_common::game::stations_common::Kind::Stonecutter
+                        && s.inputs[0].as_ref().is_some_and(|st| {
+                            st.item.as_ref() == "minecraft:stone" && st.count == 1
+                        })
+                }),
+                "declined station press must leave the station open and its slots untouched"
+            );
+            assert!(
+                game.common.carried.is_none(),
+                "declined station press must not trigger a slot click"
+            );
+            game.clear_station_client();
 
             // Non-Options route: moving a widget on DebugOptions over Done routes clicks
             // exclusively to the moved widget, and a mismatched-button release does not steal
