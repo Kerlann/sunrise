@@ -216,13 +216,16 @@ fn read_field<T: DeserializeOwned>(raw: &mut RawObject, field: &str) -> Result<O
 
 fn decode_removals<R>(
     raw: Option<Box<RawValue>>,
-    decode_remover: impl Fn(&Value) -> Result<R, String>,
+    decode_remover: Option<&impl Fn(&Value) -> Result<R, String>>,
 ) -> Result<Vec<Removal<R>>, String> {
     let Some(raw) = raw else {
         return Ok(Vec::new());
     };
     let trimmed = raw.get().trim_start();
     if trimmed.starts_with('{') {
+        let Some(decode_remover) = decode_remover else {
+            return Err("remove: data map does not support partial removers".into());
+        };
         let OrderedMap(entries) = serde_json::from_str::<OrderedMap<Value>>(raw.get())
             .map_err(|e| format!("remove: {e}"))?;
         return entries
@@ -243,6 +246,9 @@ fn decode_removals<R>(
                 if let Some(key) = removal.as_str() {
                     Ok(Removal::Full(Key::decode(key)?))
                 } else if let Some(object) = removal.as_object() {
+                    let Some(decode_remover) = decode_remover else {
+                        return Err("remove: data map does not support partial removers".into());
+                    };
                     let key = object
                         .get("key")
                         .and_then(Value::as_str)
@@ -266,13 +272,14 @@ fn decode<T, V: DeserializeOwned>(
     bytes: &[u8],
     value: impl Fn(V) -> Result<Option<T>, String>,
 ) -> Result<File<T>, String> {
-    decode_with_removers(bytes, |raw| Ok(value(raw)?.map(|v| (false, v))), |_| Ok(()))
+    let no_remover: Option<&fn(&Value) -> Result<(), String>> = None;
+    decode_with_removers(bytes, |raw| Ok(value(raw)?.map(|v| (false, v))), no_remover)
 }
 
 fn decode_with_removers<T, R, V: DeserializeOwned>(
     bytes: &[u8],
     value: impl Fn(V) -> Result<Option<(bool, T)>, String>,
-    decode_remover: impl Fn(&Value) -> Result<R, String>,
+    decode_remover: Option<&impl Fn(&Value) -> Result<R, String>>,
 ) -> Result<File<T, R>, String> {
     let mut raw: RawObject = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
     let replace = read_field::<bool>(&mut raw, "replace")?.unwrap_or_default();
@@ -441,7 +448,7 @@ pub fn load_registered<T: Clone, R, I: IntoIterator<Item: AsRef<str>>>(
                     }
                     (codecs.decode_value)(&raw).map(Some)
                 },
-                &codecs.decode_remover,
+                Some(&codecs.decode_remover),
             )
         },
     )
@@ -665,5 +672,39 @@ mod condition_tests {
         let replaced =
             run(br##"{"values":{"minecraft:coal":2,"#test:fuels":{"value":5,"replace":true}}}"##);
         assert_eq!(replaced.get("minecraft:coal"), Some(&5));
+    }
+
+    #[test]
+    fn basic_map_rejects_partial_removal_forms_before_replace_clears_lower_layer() {
+        let files = vec![(
+            "data_maps/test:item/basic".to_owned(),
+            vec![
+                br#"{"values":{"minecraft:stick":2}}"#.to_vec(),
+                br#"{"replace":true,"values":{"minecraft:coal":9},"remove":{"minecraft:stick":1}}"#
+                    .to_vec(),
+                br#"{"replace":true,"values":{"minecraft:coal":9},"remove":[{"key":"minecraft:stick","remover":1}]}"#
+                    .to_vec(),
+            ],
+        )];
+        let overlay = sunrise_world::loot::PackOverlay {
+            files: &files,
+            ..sunrise_world::loot::PackOverlay::default()
+        };
+        let id = Identifier::parse("test:basic").unwrap();
+        let (values, applied) = load(
+            &id,
+            "minecraft:item",
+            BTreeMap::new(),
+            &overlay,
+            |_| std::iter::empty::<String>(),
+            |raw| {
+                entry_value(raw)?
+                    .as_i64()
+                    .ok_or_else(|| "expected integer".into())
+            },
+            |_| true,
+        );
+        assert!(applied);
+        assert_eq!(values, BTreeMap::from([("minecraft:stick".to_owned(), 2)]));
     }
 }

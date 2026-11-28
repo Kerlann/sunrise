@@ -78,7 +78,7 @@ pub(in crate::game) fn load(
             }
             Ok(transform(name))
         },
-        |_, _| Ok(()),
+        |_, _| Err("data map does not support partial removers".into()),
         |_, _, _, incoming| Ok(incoming.clone()),
         |_, _, _, _| Err("data map does not support partial removers".into()),
     );
@@ -169,6 +169,11 @@ mod tests {
                 layers(&[
                     json!({"values": {"minecraft:stone": {"ignite_odds": 5, "burn_odds": 20}}}),
                     json!({"values": {"minecraft:stone": null}}),
+                    json!({
+                        "replace": true,
+                        "values": {"test:tin": {"ignite_odds": 1, "burn_odds": 2}},
+                        "remove": {"minecraft:stone": 1}
+                    }),
                 ]),
             ),
             (
