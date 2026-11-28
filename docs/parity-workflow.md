@@ -231,6 +231,40 @@ runs, the comparators print player component differences at the first tick where
 - `tools/state_digest_compare.py A/digest.txt B/digest.txt` names the earliest differing group and reports each group’s first differing step and game time. First compare two runs of the same binary. With either comparator, repeat `--ignore-group GROUP` for observed run-to-run differences that should remain visible without failing the comparison. The player comparator also accepts `player_summary` for `players.txt`. Compare runs built with the same digest groups and Rust toolchain.
 - Keep the measured window free of chunk loading, generation and lighting, and of trial spawners, ominous item spawners and `/item modify` (clock-seeded UUIDs and loot random).
 
+### State transcript
+
+The state transcript compares what the integrated server does with the same scripted scene in vanilla and
+Sunrise. Start with the pinned server artifacts and prepared client resources from the vanilla harness setup.
+Use the JDK from the research lock on `PATH`.
+
+```sh
+python3 tools/test_state_transcript_parity.py --scene base --repeat
+python3 tools/test_state_transcript_parity.py --scene riding --binary target/fast/sunrise-client
+```
+
+The harness is manual and `parity.py` leaves it out. An existing client binary needs the
+`sunrise-client/state-digest` feature. Use `--only vanilla` or `--only sunrise` to record one engine.
+`--repeat` checks that fresh runs of each selected engine produce byte-identical transcripts with the oracle
+cache disabled before comparing across engines.
+
+Each run writes its script, fixture manifest, logs and transcripts to a fresh directory under
+`.local/state_transcript/<scene>/`. The cross-engine comparison writes `report.json` there.
+Keep those outputs local.
+
+The transcript covers overworld entities in the ticking set, their stored order, actual turns and departures,
+and the recorded member and level fields. A turn can survive its entity's removal from the ticking set.
+The riding group covers vehicles and passengers. Leashes, block and inventory state, packets, rendering,
+and other levels are outside the comparison.
+
+`tools/state_transcript_compare.py A B` validates the records and script and fixture provenance. Read the
+earliest differing point first, then the first difference in each group. The report includes the entity,
+field, values from both files, and nearby lines for the earliest difference. Later differences can follow
+from that first one. Member state is paired by id and type up to the first divergence in the id sequence
+at each point. An unknown value is counted even when both engines report it. Repeat `--ignore-group GROUP`
+to keep a group visible while omitting it from the result. Use `--json PATH` to save the report.
+The comparator exits with 0 when the included groups match and have no unknowns, 1 for a difference or
+unknown, and 2 for invalid input.
+
 ### Fuzzing scenarios
 
 `tools/parity_fuzz.py` runs generated scenarios in vanilla and Sunrise and reports each divergence group with a shrunk reproduction. A batch of scenarios runs as one command-exec script (`test_command_exec_parity.py --groups-file`). It is a separate tool: `parity.py` never selects it.
