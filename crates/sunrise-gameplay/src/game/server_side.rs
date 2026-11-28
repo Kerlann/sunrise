@@ -1197,11 +1197,7 @@ pub struct ServerState {
     pub lan_songs: Vec<([i32; 3], Option<String>)>,
     pub(in crate::game::server_side) lan_cushion_breaks:
         Vec<(sunrise_world::registry::BlockStateId, [f64; 3])>,
-    /// Block events (position, b0, b1, state) and entity events (id, event) for the guests.
-    pub lan_block_events: Vec<([i32; 3], i32, i32, u32)>,
-    pub lan_entity_events: Vec<(i32, i8)>,
-    /// Successful crits (attacking guest, hit entity), queued while the hub is taken.
-    pub(in crate::game::server_side) lan_critical_hits: Vec<(Option<u32>, i32, bool)>,
+    pub lan_queues: levels::LanEventLevelState,
     /// Spear stabs that landed (the stabbing guest), queued while the hub is
     /// taken: `broadcastEntityEvent(player, 2)`.
     pub(in crate::game::server_side) lan_kinetic_hits: Vec<Option<u32>>,
@@ -1503,9 +1499,7 @@ impl ServerState {
             lan_events: Vec::new(),
             lan_songs: Vec::new(),
             lan_cushion_breaks: Vec::new(),
-            lan_block_events: Vec::new(),
-            lan_entity_events: Vec::new(),
-            lan_critical_hits: Vec::new(),
+            lan_queues: Default::default(),
             lan_kinetic_hits: Vec::new(),
             stabbed: HashMap::new(),
             stab_players: Vec::new(),

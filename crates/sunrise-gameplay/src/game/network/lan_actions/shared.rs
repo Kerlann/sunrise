@@ -569,7 +569,7 @@ pub mod tests {
                 );
             };
             let take_signals = |game: &mut crate::game::ServerGame<'_>| {
-                let lids = std::mem::take(&mut game.server.lan_block_events)
+                let lids = std::mem::take(&mut game.server.lan_queues.block_events)
                     .into_iter()
                     .filter_map(|(p, id, count, _)| (p == at && id == 1).then_some(count))
                     .collect::<Vec<_>>();

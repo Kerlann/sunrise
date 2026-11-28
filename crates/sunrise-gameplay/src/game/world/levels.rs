@@ -177,6 +177,14 @@ pub struct KnotLevelState {
     pub broken_knots: Vec<[i32; 3]>,
 }
 
+/// Per-level queued LAN block, entity, and critical-hit events.
+#[derive(Default)]
+pub struct LanEventLevelState {
+    pub block_events: Vec<([i32; 3], i32, i32, u32)>,
+    pub entity_events: Vec<(i32, i8)>,
+    pub(in crate::game::server_side) critical_hits: Vec<(Option<u32>, i32, bool)>,
+}
+
 /// A level that is not in place: every per-level field of `Game`.
 pub struct Parked {
     pub world: World,
@@ -218,9 +226,7 @@ pub struct Parked {
     lectern_pulses: Vec<((i32, i32, i32), i32)>,
     lid_openers: HashMap<(i32, i32, i32), i32>,
     lan_events: Vec<super::QueuedLevelEvent>,
-    lan_block_events: Vec<([i32; 3], i32, i32, u32)>,
-    lan_entity_events: Vec<(i32, i8)>,
-    lan_critical_hits: Vec<(Option<u32>, i32, bool)>,
+    lan_queues: LanEventLevelState,
     /// The hub's tracked entities of this level (`LanHost::states`), as its last tick described
     /// them: what its players' moves are checked against before this tick describes them again.
     lan_states: sunrise_sim::lan::entity::States,
@@ -1054,9 +1060,7 @@ fn box_parked(
         lectern_pulses: Vec::new(),
         lid_openers: HashMap::new(),
         lan_events: Vec::new(),
-        lan_block_events: Vec::new(),
-        lan_entity_events: Vec::new(),
-        lan_critical_hits: Vec::new(),
+        lan_queues: Default::default(),
         lan_states: Default::default(),
         anims: Default::default(),
         raiding: Default::default(),
@@ -1366,9 +1370,7 @@ impl crate::game::ServerGame<'_> {
         swap(&mut self.server.lectern_pulses, &mut p.lectern_pulses);
         swap(&mut self.server.lid_openers, &mut p.lid_openers);
         swap(&mut self.server.lan_events, &mut p.lan_events);
-        swap(&mut self.server.lan_block_events, &mut p.lan_block_events);
-        swap(&mut self.server.lan_entity_events, &mut p.lan_entity_events);
-        swap(&mut self.server.lan_critical_hits, &mut p.lan_critical_hits);
+        swap(&mut self.server.lan_queues, &mut p.lan_queues);
         self.server.be_anims.swap_level(&mut p.anims);
         self.server.raiding.0.swap_level(&mut p.raiding);
         self.server.sculk.swap_level(&mut p.sculk);

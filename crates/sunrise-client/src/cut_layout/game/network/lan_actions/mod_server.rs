@@ -621,16 +621,33 @@ pub(crate) mod tests {
                     ..hit
                 };
                 game.start_audio_capture();
-                game.server.lan_block_events.clear();
+                game.server.lan_queues.block_events.clear();
                 assert!(game.use_hand(Some(&pot_hit)).unwrap());
-                assert!(!game.server.lan_block_events.iter().any(|&(p, b0, b1, _)| {
-                    p == pot_hit.pos && b0 == 1 && b1 == crate::game::decorated_pot::WOBBLE_NEGATIVE
-                }));
+                assert!(
+                    !game
+                        .server
+                        .lan_queues
+                        .block_events
+                        .iter()
+                        .any(|&(p, b0, b1, _)| {
+                            p == pot_hit.pos
+                                && b0 == 1
+                                && b1 == crate::game::decorated_pot::WOBBLE_NEGATIVE
+                        })
+                );
                 *user.empty_answer.lock().unwrap() = None;
                 assert!(game.use_hand(Some(&pot_hit)).unwrap());
-                assert!(game.server.lan_block_events.iter().any(|&(p, b0, b1, _)| {
-                    p == pot_hit.pos && b0 == 1 && b1 == crate::game::decorated_pot::WOBBLE_NEGATIVE
-                }));
+                assert!(
+                    game.server
+                        .lan_queues
+                        .block_events
+                        .iter()
+                        .any(|&(p, b0, b1, _)| {
+                            p == pot_hit.pos
+                                && b0 == 1
+                                && b1 == crate::game::decorated_pot::WOBBLE_NEGATIVE
+                        })
+                );
                 game.stop_audio_capture();
                 let shelf = game
                     .with_props(

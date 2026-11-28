@@ -348,7 +348,7 @@ impl crate::game::ServerGame<'_> {
                 order.push((
                     event,
                     ctx.source.and_then(|source| source.actor()),
-                    self.server.lan_entity_events.len(),
+                    self.server.lan_queues.entity_events.len(),
                     if self.common.is_logical_server() {
                         self.server.pending_sounds.len()
                     } else {
