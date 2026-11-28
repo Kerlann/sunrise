@@ -14,7 +14,7 @@ The split comes first, inside this repository, one checked step at a time. The r
 
 Both checks below run in CI's verify job and in `tools/pr_ready.py`, against the fork's baseline: the explicit
 rows and reasons in `tools/layers.json` and `tools/addresses.json`, which cover the split mod crates and the separate
-launcher, registry and telemetry-server workspaces. No engine/API refactor is implied by importing these tools.
+launcher and telemetry-server workspaces. No engine/API refactor is implied by importing these tools.
 
 This page says:
 
@@ -78,8 +78,8 @@ Vanilla Minecraft: Java Edition 26.3, and nothing else.
 
 ### Portable crates
 
-`sunrise-core`, `sunrise-world`, `sunrise-protocol`, `sunrise-items`, `sunrise-command`, `sunrise-game-data`
-and `sunrise-assets` hold vanilla's rules and data with no desktop in them. `sunrise-threads` provides worker
+`sunrise-core`, `sunrise-world`, `sunrise-protocol`, `sunrise-items`, `sunrise-command`, `sunrise-game-data`,
+`sunrise-entity-data` and `sunrise-assets` hold vanilla's rules and data with no desktop in them. `sunrise-threads` provides worker
 scheduling and sampling, and `sunrise-java-properties` reads and writes Java-properties files with the standard
 library alone. These portable crates have no window, GPU, sound, gamepad or clipboard library, no HTTP client,
 and no engine crate outside the portable list. The platform sits on the desktop engine
@@ -149,7 +149,7 @@ Sunrise's own extras and its product, and every built-in address of an outside s
   music page, auto-reconnect...), Play with Friends and its relay, Discord, the "I'm playing" ping,
   telemetry and benchmark uploads, releases and updates, the hosting supervisor, the launcher.
 - **Examples:** `sunrise-addresses`, `sunrise-friends`, `sunrise-relay`, `sunrise-telemetry`,
-  `sunrise-perf-share`, `sunrise-perf-overlay`, `sunrise-release-sign`, `sunrise-server`, `sunrise-mod-registry`,
+  `sunrise-perf-share`, `sunrise-perf-overlay`, `sunrise-release-sign`, `sunrise-server`,
   `sunrise-heartbeat`, `sunrise-official`, `sunrise-discord`, `sunrise-reconnect`, `https://github.com/sunrise-org/sunrise-launcher`. Still in
   engine crates today:
   `game/extras.rs` and `game/extras/`, `extras_ui.rs`, `chat_options.rs`.
@@ -637,7 +637,7 @@ Controllers are platform ([above](#controllers-and-ui-pages)).
 ## The checks
 
 `python3 tools/check_layers.py` runs in CI's verify job and in `tools/pr_ready.py`. It reads the `cargo metadata` of the
-four workspaces `tools/layers.json` lists (the game, `https://github.com/sunrise-org/sunrise-launcher`, `crates/sunrise-mod-registry/` and
+three workspaces `tools/layers.json` lists (the game, `https://github.com/sunrise-org/sunrise-launcher` and
 `crates/sunrise-telemetry-server/`; no build, about a second) and [`tools/layers.json`](../tools/layers.json), which
 gives every crate its layer. It fails when:
 
@@ -660,9 +660,9 @@ left.
 ### Today's exceptions
 
 The current dependency inventory is in `tools/layers.json`, with fork-specific classifications and reasons in
-`_fork_baselines`. It records existing fork dependencies and the restored upstream Horizon layer dependencies. The separate launcher and registry workspaces take two engine crates: `sunrise-mod-package` (the launcher's
-package, modpack and index reads; the registry's index format) and `sunrise-system` (the launcher's bug reports).
-Those three edges are `allowed` rows like the launcher's other engine dependencies.
+`_fork_baselines`. It records existing fork dependencies and the restored upstream Horizon layer dependencies. The separate launcher workspace takes two engine crates: `sunrise-mod-package` (the launcher's
+package, modpack and index reads) and `sunrise-system` (the launcher's bug reports).
+Those two edges are `allowed` rows like the launcher's other engine dependencies.
 
 ## Built-in addresses
 
@@ -701,13 +701,12 @@ Sunrise's own and third-party addresses (Sunrise layer):
 | `playsunrise.net/perf`, `playsunrise.net/api/perf/captures` | the performance viewer Open shows a saved capture in, and the upload behind Share (`SUNRISE_PERF_VIEWER`, `SUNRISE_PERF_CAPTURES` override them) | `sunrise-addresses`, used by `sunrise-perf-share` |
 | `telemetry.playsunrise.net` | opt-in telemetry, the "I'm playing" ping, benchmark uploads | `sunrise-addresses` (#12993) |
 | `stun.cloudflare.com`, `stun.l.google.com` | Play with Friends NAT discovery | `sunrise-addresses` (#12993) |
-| `sunrise-org.github.io/sunrise-mods`, `github.com/sunrise-org/sunrise-mods`, `playsunrise.net/mods` | Sunrise's mod registry: index, mirrored release assets, icons and screenshots, report form and project pages (`SUNRISE_MOD_INDEX` overrides the index) | `sunrise-launcher-addresses` in the launcher repository; `cargo-sunrise-mod` reads `sunrise_addresses::MOD_REGISTRY_INDEX` and `MOD_REGISTRY_METADATA`; `sunrise_mod_package::index` (`REGISTRY_REPO`, `FILE_HOST`) supplies the registry release defaults for `sunrise-mod-registry` |
+| `sunrise-org.github.io/sunrise-mods`, `github.com/sunrise-org/sunrise-mods`, `playsunrise.net/mods` | Sunrise's mod registry: index, mirrored release assets, icons and screenshots, report form and project pages (`SUNRISE_MOD_INDEX` overrides the index) | `sunrise-launcher-addresses` in the launcher repository; `cargo-sunrise-mod` reads `sunrise_addresses::MOD_REGISTRY_INDEX` and `MOD_REGISTRY_METADATA` |
 | `api.modrinth.com`, `cdn.modrinth.com` | modpack porting | `sunrise-port-pack` |
 | `github.com`, `raw.githubusercontent.com`, `gitlab.com`, `maven.neoforged.net` | modpack porting's sources | `sunrise-port-pack` |
 | `play.playhorizon.dev` | the official Horizon server, which the client identity hook answers for | `sunrise-addresses`, `sunrise-official` |
 | `playsunrise.net` | the download link shown with no resources | `no_resources.rs` |
 | `api.github.com`, `discord.com` | hosting: updates, Discord webhooks | `sunrise-server` |
-| `api.github.com`, `uploads.github.com`, `playsunrise.net` | the registry's submission service | `sunrise-mod-registry` |
 | Modrinth, CurseForge, Fabric, Quilt, Forge, NeoForge, GitHub, Microsoft and Xbox sign-in, Tailscale, `discord.gg`, `mclo.gs`, `static.rust-lang.org` | the launcher's browsers, loaders, sign-in, logs and hosting | `https://github.com/sunrise-org/sunrise-launcher/tree/main/src/`, `https://github.com/sunrise-org/sunrise-launcher/blob/main/links.json` |
 
 These are not addresses:

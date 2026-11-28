@@ -43,6 +43,29 @@ pub trait LevelCollisionBackend {
         visit: &mut dyn FnMut([f64; 6]) -> core::ops::ControlFlow<()>,
     ) -> Option<core::ops::ControlFlow<()>>;
     /// Side: both.
+    /// `BlockState.isSuffocating(level, pos)` of the supplied `state` at `pos`: the block's own
+    /// predicate (`BlockBehaviour.Properties.isSuffocating`) as the level's suffocation rules
+    /// bind it, with the level read where the predicate reads it: on the server the open
+    /// world's rules, its data packs' `#minecraft:causes_suffocation` included; on the client
+    /// the game's built-in rules until the client receives the world's tables
+    /// (#6597). The arguments come in `visit_block_shape`'s order,
+    /// state then position. The state need not be the block stored there, so a camouflaged
+    /// block can ask about the state it shows. A shulker box (`Blocks.shulkerBox`'s predicate)
+    /// suffocates unless a `ShulkerBoxBlockEntity` at `pos` is not closed (opening, open or
+    /// closing); a block whose collision shape a block entity publishes or a declared offset
+    /// moves is tested with its shape at `pos`. A predicate that ignores the level answers as
+    /// `BlockStates::is_suffocating`, which reads the same rules. Reads open
+    /// server levels (active or parked) and the client's current level; never loads chunks.
+    /// None for an unknown state, a stale handle or an unavailable level, an unloaded or
+    /// out-of-height `pos`, and collision data that cannot answer (a collision query error, as
+    /// `visit_block_shape` returns no boxes for one).
+    fn level_state_is_suffocating(
+        &self,
+        level: LevelRef,
+        state: BlockState,
+        pos: [i32; 3],
+    ) -> Option<bool>;
+    /// Side: both.
     /// Clip a ray from `from` to `to` against collider, outline or visual shapes
     /// (`ClipContext.Block.COLLIDER`, `OUTLINE`, `VISUAL`) and fluids (`BlockGetter.clip` /
     /// `BlockGetter.clipWithInteractionOverride`, not `CollisionGetter.clipIncludingBorder`).
@@ -126,4 +149,25 @@ pub trait LevelCollisionBackend {
     /// and the world border, and returns `None` for unavailable levels, invalid bounds or
     /// query errors. Stops at the first hit without lending or collecting geometry.
     fn level_has_collisions(&self, level: LevelRef, aabb: [f64; 6]) -> Option<bool>;
+    /// Side: server.
+    /// Whether no entity that blocks building is in `state`'s collision shape at `pos`:
+    /// `CollisionGetter.isUnobstructed(state, pos, CollisionContext.empty())`, which is
+    /// `EntityGetter.isUnobstructed(null, shape)` over `state.getCollisionShape(level, pos,
+    /// context).move(pos)`. It is the empty-context form of the test `BlockItem.canPlace` makes
+    /// with `CollisionContext.placementContext(player)`: no player context is exposed, so a shape
+    /// that depends on the entity context is its empty-context shape. The state need not be the
+    /// block stored there. An entity counts when it is alive, not a
+    /// spectator and `Entity.blocksBuilding` (players, mobs, minecarts, boats, armor stands that
+    /// are not markers, end crystals, primed TNT, falling blocks that landed from a fall), and
+    /// when its bounding box overlaps the shape itself, not merely the shape's bounds. A state
+    /// with an empty collision shape is always unobstructed. No entity is excepted, as with
+    /// `null`. Reads open server levels, active or parked, and loads nothing.
+    /// `Err(Stale)` for a stale handle, `Err(Unavailable)` on a client, when the level cannot be
+    /// read or when the state's collision shape cannot be evaluated.
+    fn level_is_unobstructed(
+        &self,
+        level: LevelRef,
+        pos: [i32; 3],
+        state: BlockState,
+    ) -> Result<bool, LevelReadError>;
 }

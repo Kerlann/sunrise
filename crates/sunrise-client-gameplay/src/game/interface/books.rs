@@ -943,6 +943,162 @@ impl ClientGame<'_> {
             *page = (value.max(0) as usize).min(pages.len().saturating_sub(1));
         }
     }
+    pub(in crate::game) fn book_press_child(
+        &mut self,
+        tag: u64,
+        mapped_cursor: (f32, f32),
+    ) -> bool {
+        let size = self
+            .client
+            .renderer
+            .0
+            .as_ref()
+            .map_or([1, 1], |r| [r.config.width, r.config.height]);
+        let b = HudBatch::new(size, self.client.settings.gui_scale_inputs());
+        let left = ((b.width - 192.0) / 2.0).floor();
+        let click = |game: &mut Self| game.play_audio("minecraft:ui.button.click", None, 0.25, 1.0);
+        match tag {
+            0 => {
+                // Page forward
+                match &self.client.book {
+                    Some(BookScreen::Edit { signing: false, .. }) => {
+                        self.turn_page(true);
+                        true
+                    }
+                    Some(BookScreen::View { pages, page, .. }) if *page + 1 < pages.len() => {
+                        self.turn_page(true);
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            1 => {
+                // Page backward
+                match &self.client.book {
+                    Some(BookScreen::Edit {
+                        signing: false,
+                        page,
+                        ..
+                    }) if *page > 0 => {
+                        self.turn_page(false);
+                        true
+                    }
+                    Some(BookScreen::View { page, .. }) if *page > 0 => {
+                        self.turn_page(false);
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            2 => {
+                // BookSignScreen: Sign and Close
+                let ok = matches!(
+                    &self.client.book,
+                    Some(BookScreen::Edit { signing: true, title, .. }) if !title.trim().is_empty()
+                );
+                if ok {
+                    click(self);
+                    self.save_book(true);
+                }
+                ok
+            }
+            3 => {
+                // BookSignScreen: Cancel
+                if matches!(
+                    &self.client.book,
+                    Some(BookScreen::Edit { signing: true, .. })
+                ) {
+                    click(self);
+                    self.set_book_signing(false);
+                    true
+                } else {
+                    false
+                }
+            }
+            4 => {
+                // BookEditScreen: Sign
+                if matches!(
+                    &self.client.book,
+                    Some(BookScreen::Edit { signing: false, .. })
+                ) {
+                    click(self);
+                    self.set_book_signing(true);
+                    true
+                } else {
+                    false
+                }
+            }
+            5 => {
+                // BookEditScreen: Done (save)
+                if matches!(
+                    &self.client.book,
+                    Some(BookScreen::Edit { signing: false, .. })
+                ) {
+                    click(self);
+                    self.save_book(false);
+                    true
+                } else {
+                    false
+                }
+            }
+            6 => {
+                // BookViewScreen / LecternScreen: Done
+                if matches!(&self.client.book, Some(BookScreen::View { .. })) {
+                    click(self);
+                    self.close_book();
+                    true
+                } else {
+                    false
+                }
+            }
+            7 => {
+                // LecternScreen: Take Book
+                if let Some(BookScreen::View {
+                    lectern: Some(key), ..
+                }) = &self.client.book
+                    && self.may_build()
+                {
+                    let key = *key;
+                    click(self);
+                    self.take_lectern_book(key);
+                    true
+                } else {
+                    false
+                }
+            }
+            8 => {
+                // BookSignScreen: title field
+                if matches!(
+                    &self.client.book,
+                    Some(BookScreen::Edit { signing: true, .. })
+                ) {
+                    self.book_title_click(left + 36.0, mapped_cursor.0);
+                    true
+                } else {
+                    false
+                }
+            }
+            9 => {
+                // BookEditScreen: page field
+                if matches!(
+                    &self.client.book,
+                    Some(BookScreen::Edit { signing: false, .. })
+                ) {
+                    self.book_page_click(
+                        left + 36.0,
+                        32.0,
+                        mapped_cursor.0,
+                        mapped_cursor.1,
+                        false,
+                    );
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
     pub(in crate::game::client_side) fn book_click(&mut self, size: [u32; 2]) -> bool {
         let b = HudBatch::new(size, self.client.settings.gui_scale_inputs());
         let (w, left) = (b.width, ((b.width - 192.0) / 2.0).floor());
@@ -1067,17 +1223,68 @@ impl ClientGame<'_> {
         }
         let tr = |key: &str, fallback: &str| self.translate_with_fallback(key, fallback);
         let page_buttons = |batch: &mut HudBatch, back: bool, forward: bool| {
-            for (show, x, name) in [
-                (forward, 116.0, "page_forward"),
-                (back, 43.0, "page_backward"),
+            for (tag, show, x, name, key) in [
+                (
+                    0u64,
+                    forward,
+                    116.0,
+                    "page_forward",
+                    "book.page_button.next",
+                ),
+                (
+                    1u64,
+                    back,
+                    43.0,
+                    "page_backward",
+                    "book.page_button.previous",
+                ),
             ] {
                 if show {
-                    let sprite = if hover(left + x, top + 157.0, 23.0, 13.0) {
-                        format!("widget/{name}_highlighted")
-                    } else {
-                        format!("widget/{name}")
-                    };
-                    batch.sprite(atlas, &sprite, left + x, top + 157.0);
+                    let rect = [left + x, top + 157.0, 23.0, 13.0];
+                    let is_hovered = hover(rect[0], rect[1], rect[2], rect[3]);
+                    let label = Text::translate(key, &[]);
+                    match widgets::with_native_action(tag, || {
+                        widgets::resolve_engine_widget(widgets::EngineWidgetInput {
+                            bucket: widgets::WidgetBucket::Button,
+                            rect,
+                            label: Some(&label),
+                            explicit_key: None,
+                            active: true,
+                            hovered: is_hovered,
+                            focused: false,
+                            tab_order_group: 0,
+                        })
+                    }) {
+                        widgets::ResolvedEngineWidget::Skip => {}
+                        widgets::ResolvedEngineWidget::Unchanged => {
+                            let sprite = if is_hovered {
+                                format!("widget/{name}_highlighted")
+                            } else {
+                                format!("widget/{name}")
+                            };
+                            batch.sprite(atlas, &sprite, rect[0], rect[1]);
+                        }
+                        widgets::ResolvedEngineWidget::Draw(props) => {
+                            let lit = props
+                                .override_render_highlighted_sprite
+                                .unwrap_or(props.active && props.hovered);
+                            let sprite = if lit {
+                                format!("widget/{name}_highlighted")
+                            } else {
+                                format!("widget/{name}")
+                            };
+                            let tint = widgets::white_abgr_alpha(props.alpha);
+                            batch.sprite_scaled(
+                                atlas,
+                                &sprite,
+                                props.rect[0],
+                                props.rect[1],
+                                props.rect[2],
+                                props.rect[3],
+                                tint,
+                            );
+                        }
+                    }
                 }
             }
         };
@@ -1150,15 +1357,6 @@ impl ClientGame<'_> {
                 widgets::begin_screen(|| {
                     ScreenInfo::new("book/sign", screen_info::tr("book.sign.title", &[]))
                 });
-                widgets::narratable(|| {
-                    let rect = [((w - 114.0) / 2.0).floor() - 3.0, 50.0, 114.0, 20.0];
-                    Narratable::edit_box(
-                        screen_info::tr("book.sign.titlebox", &[]),
-                        title_edit.value.clone(),
-                        rect,
-                    )
-                    .focused(title_edit.focused)
-                });
                 let edit = tr("book.editTitle", "Enter Book Title:");
                 let tw = HudBatch::text_width(atlas, &edit);
                 batch.text(
@@ -1172,34 +1370,86 @@ impl ClientGame<'_> {
                 // The title box: an unbordered, centred EditBox of 114 with
                 // black text and no shadow; the value alone is centred, the
                 // cursor follows it.
-                let value = &title_edit.value;
-                let x = left + 36.0;
-                let tx = x + ((114.0 - HudBatch::text_width(atlas, value)) / 2.0).floor();
-                batch.text(atlas, value, tx, 50.0, BLACK, false);
-                if title_edit.cursor != title_edit.highlight {
-                    let (a, b) = (
-                        title_edit.cursor.min(title_edit.highlight),
-                        title_edit.cursor.max(title_edit.highlight),
-                    );
-                    let pre: String = value.chars().take(a).collect();
-                    let sel: String = value.chars().skip(a).take(b - a).collect();
-                    let sx = tx + HudBatch::text_width(atlas, &pre);
-                    batch.text_highlight(
-                        atlas,
-                        (sx, 49.0, HudBatch::text_width(atlas, &sel), 11.0),
-                        true,
-                    );
-                }
-                if title_edit.cursor_visible() {
-                    let pre: String = value.chars().take(title_edit.cursor).collect();
-                    batch.fill(
-                        atlas,
-                        tx + HudBatch::text_width(atlas, &pre),
-                        49.0,
-                        1.0,
-                        9.0,
-                        BLACK,
-                    );
+                let title_rect = [((w - 114.0) / 2.0).floor() - 3.0, 50.0, 114.0, 20.0];
+                let title_label = Text::translate("book.sign.titlebox", &[]);
+                let title_resolved = widgets::with_native_action(8, || {
+                    widgets::resolve_engine_widget(widgets::EngineWidgetInput {
+                        bucket: widgets::WidgetBucket::Field,
+                        rect: title_rect,
+                        label: Some(&title_label),
+                        explicit_key: Some("book.sign.titlebox"),
+                        active: true,
+                        hovered: false,
+                        focused: title_edit.focused,
+                        tab_order_group: 0,
+                    })
+                });
+                if !matches!(title_resolved, widgets::ResolvedEngineWidget::Skip) {
+                    let (draw_rect, active, alpha, tab_order_group, tooltip_hint, msg_plain) =
+                        match title_resolved {
+                            widgets::ResolvedEngineWidget::Draw(props) => (
+                                props.rect,
+                                props.active,
+                                props.alpha,
+                                props.tab_order_group,
+                                props.tooltip_narration,
+                                props.message.map(|m| m.plain()),
+                            ),
+                            _ => (title_rect, true, 1.0, 0, None, None),
+                        };
+                    let (dx, dy) = (draw_rect[0] - title_rect[0], draw_rect[1] - title_rect[1]);
+                    widgets::narratable(|| {
+                        let mut n = Narratable::edit_box(
+                            msg_plain
+                                .clone()
+                                .unwrap_or_else(|| screen_info::tr("book.sign.titlebox", &[])),
+                            title_edit.value.clone(),
+                            draw_rect,
+                        )
+                        .focused(title_edit.focused && active)
+                        .order(tab_order_group);
+                        widgets::apply_narration_overrides(
+                            &mut n,
+                            draw_rect,
+                            active,
+                            false,
+                            msg_plain.as_deref(),
+                            tab_order_group,
+                            tooltip_hint.clone(),
+                        );
+                        n
+                    });
+                    let value = &title_edit.value;
+                    let x = left + 36.0 + dx;
+                    let tx =
+                        x + ((draw_rect[2] - HudBatch::text_width(atlas, value)) / 2.0).floor();
+                    let text_color = widgets::scale_abgr_alpha(BLACK, alpha);
+                    batch.text(atlas, value, tx, 50.0 + dy, text_color, false);
+                    if title_edit.cursor != title_edit.highlight {
+                        let (a, b) = (
+                            title_edit.cursor.min(title_edit.highlight),
+                            title_edit.cursor.max(title_edit.highlight),
+                        );
+                        let pre: String = value.chars().take(a).collect();
+                        let sel: String = value.chars().skip(a).take(b - a).collect();
+                        let sx = tx + HudBatch::text_width(atlas, &pre);
+                        batch.text_highlight(
+                            atlas,
+                            (sx, 49.0 + dy, HudBatch::text_width(atlas, &sel), 11.0),
+                            true,
+                        );
+                    }
+                    if active && title_edit.cursor_visible() {
+                        let pre: String = value.chars().take(title_edit.cursor).collect();
+                        batch.fill(
+                            atlas,
+                            tx + HudBatch::text_width(atlas, &pre),
+                            49.0 + dy,
+                            1.0,
+                            9.0,
+                            text_color,
+                        );
+                    }
                 }
                 // BookSignScreen: `owner.getName()`, the account's name on a server.
                 let owner = self
@@ -1236,20 +1486,24 @@ impl ClientGame<'_> {
                         false,
                     );
                 }
-                button(
-                    batch,
-                    w / 2.0 - 100.0,
-                    98.0,
-                    &tr("book.finalizeButton", "Sign and Close"),
-                    !title.trim().is_empty(),
-                );
-                action_button(
-                    batch,
-                    widgets::Action::Cancel,
-                    w / 2.0 + 2.0,
-                    98.0,
-                    &tr("gui.cancel", "Cancel"),
-                );
+                widgets::with_native_action(2, || {
+                    button(
+                        batch,
+                        w / 2.0 - 100.0,
+                        98.0,
+                        &tr("book.finalizeButton", "Sign and Close"),
+                        !title.trim().is_empty(),
+                    );
+                });
+                widgets::with_native_action(3, || {
+                    action_button(
+                        batch,
+                        widgets::Action::Cancel,
+                        w / 2.0 + 2.0,
+                        98.0,
+                        &tr("gui.cancel", "Cancel"),
+                    );
+                });
             }
             BookScreen::Edit {
                 pages,
@@ -1262,77 +1516,131 @@ impl ClientGame<'_> {
                 });
                 // The page's MultiLineEditBox (no message), focused, then the
                 // page buttons.
-                widgets::narratable(|| {
-                    let rect = [((w - 114.0) / 2.0).floor() - 8.0, 28.0, 122.0, 134.0];
-                    Narratable::edit_box("", pages[*page].clone(), rect).focused(page_edit.focused)
+                let page_rect = [((w - 114.0) / 2.0).floor() - 8.0, 28.0, 122.0, 134.0];
+                let page_resolved = widgets::with_native_action(9, || {
+                    widgets::resolve_engine_widget(widgets::EngineWidgetInput {
+                        bucket: widgets::WidgetBucket::Field,
+                        rect: page_rect,
+                        label: None,
+                        explicit_key: Some("book.page"),
+                        active: true,
+                        hovered: false,
+                        focused: page_edit.focused,
+                        tab_order_group: 0,
+                    })
                 });
+                let page_draw = match page_resolved {
+                    widgets::ResolvedEngineWidget::Skip => None,
+                    widgets::ResolvedEngineWidget::Unchanged => {
+                        Some((page_rect, true, 1.0, 0, None, None))
+                    }
+                    widgets::ResolvedEngineWidget::Draw(props) => Some((
+                        props.rect,
+                        props.active,
+                        props.alpha,
+                        props.tab_order_group,
+                        props.tooltip_narration,
+                        props.message.map(|m| m.plain()),
+                    )),
+                };
+                if let Some((draw_rect, active, _, tab_order_group, tooltip_hint, msg_plain)) =
+                    &page_draw
+                {
+                    widgets::narratable(|| {
+                        let mut n = Narratable::edit_box(
+                            msg_plain.clone().unwrap_or_default(),
+                            pages[*page].clone(),
+                            *draw_rect,
+                        )
+                        .focused(page_edit.focused && *active)
+                        .order(*tab_order_group);
+                        widgets::apply_narration_overrides(
+                            &mut n,
+                            *draw_rect,
+                            *active,
+                            false,
+                            msg_plain.as_deref(),
+                            *tab_order_group,
+                            tooltip_hint.clone(),
+                        );
+                        n
+                    });
+                }
                 page_narratables(*page > 0, true, false);
                 indicator(batch, *page, pages.len());
-                let text = &pages[*page];
-                let lines = self.book_lines(text);
-                for (i, line) in lines.iter().take(LINES).enumerate() {
-                    batch.text_styled(
-                        atlas,
-                        line,
-                        left + 36.0,
-                        top + 30.0 + i as f32 * 9.0,
-                        BLACK,
-                        false,
-                    );
-                }
-                let rows = self.page_rows(text);
-                let (sel_a, sel_b) = (
-                    page_edit.cursor.min(page_edit.highlight),
-                    page_edit.cursor.max(page_edit.highlight),
-                );
-                if sel_a != sel_b {
-                    let chars: Vec<char> = text.chars().collect();
-                    for (i, &(start, end)) in rows.iter().enumerate().take(LINES) {
-                        let from = sel_a.max(start);
-                        let to = sel_b.min(end);
-                        if from >= to {
-                            continue;
-                        }
-                        let pre: String = chars[start..from].iter().collect();
-                        let sel: String = chars[from..to].iter().collect();
-                        batch.text_highlight(
+                if let Some((draw_rect, active, alpha, _, _, _)) = page_draw {
+                    let (dx, dy) = (draw_rect[0] - page_rect[0], draw_rect[1] - page_rect[1]);
+                    let text = &pages[*page];
+                    let lines = self.book_lines(text);
+                    let text_color = widgets::scale_abgr_alpha(BLACK, alpha);
+                    for (i, line) in lines.iter().take(LINES).enumerate() {
+                        batch.text_styled(
                             atlas,
-                            (
-                                left + 36.0 + atlas.font.width(&pre),
-                                top + 29.0 + i as f32 * 9.0,
-                                atlas.font.width(&sel),
-                                9.0,
-                            ),
-                            true,
+                            line,
+                            left + 36.0 + dx,
+                            top + 30.0 + dy + i as f32 * 9.0,
+                            text_color,
+                            false,
+                        );
+                    }
+                    let rows = self.page_rows(text);
+                    let (sel_a, sel_b) = (
+                        page_edit.cursor.min(page_edit.highlight),
+                        page_edit.cursor.max(page_edit.highlight),
+                    );
+                    if sel_a != sel_b {
+                        let chars: Vec<char> = text.chars().collect();
+                        for (i, &(start, end)) in rows.iter().enumerate().take(LINES) {
+                            let from = sel_a.max(start);
+                            let to = sel_b.min(end);
+                            if from >= to {
+                                continue;
+                            }
+                            let pre: String = chars[start..from].iter().collect();
+                            let sel: String = chars[from..to].iter().collect();
+                            batch.text_highlight(
+                                atlas,
+                                (
+                                    left + 36.0 + dx + atlas.font.width(&pre),
+                                    top + 29.0 + dy + i as f32 * 9.0,
+                                    atlas.font.width(&sel),
+                                    9.0,
+                                ),
+                                true,
+                            );
+                        }
+                    }
+                    if active && page_edit.cursor_visible() {
+                        let (x, row) = self.caret_on(text, &rows, page_edit.cursor);
+                        batch.fill(
+                            atlas,
+                            left + 36.0 + dx + x,
+                            top + 29.0 + dy + row as f32 * 9.0,
+                            1.0,
+                            9.0,
+                            text_color,
                         );
                     }
                 }
-                if page_edit.cursor_visible() {
-                    let (x, row) = self.caret_on(text, &rows, page_edit.cursor);
-                    batch.fill(
-                        atlas,
-                        left + 36.0 + x,
-                        top + 29.0 + row as f32 * 9.0,
-                        1.0,
-                        9.0,
-                        BLACK,
-                    );
-                }
                 page_buttons(batch, *page > 0, true);
-                button(
-                    batch,
-                    w / 2.0 - 100.0,
-                    98.0,
-                    &tr("book.signButton", "Sign"),
-                    true,
-                );
-                action_button(
-                    batch,
-                    widgets::Action::Done,
-                    w / 2.0 + 2.0,
-                    98.0,
-                    &tr("gui.done", "Done"),
-                );
+                widgets::with_native_action(4, || {
+                    button(
+                        batch,
+                        w / 2.0 - 100.0,
+                        98.0,
+                        &tr("book.signButton", "Sign"),
+                        true,
+                    );
+                });
+                widgets::with_native_action(5, || {
+                    action_button(
+                        batch,
+                        widgets::Action::Done,
+                        w / 2.0 + 2.0,
+                        98.0,
+                        &tr("gui.done", "Done"),
+                    );
+                });
             }
             BookScreen::View {
                 pages,
@@ -1363,28 +1671,34 @@ impl ClientGame<'_> {
                 // LecternScreen.createMenuControls: Done and Take Book only with
                 // build permission, else BookViewScreen's wide Done.
                 if lectern.is_some() && self.may_build() {
-                    action_button(
-                        batch,
-                        widgets::Action::Done,
-                        w / 2.0 - 100.0,
-                        98.0,
-                        &tr("gui.done", "Done"),
-                    );
-                    button(
-                        batch,
-                        w / 2.0 + 2.0,
-                        98.0,
-                        &tr("lectern.take_book", "Take Book"),
-                        true,
-                    );
+                    widgets::with_native_action(6, || {
+                        action_button(
+                            batch,
+                            widgets::Action::Done,
+                            w / 2.0 - 100.0,
+                            98.0,
+                            &tr("gui.done", "Done"),
+                        );
+                    });
+                    widgets::with_native_action(7, || {
+                        button(
+                            batch,
+                            w / 2.0 + 2.0,
+                            98.0,
+                            &tr("lectern.take_book", "Take Book"),
+                            true,
+                        );
+                    });
                 } else {
-                    action_button(
-                        batch,
-                        widgets::Action::Done,
-                        (w - 200.0) / 2.0,
-                        200.0,
-                        &tr("gui.done", "Done"),
-                    );
+                    widgets::with_native_action(6, || {
+                        action_button(
+                            batch,
+                            widgets::Action::Done,
+                            (w - 200.0) / 2.0,
+                            200.0,
+                            &tr("gui.done", "Done"),
+                        );
+                    });
                 }
                 // HoveredTextEffects.TOOLTIP_AND_CURSOR: the hovered words' hover
                 // event, drawn as the chat draws it (componentHoverEffect).

@@ -39,7 +39,7 @@ use sunrise_gameplay_common::game::creatures::from_loot;
 use sunrise_gameplay_common::game::creatures::killed_by_mob;
 use sunrise_gameplay_common::game::creatures::mob_effect_instance;
 use sunrise_gameplay_common::game::creatures::projectile_targets::{
-    NonMobHit, ProjectileHitInfo, TargetQuery, is_pickable_projectile,
+    NonMobHit, ProjectileHitInfo, TargetQuery,
 };
 use sunrise_gameplay_common::game::creatures::seen;
 use sunrise_gameplay_common::game::creatures::to_loot;
@@ -387,7 +387,7 @@ impl crate::game::ServerGame<'_> {
                 .mobs
                 .iter()
                 .find(|m| m.id == id)
-                .map(|m| m.species()),
+                .map(|m| sunrise_sim::mobs::species::vanilla_id(m.species())),
             _ => None,
         };
         let source = Damage {
@@ -1316,13 +1316,13 @@ impl crate::game::ServerGame<'_> {
     /// simulation distance: the chunks whose entities are on `ServerLevel`'s entity tick list
     /// (`Visibility.fromFullChunkStatus`), so they check despawning.
     pub fn entity_tick_listed_area(&self) -> impl Fn(i32, i32) -> bool + use<> {
-        let levels = self.server.tickets.0.levels();
+        let levels = self.server.chunk_ticking.tickets.levels();
         move |x, z| levels.loaded_entity_ticking(x >> 4, z >> 4)
     }
     /// `DistanceManager.inEntityTickingRange` in an entity-ticking chunk
     /// (block coordinates), from every player's tickets (`update_chunk_tickets`).
     pub fn entity_ticking_area(&self) -> impl Fn(i32, i32) -> bool + use<> {
-        let levels = self.server.tickets.0.levels();
+        let levels = self.server.chunk_ticking.tickets.levels();
         move |x, z| levels.entity_ticking_at(x, z)
     }
     /// Complete `AbstractArrow.stepMoveAndHit` for any non-trident arrow entity hit batch.
@@ -1542,6 +1542,12 @@ impl crate::game::ServerGame<'_> {
                 .creatures
                 .projectiles
                 .retire_extracted(arrow.id, arrow.join);
+            crate::game::record_departure!(
+                self.common.dim,
+                arrow.id,
+                arrow.entity_type(),
+                Some("discarded")
+            );
         }
         Ok(())
     }
@@ -2013,6 +2019,7 @@ impl crate::game::ServerGame<'_> {
                         && source_mob.is_some_and(|id| {
                             self.server
                                 .portals
+                                .level
                                 .entities
                                 .get(&id)
                                 .is_some_and(|p| p.cooldown > 0)
@@ -2219,7 +2226,9 @@ impl crate::game::ServerGame<'_> {
                                 kind: DamageKind::SonicBoom,
                                 attacker: Some(Who::Mob(attacker)),
                                 from: Some(from),
-                                attacker_species: Some(Species::Warden),
+                                attacker_species: Some(sunrise_sim::mobs::species::vanilla_id(
+                                    Species::Warden,
+                                )),
                                 direct: None,
                             };
                             let hurt = self.mob_hits_mob(id, 10.0, source);
@@ -4563,6 +4572,8 @@ impl crate::game::ServerGame<'_> {
         self.complete_mob_removal(join, split);
     }
 
+    /// Settle `Mob.doHurtTarget` after the borrowed tick, or `LivingEntity.stabAttack` at the
+    /// attacker's `Pause::Stab`, before its `aiStep`.
     fn mob_weapon_attack(&mut self, hit: sunrise_sim::mobs::WeaponHit) -> bool {
         use sunrise_sim::mobs::{WeaponAttack, WeaponHit};
         let WeaponHit {
@@ -4731,7 +4742,7 @@ impl crate::game::ServerGame<'_> {
                 .mobs
                 .iter()
                 .find(|m| m.id == id)
-                .map(|m| m.species());
+                .map(|m| sunrise_sim::mobs::species::vanilla_id(m.species()));
         }
         let mut killed = false;
         let mut settle = false;
@@ -5165,7 +5176,7 @@ impl crate::game::ServerGame<'_> {
                 .mobs
                 .iter()
                 .find(|m| m.id == id)
-                .map(|m| m.species()),
+                .map(|m| sunrise_sim::mobs::species::vanilla_id(m.species())),
             _ => None,
         };
         let source = Damage {
@@ -6022,16 +6033,8 @@ impl crate::game::ServerGame<'_> {
         // LivingEntity.isPushable reads onClimbable live; a mob's cached one
         // is only refreshed by its own push step, so one that has not ticked
         // yet (the first tick after a load, a fresh spawn) or has moved since
-        // would be pushed out of a ladder or scaffolding. Refreshed here, from
-        // where each mob stands now, before the snapshot others push it by.
-        let climbing: Vec<bool> = {
-            let w = self.mob_world_base(&[]);
-            self.common
-                .mobs
-                .iter()
-                .map(|m| m.on_climbable(&w))
-                .collect()
-        };
+        // would be pushed out of a ladder or scaffolding. Refreshed in place
+        // from the world and block tables, without building a duplicate MobWorld.
         let inactive_equipment = if self.common.is_logical_server() {
             Some((
                 self.entity_ticking_area(),
@@ -6041,8 +6044,14 @@ impl crate::game::ServerGame<'_> {
         } else {
             None
         };
-        for (m, climbing) in self.common.mobs.iter_mut().zip(climbing) {
-            m.on_climbable = climbing;
+        let world = &self.common.world;
+        let registry = self.common.pack.assets.registry;
+        let facts = self.common.res.facts();
+        let block_tag_flags = world_items!(self).block_tag_flags.bits();
+        let loop_context = &self.common.loop_context;
+        for m in self.common.mobs.iter_mut() {
+            m.on_climbable =
+                m.on_climbable_in(world, registry, facts, block_tag_flags, loop_context);
             if let Some((ticking, items, catalog)) = &inactive_equipment
                 && !m.removed
                 && (!m.extra.equipment.is_empty() || m.extra.live.has_worn())
@@ -6224,8 +6233,11 @@ impl crate::game::ServerGame<'_> {
         self.tick_leads();
         // Vanilla's spawning and raids run before ChunkMap.tick.
         self.tick_spawners();
-        let ticked =
-            sunrise_level::spans::time("tick_creature_entities", || self.tick_creature_entities());
+        let ticked = sunrise_level::spans::time("tick_creature_entities", || {
+            crate::rng_count::in_consumer(crate::rng_count::Consumer::MobBatch, || {
+                self.tick_creature_entities()
+            })
+        });
         self.dismount_underwater_mob_riders();
         ticked
     }
@@ -6355,7 +6367,7 @@ impl crate::game::ServerGame<'_> {
             for (j, q) in projectiles.iter().enumerate() {
                 if j != i
                     && keep_flags[j]
-                    && is_pickable_projectile(q)
+                    && self.projectile_is_pickable(q)
                     && (!skip_wind
                         || !matches!(
                             q.kind,
@@ -6375,6 +6387,8 @@ impl crate::game::ServerGame<'_> {
             }
             {
                 let host_dead = self.player_view().is_some_and(|p| !p.alive);
+                #[cfg(feature = "state-digest")]
+                let dim = self.common.dim;
                 projectiles.update(i, |p| {
                     if vanish
                         && matches!(p.kind, ProjectileKind::EnderPearl)
@@ -6392,6 +6406,7 @@ impl crate::game::ServerGame<'_> {
                         keep_flags[i] = false;
                         return;
                     }
+                    crate::game::record_turn!(dim, p.id, p.entity_type(), None);
                     // The projectile as it was, to fly on if a mod cancels its impact.
                     let before = (hear && !p.stuck).then(|| p.clone());
                     let wind_before = vehicle_winds.before(p);
@@ -6602,6 +6617,19 @@ impl crate::game::ServerGame<'_> {
                 impact.keep = keep_flags[i];
                 if !projectiles[i].destroyed {
                     keep_flags[i] = true;
+                }
+            }
+        }
+        #[cfg(feature = "state-digest")]
+        if crate::game::state_transcript::is_recording() {
+            for (p, &keep) in projectiles.iter().zip(keep_flags.iter()) {
+                if !keep {
+                    crate::game::state_transcript::record_departure(
+                        self.common.dim,
+                        p.id,
+                        p.entity_type(),
+                        Some("discarded"),
+                    );
                 }
             }
         }
@@ -8196,8 +8224,15 @@ impl crate::game::ServerGame<'_> {
                     .creatures
                     .projectiles
                     .retire_extracted(pid, join);
+                crate::game::record_departure!(
+                    self.common.dim,
+                    pid,
+                    p.entity_type(),
+                    Some("discarded")
+                );
                 continue;
             }
+            crate::game::record_turn!(self.common.dim, pid, p.entity_type(), None);
             let section_from = p.position;
             let before = (self.native_hears_impacts() && !p.stuck).then(|| p.clone());
             let mob_shot = !matches!(p.owner, Some(Who::Player));
@@ -8354,6 +8389,12 @@ impl crate::game::ServerGame<'_> {
                     ..self.entity_event_context(pid, None)
                 };
                 self.shulker_bullet_hurt(at, silent);
+                crate::game::record_departure!(
+                    self.common.dim,
+                    pid,
+                    p.entity_type(),
+                    Some("killed")
+                );
                 self.common
                     .creatures
                     .projectiles
@@ -8395,6 +8436,12 @@ impl crate::game::ServerGame<'_> {
                 && keep
                 && let Some(ceiling) = self.wind_ceiling_contact(&p)
             {
+                crate::game::record_departure!(
+                    self.common.dim,
+                    pid,
+                    p.entity_type(),
+                    Some("discarded")
+                );
                 self.common
                     .creatures
                     .projectiles
@@ -8406,6 +8453,12 @@ impl crate::game::ServerGame<'_> {
             if keep || hit != Hit::None && p.arrow.is_none() {
                 self.sweep_projectile_inside(&mut p, None);
                 if p.destroyed {
+                    crate::game::record_departure!(
+                        self.common.dim,
+                        pid,
+                        p.entity_type(),
+                        Some("discarded")
+                    );
                     self.common
                         .creatures
                         .projectiles
@@ -8453,6 +8506,12 @@ impl crate::game::ServerGame<'_> {
                 continue;
             }
             if hit == Hit::None {
+                crate::game::record_departure!(
+                    self.common.dim,
+                    pid,
+                    p.entity_type(),
+                    Some("discarded")
+                );
                 self.common
                     .creatures
                     .projectiles
@@ -8467,6 +8526,12 @@ impl crate::game::ServerGame<'_> {
                     }
                 });
             } else {
+                crate::game::record_departure!(
+                    self.common.dim,
+                    pid,
+                    p.entity_type(),
+                    Some("discarded")
+                );
                 self.common
                     .creatures
                     .projectiles
@@ -8863,6 +8928,12 @@ impl crate::game::ServerGame<'_> {
                 .creatures
                 .projectiles
                 .retire_extracted(arrow.id, arrow.join);
+            crate::game::record_departure!(
+                self.common.dim,
+                arrow.id,
+                arrow.entity_type(),
+                Some("discarded")
+            );
         }
     }
 
@@ -9281,6 +9352,10 @@ pub mod pending_birth_matrix_tests;
 #[cfg(test)]
 #[path = "death_loot_context_tests_server.rs"]
 pub(in crate::game) mod death_loot_context_tests;
+
+#[cfg(test)]
+#[path = "vehicle_loot_tests.rs"]
+pub(in crate::game) mod vehicle_loot_tests;
 
 #[cfg(any(test, feature = "test-support"))]
 #[path = "projectile_targets_tests_server.rs"]

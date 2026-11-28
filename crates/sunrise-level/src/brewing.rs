@@ -106,7 +106,10 @@ pub fn contents_instances(stack: &ItemStack) -> Vec<crate::effects::EffectInstan
             let mut instance = crate::effects::EffectInstance::new(
                 def.id,
                 number(e.get("duration")).unwrap_or(0) as i32,
-                number(e.get("amplifier")).unwrap_or(0).clamp(0, 255) as i32,
+                // The same `ExtraCodecs.UNSIGNED_BYTE` decode as `custom_potion_effects`.
+                e.get("amplifier")
+                    .and_then(sunrise_items::item_data::unsigned_byte)
+                    .unwrap_or(0),
             );
             instance.ambient = number(e.get("ambient")).unwrap_or(0) != 0;
             instance.visible = number(e.get("show_particles")) != Some(0);
@@ -1059,6 +1062,19 @@ mod tests {
         assert!(!contents_empty(&stack));
         // Glowing's colour; hidden poison contributes no weight.
         assert_eq!(contents_color(&stack), 0xFF94_A061);
+        // A custom amplifier reads through its byte: `-56b` is 200, so speed's weight
+        // is 201, not the 0/1 the old clamp gave (#6850).
+        stack.data_mut().potion_extra = vec![(
+            "custom_effects".into(),
+            Tag::List(vec![
+                Tag::compound([
+                    ("id", Tag::String("minecraft:speed".into())),
+                    ("amplifier", Tag::Byte(-56)),
+                ]),
+                Tag::compound([("id", Tag::String("minecraft:poison".into()))]),
+            ]),
+        )];
+        assert_eq!(contents_color(&stack), 0xFF33_EAFE);
         stack
             .data_mut()
             .potion_extra

@@ -54,18 +54,26 @@ impl crate::game::ClientGame<'_> {
     pub(in crate::game::client_side) fn win_screen_pauses(&self) -> bool {
         self.client.win.as_ref().is_some_and(|w| !w.screen.poem)
     }
-    pub(in crate::game::client_side) fn draw_win_screen(&mut self, batch: &mut HudBatch) {
+    /// `WinScreen.extractRenderState` (`WinScreen.java:246-249`) advances `scroll` per frame;
+    /// split out right before `draw_win_screen` so drawing itself mutates no state.
+    pub(in crate::game::client_side) fn advance_win_screen(&mut self) {
         let Some(win) = self.client.win.as_mut() else {
-            self.draw_screen_phase(batch, sunrise_client::screen_draw::RenderPhase::Background);
-            self.draw_screen_phase(batch, sunrise_client::screen_draw::RenderPhase::Foreground);
             return;
         };
-        sunrise_client::widgets::begin_screen(|| win.screen.screen_info());
         let now = Instant::now();
         // DeltaTracker.getGameTimeDeltaTicks: the frame's length in ticks.
         let delta_ticks = now.duration_since(win.frame).as_secs_f32()
             / self.common.clock.tick_duration().as_secs_f32();
         win.frame = now;
+        win.screen.advance(delta_ticks);
+    }
+    pub(in crate::game::client_side) fn draw_win_screen(&mut self, batch: &mut HudBatch) {
+        let Some(win) = self.client.win.as_ref() else {
+            self.draw_screen_phase(batch, sunrise_client::screen_draw::RenderPhase::Background);
+            self.draw_screen_phase(batch, sunrise_client::screen_draw::RenderPhase::Foreground);
+            return;
+        };
+        sunrise_client::widgets::begin_screen(|| win.screen.screen_info());
         let sprite = |n: &str| {
             self.client
                 .gui
@@ -84,11 +92,12 @@ impl crate::game::ClientGame<'_> {
         win.screen
             .draw_background(batch, &self.client.gui.atlas, fill);
         self.draw_screen_phase(batch, sunrise_client::screen_draw::RenderPhase::Background);
-        self.client.win.as_mut().unwrap().screen.draw_contents(
-            batch,
-            &self.client.gui.atlas,
-            delta_ticks,
-        );
+        self.client
+            .win
+            .as_ref()
+            .unwrap()
+            .screen
+            .draw_contents(batch, &self.client.gui.atlas);
         self.draw_screen_phase(batch, sunrise_client::screen_draw::RenderPhase::Foreground);
     }
     /// `WinScreen.keyPressed` / `keyReleased`; Escape closes it (`onClose`).

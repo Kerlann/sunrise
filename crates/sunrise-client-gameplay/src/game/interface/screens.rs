@@ -12,7 +12,6 @@ use sunrise_game_data::{
     Result,
     text::{self, ClickEvent, Text},
 };
-use sunrise_gameplay_common::game::api_values::TryIntoApi;
 use winit::keyboard::KeyCode;
 
 pub(in crate::game) trait ScreenClientExt: Sized {
@@ -368,42 +367,6 @@ impl crate::game::ClientGame<'_> {
             icons: pause_icons(w, h, inputs.links, inputs.additions, &inputs.rows),
         }
     }
-    /// Native controls built by PauseScreen.init, in the grid's registration order.
-    pub(in crate::game::client_side) fn pause_init_children(
-        &self,
-    ) -> Vec<(u8, [f32; 4], Option<mod_api::Text>)> {
-        if self.client.screen != Screen::Paused || !self.client.pause_menu {
-            return Vec::new();
-        }
-        let [w, h] = self.gui_frame_now().1.size.map(|axis| axis as f32);
-        let Some(layout) = self.built_pause(w, h) else {
-            return Vec::new();
-        };
-        let buttons = layout.buttons.iter().map(|&(x, y, bw, key, id, _)| {
-            let label = if id == 14 {
-                self.pause_screen_additions()
-                    .and_then(|(text, _)| text.try_into_api().ok())
-            } else {
-                Some(mod_api::Text::translate(key, Vec::new()))
-            };
-            (id, [x, y, bw, 20.0], label)
-        });
-        let icons = layout.icons.iter().enumerate().map(|(i, &(x, y, _))| {
-            let id = if i == FRIENDS_ICON { 10 } else { 12 + i as u8 };
-            (
-                id,
-                [x, y, 20.0, 20.0],
-                Some(mod_api::Text::translate(ICON_LABELS[i], Vec::new())),
-            )
-        });
-        buttons
-            .clone()
-            .take(3)
-            .chain(icons)
-            .chain(buttons.skip(3))
-            .collect()
-    }
-
     pub(in crate::game::client_side) fn draw_pause_menu(&mut self, batch: &mut HudBatch) {
         let friends = self.friends_shown();
         let atlas = &self.client.gui.atlas;
@@ -431,88 +394,99 @@ impl crate::game::ClientGame<'_> {
             }
         };
         let mut tooltip = None;
-        let mut icon_narration_index = 0;
-        for (index, &(x, y, bw, key, id, active)) in layout.buttons.iter().enumerate() {
-            if self.pause_child_removed(id) {
-                continue;
-            }
-            icon_narration_index += usize::from(index < 3);
-            let is_focused = self.client.pause_focus == Some(id);
-            let hover = active && (ui::hovered(self.client.cursor, x, y, bw, 20.0) || is_focused);
-            let label = match (id, &additions) {
-                (14, Some((label, _))) => label.clone(),
-                _ => Text::translate(key, &[]),
+        let draw_pause_button =
+            |batch: &mut HudBatch,
+             tooltip: &mut Option<Text>,
+             &(x, y, bw, key, id, active): &(f32, f32, f32, &'static str, u8, bool)| {
+                let is_focused = self.client.pause_focus == Some(id);
+                let hover =
+                    active && (ui::hovered(self.client.cursor, x, y, bw, 20.0) || is_focused);
+                let label = match (id, &additions) {
+                    (14, Some((label, _))) => label.clone(),
+                    _ => Text::translate(key, &[]),
+                };
+                let action = match id {
+                    0 => Some(sunrise_client::widgets::Action::Back),
+                    1 => Some(sunrise_client::widgets::Action::Options),
+                    2 => Some(sunrise_client::widgets::Action::Exit),
+                    _ => None,
+                };
+                if let Some(action) = action {
+                    ui::action_button(batch, atlas, action, x, y, bw, 20.0, &label, active, hover);
+                } else {
+                    ui::button(batch, atlas, x, y, bw, 20.0, &label, active, hover);
+                }
+                // PauseScreen's customAdditions button: CUSTOM_OPTIONS_TOOLTIP.
+                let btn_key = widgets::EngineWidgetKey {
+                    key: widgets::stable_key_from_text(&label),
+                    bucket: widgets::WidgetBucket::Button,
+                    occurrence: 0,
+                };
+                if (id == 11 || id == 14)
+                    && hover
+                    && !self.engine_key_blocked(&btn_key)
+                    && !widgets::active_tooltip_overridden(&btn_key)
+                {
+                    *tooltip = Some(Text::translate("menu.custom_options.tooltip", &[]));
+                }
             };
-            let action = match id {
-                0 => Some(sunrise_client::widgets::Action::Back),
-                1 => Some(sunrise_client::widgets::Action::Options),
-                2 => Some(sunrise_client::widgets::Action::Exit),
-                _ => None,
-            };
-            if let Some(action) = action {
-                ui::action_button(batch, atlas, action, x, y, bw, 20.0, &label, active, hover);
-            } else {
-                ui::button(batch, atlas, x, y, bw, 20.0, &label, active, hover);
-            }
-            // PauseScreen's customAdditions button: CUSTOM_OPTIONS_TOOLTIP.
-            if (id == 11 || id == 14) && hover {
-                tooltip = Some(Text::translate("menu.custom_options.tooltip", &[]));
-            }
+        // `PauseScreen.init` adds Back to Game, Advancements, Statistics, then the icon row,
+        // then the remaining buttons (Options..., Open to LAN, Save and Quit to Title, etc.).
+        for button in layout.buttons.iter().take(3) {
+            draw_pause_button(batch, &mut tooltip, button);
         }
         for (i, &(x, y, sprite)) in layout.icons.iter().enumerate() {
             let id = if i == FRIENDS_ICON { 10 } else { 12 + i as u8 };
-            if self.pause_child_removed(id) {
-                continue;
-            }
             let active = icon_active(i, friends);
             let is_focused = self.client.pause_focus == Some(id);
             let hover = active && (ui::hovered(self.client.cursor, x, y, 20.0, 20.0) || is_focused);
-            // The icon has no label: name it for controller focus and the
-            // control socket's widget tree.
-            if i == FRIENDS_ICON {
-                sunrise_client::widgets::record(super::friends::TITLE, [x, y, 20.0, 20.0], active);
+            let rect = [x, y, 20.0, 20.0];
+            let label = Text::translate(ICON_LABELS[i], &[]);
+            let icon_key = widgets::EngineWidgetKey {
+                key: widgets::stable_key_from_text(&label),
+                bucket: widgets::WidgetBucket::Button,
+                occurrence: 0,
+            };
+            let blocked = self.engine_key_blocked(&icon_key);
+            // Keep the control socket's legacy name for the Friends icon when not suppressed.
+            if i == FRIENDS_ICON && !blocked {
+                sunrise_client::widgets::record(super::friends::TITLE, rect, active);
             }
-            ui::button(
+            ui::button_decorated(
                 batch,
                 atlas,
-                x,
-                y,
-                20.0,
-                20.0,
-                &Text::empty(),
-                active,
-                hover,
+                rect,
+                &label,
+                ui::ButtonVisualState {
+                    active,
+                    hovered: hover,
+                    focused: is_focused,
+                },
+                ui::ButtonStyle {
+                    icon: Some(ui::ButtonIcon::Centered { sprite, size: 15.0 }),
+                    ..ui::ButtonStyle::default()
+                },
+                |r| {
+                    let t = |key: &str| Text::translate(key, &[]).plain();
+                    if i == FRIENDS_ICON {
+                        widgets::Narratable::named(t("gui.friends.open.narration"), r, active)
+                            .hint(t("gui.friends.open.tooltip"))
+                    } else {
+                        let key = ICON_LABELS[i];
+                        widgets::Narratable::button(t(key), r, active).hint(t(key))
+                    }
+                },
             );
-            // PauseScreen adds the icon row after Statistics: the icons'
-            // messages (their tooltips too), the friends button's own.
-            widgets::last_narratable_at(icon_narration_index, |n| {
-                let t = |key: &str| Text::translate(key, &[]).plain();
-                let key = [
-                    "menu.reportBugs",
-                    "menu.sendFeedback",
-                    "",
-                    "menu.playerReporting",
-                ][i];
-                *n = if i == FRIENDS_ICON {
-                    widgets::Narratable::named(t("gui.friends.open.narration"), n.rect, active)
-                        .hint(t("gui.friends.open.tooltip"))
-                } else {
-                    widgets::Narratable::button(t(key), n.rect, active).hint(t(key))
-                }
-                .hovered(hover);
-            });
-            icon_narration_index += 1;
-            // SpriteIconButton.CenteredIcon: the 15x15 sprite at
-            // x + width / 2 - 15 / 2 in integer pixels, untinted even
-            // when the button is inactive.
-            batch.sprite_scaled(atlas, sprite, x + 3.0, y + 3.0, 15.0, 15.0, u32::MAX);
-            if hover {
+            if hover && !blocked && !widgets::active_tooltip_overridden(&icon_key) {
                 tooltip = Some(if i == FRIENDS_ICON {
                     Text::literal(super::friends::title())
                 } else {
                     Text::translate(ICON_LABELS[i], &[])
                 });
             }
+        }
+        for button in layout.buttons.iter().skip(3) {
+            draw_pause_button(batch, &mut tooltip, button);
         }
         self.draw_screen_phase(batch, sunrise_client::screen_draw::RenderPhase::Foreground);
         // SpriteIconButton.withTootip: the label as a tooltip.
@@ -579,6 +553,9 @@ impl crate::game::ClientGame<'_> {
             .map(|(i, page)| (page.title(), ADDED_PAGES + i as u8))
     }
     pub fn pause_click(&mut self) -> Result<bool> {
+        self.with_screen_input_overrides(|game| game.pause_click_inner())
+    }
+    fn pause_click_inner(&mut self) -> Result<bool> {
         let (w, h) = {
             let size = self
                 .client
@@ -597,14 +574,29 @@ impl crate::game::ClientGame<'_> {
                 &fallback
             }
         };
+        let additions = self.pause_screen_additions();
+        let pause_button_label = |key: &'static str, id: u8| -> Text {
+            match (id, &additions) {
+                (14, Some((label, _))) => label.clone(),
+                _ => Text::translate(key, &[]),
+            }
+        };
         let icons = layout.icons;
         let hit = layout
             .buttons
             .iter()
             .copied()
             .find(|b| {
-                b.5 && !self.pause_child_removed(b.4)
-                    && ui::hovered(self.client.cursor, b.0, b.1, b.2, 20.0)
+                let label = pause_button_label(b.3, b.4);
+                widgets::resolve_engine_input(
+                    widgets::WidgetBucket::Button,
+                    Some(&label),
+                    None,
+                    0,
+                    [b.0, b.1, b.2, 20.0],
+                    b.5,
+                )
+                .is_some_and(|[rx, ry, rw, rh]| ui::hovered(self.client.cursor, rx, ry, rw, rh))
             })
             .map(|b| b.4)
             .or_else(|| {
@@ -612,21 +604,35 @@ impl crate::game::ClientGame<'_> {
                 [0, 1, 3]
                     .into_iter()
                     .find(|&i| {
-                        !self.pause_child_removed(12 + i as u8)
-                            && ui::hovered(self.client.cursor, icons[i].0, icons[i].1, 20.0, 20.0)
+                        let label = Text::translate(ICON_LABELS[i], &[]);
+                        widgets::resolve_engine_input(
+                            widgets::WidgetBucket::Button,
+                            Some(&label),
+                            None,
+                            0,
+                            [icons[i].0, icons[i].1, 20.0, 20.0],
+                            true,
+                        )
+                        .is_some_and(|[rx, ry, rw, rh]| {
+                            ui::hovered(self.client.cursor, rx, ry, rw, rh)
+                        })
                     })
                     .map(|i| 12 + i as u8)
             })
             .or_else(|| {
+                let label = Text::translate(ICON_LABELS[FRIENDS_ICON], &[]);
                 (self.friends_shown()
-                    && !self.pause_child_removed(10)
-                    && ui::hovered(
-                        self.client.cursor,
-                        icons[FRIENDS_ICON].0,
-                        icons[FRIENDS_ICON].1,
-                        20.0,
-                        20.0,
-                    ))
+                    && widgets::resolve_engine_input(
+                        widgets::WidgetBucket::Button,
+                        Some(&label),
+                        None,
+                        0,
+                        [icons[FRIENDS_ICON].0, icons[FRIENDS_ICON].1, 20.0, 20.0],
+                        true,
+                    )
+                    .is_some_and(|[rx, ry, rw, rh]| {
+                        ui::hovered(self.client.cursor, rx, ry, rw, rh)
+                    }))
                 .then_some(10)
             });
         if let Some(id) = hit {
@@ -638,6 +644,9 @@ impl crate::game::ClientGame<'_> {
         Ok(hit.is_some())
     }
     pub(in crate::game::client_side) fn pause_key(&mut self, key: KeyCode) -> Result<bool> {
+        self.with_screen_input_overrides(|game| game.pause_key_inner(key))
+    }
+    fn pause_key_inner(&mut self, key: KeyCode) -> Result<bool> {
         let (w, h) = {
             let size = self
                 .client
@@ -656,22 +665,62 @@ impl crate::game::ClientGame<'_> {
                 &fallback
             }
         };
-        // The widget tuples are `Copy`: one small copy per press keeps the
-        // build readable while the focus moves.
-        let buttons: Vec<_> = layout
+        let additions = self.pause_screen_additions();
+        let pause_button_label = |key: &'static str, id: u8| -> Text {
+            match (id, &additions) {
+                (14, Some((label, _))) => label.clone(),
+                _ => Text::translate(key, &[]),
+            }
+        };
+        let buttons: Vec<(u8, [f32; 4], i32)> = layout
             .buttons
             .iter()
             .copied()
-            .filter(|b| b.5 && !self.pause_child_removed(b.4))
+            .filter_map(|b| {
+                let label = pause_button_label(b.3, b.4);
+                let rect = widgets::resolve_engine_input(
+                    widgets::WidgetBucket::Button,
+                    Some(&label),
+                    None,
+                    0,
+                    [b.0, b.1, b.2, 20.0],
+                    b.5,
+                )?;
+                let key = widgets::EngineWidgetKey {
+                    key: widgets::stable_key_from_text(&label),
+                    bucket: widgets::WidgetBucket::Button,
+                    occurrence: 0,
+                };
+                Some((b.4, rect, self.engine_tab_order_group(&key)))
+            })
             .collect();
         let icons = layout.icons;
-        let mut active_ids: Vec<u8> = buttons.iter().map(|b| b.4).collect();
+        let mut active_entries: Vec<(u8, i32)> = buttons.iter().map(|b| (b.0, b.2)).collect();
         let friends = self.friends_shown();
-        active_ids.extend(
-            pause_icon_focus_ids(friends)
-                .into_iter()
-                .filter(|&id| !self.pause_child_removed(id)),
-        );
+        active_entries.extend(pause_icon_focus_ids(friends).into_iter().filter_map(|id| {
+            let idx = if id == 10 {
+                FRIENDS_ICON
+            } else {
+                usize::from(id - 12)
+            };
+            let label = Text::translate(ICON_LABELS[idx], &[]);
+            widgets::resolve_engine_input(
+                widgets::WidgetBucket::Button,
+                Some(&label),
+                None,
+                0,
+                [icons[idx].0, icons[idx].1, 20.0, 20.0],
+                icon_active(idx, friends),
+            )?;
+            let key = widgets::EngineWidgetKey {
+                key: widgets::stable_key_from_text(&label),
+                bucket: widgets::WidgetBucket::Button,
+                occurrence: 0,
+            };
+            Some((id, self.engine_tab_order_group(&key)))
+        }));
+        active_entries.sort_by_key(|&(_, group)| group);
+        let active_ids: Vec<u8> = active_entries.into_iter().map(|(id, _)| id).collect();
         if active_ids.is_empty() {
             return Ok(false);
         }
@@ -710,13 +759,23 @@ impl crate::game::ClientGame<'_> {
                 Ok(true)
             }
             KeyCode::ArrowUp | KeyCode::ArrowDown | KeyCode::ArrowLeft | KeyCode::ArrowRight => {
-                let mut rects: Vec<(u8, f32, f32, f32)> =
-                    buttons.iter().map(|b| (b.4, b.0, b.1, b.2)).collect();
+                let mut rects: Vec<(u8, f32, f32, f32)> = buttons
+                    .iter()
+                    .map(|&(id, [x, y, bw, _], _)| (id, x, y, bw))
+                    .collect();
                 let friends = self.friends_shown();
                 for (i, &(x, y, _)) in icons.iter().enumerate() {
                     let id = if i == FRIENDS_ICON { 10 } else { 12 + i as u8 };
-                    if icon_active(i, friends) && !self.pause_child_removed(id) {
-                        rects.push((id, x, y, 20.0));
+                    let label = Text::translate(ICON_LABELS[i], &[]);
+                    if let Some([rx, ry, rw, _]) = widgets::resolve_engine_input(
+                        widgets::WidgetBucket::Button,
+                        Some(&label),
+                        None,
+                        0,
+                        [x, y, 20.0, 20.0],
+                        icon_active(i, friends),
+                    ) {
+                        rects.push((id, rx, ry, rw));
                     }
                 }
                 let cur_id = self.client.pause_focus.unwrap_or(0);
@@ -860,17 +919,19 @@ impl crate::game::ClientGame<'_> {
             let is_focused = self.client.death_focus == Some(id);
             let hover =
                 active && (ui::hovered(self.client.cursor, x, y, 200.0, 20.0) || is_focused);
-            ui::button(
-                batch,
-                atlas,
-                x,
-                y,
-                200.0,
-                20.0,
-                &Text::translate(key, &[]),
-                active,
-                hover,
-            );
+            widgets::with_native_action((1 << 32) | (id as u64), || {
+                ui::button(
+                    batch,
+                    atlas,
+                    x,
+                    y,
+                    200.0,
+                    20.0,
+                    &Text::translate(key, &[]),
+                    active,
+                    hover,
+                );
+            });
         }
         self.draw_screen_phase(batch, sunrise_client::screen_draw::RenderPhase::Foreground);
         // DeathScreen.visitText(HoveredTextEffects.TOOLTIP_AND_CURSOR): a
@@ -903,6 +964,44 @@ impl crate::game::ClientGame<'_> {
         self.remote_respawn();
         Ok(())
     }
+    pub(in crate::game) fn death_press_child(&mut self, tag: u64) -> Result<bool> {
+        if self
+            .client
+            .chat_ui
+            .died_at
+            .is_some_and(|t| t.elapsed().as_millis() < 1000)
+        {
+            return Ok(false);
+        }
+        let kind = tag >> 32;
+        let Ok(payload) = u8::try_from(tag & 0xFFFF_FFFF) else {
+            return Ok(false);
+        };
+        if let Some(opened) = self.client.chat_ui.death_confirm {
+            if opened.elapsed().as_millis() < 1000 {
+                return Ok(false);
+            }
+            if kind == 0 && payload < 2 {
+                let yes = payload == 0;
+                self.client.death_focus = Some(payload);
+                self.death_confirm_answer(yes)?;
+                return Ok(true);
+            }
+            return Ok(false);
+        }
+        if kind != 1 || payload > 1 {
+            return Ok(false);
+        }
+        self.client.death_focus = Some(payload);
+        if payload == 1 && !self.common.level.hardcore {
+            self.client.chat_ui.death_confirm = Some(std::time::Instant::now());
+            self.play_audio_button_click();
+            return Ok(true);
+        }
+        self.death_action(Some(payload))?;
+        Ok(true)
+    }
+
     pub(in crate::game::client_side) fn death_click(&mut self) -> Result<bool> {
         if self
             .client

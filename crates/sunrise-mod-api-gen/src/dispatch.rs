@@ -2075,12 +2075,29 @@ pub(super) fn emit<'a>(
                 } else {
                     String::new()
                 };
-                (
-                    String::new(),
-                    format!(
-                        "{{ let mut {entered} = super::runtime::ListenerScope::new(); for ({receives}, {mod_entry}) in {each} {{ {side_guard}if {accepted} && !{receives} {{ continue; }} {active} let {mod_item} = {entered}.enter({mod_entry}, \"{name}\"); {local_event} {cancel_step} {publish_each} }} }} {publish_end}"
-                    ),
-                )
+                if let Some((field, stage, _)) = &staged {
+                    let accepted = run(
+                        &format!("{mod_entry}.id"),
+                        "false",
+                        &format!(
+                            "{{ if matches!({}, Flow::Cancel) {{ {event}.cancelled = true; }} *{out} = {event}.cancelled; true }}",
+                            listener_call(&mod_item, &format!("{mod_entry}.id"))
+                        ),
+                    );
+                    (
+                        String::new(),
+                        format!(
+                            "{{ let mut {entered} = super::runtime::ListenerScope::new(); for ({receives}, {mod_entry}) in {each} {{ {side_guard}if *{out} && !{receives} {{ continue; }} {active} let {mod_item} = {entered}.enter({mod_entry}, \"{name}\"); {stage}(&mut |{field}| {{ {local_event} {snapshot_statement}{accepted} }}); }} }}"
+                        ),
+                    )
+                } else {
+                    (
+                        String::new(),
+                        format!(
+                            "{{ let mut {entered} = super::runtime::ListenerScope::new(); for ({receives}, {mod_entry}) in {each} {{ {side_guard}if {accepted} && !{receives} {{ continue; }} {active} let {mod_item} = {entered}.enter({mod_entry}, \"{name}\"); {local_event} {cancel_step} {publish_each} }} }} {publish_end}"
+                        ),
+                    )
+                }
             }
             None if movement_side_filter => {
                 let side_guard = format!(
@@ -3447,6 +3464,27 @@ fn main() {{
         hook.dispatch = DispatchStyle::Flat;
         hook.call[1].1 = "&mut u32".into();
         assert!(emit(std::iter::once(&hook), &[], true).is_err());
+        let cancel_staged = Hook {
+            name: "screen_init_pre".into(),
+            contract: Contract::Cancel,
+            out: Some("canceled".into()),
+            cancellable: Some(true),
+            event_per_listener: true,
+            staged_surface: Some("widgets".into()),
+            call: vec![
+                ("widgets".into(), "&mut dyn ScreenWidgets".into()),
+                ("canceled".into(), "&mut bool".into()),
+            ],
+            dispatch: DispatchStyle::Flat,
+            receiver: Receiver::Read,
+            ..Hook::sample(
+                "sunrise_client::game::native_hooks::screen_init_pre::Game<'_>::native_screen_init_pre",
+                Side::Client,
+            )
+        };
+        let emitted = emit(std::iter::once(&cancel_staged), &[], true).unwrap();
+        assert!(emitted.dispatch.contains("stage_listener"));
+        assert!(emitted.dispatch.contains("*canceled = event.cancelled;"));
     }
 
     #[test]

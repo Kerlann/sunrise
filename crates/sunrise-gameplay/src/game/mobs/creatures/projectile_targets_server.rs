@@ -9,9 +9,7 @@ use sunrise_gameplay_common::game::creatures::projectile_targets::NonMobHit;
 use sunrise_gameplay_common::game::creatures::projectile_targets::ProjectileHitInfo;
 use sunrise_gameplay_common::game::creatures::projectile_targets::TargetQuery;
 use sunrise_gameplay_common::game::creatures::projectile_targets::extents;
-use sunrise_gameplay_common::game::creatures::projectile_targets::is_pickable_projectile;
 use sunrise_gameplay_common::game::creatures::projectile_targets::knot_bounds;
-use sunrise_gameplay_common::game::deflect_common::redirectable;
 use sunrise_sim::entities::arrows::ArrowTargets;
 use sunrise_sim::mobs::{MobWorld, Who};
 use sunrise_sim::projectiles::{
@@ -294,7 +292,7 @@ impl<'r> crate::game::ServerGame<'r> {
             .creatures
             .projectiles
             .iter()
-            .position(|q| q.id == target_id && redirectable(q))
+            .position(|q| q.id == target_id && self.projectile_redirectable(q))
         else {
             return;
         };
@@ -688,7 +686,7 @@ impl<'r> crate::game::ServerGame<'r> {
                 let _ = self.destroy_shulker_bullet(i);
                 return NonMobHit::Hurt;
             }
-            if redirectable(&self.common.creatures.projectiles[i]) {
+            if self.projectile_redirectable(&self.common.creatures.projectiles[i]) {
                 return NonMobHit::Refused;
             }
         }
@@ -1013,7 +1011,7 @@ impl<'r> crate::game::ServerGame<'r> {
         }
         // Pickable projectiles (`#redirectable_projectile` + `ShulkerBullet`).
         for q in self.common.creatures.projectiles.iter() {
-            if query.skip_self_id == Some(q.id) || !is_pickable_projectile(q) {
+            if query.skip_self_id == Some(q.id) || !self.projectile_is_pickable(q) {
                 continue;
             }
             if query.skip_wind_charges
@@ -1075,3 +1073,5 @@ use sunrise_gameplay_common::game::commands_common::CommandsCommonGameExt2 as _;
 use sunrise_gameplay_common::game::game_mode_common::GameModeCommonGameExt1 as _;
 
 use sunrise_gameplay_common::game::player_identity::PlayerIdentityGameExt1 as _;
+
+use sunrise_gameplay_common::game::held_items::HeldItemsGameExt1 as _;

@@ -11,7 +11,7 @@ pub struct TitleQuit;
 impl Hooks for TitleQuit {
     fn screen_key_pressed_pre(
         &self,
-        host: &dyn ClientHost,
+        host: &mut dyn ClientHost,
         event: &mut ScreenKeyPressedPreEvent<'_>,
     ) -> Flow {
         if event.screen.id == "title"

@@ -337,6 +337,14 @@ impl ClientGame<'_> {
         }
         self.sign_keep(before);
     }
+    pub(in crate::game) fn sign_edit_press_child(&mut self, tag: u64) -> bool {
+        if tag != 0 || self.client.sign_edit.is_none() {
+            return false;
+        }
+        self.play_audio_button_click();
+        self.close_sign_editor();
+        true
+    }
     /// Done button (`this.width / 2 - 100, this.height / 4 + 144`, 200x20),
     /// or a click on a line (`EditBox.onClick`).
     pub(in crate::game::client_side) fn sign_edit_click(&mut self, size: [u32; 2]) -> bool {
@@ -507,28 +515,34 @@ impl ClientGame<'_> {
             }
             sunrise_client::preedit::report_caret(caret_x, ly, line_height);
         }
-        let (bx, by) = done_button(w, h);
-        sunrise_client::widgets::declare_action(
-            sunrise_client::widgets::Action::Done,
-            [bx, by, 200.0, 20.0],
-            true,
-        );
-        sunrise_client::widgets::narratable(|| {
-            sunrise_client::widgets::Narratable::button(done_label(), [bx, by, 200.0, 20.0], true)
-        });
-        batch.sprite_scaled(atlas, "widget/button", bx, by, 200.0, 20.0, u32::MAX);
-        let done = done_label();
-        let tw = HudBatch::text_width(atlas, &done);
-        batch.text(
-            atlas,
-            &done,
-            bx + 100.0 - (tw / 2.0).floor(),
-            by + 6.0,
-            u32::MAX,
-            true,
-        );
+        draw_done_button(batch, atlas, self.client.cursor, w, h);
         self.draw_overlay_mounted_widgets(batch, "sign_editor");
     }
+}
+
+fn draw_done_button(
+    batch: &mut HudBatch,
+    atlas: &sunrise_client::hud::HudAtlas,
+    cursor: (f32, f32),
+    w: f32,
+    h: f32,
+) {
+    let (bx, by) = done_button(w, h);
+    let hover = sunrise_client::ui::hovered(cursor, bx, by, 200.0, 20.0);
+    sunrise_client::widgets::with_native_action(0, || {
+        sunrise_client::ui::action_button(
+            batch,
+            atlas,
+            sunrise_client::widgets::Action::Done,
+            bx,
+            by,
+            200.0,
+            20.0,
+            &sunrise_game_data::text::Text::literal(done_label()),
+            true,
+            hover,
+        );
+    });
 }
 
 #[cfg(test)]
@@ -561,5 +575,78 @@ pub(in crate::game) mod tests {
             assert_eq!(label, want, "{code}");
             assert!(missed.is_empty(), "{code}: {missed:?}");
         }
+    }
+
+    #[test]
+    fn done_button_highlights_narrates_and_requests_hand_on_hover() {
+        use sunrise_client::{
+            hud::{GuiSprite, HudAtlas, HudBatch, Rect},
+            widgets::{self, Action, Cursor, ScreenInfo},
+        };
+        let mut atlas =
+            HudAtlas::build(&sunrise_assets::resource_source::ResourceSource::directory(
+                "/nonexistent/sunrise-test-assets".into(),
+            ))
+            .unwrap();
+        for (n, name) in ["widget/button", "widget/button_highlighted"]
+            .into_iter()
+            .enumerate()
+        {
+            atlas.gui.insert(
+                name.into(),
+                GuiSprite::Present {
+                    rect: Rect {
+                        u0: n as f32 / 4.0,
+                        v0: 0.0,
+                        u1: (n as f32 + 0.5) / 4.0,
+                        v1: 0.25,
+                        w: 16,
+                        h: 16,
+                    },
+                    scaling: None,
+                },
+            );
+        }
+        let saved = widgets::take();
+        widgets::set_narrating(true);
+        let (bx, by) = super::done_button(320.0, 240.0);
+        let mut frame = 710;
+        for (cursor, expect_u0, expect_cursor, expect_hovered) in [
+            ((0.0, 0.0), 0.0, Cursor::Arrow, false),
+            ((bx + 10.0, by + 10.0), 0.25, Cursor::PointingHand, true),
+        ] {
+            frame += 1;
+            widgets::set_action_screen(71);
+            widgets::end_frame(frame);
+            widgets::begin_screen(|| ScreenInfo::new("sign_editor", "Edit Sign Message"));
+            let _ = widgets::take_cursor();
+            let mut batch = HudBatch::scratch([320, 240]);
+            super::draw_done_button(&mut batch, &atlas, cursor, 320.0, 240.0);
+            assert_eq!(widgets::take_cursor(), expect_cursor);
+            let sprite_u0 = batch.vertices.iter().find(|v| v.text == 0).map(|v| v.uv[0]);
+            assert_eq!(sprite_u0, Some(expect_u0));
+            frame += 1;
+            widgets::set_action_screen(71);
+            widgets::end_frame(frame);
+            let recorded = widgets::last();
+            assert_eq!(recorded.len(), 1);
+            assert_eq!(
+                [recorded[0].x, recorded[0].y, recorded[0].w, recorded[0].h],
+                [bx, by, 200.0, 20.0]
+            );
+            assert!(recorded[0].enabled);
+            assert_eq!(
+                widgets::last_actions(71)
+                    .iter()
+                    .map(|a| a.action)
+                    .collect::<Vec<_>>(),
+                [Action::Done]
+            );
+            let narration = widgets::take_last_narration();
+            assert_eq!(narration.items.len(), 1);
+            assert_eq!(narration.items[0].hovered, Some(expect_hovered));
+        }
+        widgets::set_narrating(false);
+        widgets::put(saved);
     }
 }

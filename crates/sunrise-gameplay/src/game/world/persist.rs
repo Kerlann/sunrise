@@ -463,7 +463,7 @@ impl crate::game::ServerGame<'_> {
         for tag in &mut extras.block_entities {
             let pos = [tag.get("x"), tag.get("y"), tag.get("z")]
                 .map(|v| sunrise_sim::save::number(v).unwrap_or(0) as i32);
-            if let Some(g) = self.server.be_anims.gateway_servers.get(&pos)
+            if let Some(g) = self.server.be_anims.level.gateway_servers.get(&pos)
                 && let Some(age) = tag.get_mut("Age")
             {
                 *age = sunrise_core::nbt::Tag::Long(g.age);
@@ -1540,6 +1540,12 @@ impl crate::game::ServerGame<'_> {
     /// world with the player (`setRemoved(UNLOADED_WITH_PLAYER)`).
     pub fn remove_vehicle_tree(&mut self, root: u32) {
         let gone = self.vehicle_tree_ids(root);
+        #[cfg(feature = "state-digest")]
+        crate::game::state_transcript::record_vehicle_tree_departures(
+            self,
+            &gone,
+            Some("unloaded_with_player"),
+        );
         self.remove_vehicle_rows(&gone);
         for id in gone {
             self.forget_entity(id);

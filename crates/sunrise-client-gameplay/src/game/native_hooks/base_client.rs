@@ -148,7 +148,8 @@ impl crate::game::ClientGame<'_> {
     /// x, y, z, in blocks from the block's lower north-west corner. It starts
     /// as the block with a block of margin around it; widen it when your
     /// `native_block_entity_submit` draws further (a tall shaft, a beam), or
-    /// set an infinite value for one never culled. Asked once a frame for each
+    /// set an infinite value for one never frustum-culled; the view distance
+    /// (`block_entity_view_distance`) still applies. Asked once a frame for each
     /// within its view distance (`block_entity_view_distance`) whose chunk is drawn.
     pub(in crate::game) fn native_block_entity_render_bounding_box(
         &self,
@@ -534,7 +535,7 @@ impl crate::game::ClientGame<'_> {
     /// backspace. Same screens as the key press, and it fires with no text box
     /// focused (there is nothing to take the character then).
     pub(in crate::game) fn native_screen_char_typed_pre(
-        &self,
+        &mut self,
         screen: &ScreenView<'_>,
         c: char,
         modifiers: u32,
@@ -566,7 +567,7 @@ impl crate::game::ClientGame<'_> {
     /// are GLFW's separate char callback and still come; see
     /// `native_screen_char_typed_pre`.
     pub fn native_screen_key_pressed_pre(
-        &self,
+        &mut self,
         screen: &ScreenView<'_>,
         key: &str,
         repeat: bool,
@@ -578,7 +579,7 @@ impl crate::game::ClientGame<'_> {
     /// Before an open screen handles a named key's release (same screen gate as key presses).
     /// Cancel bypasses screen handling; physical keys and mapped keyboard hold/toggle state release.
     pub(in crate::game) fn native_screen_key_released_pre(
-        &self,
+        &mut self,
         screen: &ScreenView<'_>,
         key: &str,
         modifiers: u32,
@@ -608,7 +609,7 @@ impl crate::game::ClientGame<'_> {
     /// click there stays the game's own. A gamepad click or a click the
     /// keyboard's focus sends is not the mouse and fires nothing.
     pub(in crate::game) fn native_screen_mouse_button_pressed_pre(
-        &self,
+        &mut self,
         screen: &ScreenView<'_>,
         button: i32,
         modifiers: u32,
@@ -636,7 +637,7 @@ impl crate::game::ClientGame<'_> {
     /// does in vanilla, and no guard here un-cancels it. Same screens as the
     /// press; a press that opened another screen ends on that one.
     pub(in crate::game) fn native_screen_mouse_button_released_pre(
-        &self,
+        &mut self,
         screen: &ScreenView<'_>,
         button: i32,
         modifiers: u32,
@@ -648,7 +649,7 @@ impl crate::game::ClientGame<'_> {
     /// The pointer moved over the open screen (`Screen.mouseMoved`): before the drag hook
     /// of the same move. Cancel keeps the new cursor position and skips the rest of the move.
     pub(in crate::game) fn native_screen_mouse_moved_pre(
-        &self,
+        &mut self,
         screen: &ScreenView<'_>,
         delta: [f32; 2],
         modifiers: u32,
@@ -679,7 +680,7 @@ impl crate::game::ClientGame<'_> {
     /// `screen.mouse` is the current GUI position; `delta` is its GUI-space movement.
     /// Cancel keeps the new cursor position but skips all screen drag handlers.
     pub(in crate::game) fn native_screen_mouse_dragged_pre(
-        &self,
+        &mut self,
         screen: &ScreenView<'_>,
         button: i32,
         delta: [f32; 2],
@@ -713,7 +714,7 @@ impl crate::game::ClientGame<'_> {
     /// own. A wheel a gamepad or the keyboard's focus sends is not the mouse
     /// and fires nothing.
     pub(in crate::game) fn native_screen_mouse_scrolled_pre(
-        &self,
+        &mut self,
         screen: &ScreenView<'_>,
         scroll: [f64; 2],
         modifiers: u32,

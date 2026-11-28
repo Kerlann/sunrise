@@ -1418,9 +1418,8 @@ impl Entity for Projectile {
     fn piston_slime_bounce(&mut self, movement: Direction) {
         Projectile::piston_slime_bounce(self, movement);
     }
-    fn is_pickable(&self) -> bool {
-        super::deflect_common::attackable(self)
-    }
+    // `Projectile.isPickable` reads the level's bound `#minecraft:redirectable_projectile`,
+    // which this trait cannot see: it is `HeldItemsGameExt1::projectile_is_pickable`.
 }
 
 impl Entity for Rocket {

@@ -560,6 +560,11 @@ impl PackScreen {
             x >= bx as f64 && y >= by as f64 && x < (bx + 150) as f64 && y < (by + 20) as f64
         })
     }
+    pub fn cancel_drag(&mut self) {
+        for l in &mut self.lists {
+            l.held = None;
+        }
+    }
     /// A left click (`Screen.mouseClicked`).
     pub fn click(&mut self, m: &Measure, x: f64, y: f64) -> Action {
         self.click_with_outcome(m, x, y).0
@@ -569,7 +574,14 @@ impl PackScreen {
         if self.confirm.is_some() {
             return self.confirm_click(m, x, y);
         }
-        if self.search.contains(x, y) {
+        if self.search.contains(x, y)
+            && crate::widgets::matches_selected_engine_widget(
+                crate::widgets::WidgetBucket::Field,
+                None,
+                None,
+                0,
+            )
+        {
             self.search.click(m, x, false, false);
             self.set_focus(Focus::Search);
             return (Action::None, true);
@@ -628,8 +640,19 @@ impl PackScreen {
             }
             return (Action::None, took);
         }
+        let footer_labels = [tr("pack.openFolder"), tr("gui.done")];
         for (i, (bx, by)) in self.footer().into_iter().enumerate() {
-            if x >= bx as f64 && y >= by as f64 && x < (bx + 150) as f64 && y < (by + 20) as f64 {
+            if x >= bx as f64
+                && y >= by as f64
+                && x < (bx + 150) as f64
+                && y < (by + 20) as f64
+                && crate::widgets::matches_selected_engine_widget(
+                    crate::widgets::WidgetBucket::Button,
+                    Some(&footer_labels[i]),
+                    None,
+                    0,
+                )
+            {
                 self.set_focus(Focus::Button(i));
                 let action = if i == 0 {
                     Action::OpenFolder
@@ -984,23 +1007,107 @@ impl PackScreen {
     }
     /// The options button of a card: a small button with a sliders glyph.
     fn draw_options_button(out: &mut Vec<Draw>, x: i32, y: i32, hover: bool) {
-        crate::widgets::narratable(|| {
-            crate::widgets::Narratable::button(
-                tr("sunrise.pack.options").plain(),
-                [x as f32, y as f32, OPTIONS_SIZE as f32, OPTIONS_SIZE as f32],
-                true,
-            )
-        });
-        let sprite = if hover {
-            "widget/button_highlighted"
-        } else {
-            "widget/button"
+        let orig_rect = [x as f32, y as f32, OPTIONS_SIZE as f32, OPTIONS_SIZE as f32];
+        let default_label = tr("sunrise.pack.options");
+        let (
+            rect,
+            message,
+            active,
+            hover,
+            alpha,
+            sprites,
+            override_hl,
+            tab_order_group,
+            tooltip_hint,
+        ) = match crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
+            bucket: crate::widgets::WidgetBucket::Button,
+            rect: orig_rect,
+            label: Some(&default_label),
+            explicit_key: None,
+            active: true,
+            hovered: hover,
+            focused: false,
+            tab_order_group: 0,
+        }) {
+            crate::widgets::ResolvedEngineWidget::Skip => return,
+            crate::widgets::ResolvedEngineWidget::Unchanged => {
+                (orig_rect, None, true, hover, 1.0, None, None, 0, None)
+            }
+            crate::widgets::ResolvedEngineWidget::Draw(props) => (
+                props.rect,
+                props.message,
+                props.active,
+                props.hovered,
+                props.alpha,
+                props.sprites,
+                props.override_render_highlighted_sprite,
+                props.tab_order_group,
+                props.tooltip_narration,
+            ),
         };
-        d::sprite(out, sprite, x, y, OPTIONS_SIZE, OPTIONS_SIZE);
+        let label = message.as_ref().unwrap_or(&default_label);
+        let plain = label.plain();
+        crate::widgets::record(&plain, rect, active);
+        if active && plain.trim().is_empty() {
+            crate::widgets::target(rect);
+        }
+        crate::widgets::widget_cursor(hover, active);
+        crate::widgets::narratable(|| {
+            let mut n =
+                crate::widgets::Narratable::button(plain, rect, active).order(tab_order_group);
+            if let Some(hint) = tooltip_hint {
+                n = n.hint(hint);
+            }
+            n
+        });
+        let (x, y, w, h) = (
+            rect[0].round() as i32,
+            rect[1].round() as i32,
+            rect[2].round() as i32,
+            rect[3].round() as i32,
+        );
+        let highlighted = match override_hl {
+            Some(forced) => active && forced,
+            None => active && hover,
+        };
+        let sprite = sprites
+            .as_ref()
+            .map(|s| {
+                if !active {
+                    s.disabled.as_deref().unwrap_or(s.normal.as_str())
+                } else if highlighted {
+                    s.highlighted.as_deref().unwrap_or(s.normal.as_str())
+                } else {
+                    s.normal.as_str()
+                }
+            })
+            .unwrap_or_else(|| {
+                if !active {
+                    "widget/button_disabled"
+                } else if highlighted {
+                    "widget/button_highlighted"
+                } else {
+                    "widget/button"
+                }
+            });
+        out.push(Draw::Sprite {
+            sprite: sprite.to_owned(),
+            x,
+            y,
+            w,
+            h,
+            color: crate::widgets::scale_argb_alpha(0xFFFF_FFFF, alpha),
+        });
         let (line, knob) = if hover {
-            (0xFF_C6_C6_C6u32 as i32, -1)
+            (
+                crate::widgets::scale_argb_alpha(0xFF_C6_C6_C6, alpha),
+                crate::widgets::scale_argb_alpha(0xFFFF_FFFF, alpha),
+            )
         } else {
-            (0xFF_A0_A0_A0u32 as i32, 0xFF_E0_E0_E0u32 as i32)
+            (
+                crate::widgets::scale_argb_alpha(0xFF_A0_A0_A0, alpha),
+                crate::widgets::scale_argb_alpha(0xFF_E0_E0_E0, alpha),
+            )
         };
         // Three sliders, their knobs at different places.
         for (row, at) in [(4, 8), (8, 4), (12, 9)] {
@@ -1918,5 +2025,27 @@ mod icon_slot_tests {
         let other = self::atlas();
         assert_ne!(other.revision, atlas.revision);
         assert_eq!(frame(&screen, &other).2.len(), 3);
+    }
+
+    #[test]
+    fn options_button_records_widget_and_requests_hand_on_hover() {
+        let saved = crate::widgets::take();
+        crate::widgets::end_frame(820);
+        let _ = crate::widgets::take_cursor();
+        let mut out = Vec::new();
+        PackScreen::draw_options_button(&mut out, 30, 40, true);
+        assert_eq!(
+            crate::widgets::take_cursor(),
+            crate::widgets::Cursor::PointingHand
+        );
+        crate::widgets::end_frame(821);
+        let recorded = crate::widgets::last();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(
+            [recorded[0].x, recorded[0].y, recorded[0].w, recorded[0].h],
+            [30.0, 40.0, OPTIONS_SIZE as f32, OPTIONS_SIZE as f32]
+        );
+        assert!(recorded[0].enabled);
+        crate::widgets::put(saved);
     }
 }

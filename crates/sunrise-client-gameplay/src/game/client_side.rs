@@ -438,6 +438,10 @@ pub(in crate::game) mod pack_layers;
 #[cfg(feature = "client")]
 #[path = "mobs/part_shearing_client.rs"]
 pub(in crate::game) mod part_shearing_client;
+#[cfg(feature = "client")]
+#[cfg(test)]
+#[path = "interface/shader_options_device_tests.rs"]
+mod shader_options_device_tests;
 #[path = "entities/stock_layer_mask.rs"]
 pub(in crate::game) mod stock_layer_mask;
 #[cfg(feature = "client")]
@@ -711,6 +715,10 @@ pub(in crate::game) mod shader_pack_hdr_tests;
 #[cfg(test)]
 #[path = "interface/shader_pack_switch_tests.rs"]
 pub(in crate::game) mod shader_pack_switch_tests;
+#[cfg(feature = "client")]
+#[cfg(test)]
+#[path = "interface/shader_pack_teardown_tests.rs"]
+mod shader_pack_teardown_tests;
 #[cfg(feature = "client")]
 #[path = "interface/shader_packs.rs"]
 pub mod shader_packs;
@@ -1134,6 +1142,9 @@ pub(in crate::game) mod tables_client;
 #[cfg(feature = "client")]
 #[path = "administration/test_instances_client.rs"]
 pub(in crate::game) mod test_instances_client;
+#[cfg(all(feature = "client", any(test, feature = "test-support")))]
+#[path = "runtime/test_resource_cache.rs"]
+pub mod test_resource_cache;
 #[cfg(feature = "client")]
 #[path = "interface/toast_manager_client.rs"]
 pub(in crate::game) mod toast_manager_client;
@@ -1849,7 +1860,7 @@ pub struct ClientState {
     pub client_tasks: ClientOnly<sunrise_client::net::ClientTasks>,
     pub(in crate::game::client_side) pending_client_tasks:
         ClientOnly<std::collections::VecDeque<sunrise_client::net::ClientTask>>,
-    pub(in crate::game::client_side) world_options: ClientOnly<Option<lan_screen::WorldOptions>>,
+    pub(in crate::game) world_options: ClientOnly<Option<lan_screen::WorldOptions>>,
     pub(in crate::game::client_side) command_block_screen:
         ClientOnly<Option<command_blocks::CommandBlockScreen>>,
     pub(in crate::game::client_side) block_editor:

@@ -116,8 +116,12 @@ impl crate::game::ClientGame<'_> {
         batch: &mut HudBatch,
         overlay_id: &'static str,
     ) {
+        if sunrise_client::widgets::is_collecting_widgets() {
+            return;
+        }
         if self.observed_overlay_now() == Some(overlay_id) {
             self.draw_mounted_screen_widgets(batch);
+            self.draw_pending_widget_tooltip(batch);
         }
     }
     pub fn draw_screen_phase(
@@ -125,6 +129,9 @@ impl crate::game::ClientGame<'_> {
         batch: &mut HudBatch,
         phase: sunrise_client::screen_draw::RenderPhase,
     ) {
+        if sunrise_client::widgets::is_collecting_widgets() {
+            return;
+        }
         use sunrise_client::screen_draw::RenderPhase;
         if matches!(phase, RenderPhase::Foreground) {
             if !self.screen_over_playing() {
@@ -156,6 +163,10 @@ impl crate::game::ClientGame<'_> {
     /// This is a notice; mounted children draw
     /// inside the Pre-guarded contents pass (`draw_screen_phase`).
     pub(in crate::game) fn draw_screen_with_post_hook(&self, batch: &mut HudBatch) {
+        if sunrise_client::widgets::is_collecting_widgets() {
+            return;
+        }
+        self.draw_pending_widget_tooltip(batch);
         if let Some(view) = self.screen_render_view(batch) {
             self.screen_render_end(batch, &view);
         }
@@ -163,24 +174,42 @@ impl crate::game::ClientGame<'_> {
     /// `ScreenEvent.Render.Pre` for the open screen: whether it draws.
     /// Background and Foreground are reported by the screen while drawing.
     pub(in crate::game) fn draw_screen_with_pre_hook(&self, batch: &mut HudBatch) -> bool {
-        match self.screen_render_view(batch) {
+        if sunrise_client::widgets::is_collecting_widgets() {
+            return true;
+        }
+        let drawn = match self.screen_render_view(batch) {
             Some(view) => self.screen_render_begin(batch, &view),
             None => true,
+        };
+        if !drawn {
+            sunrise_client::widgets::mark_render_vetoed();
         }
+        drawn
     }
     /// `draw_screen_with_post_hook` for the title's own screen, once a frame,
     /// after it has drawn and before the toasts.
     pub(in crate::game) fn draw_title_screen_with_post_hook(&self, batch: &mut HudBatch) {
+        if sunrise_client::widgets::is_collecting_widgets() {
+            return;
+        }
+        self.draw_pending_widget_tooltip(batch);
         if let Some(view) = self.title_screen_render_view(batch) {
             self.screen_render_end(batch, &view);
         }
     }
     /// `draw_screen_with_pre_hook` for the title's own screens.
     pub(in crate::game) fn draw_title_screen_with_pre_hook(&self, batch: &mut HudBatch) -> bool {
-        match self.title_screen_render_view(batch) {
+        if sunrise_client::widgets::is_collecting_widgets() {
+            return true;
+        }
+        let drawn = match self.title_screen_render_view(batch) {
             Some(view) => self.screen_render_begin(batch, &view),
             None => true,
+        };
+        if !drawn {
+            sunrise_client::widgets::mark_render_vetoed();
         }
+        drawn
     }
     /// `Screen.extractBlurredBackground` over the panorama or the world and
     /// HUD, when `menuBackgroundBlurriness` is at least 1.
@@ -209,6 +238,9 @@ impl crate::game::ClientGame<'_> {
         screen: &str,
         batch: &mut HudBatch,
     ) {
+        if sunrise_client::widgets::is_collecting_widgets() {
+            return;
+        }
         let mut canceled = false;
         self.native_screen_transparent_background(screen, batch, &mut canceled);
         if !canceled {

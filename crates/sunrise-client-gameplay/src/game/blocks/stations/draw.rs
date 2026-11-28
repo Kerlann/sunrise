@@ -45,7 +45,7 @@ impl crate::game::ClientGame<'_> {
         let (ox, oy) = self.inventory_origin(batch);
         let local = (self.client.cursor.0 - ox, self.client.cursor.1 - oy);
         let mut tooltip: Option<Vec<(sunrise_game_data::text::Text, u32)>> = None;
-        let mut anvil_name = false;
+        let mut anvil_name: Option<bool> = None;
         let mut recipe_tooltip: Option<ItemStack> = None;
         {
             self.render_transparent_background("station", batch);
@@ -381,10 +381,9 @@ impl crate::game::ClientGame<'_> {
                     if has_input && s.result.is_none() {
                         batch.sprite(atlas, "container/anvil/error", ox + 99.0, oy + 45.0);
                     }
-                    if s.inputs[0].is_some() {
-                        // Drawn once this borrow of the station ends.
-                        anvil_name = true;
-                    }
+                    // Drawn once this borrow of the station ends (`AnvilScreen` always registers
+                    // `this.name`, toggling `setEditable(has_input)`).
+                    anvil_name = Some(has_input);
                     let cost = s.anvil.cost;
                     if cost > 0 {
                         let mut color = argb(-8323296);
@@ -578,8 +577,8 @@ impl crate::game::ClientGame<'_> {
                 }
             }
         }
-        if anvil_name {
-            self.draw_anvil_name(batch, ox, oy);
+        if let Some(has_input) = anvil_name {
+            self.draw_anvil_name(batch, ox, oy, has_input);
         }
         let drag = self.drag_view();
         self.draw_hovered_slot_highlight(batch, false, ox, oy);

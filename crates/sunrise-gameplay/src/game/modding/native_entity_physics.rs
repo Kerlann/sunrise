@@ -183,6 +183,22 @@ impl crate::game::ServerGame<'_> {
     /// `/kill` and the native discard drop a projectile from its list: the
     /// `noPhysics` write stored for a shulker bullet leaves with it.
     pub(in crate::game::server_side) fn remove_projectile(&mut self, id: u32) {
+        #[cfg(feature = "state-digest")]
+        if crate::game::state_transcript::is_recording()
+            && let Some(p) = self
+                .common
+                .creatures
+                .projectiles
+                .iter()
+                .find(|p| p.id == id)
+        {
+            crate::game::state_transcript::record_departure(
+                self.common.dim,
+                p.id,
+                p.entity_type(),
+                None,
+            );
+        }
         self.common.creatures.projectiles.retain(|p| p.id != id);
         self.forget_entity(id);
     }
@@ -191,6 +207,7 @@ impl crate::game::ServerGame<'_> {
     /// the `noPhysics` write stored for a shulker bullet leaves with it.
     pub(in crate::game::server_side) fn remove_projectile_at(&mut self, i: usize) -> Projectile {
         let p = self.common.creatures.projectiles.remove(i);
+        crate::game::record_departure!(self.common.dim, p.id, p.entity_type(), None);
         self.forget_entity(p.id);
         p
     }
@@ -198,6 +215,17 @@ impl crate::game::ServerGame<'_> {
     /// A command drops an ominous item spawner: its stored `noPhysics` write
     /// leaves with it.
     pub(in crate::game::server_side) fn remove_ominous_spawner(&mut self, id: u32) {
+        #[cfg(feature = "state-digest")]
+        if crate::game::state_transcript::is_recording()
+            && self.common.ominous_spawners.iter().any(|s| s.id == id)
+        {
+            crate::game::state_transcript::record_departure(
+                self.common.dim,
+                id,
+                "minecraft:ominous_item_spawner",
+                None,
+            );
+        }
         self.common.ominous_spawners.retain(|s| s.id != id);
         self.forget_entity(id);
     }
@@ -205,6 +233,17 @@ impl crate::game::ServerGame<'_> {
     /// A command drops one breath cloud: its stored `noPhysics` write leaves
     /// with it.
     pub(in crate::game::server_side) fn remove_breath_cloud(&mut self, id: u32) {
+        #[cfg(feature = "state-digest")]
+        if crate::game::state_transcript::is_recording()
+            && self.common.breath_clouds.iter().any(|c| c.id == id)
+        {
+            crate::game::state_transcript::record_departure(
+                self.common.dim,
+                id,
+                "minecraft:area_effect_cloud",
+                None,
+            );
+        }
         self.common.breath_clouds.retain(|c| c.id != id);
         self.forget_entity(id);
     }
@@ -215,10 +254,13 @@ impl crate::game::ServerGame<'_> {
         &mut self,
         mut keep: impl FnMut(&sunrise_gameplay_common::game::dragon_common::Breath) -> bool,
     ) {
+        #[cfg(feature = "state-digest")]
+        let dim = self.common.dim;
         let mut gone = Vec::new();
         self.common.breath_clouds.retain(|c| {
             let kept = keep(c);
             if !kept {
+                crate::game::record_departure!(dim, c.id, "minecraft:area_effect_cloud", None);
                 gone.push(c.id);
             }
             kept

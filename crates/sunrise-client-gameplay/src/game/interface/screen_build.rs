@@ -34,6 +34,10 @@ pub struct ObservedScreen {
     pub menu_generation: Option<u64>,
     /// Dialog, warning and waiting screens share one public id, not one receiver.
     pub dialog_key: Option<(bool, bool, Option<u64>)>,
+    /// Sub-page or overlay discriminant for screens that share one public `ScreenView.id`
+    /// (for example `OptionsUi::Page`, `WorldOptions::View`, `DeathScreen.TitleConfirmScreen`,
+    /// `Title` overlays / `CreateFlat::Page`, and `Realms::SubScreen`).
+    pub sub_page: u64,
     pub title: Option<std::sync::Arc<mod_api::Text>>,
     pub rect: [f32; 4],
     /// Actual GUI-scaled screen dimensions (`width`, `height`), used to detect
@@ -46,6 +50,16 @@ pub struct ObservedScreen {
 }
 
 impl ObservedScreen {
+    /// Whether `self` and `other` represent the same logical screen receiver.
+    pub fn same_receiver(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.menu == other.menu
+            && self.menu_generation == other.menu_generation
+            && self.mod_screen == other.mod_screen
+            && self.dialog_key == other.dialog_key
+            && self.sub_page == other.sub_page
+    }
+
     pub fn view(&self) -> ScreenView<'_> {
         ScreenView::from(mod_api::__private::built::ScreenView {
             id: self.id,
@@ -343,6 +357,11 @@ pub struct ScreenState {
     /// book drew none.
     pub(in crate::game) drawn_book_tabs: std::cell::Cell<Option<[f32; 4]>>,
     pub widgets: super::screen_widgets::MountedScreenWidgets,
+    /// Underlying screen observations and mounted widget collections suspended while an overlay
+    /// (such as a link prompt, pack prompt, or dialog) sits on top, restored without re-running
+    /// `screen_init_pre`/`screen_init_post` when the overlay closes and reveals them.
+    pub(in crate::game) suspended_under_overlay:
+        Vec<(ObservedScreen, super::screen_widgets::MountedScreenWidgets)>,
     /// A mod's context menu over this screen (`ClientHost::open_context_menu`).
     #[cfg(feature = "client")]
     pub(in crate::game) context_menu: Option<super::context_menu::ContextMenu>,

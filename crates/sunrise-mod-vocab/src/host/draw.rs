@@ -159,7 +159,9 @@ pub trait DrawContext {
     /// a clock the scene owns, kept per calling mod and clock id. A scene of blocks
     /// alone keeps no state. Refused by name ([`SceneError`]): over a cap (16
     /// entities, 512 live particles, 4 animating scenes a frame), an entity
-    /// `entity` would refuse, or input that isn't drawable.
+    /// `entity` would refuse, or input that isn't drawable. A nonpositive or nonfinite scale
+    /// is `BadView` before anything else happens: it keeps no scene, advances no clock and
+    /// spends none of the frame's animation budget.
     /// API @API:scenes_in_screens@.
     fn draw_scene(
         &mut self,
@@ -268,7 +270,11 @@ pub trait BlockEntityDrawContext {
     }
     /// Keeps what this call drew, with neither `block_entity_submit` nor
     /// `block_entity_render_bounding_box` called until its state, block entity,
-    /// light or resource packs change. Parts marked with `spin` keep turning on the
+    /// light, resource packs or the font's glyph cache change. A kept draw not drawn
+    /// for 100 ticks is dropped, and the next frame that draws the block submits it
+    /// again. A draw that fills the frame's entity quad batch is not kept (it may have
+    /// been cut short; a later frame with room extracts it again), even when it fits
+    /// exactly. Parts marked with `spin` keep turning on the
     /// animation clock (`animation_time`); other geometry stays as submitted. Do not bake frame-dependent
     /// values into kept vertices: item glint and time-dependent item models stop
     /// where they were, and neighboring blocks do not invalidate the cache.

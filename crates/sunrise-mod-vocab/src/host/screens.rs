@@ -187,6 +187,17 @@ pub trait ScreensClientHost {
     /// no world.
     fn open_inventory(&mut self) -> bool;
     /// Side: client.
+    /// Live access to the open screen's widgets (both the game's own controls and mounted mod
+    /// widgets), exposing the same [`ScreenWidgets`] surface handed to `Hooks::screen_init_pre`
+    /// and `Hooks::screen_init_post`. Returns `None` while playing with no screen or overlay open,
+    /// or outside a client window.
+    ///
+    /// Mutations take effect on the next frame and on subsequent input; stale widget identifiers
+    /// from a closed or rebuilt screen return `false` without panicking. Call from a tick, input,
+    /// or widget callback (render hooks hold a read-only `&dyn ClientHost` while drawing reads
+    /// the widget override table).
+    fn screen_widgets(&mut self) -> Option<&mut dyn ScreenWidgets>;
+    /// Side: client.
     /// The sign the sign editor is on, its block position and side; None when
     /// no sign editor is open or outside a world.
     fn sign_editor(&self) -> Option<SignEditView>;
