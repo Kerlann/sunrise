@@ -159,7 +159,7 @@ workspace = true
 [dev-dependencies]
 sunrise-gameplay-common = { path = "../sunrise-gameplay-common", features = ["test-support"] }
 # The integration target uses the same client-side fixtures as the lib tests.
-sunrise-client = { path = ".", default-features = false, features = ["client", "test-support"] }
+sunrise-client = { path = ".", default-features = false, features = ["test-support"] }
 sunrise-gameplay = { path = "../sunrise-gameplay", features = ["test-support"] }
 sunrise-hooks = { path = "../sunrise-hooks", features = ["test-support"] }
 # `runtime_files` tests pack a mod folder.

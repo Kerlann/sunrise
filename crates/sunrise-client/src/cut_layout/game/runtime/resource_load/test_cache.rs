@@ -647,6 +647,21 @@ mod tests {
     #[ignore = "daily"]
     fn repeated_and_concurrent_loads_share_resources_while_uncached_and_mutating_hooks_stay_private()
      {
+        const CHILD: &str = "SUNRISE_RESOURCE_CACHE_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            const TEST: &str = "cut_layout::game::resource_load::test_cache::tests::repeated_and_concurrent_loads_share_resources_while_uncached_and_mutating_hooks_stay_private";
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--ignored", "--exact", TEST])
+                .env(CHILD, "1")
+                .status()
+                .expect("run resource-cache regression in an isolated process");
+            assert!(
+                status.success(),
+                "isolated resource-cache regression failed"
+            );
+            return;
+        }
+
         let first = load_for(execution_role::ExecutionRole::IntegratedServer);
         let second = load_for(execution_role::ExecutionRole::IntegratedServer);
         assert!(first.resources.living_type_keys().player.is_some());

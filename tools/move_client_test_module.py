@@ -38,6 +38,7 @@ MODULE_ITEM = re.compile(
     rf"(?m)^[ \t]*(?P<visibility>pub(?:\s*\([^)]*\))?\s+)?mod\s+(?P<name>{IDENTIFIER})\b(?P<tail>[^\r\n]*)"
 )
 POLICY_FIELDS = re.compile(r"\S+")
+CFG_TEST_ATTRIBUTE = re.compile(r"#\[\s*cfg\s*\(\s*test\s*\)\s*\]")
 
 
 class ExtractionError(Exception):
@@ -69,6 +70,19 @@ def _module_segments(module_path: str) -> tuple[str, ...]:
     return segments
 
 
+def _has_preceding_cfg_test_attribute(text: str, position: int) -> bool:
+    for line in reversed(text[:position].splitlines()):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("//"):
+            continue
+        if stripped.startswith("#["):
+            if CFG_TEST_ATTRIBUTE.search(stripped):
+                return True
+            continue
+        break
+    return False
+
+
 def _declaration_to_remove(declaration_file: Path, source: Path, module_name: str) -> tuple[str, int, int]:
     text = declaration_file.read_text(encoding="utf-8")
     module_items = [match for match in MODULE_ITEM.finditer(text) if match.group("name") == module_name]
@@ -83,6 +97,10 @@ def _declaration_to_remove(declaration_file: Path, source: Path, module_name: st
             f"expected one #[path] declaration resolving to {source}, found {len(matching_path_items)}"
         )
     declaration = matching_path_items[0]
+    if _has_preceding_cfg_test_attribute(text, declaration.start()):
+        raise ExtractionError(
+            f"the file-backed module {module_name} has a preceding #[cfg(test)] attribute"
+        )
     visibility = re.sub(r"\s+", "", declaration.group("visibility") or "")
     if declaration.group("name") != module_name or visibility != "pub(crate)":
         raise ExtractionError(
