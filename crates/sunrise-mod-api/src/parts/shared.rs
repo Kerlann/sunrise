@@ -391,9 +391,20 @@ pub(crate) fn install_registrar(
     registrar.validate_data_maps();
     let custom_registries = registrar.validate_and_freeze_custom_registries();
     if !registrar.refused.is_empty() {
-        return Err(registrar.refused);
+        let refused = std::mem::take(&mut registrar.refused);
+        super::registration_refusal::discard_data_maps(std::mem::take(&mut registrar.data_maps));
+        super::registration_refusal::discard_load_conditions(std::mem::take(
+            &mut registrar.load_conditions,
+        ));
+        return Err(refused);
     }
-    registrar.validate_attachment_admission()?;
+    if let Err(refused) = registrar.validate_attachment_admission() {
+        super::registration_refusal::discard_data_maps(std::mem::take(&mut registrar.data_maps));
+        super::registration_refusal::discard_load_conditions(std::mem::take(
+            &mut registrar.load_conditions,
+        ));
+        return Err(refused);
+    }
     let game_rule_slots = slots.expect("every schema refusal was collected");
     let installed = Installed {
         dependencies: crate::load_state::effective_dependencies(),

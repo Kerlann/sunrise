@@ -359,6 +359,16 @@ impl RegisteredDataMap {
         self.supports_tags
     }
 
+    /// Consume this descriptor and drop each mod-owned callback through `discard`,
+    /// fencing each callback independently so a panicking destructor cannot unwind
+    /// through another callback's destructor.
+    pub fn discard_callbacks(self, mut discard: impl FnMut(&'static str, Box<dyn std::any::Any>)) {
+        let owner = self.owner_mod;
+        discard(owner, Box::new(self.network_value));
+        discard(owner, Box::new(self.merge));
+        discard(owner, Box::new(self.remove_partial));
+    }
+
     /// Project a merged NBT value for client sync. If projection returns `None` or panics,
     /// logs once and omits the entry from the client snapshot (containment rule).
     pub fn project_network_value(&self, entry: &str, value: &Tag) -> Option<Tag> {
