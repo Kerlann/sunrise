@@ -132,6 +132,71 @@ fn issue_6828_menus_follow_the_live_block_range() {
     );
 }
 
+/// `ServerPlayer.doTick` closes a menu when its `stillValid` fails. For a chest
+/// (`Container.stillValidBlockEntity`) and crafting table (`CraftingMenu.stillValid`),
+/// `Player.isWithinBlockInteractionRange` reads the live attribute and adds 4.
+#[test]
+#[ignore = "daily"]
+fn issue_6828_host_menus_close_on_live_range_decrease() {
+    const CASE: &str = "SUNRISE_LIVE_BLOCK_REACH_HOST_MENUS_CASE";
+    const TEST: &str = "game::server_side::lan_actions_server::packets::live_block_reach_tests::issue_6828_host_menus_close_on_live_range_decrease";
+    if sunrise_gameplay_common::game::test_fixtures::run_fresh_cases(TEST, CASE, &["host_menus"]) {
+        return;
+    }
+    let mut resources = None;
+    let mut game = crate::game::game_tests::tests::server_game(&mut resources);
+    game.common.player = Some(sunrise_sim::motion::PlayerMotion::new(
+        game.common.motion,
+        Vec3::new(0.5, 64.0, 0.5),
+    ));
+    let chest = [10, 65, 0];
+    let table = [0, 65, 10];
+    for ([x, y, z], block) in [
+        (chest, "minecraft:chest"),
+        (table, "minecraft:crafting_table"),
+    ] {
+        let state = game.pack.assets.registry.default_state(block).unwrap();
+        game.world.set(x, y, z, state).unwrap();
+    }
+    let extend_range = |game: &mut crate::game::ServerGame<'_>, present| {
+        game.common
+            .player
+            .as_mut()
+            .unwrap()
+            .set_modifier(
+                "minecraft:block_interaction_range",
+                "sunrise:test",
+                6.0,
+                "add_value",
+                present,
+            )
+            .unwrap();
+    };
+
+    // Both block boxes are 9.5 blocks from the standing eyes: inside the raised
+    // reach of 10.5, but outside the default 4.5 even with the menu's 4-block buffer.
+    extend_range(&mut game, true);
+    game.open_block_effect_menu(chest);
+    game.common.update_interaction_ranges();
+    game.tick_container_reach();
+    assert_eq!(game.common.container, Some((10, 65, 0)));
+    extend_range(&mut game, false);
+    game.tick_container_reach();
+    assert_eq!(game.common.container, None, "the host chest menu closes");
+
+    extend_range(&mut game, true);
+    game.open_block_effect_menu(table);
+    game.common.update_interaction_ranges();
+    game.tick_craft_table();
+    assert_eq!(game.server.craft_table, Some(table));
+    extend_range(&mut game, false);
+    game.tick_craft_table();
+    assert_eq!(
+        game.server.craft_table, None,
+        "the host crafting menu closes"
+    );
+}
+
 /// A block one unit below x = 7 whose distance is just under the 7-block range:
 /// vanilla accepts it; subtracting `lo + 1` from `lo` must not round it up.
 #[test]
