@@ -143,7 +143,7 @@ pub(in crate::game) mod level_format;
 
 #[path = "raw_ingress_client.rs"]
 pub(in crate::game) mod raw_ingress;
-pub(in crate::game) use ingress_state::PacketError;
+pub(in crate::game) use ingress_state::{DetailedPacketError, PacketError};
 
 #[path = "recipe_properties_client.rs"]
 pub(in crate::game) mod recipe_properties;
@@ -737,15 +737,29 @@ impl crate::game::ClientGame<'_> {
     /// Apply one `sunrise:data_map_sync` play payload on a remote client
     /// (`ClientRegistryManager.handleDataMapSync:39-53`).
     pub(in crate::game) fn apply_synced_data_maps(&mut self, data: &[u8]) -> Result<()> {
-        let (registry, maps) = match sunrise_sim::data_map_net::decode_sync_payload(data) {
-            Ok(decoded) => decoded,
-            Err(error) => {
-                self.refuse_remote_input(format!(
-                    "Failed to handle registry data map sync: {error}"
-                ))?;
-                return Ok(());
+        let (registry, maps) =
+            sunrise_sim::data_map_net::decode_sync_payload(data).map_err(|error| {
+                DetailedPacketError(format!("Failed to handle registry data map sync: {error}"))
+            })?;
+        let known = sunrise_sim::data_map_net::LocalDataMaps::installed();
+        if !known
+            .entries()
+            .iter()
+            .any(|entry| entry.registry == registry)
+        {
+            return Err(DetailedPacketError(format!(
+                "Failed to handle registry data map sync: unknown registry {registry}"
+            ))
+            .into());
+        }
+        for map_id in maps.keys() {
+            if !known.contains(&registry, map_id) {
+                return Err(DetailedPacketError(format!(
+                    "Failed to handle registry data map sync: unknown data map {map_id} for registry {registry}"
+                ))
+                .into());
             }
-        };
+        }
         if let Some(remote) = &mut self.client.remote {
             remote
                 .client_data_maps

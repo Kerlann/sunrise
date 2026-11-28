@@ -1258,6 +1258,9 @@ fn data_maps_updated_fires_for_each_registry_on_first_open_and_every_reload() {
         fn decode(&self, value: &Tag) -> Option<i64> {
             number(value)
         }
+        fn sync(&self) -> mod_api::DataMapSync {
+            mod_api::DataMapSync::Optional
+        }
     }
     struct Hardness;
     impl DataMap for Hardness {
@@ -1268,6 +1271,9 @@ fn data_maps_updated_fires_for_each_registry_on_first_open_and_every_reload() {
         }
         fn decode(&self, value: &Tag) -> Option<i64> {
             number(value)
+        }
+        fn sync(&self) -> mod_api::DataMapSync {
+            mod_api::DataMapSync::Optional
         }
     }
     const FUEL: Fuel = Fuel("probe:fuel");
@@ -1446,6 +1452,48 @@ fn data_maps_updated_fires_for_each_registry_on_first_open_and_every_reload() {
                 .unwrap();
             assert_eq!(coal.data(client, &FUEL), Ok(Some(25)));
             assert_eq!(log.data(client, &FUEL), Ok(None));
+
+            // Unknown registry and unknown map sync payloads must fail via DetailedPacketError
+            // naming the registry/map without mutating client state or firing ClientSync.
+            let unknown_reg = sunrise_sim::data_map_net::encode_sync_payload(
+                "unknown:registry",
+                &[("unknown:map".to_owned(), vec![])],
+            )
+            .unwrap();
+            let err = client
+                .apply_packet(sunrise_protocol::packets::play::Clientbound::CustomPayload(
+                    sunrise_protocol::packets::configuration::CustomPayload {
+                        channel: sunrise_sim::data_map_net::SYNC_CHANNEL.into(),
+                        data: unknown_reg,
+                    },
+                ))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("unknown:registry"),
+                "expected unknown registry error, got: {err}"
+            );
+
+            let unknown_map = sunrise_sim::data_map_net::encode_sync_payload(
+                "minecraft:item",
+                &[("probe:not_synced".to_owned(), vec![])],
+            )
+            .unwrap();
+            let err = client
+                .apply_packet(sunrise_protocol::packets::play::Clientbound::CustomPayload(
+                    sunrise_protocol::packets::configuration::CustomPayload {
+                        channel: sunrise_sim::data_map_net::SYNC_CHANNEL.into(),
+                        data: unknown_map,
+                    },
+                ))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("minecraft:item") && err.contains("probe:not_synced"),
+                "expected unknown map error naming registry and map, got: {err}"
+            );
+            assert_eq!(coal.data(client, &FUEL), Ok(Some(25)));
+
             assert_eq!(
                 seen.lock()
                     .unwrap()

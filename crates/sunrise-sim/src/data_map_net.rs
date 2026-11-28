@@ -446,6 +446,11 @@ pub fn decode_sync_payload(
         let map_id = r
             .string(MAX_STRING_LEN)
             .map_err(|e| format!("invalid map id for registry {registry}: {e}"))?;
+        if maps.contains_key(&map_id) {
+            return Err(format!(
+                "duplicate data map {map_id} for registry {registry} in sunrise:data_map_sync payload"
+            ));
+        }
         let entry_count = r
             .varint()
             .map_err(|e| format!("invalid entry count for data map {map_id} ({registry}): {e}"))?;
@@ -472,6 +477,12 @@ pub fn decode_sync_payload(
             entries.push((entry_id, tag));
         }
         entries.sort_by(|a, b| a.0.cmp(&b.0));
+        if let Some(pair) = entries.windows(2).find(|pair| pair[0].0 == pair[1].0) {
+            return Err(format!(
+                "duplicate entry {} in data map {map_id} ({registry}) in sunrise:data_map_sync payload",
+                pair[0].0
+            ));
+        }
         maps.insert(map_id, entries);
     }
     if r.remaining() != 0 {
@@ -644,6 +655,50 @@ mod tests {
         assert!(
             err.contains("minecraft:item") && err.contains("chemlib:fuel"),
             "unexpected truncated NBT error: {err}"
+        );
+
+        // Receiver must refuse duplicate map ids naming registry and map.
+        let dup_map = encode_sync_payload(
+            "minecraft:item",
+            &[
+                (
+                    "chemlib:fuel".to_owned(),
+                    vec![("minecraft:coal".to_owned(), Tag::Int(1))],
+                ),
+                (
+                    "chemlib:fuel".to_owned(),
+                    vec![("minecraft:stick".to_owned(), Tag::Int(2))],
+                ),
+            ],
+        )
+        .unwrap();
+        let err = decode_sync_payload(&dup_map).unwrap_err();
+        assert!(
+            err.contains("duplicate")
+                && err.contains("minecraft:item")
+                && err.contains("chemlib:fuel"),
+            "unexpected duplicate map error: {err}"
+        );
+
+        // Receiver must refuse duplicate entry ids naming registry, map, and entry.
+        let dup_entry = encode_sync_payload(
+            "minecraft:item",
+            &[(
+                "chemlib:fuel".to_owned(),
+                vec![
+                    ("minecraft:coal".to_owned(), Tag::Int(1)),
+                    ("minecraft:coal".to_owned(), Tag::Int(2)),
+                ],
+            )],
+        )
+        .unwrap();
+        let err = decode_sync_payload(&dup_entry).unwrap_err();
+        assert!(
+            err.contains("duplicate")
+                && err.contains("minecraft:item")
+                && err.contains("chemlib:fuel")
+                && err.contains("minecraft:coal"),
+            "unexpected duplicate entry error: {err}"
         );
     }
 

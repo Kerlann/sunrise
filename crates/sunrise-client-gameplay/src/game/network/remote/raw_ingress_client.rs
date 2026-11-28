@@ -1,7 +1,7 @@
 use super::ingress_state::ListenerTurn;
-pub(in crate::game::client_side) use super::ingress_state::PacketError;
 use super::ingress_state::local_transfer_notice;
 use super::ingress_state::packet_error_notice;
+pub(in crate::game::client_side) use super::ingress_state::{DetailedPacketError, PacketError};
 use super::*;
 
 #[cfg(feature = "client")]
@@ -556,6 +556,16 @@ impl crate::game::ClientGame<'_> {
                     Err(e) if e.is::<PacketError>() => {
                         log::warn!("Sunrise: disconnected: {e}");
                         self.record_packet_error(turn, packet_error_notice);
+                    }
+                    Err(e) if e.is::<DetailedPacketError>() => {
+                        let reason = e.to_string();
+                        log::warn!("Sunrise: disconnected: {reason}");
+                        self.record_packet_error(turn, || Event::Disconnected {
+                            reason,
+                            key: None,
+                            from_server: false,
+                            after_login: true,
+                        });
                     }
                     other => other?,
                 },
