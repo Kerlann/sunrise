@@ -1,7 +1,8 @@
-//! `ServerPlayerGameMode.handleBlockBreakAction`: an out-of-range
-//! `STOP_DESTROY_BLOCK` acknowledges the action but leaves the active dig and
-//! its clock alone; only `ABORT_DESTROY_BLOCK` clears them. An instant break is
-//! decided at START, so a later tick never breaks the block on its own (#6853).
+//! `ServerPlayerGameMode.handleBlockBreakAction`: an out-of-range STOP leaves
+//! the active dig and its clock alone; ABORT ends the dig without resetting
+//! that clock. `ServerGamePacketListenerImpl.handlePlayerAction` queues the ACK
+//! even for a refused STOP. `ServerPlayerGameMode.tick` advances active dig
+//! feedback without breaking the block (#6853).
 
 use std::sync::Arc;
 use sunrise_protocol::packets::play::{self, Serverbound as S};
@@ -81,6 +82,7 @@ fn issue_6853_out_of_range_stop_keeps_the_active_dig() {
 
     {
         let host = game.server.lan.as_ref().unwrap();
+        assert_eq!(host.hub.guests[0].ack_up_to.get(), 2, "STOP queued its ACK");
         let play = host.play.get(&1).expect("the STOP ran for the guest");
         assert!(
             play.digging.is_some(),
@@ -103,9 +105,19 @@ fn issue_6853_out_of_range_stop_keeps_the_active_dig() {
         "the refused STOP leaves the block alone"
     );
 
-    // The guest's next tick advances feedback only; START's non-instant block
-    // must not break just because it became instant afterwards.
+    // Return to reach facing the block. The next tick advances the retained
+    // dig's feedback only, even though the block is now instant.
+    game.server.lan.as_mut().unwrap().hub.guests.update(0, |g| {
+        g.position = [0.5, 64.0, 0.5];
+        g.yaw = -90.0;
+        g.pitch = 30.0;
+    });
     game.tick_guests();
+    let host = game.server.lan.as_ref().unwrap();
+    let play = host.play.get(&1).unwrap();
+    let mining = play.mining.as_ref().expect("the tick kept the active dig");
+    assert_eq!(mining.pos, pos);
+    assert_eq!(mining.ticks, 1, "the retained dig received its first tick");
     assert_eq!(
         game.common.world.block(pos[0], pos[1], pos[2]),
         torch,
