@@ -213,6 +213,11 @@ impl ServerGame<'_> {
             if let Some(p) = self.common.player.as_mut() {
                 p.position = seat;
             }
+        } else if let Some(c) = self.common.cushions.iter().find(|c| c.id == vehicle) {
+            let seat = c.seat();
+            if let Some(p) = self.common.player.as_mut() {
+                p.position = seat;
+            }
         } else if self.common.mobs.iter().any(|m| m.id == vehicle) {
             self.position_rider();
         }
