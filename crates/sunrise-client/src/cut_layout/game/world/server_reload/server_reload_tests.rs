@@ -1313,7 +1313,6 @@ fn data_maps_updated_fires_for_each_registry_on_first_open_and_every_reload() {
             context: &dyn ReloadContext,
             event: &mut DataMapsUpdatedEvent<'_>,
         ) {
-            assert_eq!(event.cause, DataMapsUpdateCause::ServerReload);
             self.seen
                 .lock()
                 .unwrap()
@@ -1323,12 +1322,17 @@ fn data_maps_updated_fires_for_each_registry_on_first_open_and_every_reload() {
             }
             let item = |id: &str| context.item_key(&Identifier::parse(id).unwrap()).unwrap();
             let stone = mod_api::__private::block_key("minecraft:stone").unwrap();
+            let hardness = if event.cause == DataMapsUpdateCause::ServerReload {
+                context.data_map(&stone, &Hardness)
+            } else {
+                Err(DataMapError::UnknownType)
+            };
             self.reads.lock().unwrap().push([
                 context.data_map(&item("minecraft:coal"), &FUEL),
                 context.data_map(&item("minecraft:oak_log"), &FUEL),
                 context.data_map(&item("minecraft:stone"), &FUEL),
                 context.data_map(&item("minecraft:coal"), &Fuel("probe:unregistered")),
-                context.data_map(&stone, &Hardness),
+                hardness,
             ]);
         }
     }
@@ -1377,7 +1381,8 @@ fn data_maps_updated_fires_for_each_registry_on_first_open_and_every_reload() {
             );
             let _ = std::fs::remove_dir_all(root);
         });
-        // A client holds no server data maps it may answer.
+        // A client holds no data maps until synced, then reads synced maps (and updates on reload)
+        // through typed keys and `DataMapsUpdateCause::ClientSync`, while `ServerOnly` maps stay absent.
         #[cfg(feature = "client")]
         crate::game::server_side::native_entity_refs::tests::with_client_game(|client| {
             assert_eq!(
@@ -1388,6 +1393,92 @@ fn data_maps_updated_fires_for_each_registry_on_first_open_and_every_reload() {
                     "probe:fuel"
                 ),
                 Err(DataMapError::Unavailable)
+            );
+            client.init_remote_for_replay().unwrap();
+            let initial_payload = sunrise_sim::data_map_net::encode_sync_payload(
+                "minecraft:item",
+                &[(
+                    "probe:fuel".to_owned(),
+                    vec![
+                        ("minecraft:coal".to_owned(), Tag::Int(10)),
+                        ("minecraft:oak_log".to_owned(), Tag::Int(5)),
+                    ],
+                )],
+            )
+            .unwrap();
+            client
+                .apply_packet(sunrise_protocol::packets::play::Clientbound::CustomPayload(
+                    sunrise_protocol::packets::configuration::CustomPayload {
+                        channel: sunrise_sim::data_map_net::SYNC_CHANNEL.into(),
+                        data: initial_payload,
+                    },
+                ))
+                .unwrap();
+            let coal = client
+                .item_key(&Identifier::parse("minecraft:coal").unwrap())
+                .unwrap();
+            let log = client
+                .item_key(&Identifier::parse("minecraft:oak_log").unwrap())
+                .unwrap();
+            assert_eq!(coal.data(client, &FUEL), Ok(Some(10)));
+            assert_eq!(log.data(client, &FUEL), Ok(Some(5)));
+            assert_eq!(
+                coal.data(client, &Fuel("probe:unregistered")),
+                Err(DataMapError::UnknownType)
+            );
+
+            // Reload update replaces coal and drops oak_log on the client.
+            let reload_payload = sunrise_sim::data_map_net::encode_sync_payload(
+                "minecraft:item",
+                &[(
+                    "probe:fuel".to_owned(),
+                    vec![("minecraft:coal".to_owned(), Tag::Int(25))],
+                )],
+            )
+            .unwrap();
+            client
+                .apply_packet(sunrise_protocol::packets::play::Clientbound::CustomPayload(
+                    sunrise_protocol::packets::configuration::CustomPayload {
+                        channel: sunrise_sim::data_map_net::SYNC_CHANNEL.into(),
+                        data: reload_payload,
+                    },
+                ))
+                .unwrap();
+            assert_eq!(coal.data(client, &FUEL), Ok(Some(25)));
+            assert_eq!(log.data(client, &FUEL), Ok(None));
+            assert_eq!(
+                seen.lock()
+                    .unwrap()
+                    .iter()
+                    .rev()
+                    .take(2)
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                vec![
+                    ("minecraft:item".to_owned(), DataMapsUpdateCause::ClientSync),
+                    ("minecraft:item".to_owned(), DataMapsUpdateCause::ClientSync),
+                ]
+            );
+            let reads = reads.lock().unwrap();
+            assert_eq!(
+                reads[2],
+                [
+                    Ok(Some(10)),
+                    Ok(Some(5)),
+                    Ok(None),
+                    Err(DataMapError::UnknownType),
+                    Err(DataMapError::UnknownType),
+                ]
+            );
+            assert_eq!(
+                reads[3],
+                [
+                    Ok(Some(25)),
+                    Ok(None),
+                    Ok(None),
+                    Err(DataMapError::UnknownType),
+                    Err(DataMapError::UnknownType),
+                ]
             );
         });
     });
