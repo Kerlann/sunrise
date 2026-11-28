@@ -11,6 +11,8 @@ import java.security.DigestInputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
@@ -19,6 +21,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.players.PlayerList;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
@@ -53,7 +56,7 @@ public final class StateTranscript implements AutoCloseable {
     private record Turn(int id, String type, String role, String vehicle) {}
     private record Departure(int id, String type, Entity.RemovalReason reason) {}
 
-    StateTranscript(ServerLevel level, Path script) throws IOException, ReflectiveOperationException {
+    StateTranscript(ServerLevel level, Path script, PlayerList players) throws IOException, ReflectiveOperationException {
         Class<?> agent = Class.forName("dev.sunriselab.parity.SeedAgent");
         agent.getMethod("requireTranscriptAgent").invoke(null);
         Path path = Path.of(System.getProperty("sunrise.stateTranscript"));
@@ -70,22 +73,33 @@ public final class StateTranscript implements AutoCloseable {
         this.level = level;
         output = Files.newBufferedWriter(path);
         output.write("H\tformat=sunrise-state-transcript\tversion=1\tengine=vanilla\tscript_sha256=" + scriptHash
-            + "\tfixture_sha256=" + fixtureHash + "\tbuild=" + build + "\tgame_version=26.3\n");
+            + "\tfixture_sha256=" + fixtureHash + "\tbuild=" + build + "\tgame_version=26.3"
+            + "\tview_distance=" + players.getViewDistance() + "\tsimulation_distance=" + players.getSimulationDistance()
+            + "\n");
     }
 
     private static String defaultBuild(Class<?> agent) throws IOException {
         StringJoiner build = new StringJoiner("-");
-        var serverJar = ServerLevel.class.getProtectionDomain().getCodeSource().getLocation();
-        try (InputStream input = serverJar.openStream()) {
-            build.add(sha256(input));
-        }
-        for (Class<?> cls : List.of(VanillaCommandExecOracle.class, VanillaCommandExecOracle.Server.class, StateTranscript.class, agent)) {
-            String resource = "/" + cls.getName().replace('.', '/') + ".class";
-            try (InputStream input = cls.getResourceAsStream(resource)) {
+        for (Class<?> cls : List.of(ServerLevel.class, agent)) {
+            var location = cls.getProtectionDomain().getCodeSource().getLocation();
+            try (InputStream input = location.openStream()) {
                 build.add(sha256(input));
             }
         }
+        hashClasses(build, VanillaCommandExecOracle.class);
+        hashClasses(build, StateTranscript.class);
         return build.toString();
+    }
+
+    private static void hashClasses(StringJoiner build, Class<?> cls) throws IOException {
+        String resource = "/" + cls.getName().replace('.', '/') + ".class";
+        try (InputStream input = cls.getResourceAsStream(resource)) {
+            if (input == null) throw new IOException("Missing transcript build resource: " + resource);
+            build.add(sha256(input));
+        }
+        Class<?>[] nested = cls.getDeclaredClasses();
+        Arrays.sort(nested, Comparator.comparing(Class::getName));
+        for (Class<?> child : nested) hashClasses(build, child);
     }
 
     private static String sha256(InputStream input) throws IOException {

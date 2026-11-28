@@ -26,11 +26,15 @@ public final class SeedAgent {
     private static final long STEP = 1181783497276652981L;
     private static volatile boolean installed;
 
+    private static final String NO_PROBES = "no-state-transcript-probes";
     private static boolean transcriptReady;
 
     public static void premain(String options, Instrumentation instrumentation) throws ClassNotFoundException {
+        if (options != null && !options.isEmpty() && !NO_PROBES.equals(options)) {
+            throw new IllegalArgumentException("Unknown SeedAgent option: " + options);
+        }
         boolean transcript = System.getProperty("sunrise.stateTranscript") != null;
-        boolean probes = transcript && !"no-state-transcript-probes".equals(options);
+        boolean probes = transcript && !NO_PROBES.equals(options);
         ClassLoader oracleLoader = SeedAgent.class.getClassLoader();
         boolean[] probeClasses = {false, false};
         instrumentation.addTransformer(new ClassFileTransformer() {

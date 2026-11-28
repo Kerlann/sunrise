@@ -639,7 +639,7 @@ public final class VanillaCommandExecOracle {
                 switch (op.get("op").getAsString()) {
                     case "state_transcript" -> {
                         boolean enabled = op.get("on").getAsBoolean();
-                        if (enabled && transcript == null) transcript = new StateTranscript(level, script);
+                        if (enabled && transcript == null) transcript = new StateTranscript(level, script, getPlayerList());
                         if (transcript != null) transcript.enabled = enabled;
                     }
                     case "cmd" -> {
@@ -885,7 +885,10 @@ public final class VanillaCommandExecOracle {
                         int n=op.get("n").getAsInt();
                         int before=player.getStats().getValue(net.minecraft.stats.Stats.CUSTOM.get(net.minecraft.stats.Stats.PLAY_TIME));
                         messages.clear();
-                        for (int i=0;i<n;i++) { tick(); player.connection.tick(); }
+                        for (int i = 0; i < n; i++) {
+                            tick();
+                            if (!transcriptEnabled()) player.connection.tick();
+                        }
                         int delta=player.getStats().getValue(net.minecraft.stats.Stats.CUSTOM.get(net.minecraft.stats.Stats.PLAY_TIME))-before;
                         if (delta!=n) throw new IllegalStateException("player loop did not advance play_time: "+delta+"/"+n);
                         JsonObject record=new JsonObject();record.addProperty("cmd","#player_loop "+op.get("label").getAsString());
@@ -1402,6 +1405,15 @@ public final class VanillaCommandExecOracle {
             tick(false);
         }
 
+        private boolean transcriptEnabled() {
+            return transcript != null && transcript.enabled;
+        }
+
+        @Override protected void tickConnection() {
+            super.tickConnection();
+            if (transcriptEnabled() && player != null) player.connection.tick();
+        }
+
         void tick(boolean allowChunkIo) {
             try {
                 var delay = MinecraftServer.class.getDeclaredField("debugCommandProfilerDelayStart");
@@ -1420,9 +1432,7 @@ public final class VanillaCommandExecOracle {
             }
             drain();
             super.tickServer(() -> allowChunkIo);
-            if (transcript != null && transcript.enabled) {
-                player.connection.tick();
-            } else if (player != null) {
+            if (player != null && !transcriptEnabled()) {
                 // The embedded player has no registered listener, so the legacy fixture refreshes only attributes.
                 try {
                     var refresh = net.minecraft.world.entity.LivingEntity.class.getDeclaredMethod("refreshDirtyAttributes");
