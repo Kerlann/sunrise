@@ -268,7 +268,12 @@ impl ClientGame<'_> {
         self.client.mod_gpu.as_ref()
     }
 
-    pub fn set_renderer(&mut self, renderer: Box<Renderer>) {
+    pub fn set_renderer(&mut self, mut renderer: Box<Renderer>) {
+        // The old renderer's pack builds still running: the new one waits for them, so the swap
+        // doesn't.
+        if let Some(old) = &mut self.client.renderer.0 {
+            renderer.adopt_pack_builds(old.take_pack_builds());
+        }
         let gpu = renderer.mod_gpu();
         if let Some(previous) = &self.client.mod_gpu {
             gpu.continue_ids_from(previous);

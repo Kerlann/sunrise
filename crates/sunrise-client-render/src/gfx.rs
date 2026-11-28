@@ -1058,6 +1058,15 @@ mod sprite_upload_tests;
 #[cfg(test)]
 mod shadow_tests;
 
+#[cfg(test)]
+mod pack_build_retire_tests;
+
+mod pack_builds;
+#[cfg(feature = "test-support")]
+pub use pack_builds::PackBuildWatch;
+pub use pack_builds::PackBuilds;
+pub(crate) use pack_builds::{BuildOrigin, PackBuild, Retired, RetiredPackBuilds};
+
 /// What a pack's thread builds (`Renderer::load_shader_pack`): the pack or why it is refused,
 /// its block ids, and the mod pipelines' state for its targets.
 type PackBuilt = (
@@ -1069,12 +1078,17 @@ type PackBuilt = (
 /// A `shaders/` pack building on its own thread (`Renderer::load_shader_pack`): the dimension it
 /// is for, the thread (a panic in it contained), and what the game named it with and when.
 /// Dropping it (another pack, none, or another dimension) cancels the build: the thread stops at
-/// the next program instead of compiling the rest for nothing.
+/// the next program instead of compiling the rest for nothing, and goes to the renderer's
+/// [`RetiredPackBuilds`], which joins it once it ends, and before the renderer drops.
 pub(crate) struct PackLoading {
     dimension: i32,
-    /// Held to be dropped with it: that cancels the build.
-    _cancel: CancelOnDrop,
-    thread: std::thread::JoinHandle<std::result::Result<PackBuilt, String>>,
+    /// Set when it drops: `PackPost::new` checks it per program.
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// `None` once `poll_shader_pack` joined it.
+    thread: Option<PackBuild>,
+    /// Where the thread goes when this drops before it was joined, and where it runs.
+    retired: RetiredPackBuilds,
+    origin: BuildOrigin,
     label: String,
     started: std::time::Instant,
     /// What its terrain and shadow programs will draw from the game's sections, as the built
@@ -1086,6 +1100,19 @@ pub(crate) struct PackLoading {
     /// Block ids given while it builds (`Renderer::set_pack_block_ids`), which it runs with in
     /// place of those it was built with.
     block_ids: Option<Vec<i32>>,
+}
+
+impl Drop for PackLoading {
+    fn drop(&mut self) {
+        self.cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            self.retired.retire(Retired {
+                thread,
+                origin: self.origin.clone(),
+            });
+        }
+    }
 }
 
 /// A running `shaders/` pack's block ids (`Renderer::pack_block_ids`).
@@ -1120,14 +1147,5 @@ impl PackLoading {
             shadow,
             sections: atlas && (programs || post.water.is_some()) || shadow,
         }
-    }
-}
-
-/// Sets its flag when dropped: `PackLoading`'s cancel, which `PackPost::new` checks per program.
-struct CancelOnDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
-
-impl Drop for CancelOnDrop {
-    fn drop(&mut self) {
-        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }

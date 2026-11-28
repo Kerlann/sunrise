@@ -3,7 +3,9 @@
 //! and `sunrise-parity-fixtures` enable): one struct on the renderer ([`TestHooks`],
 //! `Renderer::test_hooks`), and the read-only views of the renderer and a screenshot they need.
 
-use super::{PendingScreenshot, Renderer};
+use super::{PackBuildWatch, PendingScreenshot, Renderer};
+use std::sync::Arc;
+use winit::window::Window;
 
 /// The renderer's test seams, kept apart from its own state.
 #[derive(Debug, Default)]
@@ -38,7 +40,22 @@ impl Renderer {
     pub fn shader_pack_building(&self) -> bool {
         self.pack_loading
             .as_ref()
-            .is_some_and(|l| !l.thread.is_finished())
+            .and_then(|l| l.thread.as_ref())
+            .is_some_and(|t| !t.is_finished())
+    }
+    /// This renderer's pack builds as they run and end, and the gate that holds them
+    /// (`PackBuildWatch`); it keeps counting once the renderer is gone.
+    pub fn pack_build_watch(&self) -> PackBuildWatch {
+        self.retired_pack_builds.watch.clone()
+    }
+    /// The window this renderer draws to.
+    pub fn window(&self) -> &Arc<Window> {
+        &self.window
+    }
+    /// The device reads as lost from now on, as after the backend reports it.
+    pub fn lose_device(&self) {
+        self.device_lost
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 

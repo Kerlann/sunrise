@@ -548,6 +548,8 @@ enum CaptureAdmission {
 /// State shared with the connection threads.
 pub struct Shared {
     payload_local: Arc<crate::raw_payloads::Local>,
+    /// The `sync(true)` custom registries every login of this listener is sent, captured at start.
+    custom_registries: Arc<crate::custom_registry_net::Snapshot>,
     /// What the next login is sent; `PlayerList.reloadResources` swaps it.
     sync: Mutex<Arc<data::SyncData>>,
     pub events: crate::raw_payloads::ingress::Producer<NetEvent>,
@@ -958,6 +960,7 @@ impl Lan {
         let shared = Arc::new(Shared {
             payload_local: crate::raw_payloads::Local::capture(crate::raw_payloads::Side::Server)
                 .map_err(io::Error::other)?,
+            custom_registries: crate::custom_registry_net::published(),
             sync: Mutex::new(sync),
             events: tx,
             handoffs: drive_game.then(|| Mutex::new(Vec::new())),

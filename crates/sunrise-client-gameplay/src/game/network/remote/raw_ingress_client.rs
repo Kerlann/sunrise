@@ -347,9 +347,13 @@ impl crate::game::ClientGame<'_> {
             Event::Joined {
                 registries,
                 datapacks,
+                custom_registries,
                 name,
                 uuid,
             } => {
+                if let Some(remote) = &mut self.client.remote {
+                    remote.custom_registries = custom_registries;
+                }
                 if let Err(error) = self.set_registries(registries) {
                     return self.refuse_remote_input(error);
                 }
@@ -428,6 +432,7 @@ impl crate::game::ClientGame<'_> {
                 // The new server announces its own features again.
                 if let Some(remote) = &mut self.client.remote {
                     remote.datapacks = Default::default();
+                    remote.custom_registries = Default::default();
                     remote.datapack_vanilla_values = None;
                     remote.has_logical_player = false;
                     remote.viewed.clear();
@@ -438,8 +443,12 @@ impl crate::game::ClientGame<'_> {
                 }
                 self.remove_local_player_body();
                 self.client.post_effects.clear();
+                // clearClientLevel drops the LocalPlayer: the next login's new one has
+                // sent no input and no sprint yet (`Input.EMPTY`, `wasSprinting` false).
                 if let Some(r) = self.client.remote.as_mut() {
                     r.camera = None;
+                    r.last_input = 0;
+                    r.was_sprinting = false;
                 }
                 self.clear_spectated_entity_post_effect();
                 self.set_screen(Screen::Playing);
@@ -459,7 +468,11 @@ impl crate::game::ClientGame<'_> {
             Event::Reconfigured {
                 registries,
                 datapacks,
+                custom_registries,
             } => {
+                if let Some(r) = self.client.remote.as_mut() {
+                    r.custom_registries = custom_registries;
+                }
                 if let Err(error) = self.set_registries(registries) {
                     return self.refuse_remote_input(error);
                 }
