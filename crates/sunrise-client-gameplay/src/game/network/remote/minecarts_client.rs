@@ -138,7 +138,7 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
     use sunrise_gameplay_common::game::Screen;
-    use sunrise_gameplay_common::game::minecarts::{CartKind, Minecart, Vec3, player_cart_seat};
+    use sunrise_gameplay_common::game::minecarts::{CartKind, Minecart, player_cart_seat};
     use sunrise_protocol::connection::Pipe;
     use sunrise_sim::motion::PlayerMotion;
 
