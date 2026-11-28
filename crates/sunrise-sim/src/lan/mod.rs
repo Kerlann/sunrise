@@ -928,7 +928,14 @@ impl Lan {
         config: NetConfig,
         dir: &std::path::Path,
     ) -> io::Result<Self> {
-        Self::start_listener_inner(sync, config, false, false, Some(dir))
+        Self::start_listener_inner(
+            sync,
+            config,
+            false,
+            false,
+            crate::data_map_net::LocalDataMaps::default(),
+            Some(dir),
+        )
     }
     fn start_listener(
         sync: Arc<data::SyncData>,
@@ -942,6 +949,7 @@ impl Lan {
             config,
             drive_game,
             prepare_spawn,
+            data_maps_known,
             #[cfg(all(test, feature = "net-trace"))]
             None,
         )
@@ -951,6 +959,7 @@ impl Lan {
         config: NetConfig,
         drive_game: bool,
         prepare_spawn: bool,
+        data_maps_known: crate::data_map_net::LocalDataMaps,
         #[cfg(all(test, feature = "net-trace"))] capture_dir: Option<&std::path::Path>,
     ) -> io::Result<Self> {
         let (tx, events) = event_channel();
