@@ -392,6 +392,9 @@ impl crate::game::ClientGame<'_> {
         key: KeyCode,
         text: Option<&str>,
     ) -> Result<bool> {
+        self.with_screen_input_overrides(|game| game.options_key_inner(key, text))
+    }
+    fn options_key_inner(&mut self, key: KeyCode, text: Option<&str>) -> Result<bool> {
         let size = self.gui_size();
         let shift = self.has_shift_down();
         let framebuffer = self.client.renderer.0.as_ref().map_or([1280, 720], |r| {

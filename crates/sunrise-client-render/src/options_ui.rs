@@ -4163,28 +4163,97 @@ impl OptionsUi {
             }
         }
 
-        // Gather focusables on the current page
+        // Gather focusables on the current page, respecting active engine input overrides.
         let layout = self.built_layout(s, self.size.0, self.size.1);
         let (widgets, top, bottom, content) = layout.parts();
         let has_search = (self.page() == Page::Language) || self.settings_search_active();
         let mut focusables: Vec<(FocusId, [f32; 4], bool)> = Vec::new();
+        let mut counts: std::collections::HashMap<(String, crate::widgets::WidgetBucket), u32> =
+            std::collections::HashMap::new();
+        let next_occ = |counts: &mut std::collections::HashMap<
+            (String, crate::widgets::WidgetBucket),
+            u32,
+        >,
+                        key_str: String,
+                        bucket: crate::widgets::WidgetBucket,
+                        visible: bool| {
+            if visible {
+                let entry = counts.entry((key_str, bucket)).or_insert(0);
+                let occ = *entry;
+                *entry += 1;
+                occ
+            } else {
+                0
+            }
+        };
         if has_search {
             let search = if self.page() == Page::Language {
                 &self.language_search
             } else {
                 &self.settings_search
             };
-            focusables.push((
-                FocusId::Search,
+            let msg = (!search.message.is_empty()).then(|| Text::literal(&search.message));
+            let key_str = msg
+                .as_ref()
+                .map(crate::widgets::stable_key_from_text)
+                .unwrap_or_default();
+            let occ = next_occ(
+                &mut counts,
+                key_str,
+                crate::widgets::WidgetBucket::Field,
+                true,
+            );
+            if let Some(rect) = crate::widgets::resolve_engine_input(
+                crate::widgets::WidgetBucket::Field,
+                msg.as_ref(),
+                None,
+                occ,
                 [search.x, search.y, search.width, search.height],
-                false,
-            ));
+                true,
+            ) {
+                focusables.push((FocusId::Search, rect, false));
+            }
         }
         for (i, wd) in widgets.iter().enumerate() {
+            let visible = !wd.list || (wd.y < bottom && wd.y + wd.h > top);
             match &wd.kind {
-                WKind::Button { active: true, .. }
-                | WKind::Slider { .. }
-                | WKind::LanguageRow { .. } => {
+                WKind::Button { label, active, .. } => {
+                    let occ = next_occ(
+                        &mut counts,
+                        crate::widgets::stable_key_from_text(label),
+                        crate::widgets::WidgetBucket::Button,
+                        visible,
+                    );
+                    if let Some(rect) = crate::widgets::resolve_engine_input(
+                        crate::widgets::WidgetBucket::Button,
+                        Some(label),
+                        None,
+                        occ,
+                        [wd.x, wd.y, wd.w, wd.h],
+                        *active,
+                    ) {
+                        focusables.push((focus_id(i, wd), rect, wd.list));
+                    }
+                }
+                WKind::Slider { label, .. } => {
+                    let occ = next_occ(
+                        &mut counts,
+                        crate::widgets::stable_key_from_text(label),
+                        crate::widgets::WidgetBucket::Slider,
+                        visible,
+                    );
+                    if let Some(rect) = crate::widgets::resolve_engine_input(
+                        crate::widgets::WidgetBucket::Slider,
+                        Some(label),
+                        None,
+                        occ,
+                        [wd.x, wd.y, wd.w, wd.h],
+                        true,
+                    ) {
+                        focusables.push((focus_id(i, wd), rect, wd.list));
+                    }
+                }
+                WKind::LanguageRow { .. } => {
                     focusables.push((focus_id(i, wd), [wd.x, wd.y, wd.w, wd.h], wd.list));
                 }
                 _ => {}
@@ -4320,6 +4389,11 @@ impl OptionsUi {
 
         // 4. Enter / Space selection keys
         if matches!(key, K::Enter | K::NumpadEnter | K::Space) {
+            if let Some(fid) = &self.focus
+                && !focusables.iter().any(|(id, ..)| id == fid)
+            {
+                return (false, Vec::new());
+            }
             match &self.focus {
                 Some(FocusId::Slider(_)) => {
                     self.can_change_value = !self.can_change_value;
@@ -8802,6 +8876,86 @@ mod tests {
             "mods discovery must collect widgets"
         );
         assert!(mods_ui.mods_screen.is_none());
+    }
+
+    #[test]
+    fn options_enter_and_space_respect_disabled_and_hidden_overrides() {
+        let atlas = atlas();
+        let mut s = Settings::default();
+
+        // 1. Disabled or hidden Done button must not activate on Enter or Space.
+        let mut ui = OptionsUi::default();
+        ui.open(false);
+        ui.size = (854.0, 480.0);
+        ui.focus = Some(FocusId::Act(Act::Done));
+        let done_key = crate::widgets::EngineWidgetKey {
+            key: crate::widgets::stable_key_from_text(&tr("gui.done")),
+            bucket: crate::widgets::WidgetBucket::Button,
+            occurrence: 0,
+        };
+        for ov in [
+            crate::widgets::EngineWidgetOverride {
+                active: Some(false),
+                ..Default::default()
+            },
+            crate::widgets::EngineWidgetOverride {
+                visible: Some(false),
+                ..Default::default()
+            },
+        ] {
+            let mut maps = crate::widgets::EngineOverrideMaps::default();
+            maps.overrides.insert(done_key.clone(), ov);
+            for key in [
+                winit::keyboard::KeyCode::Enter,
+                winit::keyboard::KeyCode::Space,
+            ] {
+                let (handled, events) = crate::widgets::with_input_overrides(&mut maps, || {
+                    ui.key_input(&mut s, &atlas, key, None, false)
+                });
+                assert!(!handled, "disabled/hidden Done must ignore {key:?}");
+                assert!(events.is_empty());
+            }
+        }
+
+        // 2. Disabled or hidden cycle button must not activate on Enter or Space.
+        let mut cycle_ui = OptionsUi::default();
+        cycle_ui.open_at(false, Page::Video);
+        cycle_ui.size = (854.0, 480.0);
+        let initial_vsync = s.vsync;
+        let vsync_label = option_widget(&s, Opt::Vsync, 0.0, 0.0, 150.0);
+        let WKind::Button { label, .. } = vsync_label.kind else {
+            panic!("Opt::Vsync must be a cycle button");
+        };
+        let vsync_key = crate::widgets::EngineWidgetKey {
+            key: crate::widgets::stable_key_from_text(&label),
+            bucket: crate::widgets::WidgetBucket::Button,
+            occurrence: 0,
+        };
+        cycle_ui.focus = Some(FocusId::Cycle(Opt::Vsync));
+        for ov in [
+            crate::widgets::EngineWidgetOverride {
+                active: Some(false),
+                ..Default::default()
+            },
+            crate::widgets::EngineWidgetOverride {
+                visible: Some(false),
+                ..Default::default()
+            },
+        ] {
+            let mut maps = crate::widgets::EngineOverrideMaps::default();
+            maps.overrides.insert(vsync_key.clone(), ov);
+            for key in [
+                winit::keyboard::KeyCode::Enter,
+                winit::keyboard::KeyCode::Space,
+            ] {
+                let (handled, events) = crate::widgets::with_input_overrides(&mut maps, || {
+                    cycle_ui.key_input(&mut s, &atlas, key, None, false)
+                });
+                assert!(!handled, "disabled/hidden cycle button must ignore {key:?}");
+                assert!(events.is_empty());
+                assert_eq!(s.vsync, initial_vsync);
+            }
+        }
     }
 }
 
