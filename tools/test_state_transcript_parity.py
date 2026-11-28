@@ -116,7 +116,7 @@ def vanilla_command(build, env):
          '-cp', dependencies, '-d', classes, oracle],
         build, 'compile-java', env=env, timeout=TIMEOUT,
     )
-    agent = seed_agent.java_option(build, java_major)
+    agent = seed_agent.java_option(build, java_major, env=env)
     return ['java', '-Xmx3G', '-Djava.awt.headless=true', '-Duser.timezone=UTC', agent,
             '-Dsunrise.parity.flat=true', f'-Dsunrise.parity.distance={scenes.DISTANCE}',
             '-cp', os.pathsep.join([str(classes), dependencies])]
@@ -139,29 +139,59 @@ def sunrise_binary(build, binary):
     return lab.binary(Path(metadata['target_directory']) / 'fast', 'sunrise-client').resolve(strict=True)
 
 
-def check_commands(path, ops):
-    commands = [op['cmd'] for op in ops if op['op'] == 'cmd']
+def expected_command_results(ops, engine):
+    for op in ops:
+        kind = op['op']
+        if kind == 'cmd':
+            command = op['cmd']
+            results = [[True, scenes.NIGHT]] if command == scenes.BASELINE_PROBE else None
+            yield command, results
+        elif kind == 'server_distances':
+            yield '#server_distances', [[True, scenes.DISTANCE]] * 2
+        elif kind == 'chunk_ready':
+            x, z = op['chunk']
+            result_count = 4 if engine == 'sunrise' else 3
+            yield f'#chunk_ready {x} {z}', [[True, 1]] * result_count
+
+
+def check_commands(path, ops, engine):
+    expected = expected_command_results(ops, engine)
     with path.open(encoding='utf-8') as source:
-        for number, (encoded, command) in enumerate(zip_longest(source, commands), 1):
-            if encoded is None or command is None:
+        for number, (encoded, expectation) in enumerate(zip_longest(source, expected), 1):
+            if encoded is None or expectation is None:
                 raise ValueError(f'{path}:{number}: command output count differs from the script')
+            command, expected_results = expectation
             row = json.loads(encoded)
             if row.get('cmd') != command:
                 raise ValueError(f'{path}:{number}: expected output for {command!r}')
-            if not any(result[0] is True for result in row.get('results', [])):
+            results = row.get('results', [])
+            if expected_results is not None and results != expected_results:
+                raise ValueError(f'{path}:{number}: {command}: expected {expected_results}, got {results}')
+            if not any(result[0] is True for result in results):
                 raise ValueError(f'{path}:{number}: command failed: {command}')
-
+            if command == '#server_distances':
+                print(f'{engine} verified view and simulation distance {scenes.DISTANCE}', flush=True)
 
 def check_transcript(path, engine, ops, script_hash, fixture_hash):
     run = transcript.read_transcript(path)
     for name, value in [('engine', engine), ('script_sha256', script_hash), ('fixture_sha256', fixture_hash)]:
         if run.header.fields[name] != value:
             raise transcript.InvalidTranscript(f'{path}:1: expected {name}={value}, got {run.header.fields[name]}')
+    for name in transcript.DISTANCES:
+        value = run.header.fields.get(name)
+        if value is not None and value != str(scenes.DISTANCE):
+            raise transcript.InvalidTranscript(f'{path}:1: expected {name}={scenes.DISTANCE}, got {value}')
     for point, expected in zip_longest(run.points, scenes.expected_points(ops)):
         actual = (*point.key, int(point.row.fields['op'])) if point else None
         if actual != expected:
             line = point.row.line if point else run.footer.line
             raise transcript.InvalidTranscript(f'{path}:{line}: expected point {expected}, got {actual}')
+    baseline = run.points[0]
+    if [member.fields['type'] for member in baseline.members] != ['minecraft:player']:
+        raise transcript.InvalidTranscript(
+            f'{path}:{baseline.level.line}: expected only the player before scene summons, '
+            f'found {[member.identity for member in baseline.members]}'
+        )
     return run
 
 
@@ -187,7 +217,7 @@ def run_engine(engine, command, build, attempt, script, ops, env, fixture, fixtu
         )
         run_process([command, '--resources', lab.RESOURCES, '--game-dir', work, '--world', 'harness',
                      '--seed', scenes.SEED, '--radius', scenes.DISTANCE], work, engine, game_env, game=True)
-    check_commands(commands, ops)
+    check_commands(commands, ops, engine)
     return check_transcript(output, engine, ops, lab.digest(script, 'sha256'), fixture_hash)
 
 

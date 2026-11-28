@@ -6,6 +6,8 @@ from tools.state_digest_scene import AREA, SYNC, Y, entity_cluster_commands, ite
 
 SEED = 12345
 DISTANCE = 4
+NIGHT = 13000
+BASELINE_PROBE = "/time query time"
 SCENES = ('base', 'riding')
 SPECIES = ('pig', 'cow', 'sheep', 'chicken', 'rabbit', 'zombie', 'skeleton', 'spider', 'wolf')
 TICKS = 200
@@ -20,7 +22,6 @@ def baseline():
     chunks = [[x, z] for z in range(z0 >> 4, (z1 >> 4) + 1) for x in range(x0 >> 4, (x1 >> 4) + 1)]
     return [
         cmd('difficulty peaceful'),
-        cmd('time set night'),
         cmd('gamerule spawn_mobs false'),
         cmd('gamerule spawn_wandering_traders false'),
         cmd('gamerule advance_weather false'),
@@ -32,7 +33,10 @@ def baseline():
         {'op': 'wait_chunks', 'chunks': chunks},
         {'op': 'settle', 'required_chunks': chunks},
         {'op': 'align_game_time', 'target': 1000},
+        {'op': 'server_distances'},
+        *({'op': 'chunk_ready', 'chunk': chunk, 'entity_ticking': True} for chunk in chunks),
         cmd('difficulty hard'),
+        cmd(f'time set {NIGHT}'),
         {'op': 'sync_randoms', 'uniquifier': SYNC[0], 'entity_id': SYNC[1], 'level_seed': SYNC[2],
          'rand_value': 19390496, 'player_seed': 24681357},
         {'op': 'state_transcript', 'on': True},
@@ -70,6 +74,7 @@ def scene_ops(name):
     if name not in SCENES:
         raise ValueError(f'unknown scene {name!r}')
     yield from baseline()
+    yield {'op': 'cmd', 'cmd': BASELINE_PROBE}
     commands = base_commands() if name == 'base' else riding_commands()
     yield from map(cmd, commands)
     for step in range(TICKS):

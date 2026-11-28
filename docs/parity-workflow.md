@@ -245,7 +245,8 @@ python3 tools/test_state_transcript_parity.py --scene riding --binary target/fas
 The harness is manual and `parity.py` leaves it out. An existing client binary needs the
 `sunrise-client/state-digest` feature. Use `--only vanilla` or `--only sunrise` to record one engine.
 `--repeat` checks that fresh runs of each selected engine produce byte-identical transcripts with the oracle
-cache disabled before comparing across engines.
+cache disabled before comparing across engines. The harness checks each engine's reported view and
+simulation distances, scene chunk readiness, and the clock and membership before the scene summons.
 
 Each run writes its script, fixture manifest, logs and transcripts to a fresh directory under
 `.local/state_transcript/<scene>/`. The cross-engine comparison writes `report.json` there.
@@ -260,10 +261,11 @@ and other levels are outside the comparison.
 earliest differing point first, then the first difference in each group. The report includes the entity,
 field, values from both files, and nearby lines for the earliest difference. Later differences can follow
 from that first one. Member state is paired by id and type up to the first divergence in the id sequence
-at each point. An unknown value is counted even when both engines report it. Repeat `--ignore-group GROUP`
+at each point. The report counts any points with unmatched member state as uncompared. An unknown value
+is counted even when both engines report it. Repeat `--ignore-group GROUP`
 to keep a group visible while omitting it from the result. Use `--json PATH` to save the report.
-The comparator exits with 0 when the included groups match and have no unknowns, 1 for a difference or
-unknown, and 2 for invalid input.
+The comparator exits with 0 when the included groups match and have full coverage, 1 for a difference,
+unknown value or uncompared state, and 2 for invalid input.
 
 ### Fuzzing scenarios
 

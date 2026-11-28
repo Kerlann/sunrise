@@ -10,6 +10,7 @@ import unittest
 
 from tools import state_transcript_compare as compare
 from tools import state_transcript_scenes as scenes
+from tools import test_state_transcript_parity as harness
 
 
 PIG = ('1', 'minecraft:pig')
@@ -88,7 +89,7 @@ class StateTranscriptCompareTests(unittest.TestCase):
         self.assertEqual(group['first']['field'], 'unmatched')
         self.assertEqual(group['first']['left'], [])
         self.assertEqual(group['first']['right'], [SHEEP])
-        self.assertEqual(report['groups']['kinematics']['status'], 'identical')
+        self.assertEqual(report['groups']['kinematics']['status'], 'not compared')
 
     def test_different_types_prevent_pairing_later_ids(self):
         left = transcript(point(0))
@@ -96,7 +97,54 @@ class StateTranscriptCompareTests(unittest.TestCase):
                                  changes={'2': {'health': '40a00000'}}))
         report = self.compare(left, right)
         self.assertEqual(report['groups']['ids']['first']['left'], [PIG, COW])
-        self.assertEqual(report['groups']['health']['status'], 'identical')
+        self.assertEqual(report['groups']['health']['status'], 'not compared')
+
+        code, _ = self.cli(left, right, '--ignore-group', 'ids', '--ignore-group', 'membership_order')
+        self.assertEqual(code, 1)
+
+    def test_empty_members_do_not_pass_as_compared(self):
+        empty = transcript(point(0, members=()))
+        full = transcript(point(0))
+        for right in (empty, full):
+            with self.subTest(right_empty=right == empty):
+                report = self.compare(empty, right)
+                for name in compare.MEMBER_GROUPS:
+                    self.assertEqual(report['groups'][name]['status'], 'not compared')
+                    self.assertEqual(report['groups'][name]['uncompared_points'], 1)
+                code, _ = self.cli(empty, right, '--ignore-group', 'ids', '--ignore-group', 'membership_order')
+                self.assertEqual(code, 1)
+
+    def test_repeated_turn_id_is_compared_in_sequence(self):
+        left = transcript(point(1, turns=(PIG, PIG))).replace(
+            'n=0\tid=1\ttype=minecraft:pig\trole=root\tvehicle=-',
+            'n=0\tid=1\ttype=minecraft:pig\trole=passenger\tvehicle=2',
+        )
+        report = self.compare(left, transcript(point(1, turns=(PIG, PIG))))
+        self.assertEqual(report['earliest']['field'], 'role')
+        self.assertEqual(report['earliest']['left'], 'passenger')
+
+    def test_repeated_departure_id_is_compared_in_sequence(self):
+        left = transcript(point(1, departures=[(PIG, 'unloaded'), (PIG, 'killed')]))
+        right = transcript(point(1, departures=[(PIG, 'unloaded')]))
+        report = self.compare(left, right)
+        self.assertEqual(report['earliest']['field'], 'departure[1]')
+
+    def test_bare_unknown_member_field(self):
+        data = transcript(point(0, changes={'1': {'uuid': '?'}}))
+        report = self.compare(data, data)
+        self.assertEqual(report['groups']['uuid']['unknown_values'], 2)
+        self.assertEqual(self.cli(data, data)[0], 1)
+
+    def test_footer_requires_terminating_lf(self):
+        data = transcript(point(0))
+        code, output = self.cli(data, data.rstrip('\n'))
+        self.assertEqual(code, 2)
+        self.assertIn(f'{self.right}:6: missing terminating LF', output)
+
+    def test_zero_point_transcript_is_invalid(self):
+        code, output = self.cli(transcript(), transcript())
+        self.assertEqual(code, 2)
+        self.assertIn(f'{self.left}:2: transcript contains no points', output)
 
     def test_membership_order_independent_of_ids_turns_and_state(self):
         left = transcript(point(1, turns=(PIG, COW)))
@@ -163,6 +211,15 @@ class StateTranscriptCompareTests(unittest.TestCase):
         self.assertEqual(report['groups']['departures']['unknown_values'], 2)
         self.assertEqual(report['earliest']['field'], 'reason')
 
+    def test_validates_both_optional_distance_fields(self):
+        suffix = '\tview_distance=4\tsimulation_distance=4'
+        data = transcript(point(0)).replace(HEADER, HEADER + suffix)
+        self.assertEqual(self.cli(data, data)[0], 0)
+        for malformed in ('\tview_distance=4', suffix.replace('distance=4', 'distance=?'),
+                          suffix.replace('simulation_distance=4', 'simulation_distance=12')):
+            with self.subTest(malformed=malformed):
+                self.assertEqual(self.cli(data, data.replace(suffix, malformed))[0], 2)
+
     def test_header_mismatch_rejected(self):
         data = transcript(point(0))
         for field, original, replacement in [
@@ -218,32 +275,38 @@ class StateTranscriptCompareTests(unittest.TestCase):
 class StateTranscriptSceneTests(unittest.TestCase):
     def test_baseline_and_vocabulary(self):
         command_prefix = [
-            '/difficulty peaceful', '/time set night', '/gamerule spawn_mobs false',
-            '/gamerule spawn_wandering_traders false', '/gamerule advance_weather false',
-            '/gamerule random_tick_speed 0', '/tp @s', '/gamemode creative',
+            '/difficulty peaceful', '/gamerule spawn_mobs false', '/gamerule spawn_wandering_traders false',
+            '/gamerule advance_weather false', '/gamerule random_tick_speed 0', '/tp @s', '/gamemode creative',
         ]
         for name in scenes.SCENES:
             with self.subTest(scene=name):
                 script = scenes.scene_script(name)
                 self.assertTrue(script.endswith('\n'))
                 ops = [json.loads(line) for line in script.splitlines()]
-                allowed = {'cmd', 'settle', 'wait_chunks', 'align_game_time', 'sync_randoms', 'state_transcript', 'tick'}
+                allowed = {'cmd', 'settle', 'wait_chunks', 'align_game_time', 'sync_randoms', 'state_transcript',
+                           'tick', 'server_distances', 'chunk_ready'}
                 self.assertLessEqual({op['op'] for op in ops}, allowed)
-                self.assertEqual(
-                    [op['op'] for op in ops[:16]],
-                    ['cmd'] * 8 + ['settle', 'cmd', 'wait_chunks', 'settle', 'align_game_time',
-                                   'cmd', 'sync_randoms', 'state_transcript'],
-                )
+                baseline_end = next(i for i, op in enumerate(ops) if op['op'] == 'state_transcript')
+                baseline = ops[:baseline_end + 1]
+                self.assertEqual([op['op'] for op in baseline[:13]],
+                                 ['cmd'] * 7 + ['settle', 'cmd', 'wait_chunks', 'settle', 'align_game_time',
+                                                'server_distances'])
                 for op, prefix in zip(ops, command_prefix):
                     self.assertTrue(op['cmd'].startswith(prefix))
-                self.assertTrue(ops[9]['cmd'].startswith('/forceload add '))
-                self.assertEqual(ops[10]['chunks'], ops[11]['required_chunks'])
-                self.assertEqual(ops[13]['cmd'], '/difficulty hard')
-                self.assertEqual(set(ops[14]), {'op', 'uniquifier', 'entity_id', 'level_seed',
-                                                'rand_value', 'player_seed'})
-                self.assertIs(ops[15]['on'], True)
+                self.assertTrue(ops[8]['cmd'].startswith('/forceload add '))
+                chunks = ops[9]['chunks']
+                self.assertEqual(chunks, ops[10]['required_chunks'])
+                self.assertEqual(baseline[13:-4], [
+                    {'op': 'chunk_ready', 'chunk': chunk, 'entity_ticking': True} for chunk in chunks
+                ])
+                self.assertEqual(baseline[-4]['cmd'], '/difficulty hard')
+                self.assertEqual(baseline[-3]['cmd'], f'/time set {scenes.NIGHT}')
+                self.assertEqual(set(baseline[-2]), {'op', 'uniquifier', 'entity_id', 'level_seed',
+                                                   'rand_value', 'player_seed'})
+                self.assertIs(baseline[-1]['on'], True)
+                self.assertEqual(ops[baseline_end + 1]['cmd'], scenes.BASELINE_PROBE)
                 self.assertEqual([op['n'] for op in ops if op['op'] == 'tick'], [1] * 200)
-                self.assertLessEqual({op['op'] for op in ops[16:]}, {'cmd', 'tick'})
+                self.assertLessEqual({op['op'] for op in ops[baseline_end + 1:]}, {'cmd', 'tick'})
 
     def test_base_summons_every_species(self):
         ops = list(scenes.scene_ops('base'))
@@ -253,6 +316,39 @@ class StateTranscriptSceneTests(unittest.TestCase):
         self.assertNotIn('minecraft:villager', kinds)
         self.assertIn('minecraft:tnt', kinds)
         self.assertIn('minecraft:item', kinds)
+
+
+class StateTranscriptHarnessTests(unittest.TestCase):
+    def check(self, op, command, results):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'commands.jsonl'
+            output.write_text(json.dumps({'cmd': command, 'results': results}) + '\n', encoding='utf-8')
+            harness.check_commands(output, [op], 'sunrise')
+
+    def test_rejects_a_different_simulation_distance(self):
+        with self.assertRaisesRegex(ValueError, '#server_distances'):
+            self.check({'op': 'server_distances'}, '#server_distances', [[True, 4], [True, 12]])
+
+    def test_rejects_startup_entities_before_scene_summons(self):
+        ops = [{'op': 'state_transcript', 'on': True}, {'op': 'cmd', 'cmd': scenes.BASELINE_PROBE}]
+        player = ('1', 'minecraft:player')
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'transcript.txt'
+            for members in ((player,), (player, COW)):
+                data = transcript(point(0, members=members)).replace('\top=1', '\top=2')
+                output.write_text(data, encoding='utf-8')
+                if members == (player,):
+                    harness.check_transcript(output, 'sunrise', ops, 'a' * 64, 'b' * 64)
+                else:
+                    with self.assertRaisesRegex(compare.InvalidTranscript, 'expected only the player'):
+                        harness.check_transcript(output, 'sunrise', ops, 'a' * 64, 'b' * 64)
+
+    def test_requires_entity_ticking_in_readiness_report(self):
+        op = {'op': 'chunk_ready', 'chunk': [0, 1], 'entity_ticking': True}
+        for results in ([[True, 1]] * 3, [[True, 1]] * 3 + [[True, 0]]):
+            with self.subTest(results=results), self.assertRaisesRegex(ValueError, '#chunk_ready 0 1'):
+                self.check(op, '#chunk_ready 0 1', results)
+        self.check(op, '#chunk_ready 0 1', [[True, 1]] * 4)
 
 
 if __name__ == '__main__':

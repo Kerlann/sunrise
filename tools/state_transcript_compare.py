@@ -20,9 +20,10 @@ F32 = r'[0-9a-f]{8}'
 F64 = r'[0-9a-f]{16}'
 RANDOM = rf'[0-9a-f]{{12}},(?:{F64}|-)'
 UUID = r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}'
-UNKNOWN = r'\?[a-zA-Z0-9_.$:/+-]+'
+UNKNOWN = r'\?[a-zA-Z0-9_.$:/+-]*'
 HEADER = dict(format=FORMAT, version='1', engine='vanilla|sunrise', script_sha256=SHA256,
               fixture_sha256=SHA256, build=r'[\x21-\x7e]+', game_version=r'26\.3')
+DISTANCES = dict(view_distance=r'[1-9][0-9]?', simulation_distance=r'[1-9][0-9]?')
 POINT = dict(step=UINT, phase='after_op|after_tick', ord=UINT, op=r'[1-9][0-9]{0,19}',
              game_time=INT, dim='minecraft:overworld')
 LEVEL = dict(level_random=RANDOM, rand_value=INT, last_entity_id=INT)
@@ -97,8 +98,9 @@ class Reader:
             raw_lines = path.read_bytes().split(b'\n')
         except OSError as error:
             raise InvalidTranscript(f'{path}:1: {error.strerror}') from error
-        if raw_lines[-1] == b'':
-            raw_lines.pop()
+        if raw_lines[-1] != b'':
+            self.fail('missing terminating LF', len(raw_lines))
+        raw_lines.pop()
         self.lines = []
         for number, raw in enumerate(raw_lines, 1):
             try:
@@ -141,10 +143,11 @@ class Reader:
             row = self.read(kind, {index: UINT, **IDENTITY, **schema}, unknown)
             if row.fields[index] != str(len(rows)):
                 self.fail(f'{kind}.{index} must be {len(rows)}', row.line)
-            entity_id = row.fields['id']
-            if entity_id in seen:
-                self.fail(f'duplicate {kind} id {entity_id}', row.line)
-            seen.add(entity_id)
+            if kind == 'M':
+                entity_id = row.fields['id']
+                if entity_id in seen:
+                    self.fail(f'duplicate M id {entity_id}', row.line)
+                seen.add(entity_id)
             rows.append(row)
         return rows
 
@@ -173,7 +176,10 @@ class Reader:
         return point
 
     def parse(self):
-        header = self.read('H', HEADER)
+        schema = HEADER
+        if self.next_kind() == 'H' and self.lines[self.index].count('\t') == len(HEADER) + len(DISTANCES):
+            schema = {**HEADER, **DISTANCES}
+        header = self.read('H', schema)
         points = []
         while self.next_kind() == 'P':
             points.append(self.point(points[-1] if points else None))
@@ -182,6 +188,8 @@ class Reader:
         for name, actual in [('points', len(points)), ('rows', rows)]:
             if footer.fields[name] != str(actual):
                 self.fail(f'Z.{name} declares {footer.fields[name]}, found {actual}', footer.line)
+        if not points:
+            self.fail('transcript contains no points', footer.line)
         if self.index != len(self.lines):
             self.fail('unexpected record after Z')
         return Transcript(self.path, self.lines, header, points, footer)
@@ -281,18 +289,20 @@ def point_differences(left, right):
             (difference for a, b in matched for difference in field_differences(a, b, fields, a.identity)),
             None,
         )
-    return differences
+    return differences, len(matched)
 
 
 def compare(left, right, ignored=()):
-    for name in ('script_sha256', 'fixture_sha256'):
-        a, b = left.header.fields[name], right.header.fields[name]
-        if a != b:
+    for name in ('script_sha256', 'fixture_sha256', *DISTANCES):
+        a, b = left.header.fields.get(name), right.header.fields.get(name)
+        if a is not None and b is not None and a != b:
             raise InvalidTranscript(f'{right.path}:1: {name} {b} does not match {left.path}:1 ({a})')
 
-    groups = {name: {'ignored': name in ignored, 'differing_points': 0, 'unknown_values': 0, 'first': None}
+    groups = {name: {'ignored': name in ignored, 'differing_points': 0, 'unknown_values': 0,
+                     'uncompared_points': 0, 'first': None, 'first_uncompared': None}
               for name in GROUPS}
     earliest = None
+    has_members = False
     for a, b in zip_longest(left.points, right.points):
         a_line = a.row.line if a else left.footer.line
         b_line = b.row.line if b else right.footer.line
@@ -301,7 +311,9 @@ def compare(left, right, ignored=()):
         if a_key != b_key:
             raise InvalidTranscript(f'{right.path}:{b_line}: point {b_key} differs from '
                                     f'{left.path}:{a_line} ({a_key}) for the same script')
-        differences = point_differences(a, b)
+        differences, matched = point_differences(a, b)
+        has_members |= bool(a.members or b.members)
+        unmatched = differences['ids']
         for name, group in groups.items():
             unknown_left = unknown_at_point(name, a)
             unknown_right = unknown_at_point(name, b)
@@ -317,15 +329,37 @@ def compare(left, right, ignored=()):
                 group['differing_points'] += 1
                 if group['first'] is None:
                     group['first'] = difference.report(a.key)
-                if earliest is None and not group['ignored']:
-                    earliest = {
-                        'group': name, **difference.report(a.key),
-                        'left_context': left.context(difference.left_line),
-                        'right_context': right.context(difference.right_line),
-                        'note': 'Later differences may be consequences of this one.',
-                    }
-    for group in groups.values():
-        group['status'] = ('ignored' if group['ignored'] else 'different' if group['first'] else 'identical')
+            if unmatched and name in MEMBER_GROUPS:
+                group['uncompared_points'] += 1
+                if group['first_uncompared'] is None:
+                    group['first_uncompared'] = Difference(
+                        'uncompared_members', len(a.members) - matched, len(b.members) - matched,
+                        unmatched.left_line, unmatched.right_line, unmatched.entity,
+                    ).report(a.key)
+    if not has_members:
+        a, b = left.points[0], right.points[0]
+        for name in MEMBER_GROUPS:
+            groups[name]['uncompared_points'] = len(left.points)
+            groups[name]['first_uncompared'] = Difference(
+                'uncompared_members', 0, 0, a.level.line, b.level.line,
+            ).report(a.key)
+    for name, group in groups.items():
+        if group['ignored']:
+            group['status'] = 'ignored'
+            continue
+        group['status'] = ('different' if group['first'] else
+                           'not compared' if group['first_uncompared'] else 'identical')
+        for first in (group['first'], group['first_uncompared']):
+            if first is None:
+                continue
+            key = first['step'], first['ord']
+            if earliest is None or key < (earliest['step'], earliest['ord']):
+                earliest = {
+                    'group': name, **first,
+                    'left_context': left.context(first['left_line']),
+                    'right_context': right.context(first['right_line']),
+                    'note': 'Later differences may be consequences of this one.',
+                }
     return {'left': str(left.path), 'right': str(right.path), 'groups': groups, 'earliest': earliest}
 
 
@@ -340,12 +374,15 @@ def print_report(report):
     print(f'{report["left"]} versus {report["right"]}')
     for name, group in report['groups'].items():
         print(f'{name}: {group["status"]} ({group["differing_points"]} differing points, '
-              f'{group["unknown_values"]} unknown values)')
+              f'{group["unknown_values"]} unknown values, {group["uncompared_points"]} uncompared points)')
         if group['first']:
             print(f'  {describe(group["first"])}')
+        if group['first_uncompared']:
+            print(f'  Not compared at {describe(group["first_uncompared"])}')
     first = report['earliest']
     if first:
-        print(f'\nEarliest difference ({first["group"]}): {describe(first)}')
+        label = 'Earliest unverified point' if first['field'] == 'uncompared_members' else 'Earliest difference'
+        print(f'\n{label} ({first["group"]}): {describe(first)}')
         for side in ('left', 'right'):
             print(f'  {report[side]}:')
             for line in first[f'{side}_context']:
