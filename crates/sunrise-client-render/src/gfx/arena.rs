@@ -2088,6 +2088,9 @@ mod tests {
             .features()
             .contains(wgpu::Features::MAPPABLE_PRIMARY_BUFFERS)
         {
+            crate::gfx::test_gpu::skip_or_fail(
+                "full_video_memory_spills_to_system_memory: adapter lacks MAPPABLE_PRIMARY_BUFFERS",
+            );
             return;
         }
         let mut arena = Arena::indices(&device, GRAIN, false);

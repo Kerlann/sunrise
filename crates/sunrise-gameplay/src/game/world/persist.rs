@@ -2286,7 +2286,13 @@ impl crate::game::ServerGame<'_> {
         loop {
             let mut queued = false;
             for key in self.occupied_entity_chunks() {
-                if keys.contains(&key) || failed.contains(&key) {
+                // Skip columns already known-pending from an earlier failed read:
+                // keep them out of `keys` (never write) and out of `failed` (only
+                // fresh admission failures make `entity_save_complete` error).
+                if keys.contains(&key)
+                    || failed.contains(&key)
+                    || self.server.save.0.is_entity_read_failed(key.0, key.1)
+                {
                     continue;
                 }
                 let Ok(tags) = self.server.save.0.load_entities(key.0, key.1) else {
@@ -2562,6 +2568,9 @@ impl crate::game::ServerGame<'_> {
         keys: &HashSet<ChunkKey>,
     ) -> (Vec<(ChunkKey, Vec<Tag>)>, HashSet<ChunkKey>) {
         self.spawn_loaded_entities();
+        if keys.is_empty() {
+            return (Vec::new(), HashSet::new());
+        }
         if self
             .common
             .dragon
@@ -2572,7 +2581,13 @@ impl crate::game::ServerGame<'_> {
         }
         self.snapshot_entity_chunks(keys, EntitySnapshot::Save)
     }
+    /// Remove the entities and kept unknown records for `keys` (the chunks
+    /// actually queued by `SaveDir::save_entities_later` / `save_eviction`,
+    /// minus any refused or kept columns).
     pub fn remove_unloading_entities(&mut self, keys: &HashSet<ChunkKey>) {
+        if keys.is_empty() {
+            return;
+        }
         for key in keys {
             self.common.persist.unknown.remove(key);
         }

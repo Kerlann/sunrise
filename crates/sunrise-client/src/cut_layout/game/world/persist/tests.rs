@@ -42,7 +42,9 @@ mod refused_entity_unload {
         sync_codec: None,
     };
 
-    fn request(root: &std::path::Path) -> sunrise_gameplay::game::world_loading::WorldRequest {
+    pub(super) fn request(
+        root: &std::path::Path,
+    ) -> sunrise_gameplay::game::world_loading::WorldRequest {
         let rules = Arc::new(sunrise_game_data::gamerules::RuleRegistry::vanilla());
         let options = sunrise_sim::world_options::WorldOptions {
             world_type: sunrise_sim::save::WorldPreset::Flat,
@@ -62,7 +64,7 @@ mod refused_entity_unload {
         request
     }
 
-    fn pump_until(
+    pub(super) fn pump_until(
         game: &mut sunrise_gameplay::game::ServerGame<'_>,
         done: impl Fn(&sunrise_gameplay::game::ServerGame<'_>) -> bool,
     ) {
@@ -175,6 +177,119 @@ use sunrise_sim::save::ChunkExtras;
 use sunrise_sim::save::text;
 
 include!("position_load_tests.rs");
+
+#[test]
+#[ignore = "daily"]
+fn terrain_unload_keeps_entities_in_a_pending_entity_chunk() {
+    use sunrise_gameplay::game::native_entity_refs::tests::{fixture_root, with_game_at};
+    use sunrise_sim::save::{LevelShape, SaveDir};
+
+    // Chunks outside spawn in separate regions (r.1.0.mca and r.3.0.mca), far
+    // enough apart that forceloading one does not load the other.
+    let a = (63, 0);
+    let b = (96, 0);
+    let at_a = [1012.0, 64.0, 4.0];
+    let at_b: [f64; 3] = [1540.0, 64.0, 4.0];
+    let scratch = tempfile::tempdir().unwrap();
+    let save_root = scratch.path().join("save");
+    let stored = Tag::compound([
+        ("id", Tag::String("minecraft:text_display".into())),
+        ("UUID", Tag::IntArray(vec![0, 0, 0, 1])),
+        (
+            "Pos",
+            Tag::List(at_b.into_iter().map(|v| Tag::Double(v.to_bits())).collect()),
+        ),
+    ]);
+    let mut dim_root = None;
+
+    mod_platform::testing::with_mods(Default::default(), || {
+        with_game_at(fixture_root(), |game| {
+            game.load_world(refused_entity_unload::request(&save_root))
+                .unwrap();
+            game.set_allow_commands(true);
+            let root = game.server.save.0.root.clone();
+            dim_root = Some(root.clone());
+
+            // Seed B's entity region on disk and corrupt its record before the
+            // server ever touches B.
+            SaveDir::new(root.clone(), LevelShape::OVERWORLD, None)
+                .save_entities(vec![(b, vec![stored.clone()])])
+                .unwrap();
+            let region = root.join("entities/r.3.0.mca");
+            let saved = std::fs::read(&region).unwrap();
+            let mut broken = saved.clone();
+            let sector = u32::from_be_bytes(saved[..4].try_into().unwrap()) >> 8;
+            let compression = sector as usize * 4096 + 4;
+            // Make B fail decompression regardless of the configured save compression.
+            broken[compression..][..2]
+                .copy_from_slice(&[sunrise_world::compression::Compression::Zlib as u8, 0]);
+            std::fs::write(&region, &broken).unwrap();
+
+            // Load A, summon a live display there, and save it to A's region.
+            assert!(game.run_command("forceload add 1012 4"));
+            refused_entity_unload::pump_until(game, |game| game.world.chunks.contains_key(&a));
+            game.tick_world(true).unwrap();
+            let target = game
+                .summon_with_nbt("minecraft:text_display", at_a, "{UUID:[I;0,0,0,2]}")
+                .unwrap()
+                .unwrap();
+            let display = game
+                .entity(game.resident_target_id(target).unwrap())
+                .unwrap();
+            game.save_entities(true).unwrap();
+            assert_eq!(game.server.save.0.load_entities(a.0, a.1).unwrap().len(), 1);
+
+            // Load B through streaming so its corrupt entity record fails to
+            // read and latches B pending, then move the live display into B.
+            assert!(game.run_command("forceload add 1540 4"));
+            refused_entity_unload::pump_until(game, |game| game.world.chunks.contains_key(&b));
+            assert!(game.server.save.0.is_entity_read_failed(b.0, b.1));
+            assert!(display.teleport_to(game, at_b, None));
+
+            // Unload both A and B through `server_update_world`: both terrain
+            // columns unload, A's old record clears, B's bytes stay untouched,
+            // and the live display remains in B.
+            assert!(game.run_command("forceload remove 1012 4"));
+            assert!(game.run_command("forceload remove 1540 4"));
+            refused_entity_unload::pump_until(game, |game| {
+                !game.world.chunks.contains_key(&a) && !game.world.chunks.contains_key(&b)
+            });
+            game.server.save.0.flush().unwrap();
+            assert_eq!(display.position(game), Some(at_b));
+            assert!(
+                game.server
+                    .save
+                    .0
+                    .load_entities(a.0, a.1)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(std::fs::read(&region).unwrap(), broken);
+
+            // An autosave while the display is still in the unloaded pending
+            // column must succeed without reopening or overwriting B's record.
+            game.save_all_levels(false).unwrap();
+            game.server.save.0.flush().unwrap();
+            assert_eq!(display.position(game), Some(at_b));
+            assert!(!game.world.chunks.contains_key(&b));
+            assert!(!game.persist.hidden_entity_sections.contains(&b));
+            assert_eq!(std::fs::read(&region).unwrap(), broken);
+
+            // Keep the unread record intact. The live display can be saved
+            // once it moves back out of the failed entity chunk.
+            std::fs::write(&region, &saved).unwrap();
+            assert!(game.run_command("forceload add 1012 4"));
+            refused_entity_unload::pump_until(game, |game| game.world.chunks.contains_key(&a));
+            assert!(display.teleport_to(game, at_a, None));
+            game.save_entities(true).unwrap();
+        });
+    });
+    let reopened = SaveDir::new(dim_root.unwrap(), LevelShape::OVERWORLD, None);
+    let live = reopened.load_entities(a.0, a.1).unwrap();
+    assert_eq!(live.len(), 1);
+    assert_eq!(entity_nbt::uuid(&live[0]), Some([0, 0, 0, 2]));
+    assert_eq!(reopened.load_entities(b.0, b.1).unwrap(), vec![stored]);
+}
 
 mod transient_entities {
     use super::*;

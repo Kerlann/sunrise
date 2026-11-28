@@ -164,7 +164,7 @@ class DataLegTimingTests(unittest.TestCase):
                     contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
                 self.assertEqual(ignored_tests.main(["sunrise-client#1of2"], report_path), 0)
             report = json.loads(report_path.read_text())
-        self.assertEqual(set(report), {"shards", "problems", "passed", "incomplete"})
+        self.assertEqual(set(report), {"shards", "problems", "passed", "incomplete", "skipped"})
         self.assertEqual(report["problems"], [])
         self.assertEqual(report["incomplete"], [])
         self.assertEqual(len(report["passed"]), 4)
