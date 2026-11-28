@@ -138,8 +138,12 @@ pub fn registry_tag_bindings(
         // Dialog registry admission also tracks missing writable holders.
         return Ok(bind_dialog_tags(&resources.join("data/minecraft"), overlay, contains).0);
     }
-    let kind = registry.split_once(':').map_or(registry, |(_, path)| path);
-    sunrise_world::tag_layers::load(resources, kind, overlay, contains)
+    let kind: std::borrow::Cow<'_, str> = match registry.split_once(':') {
+        Some(("minecraft", path)) => std::borrow::Cow::Borrowed(path),
+        Some((namespace, path)) => std::borrow::Cow::Owned(format!("{namespace}/{path}")),
+        None => std::borrow::Cow::Borrowed(registry),
+    };
+    sunrise_world::tag_layers::load(resources, &kind, overlay, contains)
         .map(|tags| tags.into_iter().collect())
         .map_err(|error| error.to_string())
 }

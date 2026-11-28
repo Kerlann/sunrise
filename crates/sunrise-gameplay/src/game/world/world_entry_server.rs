@@ -563,6 +563,13 @@ impl crate::game::ServerGame<'_> {
                         .map(|(tag, members)| (tag, members.into_iter().collect()))
                         .collect(),
                 );
+            } else if !registry.starts_with("minecraft:") {
+                pack_tags.insert(
+                    registry.to_owned(),
+                    tags.into_iter()
+                        .map(|(tag, members)| (tag, members.into_iter().collect()))
+                        .collect(),
+                );
             }
             Ok(())
         };
@@ -576,6 +583,11 @@ impl crate::game::ServerGame<'_> {
                     .get_key_value(&format!("minecraft:{directory}"))
                     .map(|(key, _)| key.as_str())
             }))
+            .chain(
+                mod_api::__private::custom_registry_directories()
+                    .iter()
+                    .map(|dir| dir.id()),
+            )
             .filter(|&key| {
                 !matches!(key, BIOME_REGISTRY | "minecraft:damage_type")
                     && !REGISTRY_KINDS.iter().any(|table| table.key == key)
@@ -766,34 +778,6 @@ impl crate::game::ServerGame<'_> {
                 .collect(),
         );
         pack_tags.insert("damage_type".to_owned(), damage_tags);
-        // Bind tags for mod-declared static custom registries into the same `pack_tags` store,
-        // keyed by canonical registry ID (`chemlib:gas`) and preserving tag order.
-        for dir in mod_api::__private::custom_registry_directories() {
-            match sunrise_world::tag_layers::load(root, dir.tag_directory(), &tag_files, |id| {
-                dir.contains_id(id)
-            }) {
-                Ok(tags) => {
-                    view.tags.insert(
-                        dir.id().to_owned(),
-                        tags.iter()
-                            .map(|(tag, members)| (tag.clone(), !members.is_empty()))
-                            .collect(),
-                    );
-                    pack_tags.insert(
-                        dir.id().to_owned(),
-                        tags.into_iter()
-                            .map(|(tag, members)| (tag, members.into_iter().collect()))
-                            .collect(),
-                    );
-                }
-                Err(e) => {
-                    log::warn!(
-                        "Sunrise: the world's {} tags are not applied: {e}",
-                        dir.id()
-                    );
-                }
-            }
-        }
         if !view.tags.contains_key("minecraft:villager_trade")
             && let Ok(tags) = sunrise_items::items::load_tags(root, "villager_trade", &tag_files)
         {
