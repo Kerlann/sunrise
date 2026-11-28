@@ -241,12 +241,6 @@ impl Menu {
         })
     }
 
-    /// `AbstractContainerMenu.stillValid` of this menu for the guest: its
-    /// slots' own answer (`Slots::still_valid`), which the parts on its mod
-    /// menu type may change (`menu_still_valid`). A mod menu with no backing
-    /// block passes `None` even if its opener supplied a screen position.
-    /// Vanilla menu types, vehicles and menus without an answering part are
-    /// not asked. A menu whose backing block entities are gone closes without asking.
     /// `PlayerEnderChestContainer.stillValid`: a menu on an ender-chest block
     /// needs the same block entity still at `pos`; a blockless one stays valid.
     pub fn active_chest_valid(&self, world: &World) -> bool {
@@ -258,6 +252,12 @@ impl Menu {
         }
     }
 
+    /// `AbstractContainerMenu.stillValid` of this menu for the guest: its
+    /// slots' own answer (`Slots::still_valid`), which the parts on its mod
+    /// menu type may change (`menu_still_valid`). A mod menu with no backing
+    /// block passes `None` even if its opener supplied a screen position.
+    /// Vanilla menu types, vehicles and menus without an answering part are
+    /// not asked. A menu whose backing block entities are gone closes without asking.
     pub fn still_valid(&self, context: &LoopContext, world: &World, guest: &Guest) -> bool {
         if !self.active_chest_valid(world) {
             return false;
