@@ -159,23 +159,10 @@ fn a_spectator_sees_the_invisible_body() {
 fn an_invisible_illusioner_draws_four_mirrors_for_an_ordinary_player() {
     const CHILD: &str = "SUNRISE_ILLUSIONER_MIRRORS_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        let name = "cut_layout::game::creatures::spectator_view_tests::an_invisible_illusioner_draws_four_mirrors_for_an_ordinary_player";
-        let out = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([name, "--exact", "--include-ignored", "--test-threads=1"])
-            .env(CHILD, "1")
-            .output()
-            .unwrap();
-        let report = format!(
-            "{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        assert!(
-            out.status.success()
-                && report
-                    .lines()
-                    .any(|line| line.starts_with("test result: ok. 1 passed;")),
-            "{name} failed in its own process:\n{report}"
+        crate::fresh_process::run_in_fresh_process(
+            "cut_layout::game::creatures::spectator_view_tests::an_invisible_illusioner_draws_four_mirrors_for_an_ordinary_player",
+            CHILD,
+            "1",
         );
         return;
     }

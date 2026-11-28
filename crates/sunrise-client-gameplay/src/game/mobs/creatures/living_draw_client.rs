@@ -633,18 +633,17 @@ mod tests {
             let hi = bounds.max_position();
             let (_, height, _) = mob.awake_dims();
             let base_vertical = height * 3.0 + 0.5;
-            assert!(
-                ((mob.position.y - lo.y) - (base_vertical + illusioner::VERTICAL_WOBBLE)).abs()
-                    < 1e-12,
+            assert_eq!(
+                lo.y,
+                mob.position.y - (base_vertical + illusioner::VERTICAL_WOBBLE),
                 "scale={scale}: downward bound must only add vertical wobble, not upward scatter"
             );
-            assert!(
-                ((hi.y - mob.position.y)
-                    - (base_vertical
+            assert_eq!(
+                hi.y,
+                mob.position.y
+                    + (base_vertical
                         + illusioner::MAX_VERTICAL_SCATTER
-                        + illusioner::VERTICAL_WOBBLE))
-                    .abs()
-                    < 1e-12,
+                        + illusioner::VERTICAL_WOBBLE),
                 "scale={scale}: upward bound must match exact vertical scatter + wobble"
             );
             let mut max_dx = 0.0_f64;
@@ -658,12 +657,12 @@ mod tests {
                 max_dx = max_dx.max((world[0] - mob.position.x).abs());
                 max_dy = max_dy.max(world[1] - mob.position.y);
                 assert!(
-                    world[0] >= lo.x - 1e-4
-                        && world[0] <= hi.x + 1e-4
-                        && world[1] >= lo.y - 1e-4
-                        && world[1] <= hi.y + 1e-4
-                        && world[2] >= lo.z - 1e-4
-                        && world[2] <= hi.z + 1e-4,
+                    world[0] >= lo.x
+                        && world[0] <= hi.x
+                        && world[1] >= lo.y
+                        && world[1] <= hi.y
+                        && world[2] >= lo.z
+                        && world[2] <= hi.z,
                     "scale={scale}: mirror vertex {world:?} outside precheck bounds {lo:?}..{hi:?}"
                 );
             }
