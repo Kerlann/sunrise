@@ -528,14 +528,9 @@ mod tests {
 
         struct Gas;
         const GASES: RegistryKey<Gas> = RegistryKey::new("chemlib:gas");
+        const OTHER_GASES: RegistryKey<Gas> = RegistryKey::new("other:gas");
         impl CustomRegistryEntry for Gas {
             const REGISTRY: RegistryKey<Self> = GASES;
-        }
-
-        struct OtherFluid;
-        const OTHER: RegistryKey<OtherFluid> = RegistryKey::new("other:fluid");
-        impl CustomRegistryEntry for OtherFluid {
-            const REGISTRY: RegistryKey<Self> = OTHER;
         }
 
         struct GasHeatMap;
@@ -555,10 +550,12 @@ mod tests {
 
         static STEAM: OnceLock<EntryKey<Gas>> = OnceLock::new();
         static OXYGEN: OnceLock<EntryKey<Gas>> = OnceLock::new();
+        static OTHER_VAPOR: OnceLock<EntryKey<Gas>> = OnceLock::new();
 
         // Each mod registers only in the namespace it owns (the custom registries'
         // namespace rule): chemlib declares `chemlib:gas`, boiler adds its own entry to it,
-        // and `other` declares and fills `other:fluid`.
+        // and `other` declares and fills `other:gas` with the same Rust payload type `Gas`
+        // so its `EntryKey<Gas>` has a different registry slot while `chemlib:gas` is live.
         struct Chemlib;
         impl Hooks for Chemlib {
             fn subscribed(&self) -> &'static [Option<HookId>] {
@@ -585,8 +582,8 @@ mod tests {
                 &[]
             }
             fn register(&self, r: &mut dyn Registrar, _: &RegistrationContext) {
-                r.declare_registry(OTHER, RegistryOptions::new());
-                let _ = r.register_entry(OTHER, "other:water", OtherFluid);
+                r.declare_registry(OTHER_GASES, RegistryOptions::new());
+                let _ = OTHER_VAPOR.set(r.register_entry(OTHER_GASES, "other:vapor", Gas));
             }
         }
 
@@ -598,6 +595,7 @@ mod tests {
         .unwrap();
         let steam = *STEAM.get().unwrap();
         let oxygen = *OXYGEN.get().unwrap();
+        let other_vapor = *OTHER_VAPOR.get().unwrap();
 
         struct GasMapsHost {
             rows: [(String, Tag); 1],
@@ -633,6 +631,25 @@ mod tests {
         crate::impl_host_areas!(GasMapsHost);
         crate::impl_backend_areas!(GasMapsHost, except(data_maps));
         impl crate::Backend for GasMapsHost {}
+        impl crate::ReloadContext for GasMapsHost {
+            fn data_map_value(
+                &self,
+                registry: &str,
+                entry: &str,
+                map: &str,
+            ) -> Result<Option<&Tag>, DataMapError> {
+                <Self as crate::prelude::DataMapsBackend>::data_map_value(
+                    self, registry, entry, map,
+                )
+            }
+            fn data_map_entries(
+                &self,
+                registry: &str,
+                map: &str,
+            ) -> Result<&[(String, Tag)], DataMapError> {
+                <Self as crate::prelude::DataMapsBackend>::data_map_entries(self, registry, map)
+            }
+        }
 
         struct BareHost;
         impl Host for BareHost {}
@@ -641,8 +658,22 @@ mod tests {
         let host = GasMapsHost {
             rows: [("boiler:steam".to_owned(), Tag::Int(373))],
         };
+        let reload: &dyn crate::ReloadContext = &host;
+
         assert_eq!(steam.data(&host, &GasHeatMap), Ok(Some(373)));
         assert_eq!(oxygen.data(&host, &GasHeatMap), Ok(None));
+        assert_eq!(reload.data_map(&steam, &GasHeatMap), Ok(Some(373)));
+        assert_eq!(reload.data_map(&oxygen, &GasHeatMap), Ok(None));
+        // Wrong registry slot for the same payload type `Gas` while `chemlib:gas` is live
+        // must fail the slot check in `Registry::id_str_of` with `InvalidKey`.
+        assert_eq!(
+            other_vapor.data(&host, &GasHeatMap),
+            Err(DataMapError::InvalidKey)
+        );
+        assert_eq!(
+            reload.data_map(&other_vapor, &GasHeatMap),
+            Err(DataMapError::InvalidKey)
+        );
         assert_eq!(
             steam.data(&BareHost, &GasHeatMap),
             Err(DataMapError::Unavailable)
@@ -651,6 +682,10 @@ mod tests {
         install_with(vec![]).unwrap();
         assert_eq!(
             steam.data(&host, &GasHeatMap),
+            Err(DataMapError::InvalidKey)
+        );
+        assert_eq!(
+            reload.data_map(&steam, &GasHeatMap),
             Err(DataMapError::InvalidKey)
         );
     }
