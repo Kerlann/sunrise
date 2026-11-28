@@ -454,8 +454,6 @@ impl crate::game::ServerGame<'_> {
         }
         self.close_ender_chest();
     }
-    #[allow(dead_code)]
-    #[inline(always)]
     pub fn finish_close_world_server(&mut self) {
         self.clear_world_parts();
         self.server.server_loot.0.set(None);

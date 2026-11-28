@@ -348,7 +348,12 @@ fn datapack_game_open_reload_and_exhaustion_are_atomic() {
                 assert_eq!(power(game), DatapackValue::Int(9));
                 game.reload_datapacks(false, &features).unwrap();
                 assert_eq!(power(game), DatapackValue::Int(9));
-                game.finish_close_world_server();
+                assert!(sunrise_sim::data_map_net::served().is_some());
+                game.run_server_lifecycle(false, |_| {
+                    Ok(sunrise_gameplay::game::ServerRunOutcome::Orderly)
+                })
+                .unwrap();
+                assert!(sunrise_sim::data_map_net::served().is_none());
                 sunrise_gameplay_common::game::lan_common::sync::forget_sync_data();
                 sunrise_gameplay_common::game::lan_common::sync::forget_server_sources();
                 game.options.execution_role =

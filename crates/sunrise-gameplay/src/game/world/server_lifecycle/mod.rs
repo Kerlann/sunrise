@@ -287,17 +287,14 @@ impl ServerGame<'_> {
         {
             result = Err(shutdown_panic(payload.as_ref()).into());
         }
-        self.server.session_lock.0 = None;
         self.server.interrupted_turns.clear();
         self.server.crash_save = Default::default();
-        // Clear world maps even if startup failed after publishing them.
+        // Clear world maps and publications even if startup failed after publishing them.
         if let Some(rest) = self.common.res.rest.get() {
             rest.behaviours.set_block_maps(None);
         }
         super::cauldron_interactions::clear();
-        self.clear_world_parts();
-        self.server.world_adopted = false;
-        self.server.startup_ticket_restore_pending = false;
+        self.finish_close_world_server();
         result
     }
 }

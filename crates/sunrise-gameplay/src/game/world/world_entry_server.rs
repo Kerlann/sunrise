@@ -193,13 +193,17 @@ impl crate::game::ServerGame<'_> {
             .map_or_else(Vec::new, |t| t.data_maps.registries());
         self.install_block_maps();
         self.install_registry_snapshots();
-        self.install_fluid_interactions()?;
+        if let Err(error) = self.install_fluid_interactions() {
+            self.finish_close_world_server();
+            return Err(error);
+        }
         self.install_profession_save_snapshots();
         self.install_level_environments();
         self.sync_timeline_registries();
         self.share_mob_maps();
         self.share_biome_keys();
         self.sync_test_registry_ids();
+        // Publish wire snapshots only after every fallible open step succeeded.
         sunrise_sim::datapack_net::serve(self.common.mods.datapack_registries.clone());
         sunrise_sim::data_map_net::serve(
             self.server
