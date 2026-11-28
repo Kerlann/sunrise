@@ -165,11 +165,12 @@ pub struct DimensionSettings {
     /// `minecraft:gameplay/sky_light_level`: the sky light that daylight is measured against, 0 to 15.
     pub sky_light_level: f32,
     /// `Level.getSeaLevel`: the sea level mob spawning, rain and snow, maps and phantoms use. With
-    /// `None` it is the noise settings' own for `minecraft:noise`, and the Overworld's 63 for a
-    /// chunk generator a mod registered, which reads none; `Some` is for that generator, whose
-    /// terrain the game cannot read a sea level from. A level of `minecraft:noise`, and one whose
-    /// chunk generator asks for vanilla stages, keeps its noise settings' sea level, which the
-    /// stages are built with.
+    /// `None` it is the noise settings' own for `minecraft:noise`, -63 for a flat stem, and the
+    /// Overworld's 63 for a chunk generator a mod registered, which reads none; `Some` is for that
+    /// generator, whose terrain the game cannot read a sea level from, and for a flat stem (a pack
+    /// that replaces your generator with one), where it changes the value the level reports and
+    /// generation is unchanged. A level of `minecraft:noise`, and one whose chunk generator asks
+    /// for vanilla stages, keeps its noise settings' sea level, which the stages are built with.
     pub sea_level: Option<i32>,
     /// When a player can sleep in a bed here (`BedRule.canSleep`): `always`, `when_dark` or `never`.
     pub bed_can_sleep: String,

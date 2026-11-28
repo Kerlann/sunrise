@@ -92,6 +92,7 @@ impl ServerGame<'_> {
         let mut eyes = std::mem::take(&mut self.common.end.eyes);
         let mut shattered = Vec::new();
         eyes.retain_mut(|eye| {
+            crate::game::record_turn!(self.common.dim, eye.id, "minecraft:eye_of_ender", None);
             eye.previous = eye.position;
             let next = eye.position + eye.velocity;
             eye.velocity = EyeOfEnder::update_delta(eye.velocity, next, eye.target);
@@ -118,6 +119,12 @@ impl ServerGame<'_> {
             } else {
                 shattered.push(at.map(|v| v.floor() as i32));
             }
+            crate::game::record_departure!(
+                self.common.dim,
+                eye.id,
+                "minecraft:eye_of_ender",
+                Some("discarded")
+            );
             false
         });
         self.common.end.eyes = eyes;

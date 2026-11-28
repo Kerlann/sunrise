@@ -88,7 +88,7 @@ pub(in crate::game) fn act(
     targets: &[Target],
     ctx: Context,
 ) -> Act {
-    act_with_tab_groups(nav, focus, targets, ctx, |_| 0)
+    act_with_tab_groups(nav, focus, targets, ctx, |_, _| 0)
 }
 
 pub(in crate::game) fn act_with_tab_groups(
@@ -96,7 +96,7 @@ pub(in crate::game) fn act_with_tab_groups(
     focus: Option<Target>,
     targets: &[Target],
     ctx: Context,
-    group: impl Fn(&Target) -> i32,
+    group: impl Fn(usize, &Target) -> i32,
 ) -> Act {
     match (nav, focus) {
         (Nav::Tab { forward }, _) => {
@@ -168,7 +168,7 @@ pub(in crate::game) fn tab_step(
     from: Option<Target>,
     forward: bool,
 ) -> Option<usize> {
-    grouped_tab_step(targets, from, forward, |_| 0)
+    grouped_tab_step(targets, from, forward, |_, _| 0)
 }
 
 /// Walk children sorted stably by tab group. Wrap as `Screen.keyPressed` does.
@@ -177,10 +177,10 @@ fn grouped_tab_step(
     targets: &[Target],
     from: Option<Target>,
     forward: bool,
-    group: impl Fn(&Target) -> i32,
+    group: impl Fn(usize, &Target) -> i32,
 ) -> Option<usize> {
     let mut order: Vec<_> = (0..targets.len()).collect();
-    order.sort_by_key(|&i| group(&targets[i]));
+    order.sort_by_key(|&i| group(i, &targets[i]));
     let mut stops: Vec<Vec<usize>> = Vec::new();
     for i in order {
         let row = targets[i].kind == Kind::Row;
@@ -212,29 +212,56 @@ fn grouped_tab_step(
     })
 }
 
-/// What the last drawn frame's screen can focus: its enabled buttons and
-/// every target it registered (sliders, fields, rows, slots...).
-pub(in crate::game) fn drawn_targets() -> Vec<Target> {
-    let mut targets: Vec<Target> = widgets::last()
-        .iter()
-        .filter(|w| w.enabled && !matches!(w.kind, Kind::Mounted { .. }))
-        .map(|w| Target {
-            rect: [w.x, w.y, w.w, w.h],
-            kind: Kind::Button,
+/// What the last drawn frame's screen can focus, paired with each target's collector identity and
+/// `tab_order_group`.
+pub(in crate::game) fn drawn_targets_with_meta() -> Vec<(Target, widgets::TargetMeta)> {
+    let mut targets: Vec<(Target, widgets::TargetMeta)> = widgets::last_with_meta()
+        .into_iter()
+        .filter(|(w, _)| w.enabled && !matches!(w.kind, Kind::Mounted { .. }))
+        .map(|(w, meta)| {
+            (
+                Target {
+                    rect: [w.x, w.y, w.w, w.h],
+                    kind: Kind::Button,
+                },
+                meta,
+            )
         })
         .collect();
-    for t in widgets::last_targets() {
+    for (t, meta) in widgets::last_targets_with_meta() {
         if matches!(t.kind, Kind::Mounted { .. }) {
             continue;
         }
-        // A button can be both a labelled button and a target.
-        if let Some(same) = targets.iter_mut().find(|o| o.rect == t.rect) {
-            same.kind = t.kind;
+        // A button can be both a labelled button and a target. Match by collector identity when
+        // present, falling back to exact rect only for unkeyed non-engine targets.
+        let existing = if let Some(key) = &meta.key {
+            targets
+                .iter_mut()
+                .find(|(_, m)| m.key.as_ref() == Some(key))
         } else {
-            targets.push(t);
+            targets
+                .iter_mut()
+                .find(|(o, m)| m.key.is_none() && o.rect == t.rect)
+        };
+        if let Some((same, same_meta)) = existing {
+            same.kind = t.kind;
+            if same_meta.key.is_none() {
+                *same_meta = meta;
+            }
+        } else {
+            targets.push((t, meta));
         }
     }
     targets
+}
+
+/// What the last drawn frame's screen can focus: its enabled buttons and
+/// every target it registered (sliders, fields, rows, slots...).
+pub(in crate::game) fn drawn_targets() -> Vec<Target> {
+    drawn_targets_with_meta()
+        .into_iter()
+        .map(|(t, _)| t)
+        .collect()
 }
 
 /// The targets inside the GUI (`gui`: its size in GUI pixels).
@@ -394,7 +421,7 @@ mod tests {
         };
         let warning = button(240.0, 120.0);
         let targets = [bottom, warning, top];
-        let group = |target: &Target| if *target == warning { -10 } else { 0 };
+        let group = |_idx: usize, target: &Target| if *target == warning { -10 } else { 0 };
         let next = |from, forward| grouped_tab_step(&targets, from, forward, group);
         assert_eq!(next(None, true), Some(1));
         assert_eq!(next(Some(warning), true), Some(0));
@@ -402,6 +429,18 @@ mod tests {
         assert_eq!(next(None, false), Some(2));
         assert_eq!(next(Some(top), false), Some(0));
         assert_eq!(next(Some(bottom), false), Some(1));
+
+        // Coincident same-kind targets keep distinct per-index tab order groups.
+        let coincident = [button(10.0, 20.0), button(10.0, 20.0)];
+        let groups = [5, -1];
+        assert_eq!(
+            grouped_tab_step(&coincident, None, true, |i, _| groups[i]),
+            Some(1)
+        );
+        assert_eq!(
+            grouped_tab_step(&coincident, None, false, |i, _| groups[i]),
+            Some(0)
+        );
     }
 
     #[test]

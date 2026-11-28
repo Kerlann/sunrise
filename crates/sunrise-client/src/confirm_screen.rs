@@ -89,14 +89,16 @@ impl Confirm {
         for (i, ((bx, by), label)) in self.buttons.into_iter().zip(labels).enumerate() {
             let is_focused = self.focus == Some(i);
             let hover = active && (ui::hovered(cursor, bx, by, 150.0, 20.0) || is_focused);
-            if self.declares_no && i == 1 {
-                let action = crate::widgets::Action::Cancel;
-                ui::action_button(
-                    batch, atlas, action, bx, by, 150.0, 20.0, label, active, hover,
-                );
-            } else {
-                ui::button(batch, atlas, bx, by, 150.0, 20.0, label, active, hover);
-            }
+            crate::widgets::with_native_action(i as u64, || {
+                if self.declares_no && i == 1 {
+                    let action = crate::widgets::Action::Cancel;
+                    ui::action_button(
+                        batch, atlas, action, bx, by, 150.0, 20.0, label, active, hover,
+                    );
+                } else {
+                    ui::button(batch, atlas, bx, by, 150.0, 20.0, label, active, hover);
+                }
+            });
         }
     }
 }
@@ -218,14 +220,16 @@ impl Choice {
         for (i, (&(bx, by), label)) in self.buttons.iter().zip(labels).enumerate() {
             let is_focused = self.focus == Some(i);
             let hover = ui::hovered(cursor, bx, by, self.width, 20.0) || is_focused;
-            if self.no_button == Some(i) {
-                let action = crate::widgets::Action::Cancel;
-                ui::action_button(
-                    batch, atlas, action, bx, by, self.width, 20.0, label, true, hover,
-                );
-            } else {
-                ui::button(batch, atlas, bx, by, self.width, 20.0, label, true, hover);
-            }
+            crate::widgets::with_native_action(i as u64, || {
+                if self.no_button == Some(i) {
+                    let action = crate::widgets::Action::Cancel;
+                    ui::action_button(
+                        batch, atlas, action, bx, by, self.width, 20.0, label, true, hover,
+                    );
+                } else {
+                    ui::button(batch, atlas, bx, by, self.width, 20.0, label, true, hover);
+                }
+            });
         }
     }
 }

@@ -149,4 +149,25 @@ pub trait LevelCollisionBackend {
     /// and the world border, and returns `None` for unavailable levels, invalid bounds or
     /// query errors. Stops at the first hit without lending or collecting geometry.
     fn level_has_collisions(&self, level: LevelRef, aabb: [f64; 6]) -> Option<bool>;
+    /// Side: server.
+    /// Whether no entity that blocks building is in `state`'s collision shape at `pos`:
+    /// `CollisionGetter.isUnobstructed(state, pos, CollisionContext.empty())`, which is
+    /// `EntityGetter.isUnobstructed(null, shape)` over `state.getCollisionShape(level, pos,
+    /// context).move(pos)`. It is the empty-context form of the test `BlockItem.canPlace` makes
+    /// with `CollisionContext.placementContext(player)`: no player context is exposed, so a shape
+    /// that depends on the entity context is its empty-context shape. The state need not be the
+    /// block stored there. An entity counts when it is alive, not a
+    /// spectator and `Entity.blocksBuilding` (players, mobs, minecarts, boats, armor stands that
+    /// are not markers, end crystals, primed TNT, falling blocks that landed from a fall), and
+    /// when its bounding box overlaps the shape itself, not merely the shape's bounds. A state
+    /// with an empty collision shape is always unobstructed. No entity is excepted, as with
+    /// `null`. Reads open server levels, active or parked, and loads nothing.
+    /// `Err(Stale)` for a stale handle, `Err(Unavailable)` on a client, when the level cannot be
+    /// read or when the state's collision shape cannot be evaluated.
+    fn level_is_unobstructed(
+        &self,
+        level: LevelRef,
+        pos: [i32; 3],
+        state: BlockState,
+    ) -> Result<bool, LevelReadError>;
 }

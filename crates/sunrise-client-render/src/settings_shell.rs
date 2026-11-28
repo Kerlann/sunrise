@@ -258,32 +258,87 @@ pub(crate) fn page_tab(
     (has, open, focused): (bool, bool, bool),
     cursor: (f32, f32),
 ) {
+    let orig_hover = has && ui::hovered(cursor, rect[0], rect[1], rect[2], rect[3]);
+    let name_text = Text::literal(name);
+    let (rect, message, has, hover, alpha, label_text_color, tab_order_group, tooltip_hint) =
+        match crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
+            bucket: crate::widgets::WidgetBucket::Button,
+            rect,
+            label: Some(&name_text),
+            explicit_key: None,
+            active: has,
+            hovered: orig_hover,
+            focused,
+            tab_order_group: 0,
+        }) {
+            crate::widgets::ResolvedEngineWidget::Skip => return,
+            crate::widgets::ResolvedEngineWidget::Unchanged => {
+                (rect, None, has, orig_hover, 1.0, None, 0, None)
+            }
+            crate::widgets::ResolvedEngineWidget::Draw(props) => (
+                props.rect,
+                props.message,
+                props.active,
+                props.hovered,
+                props.alpha,
+                props.label_text_color,
+                props.tab_order_group,
+                props.tooltip_narration,
+            ),
+        };
     let [px, py, pw, ph] = rect;
-    crate::widgets::record(name, rect, has);
-    let hover = has && ui::hovered(cursor, px, py, pw, ph);
+    let display_name = message.as_ref().map(Text::plain);
+    let effective_name = display_name.as_deref().unwrap_or(name);
+    crate::widgets::record(effective_name, rect, has);
     crate::widgets::narratable(|| {
-        crate::widgets::Narratable::button(name.to_owned(), rect, has)
+        let mut n = crate::widgets::Narratable::button(effective_name.to_owned(), rect, has)
             .hovered(hover)
             .focused(focused)
+            .order(tab_order_group);
+        if let Some(hint) = tooltip_hint.clone() {
+            n = n.hint(hint);
+        }
+        n
     });
     crate::widgets::widget_cursor(hover, has);
     if has {
         crate::widgets::target_as(rect, crate::widgets::Kind::Tab(open));
     }
     if open {
-        style::fill(batch, atlas, rect, style::open());
-        style::fill(batch, atlas, [px, py, 2.0, ph], style::accent());
+        style::fill(
+            batch,
+            atlas,
+            rect,
+            crate::widgets::scale_abgr_alpha(style::open(), alpha),
+        );
+        style::fill(
+            batch,
+            atlas,
+            [px, py, 2.0, ph],
+            crate::widgets::scale_abgr_alpha(style::accent(), alpha),
+        );
     }
-    let color = match (open || hover, has) {
-        (true, _) => style::WHITE,
-        (false, true) => style::soft(),
-        (false, false) => style::muted(),
+    let color = match label_text_color {
+        Some(argb) => crate::widgets::label_abgr_color(has, Some(argb), alpha),
+        None => crate::widgets::scale_abgr_alpha(
+            match (open || hover, has) {
+                (true, _) => style::WHITE,
+                (false, true) => style::soft(),
+                (false, false) => style::muted(),
+            },
+            alpha,
+        ),
     };
     let ty = py + ((ph - 8.0) / 2.0).floor();
-    let name = Text::literal(style::fit(atlas, name, pw - 12.0));
-    batch.text_styled(atlas, &name, px + 8.0, ty, color, true);
+    let shown = Text::literal(style::fit(atlas, effective_name, pw - 12.0));
+    batch.text_styled(atlas, &shown, px + 8.0, ty, color, true);
     if focused {
-        style::ring(batch, atlas, rect, style::WHITE);
+        style::ring(
+            batch,
+            atlas,
+            rect,
+            crate::widgets::scale_abgr_alpha(style::WHITE, alpha),
+        );
     }
 }
 
@@ -555,7 +610,43 @@ pub(crate) fn row(batch: &mut HudBatch, atlas: &HudAtlas, cols: &Columns, y: f32
                     };
                     style::slider(batch, atlas, control, &value, position, states);
                 } else {
-                    batch.text_styled(atlas, &value, start, ty, soft, true);
+                    match crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
+                        bucket: crate::widgets::WidgetBucket::Slider,
+                        rect: control,
+                        label: Some(&value),
+                        explicit_key: None,
+                        active: live,
+                        hovered: hover,
+                        focused,
+                        tab_order_group: 0,
+                    }) {
+                        crate::widgets::ResolvedEngineWidget::Skip => {}
+                        crate::widgets::ResolvedEngineWidget::Unchanged => {
+                            batch.text_styled(atlas, &value, start, ty, soft, true);
+                        }
+                        crate::widgets::ResolvedEngineWidget::Draw(props) => {
+                            let shown_val = props.message.as_ref().unwrap_or(&value);
+                            let val_w = atlas.font.width_text(shown_val);
+                            let vx = props.rect[0] + props.rect[2] - val_w;
+                            let vy = props.rect[1] + ((props.rect[3] - 8.0) / 2.0).floor();
+                            let val_color = match props.label_text_color {
+                                Some(argb) => crate::widgets::label_abgr_color(
+                                    props.active,
+                                    Some(argb),
+                                    props.alpha,
+                                ),
+                                None => crate::widgets::scale_abgr_alpha(
+                                    if props.active {
+                                        style::soft()
+                                    } else {
+                                        style::muted()
+                                    },
+                                    props.alpha,
+                                ),
+                            };
+                            batch.text_styled(atlas, shown_val, vx, vy, val_color, true);
+                        }
+                    }
                 }
             }
             (None, None) if key.is_some() => {
@@ -631,12 +722,47 @@ fn read_row(
     (label, name, value): (&str, &str, &str),
     (hover, focused, live): (bool, bool, bool),
 ) {
-    let rect = cols.row(y);
-    crate::widgets::record(label, rect, live);
+    let orig_rect = cols.row(y);
+    let label_text = Text::literal(label);
+    let (rect, message, live, hover, alpha, label_text_color, tab_order_group, tooltip_hint) =
+        match crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
+            bucket: crate::widgets::WidgetBucket::Button,
+            rect: orig_rect,
+            label: Some(&label_text),
+            explicit_key: None,
+            active: live,
+            hovered: hover,
+            focused,
+            tab_order_group: 0,
+        }) {
+            crate::widgets::ResolvedEngineWidget::Skip => return,
+            crate::widgets::ResolvedEngineWidget::Unchanged => {
+                (orig_rect, None, live, hover, 1.0, None, 0, None)
+            }
+            crate::widgets::ResolvedEngineWidget::Draw(props) => (
+                props.rect,
+                props.message,
+                props.active,
+                props.hovered,
+                props.alpha,
+                props.label_text_color,
+                props.tab_order_group,
+                props.tooltip_narration,
+            ),
+        };
+    let override_plain = message.as_ref().map(Text::plain);
+    let record_label = override_plain.as_deref().unwrap_or(label);
+    let draw_name = override_plain.as_deref().unwrap_or(name);
+    crate::widgets::record(record_label, rect, live);
     crate::widgets::narratable(|| {
-        crate::widgets::Narratable::button(label.to_owned(), rect, live)
+        let mut n = crate::widgets::Narratable::button(record_label.to_owned(), rect, live)
             .hovered(hover)
             .focused(focused)
+            .order(tab_order_group);
+        if let Some(hint) = tooltip_hint.clone() {
+            n = n.hint(hint);
+        }
+        n
     });
     if live {
         crate::widgets::target(rect);
@@ -644,14 +770,26 @@ fn read_row(
     if live && (hover || focused) {
         lit(batch, atlas, rect);
     }
-    let ty = y + ((style::ROW - 8.0) / 2.0).floor();
+    let ty = rect[1] + ((rect[3] - 8.0) / 2.0).floor();
     let left = rect[0] + style::INSET;
-    let name_w = atlas.font.width(name);
-    let shown = Text::literal(name.to_owned());
-    let (color, soft) = if live {
-        (style::WHITE, style::soft())
-    } else {
-        (style::muted(), style::muted())
+    let name_w = atlas.font.width(draw_name);
+    let shown = Text::literal(draw_name.to_owned());
+    let (color, soft) = match label_text_color {
+        Some(argb) => {
+            let c = crate::widgets::label_abgr_color(live, Some(argb), alpha);
+            (c, c)
+        }
+        None => {
+            let (c, s) = if live {
+                (style::WHITE, style::soft())
+            } else {
+                (style::muted(), style::muted())
+            };
+            (
+                crate::widgets::scale_abgr_alpha(c, alpha),
+                crate::widgets::scale_abgr_alpha(s, alpha),
+            )
+        }
     };
     batch.text_styled(atlas, &shown, left, ty, color, true);
     let room = rect[2] - 2.0 * style::INSET - name_w - 8.0;
@@ -662,8 +800,8 @@ fn read_row(
         style::ring(
             batch,
             atlas,
-            [rect[0] + 1.0, y, rect[2] - 2.0, style::ROW],
-            style::WHITE,
+            [rect[0] + 1.0, rect[1], rect[2] - 2.0, rect[3]],
+            crate::widgets::scale_abgr_alpha(style::WHITE, alpha),
         );
     }
 }
@@ -910,20 +1048,57 @@ fn strip_place(
     (has, open, focused): (bool, bool, bool),
     cursor: (f32, f32),
 ) {
-    let [x, y, w, h] = rect;
-    crate::widgets::record(name, rect, has);
-    let hover = has && ui::hovered(cursor, x, y, w, h);
+    let orig_hover = has && ui::hovered(cursor, rect[0], rect[1], rect[2], rect[3]);
+    let name_text = Text::literal(name);
+    let (rect, message, has, hover, alpha, tab_order_group, tooltip_hint) =
+        match crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
+            bucket: crate::widgets::WidgetBucket::Button,
+            rect,
+            label: Some(&name_text),
+            explicit_key: None,
+            active: has,
+            hovered: orig_hover,
+            focused,
+            tab_order_group: 0,
+        }) {
+            crate::widgets::ResolvedEngineWidget::Skip => return,
+            crate::widgets::ResolvedEngineWidget::Unchanged => {
+                (rect, None, has, orig_hover, 1.0, 0, None)
+            }
+            crate::widgets::ResolvedEngineWidget::Draw(props) => (
+                props.rect,
+                props.message,
+                props.active,
+                props.hovered,
+                props.alpha,
+                props.tab_order_group,
+                props.tooltip_narration,
+            ),
+        };
+    let display_name = message.as_ref().map(Text::plain);
+    let effective_name = display_name.as_deref().unwrap_or(name);
+    crate::widgets::record(effective_name, rect, has);
     crate::widgets::narratable(|| {
-        crate::widgets::Narratable::button(name.to_owned(), rect, has)
+        let mut n = crate::widgets::Narratable::button(effective_name.to_owned(), rect, has)
             .hovered(hover)
             .focused(focused)
+            .order(tab_order_group);
+        if let Some(hint) = tooltip_hint.clone() {
+            n = n.hint(hint);
+        }
+        n
     });
     crate::widgets::widget_cursor(hover, has);
     if has {
         crate::widgets::target_as(rect, crate::widgets::Kind::Tab(open));
     }
     if focused {
-        style::ring(batch, atlas, ring, style::WHITE);
+        style::ring(
+            batch,
+            atlas,
+            ring,
+            crate::widgets::scale_abgr_alpha(style::WHITE, alpha),
+        );
     }
 }
 
@@ -1008,17 +1183,58 @@ pub(crate) fn foot_button(
     room: f32,
 ) {
     let [x, y, w, h] = rect;
-    let hovered = ui::hovered(cursor, x, y, w, h);
+    let orig_hovered = ui::hovered(cursor, x, y, w, h);
+    let props = match crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
+        bucket: crate::widgets::WidgetBucket::Button,
+        rect,
+        label: Some(label),
+        explicit_key: None,
+        active: true,
+        hovered: orig_hovered,
+        focused: primary || focused,
+        tab_order_group: 0,
+    }) {
+        crate::widgets::ResolvedEngineWidget::Skip => return,
+        crate::widgets::ResolvedEngineWidget::Unchanged => None,
+        crate::widgets::ResolvedEngineWidget::Draw(props) => Some(props),
+    };
+    let (draw_rect, draw_label, active, hovered, tab_order_group, tooltip_hint) = match &props {
+        None => (rect, label, true, orig_hovered, 0, None),
+        Some(p) => (
+            p.rect,
+            p.message.as_ref().unwrap_or(label),
+            p.active,
+            p.hovered,
+            p.tab_order_group,
+            p.tooltip_narration.clone(),
+        ),
+    };
     let hover = hovered || focused;
-    crate::widgets::record(&label.plain(), rect, true);
+    let plain = draw_label.plain();
+    crate::widgets::record(&plain, draw_rect, active);
     crate::widgets::narratable(|| {
-        crate::widgets::Narratable::button(label.plain(), rect, true)
+        let mut n = crate::widgets::Narratable::button(plain.clone(), draw_rect, active)
             .hovered(hovered)
             .focused(focused)
+            .order(tab_order_group);
+        if let Some(hint) = tooltip_hint.clone() {
+            n = n.hint(hint);
+        }
+        n
     });
-    crate::widgets::widget_cursor(hovered, true);
-    crate::widgets::target(rect);
-    style::button_with_room(batch, atlas, rect, label, (hover, true, primary), room);
+    crate::widgets::widget_cursor(hovered, active);
+    if active {
+        crate::widgets::target(draw_rect);
+    }
+    style::button_with_room_resolved(
+        batch,
+        atlas,
+        draw_rect,
+        draw_label,
+        (hover, active),
+        room,
+        props.as_ref(),
+    );
 }
 
 /// Of the rows (their target, `y` and whether they can take the focus), those the keys reach.
@@ -1043,16 +1259,6 @@ pub(crate) fn reach<T>(
         }
         None if near => 0..0,
         _ => 0..rows.len(),
-    }
-}
-
-/// Where Tab or Shift+Tab goes among `n` controls.
-pub(crate) fn tab_step(n: usize, current: Option<usize>, shift: bool) -> usize {
-    match (current, shift) {
-        (Some(i), false) => (i + 1) % n,
-        (Some(i), true) => (i + n - 1) % n,
-        (None, false) => 0,
-        (None, true) => n - 1,
     }
 }
 
@@ -1565,6 +1771,14 @@ pub(crate) trait Hosted {
         waiting: Option<Capture>,
     );
     fn draw_contents(&mut self, batch: &mut HudBatch, atlas: &HudAtlas, cursor: (f32, f32));
+    /// Read-only widget discovery pass: collects widgets without mutating shell state.
+    fn collect_widgets(
+        &self,
+        s: &Settings,
+        batch: &mut HudBatch,
+        atlas: &HudAtlas,
+        cursor: (f32, f32),
+    );
     #[cfg(test)]
     fn draw_test_frame(
         &mut self,
@@ -1612,6 +1826,8 @@ pub(crate) trait Hosted {
     }
     /// Lets go of a slider or scrollbar; returns its events and whether it accepted the release.
     fn release_with_outcome(&mut self) -> (Option<Vec<Output>>, bool);
+    /// Clears an active drag without emitting slider release actions.
+    fn cancel_drag(&mut self);
     /// A controller's or the keyboard's focus is on the row at `rect`: if the list hides part of
     /// it, it scrolls all into view (`AbstractSelectionList.setSelected`). How far the row moved
     /// down, when it moved.
@@ -1871,6 +2087,15 @@ impl<S: Screen> Shell<S> {
         self.reveal_page = true;
         self.page = Some(page);
         self.path.clear();
+    }
+    #[cfg(test)]
+    pub(crate) fn test_state_flags(&self) -> (bool, bool, bool, bool) {
+        (
+            self.frame_draw.is_some(),
+            self.reveal_page,
+            self.focus_next.is_some(),
+            self.drawn.is_some(),
+        )
     }
     /// Follow `row`'s link to `page`: it opens alone, and Escape comes back to the page the row
     /// is on (while searching, the page it was found on).
@@ -2288,17 +2513,103 @@ impl<S: Screen> Shell<S> {
             }
         }
     }
-    /// What Tab steps through, in order, with where each is on screen (`reach`).
-    fn focusables(
+    /// Collector widget bucket and label for a shell row, shared by focus discovery and click
+    /// identity matching so both derive the exact same `EngineWidgetKey` as `draw_view`.
+    fn row_widget_spec(
+        &self,
+        row: &Row<S::Row>,
+    ) -> Option<(crate::widgets::WidgetBucket, Option<Text>)> {
+        let waits = self.waits(row);
+        let value = row
+            .value_text()
+            .map(|text| if waits { format!("> {text} <") } else { text });
+        match &row.value {
+            Value::Read(_) => Some((
+                crate::widgets::WidgetBucket::Button,
+                Some(Text::literal(row.label(value.as_deref()))),
+            )),
+            Value::Switch(_) => Some((crate::widgets::WidgetBucket::Checkbox, None)),
+            Value::Slider { .. } => Some((
+                crate::widgets::WidgetBucket::Slider,
+                value.as_deref().map(Text::literal),
+            )),
+            Value::Binding(b) if matches!(b.shown, Shown::Pad { .. }) => Some((
+                crate::widgets::WidgetBucket::Button,
+                Some(Text::literal(row.label(value.as_deref()))),
+            )),
+            Value::Choice(_) | Value::Binding(_) => Some((
+                crate::widgets::WidgetBucket::Button,
+                value.as_deref().map(Text::literal),
+            )),
+            Value::Press => Some((
+                crate::widgets::WidgetBucket::Button,
+                Some(Text::literal(&row.name)),
+            )),
+            Value::Note => None,
+        }
+    }
+    /// What Tab steps through, in order, with where each is on screen (`reach`) and its resolved
+    /// `tab_order_group`, filtered through `resolve_engine_input`.
+    fn focusables_with_groups(
         &self,
         view: &View<S::Page, S::Row>,
         near: bool,
-    ) -> Vec<(Target<S::Page, S::Row>, [f32; 4])> {
+    ) -> Vec<(Target<S::Page, S::Row>, [f32; 4], i32)> {
         let cols = &view.cols;
-        let mut out = vec![(Target::Search, cols.search())];
+        let mut counts: std::collections::HashMap<(String, crate::widgets::WidgetBucket), u32> =
+            std::collections::HashMap::new();
+        let mut resolve = |bucket: crate::widgets::WidgetBucket,
+                           label: Option<&Text>,
+                           rect: [f32; 4],
+                           active: bool,
+                           count_occurrence: bool|
+         -> Option<([f32; 4], i32)> {
+            let key_str = label
+                .map(crate::widgets::stable_key_from_text)
+                .unwrap_or_default();
+            let occ = if count_occurrence {
+                let entry = counts.entry((key_str, bucket)).or_insert(0);
+                let o = *entry;
+                *entry += 1;
+                o
+            } else {
+                0
+            };
+            let resolved_rect =
+                crate::widgets::resolve_engine_input(bucket, label, None, occ, rect, active)?;
+            let group = crate::widgets::resolve_engine_tab_order_group(bucket, label, None, occ, 0);
+            Some((resolved_rect, group))
+        };
+
+        let mut out = Vec::new();
+        let search_msg =
+            (!self.search.message.is_empty()).then(|| Text::literal(&self.search.message));
+        if let Some((rect, group)) = resolve(
+            crate::widgets::WidgetBucket::Field,
+            search_msg.as_ref(),
+            cols.search(),
+            true,
+            true,
+        ) {
+            out.push((Target::Search, rect, group));
+        }
         for (page, rect, _) in self.places(view).places {
-            if self.has(page, view) {
-                out.push((Target::Page(page), rect));
+            let name = view
+                .pages
+                .iter()
+                .find(|p| p.id == page)
+                .map(|p| p.name.as_str())
+                .unwrap_or_default();
+            let label = Text::literal(name);
+            let active = self.has(page, view);
+            if let Some((resolved_rect, group)) = resolve(
+                crate::widgets::WidgetBucket::Button,
+                Some(&label),
+                rect,
+                active,
+                true,
+            ) {
+                out.push((Target::Page(page), resolved_rect, group));
             }
         }
         let rows: Vec<(&Row<S::Row>, f32, bool)> = self
@@ -2309,14 +2620,61 @@ impl<S: Screen> Shell<S> {
             if !live {
                 continue;
             }
-            out.push((Target::Row(row.id), row_rect(row, cols, y)));
+            let Some((bucket, label_text)) = self.row_widget_spec(row) else {
+                continue;
+            };
+            let visible = y + style::ROW > cols.top && y < cols.bottom;
+            if let Some((resolved_rect, group)) = resolve(
+                bucket,
+                label_text.as_ref(),
+                row_rect(row, cols, y),
+                live,
+                visible,
+            ) {
+                out.push((Target::Row(row.id), resolved_rect, group));
+            }
             // A binding's reset, right of it, only while it would do something.
             if row.binding().is_some_and(|b| b.reset == Reset::Changed) {
-                out.push((Target::Reset(row.id), reset_rect(cols, y)));
+                let reset_label = Text::literal(lang::get("controls.reset"));
+                if let Some((resolved_rect, group)) = resolve(
+                    crate::widgets::WidgetBucket::Button,
+                    Some(&reset_label),
+                    reset_rect(cols, y),
+                    true,
+                    visible,
+                ) {
+                    out.push((Target::Reset(row.id), resolved_rect, group));
+                }
             }
         }
-        out.extend(self.foot(cols));
+        for (target, rect) in self.foot(cols) {
+            let label = Text::literal(lang::get(match target {
+                Target::Undo => UNDO,
+                Target::Apply => APPLY,
+                _ => DONE,
+            }));
+            if let Some((resolved_rect, group)) = resolve(
+                crate::widgets::WidgetBucket::Button,
+                Some(&label),
+                rect,
+                true,
+                true,
+            ) {
+                out.push((target, resolved_rect, group));
+            }
+        }
         out
+    }
+    /// What Tab steps through, in order, with where each is on screen (`reach`).
+    fn focusables(
+        &self,
+        view: &View<S::Page, S::Row>,
+        near: bool,
+    ) -> Vec<(Target<S::Page, S::Row>, [f32; 4])> {
+        self.focusables_with_groups(view, near)
+            .into_iter()
+            .map(|(target, rect, _)| (target, rect))
+            .collect()
     }
     /// Where Down from the search field goes on a screen with no page list, whose foot is under the
     /// field instead: the first row to use that is all in view.
@@ -2517,6 +2875,88 @@ impl<S: Screen> Shell<S> {
         };
         dock_note(batch, atlas, cols, about.to_owned(), color);
     }
+    fn draw_view(
+        &self,
+        batch: &mut HudBatch,
+        atlas: &HudAtlas,
+        cursor: (f32, f32),
+        view: &View<S::Page, S::Row>,
+        search: &mut ui::EditBox,
+    ) -> PageList<S::Page> {
+        let cols = view.cols;
+        let current = self.current(view);
+        self::mark(batch, atlas, &cols, &lang::get(self.screen.title()));
+        let pages = self.page_list(view, Some(atlas));
+        self.draw_pages(batch, atlas, view, &pages, cursor);
+        side_lines(batch, atlas, &cols, pages.used, &self.screen.side());
+        let focused = self.focus == Some(Target::Search);
+        search_field(search, batch, atlas, &cols, cursor, focused);
+        let name_of = |page| {
+            view.pages
+                .iter()
+                .find(|p| p.id == page)
+                .map(|p| p.name.clone())
+        };
+        let query = search.value.trim();
+        let heading = if query.is_empty() {
+            current.and_then(name_of).unwrap_or_default()
+        } else {
+            lang::get("Results for \"%s\"").replace("%s", query)
+        };
+        self::plate(batch, atlas, &cols, &heading);
+        let over_list = cursor.1 >= cols.top && cursor.1 < cols.bottom;
+        let mut described = None;
+        let mut waiting = None;
+        self::list(
+            batch,
+            atlas,
+            &cols,
+            &view.lines,
+            self.scroll.amount,
+            |page| name_of(page).unwrap_or_default(),
+            |batch, i, y| {
+                let row = &view.rows[i];
+                let [rx, ry, rw, rh] = cols.row(y);
+                let hover = over_list && ui::hovered(cursor, rx, ry, rw, rh);
+                let focused = self.shows_focus(Target::Row(row.id))
+                    || self.shows_focus(Target::Reset(row.id));
+                // A wait is what the strip says; then the pointer's row wins over the keyboard's.
+                if self.waits(row) {
+                    waiting = Some(i);
+                }
+                if hover || self.dragging == Some(row.id) || (focused && described.is_none()) {
+                    described = Some(i);
+                }
+                self.draw_row(batch, atlas, &cols, row, y, over_list.then_some(cursor));
+            },
+        );
+        scroller(batch, atlas, &cols, view.content, self.scroll.amount);
+        if let Some((_, row)) = self.first_row(view) {
+            crate::widgets::focus_link(cols.search(), true, row);
+        }
+        self.draw_dock(batch, atlas, view, waiting.or(described), current);
+        // Undo and Apply, over Done, only once there is something for them to do. A controller's
+        // X presses Apply where there is one, else Undo.
+        for (target, rect) in self.foot(&cols) {
+            use crate::widgets::Action as Declared;
+            let (label, declared, primary) = match target {
+                Target::Undo => (UNDO, (!self.pending).then_some(Declared::Apply), false),
+                Target::Apply => (APPLY, Some(Declared::Apply), true),
+                _ => (DONE, Some(Declared::Done), true),
+            };
+            let label = Text::literal(lang::get(label));
+            let flags = (self.shows_focus(target), primary);
+            let room = match declared {
+                Some(declared) => {
+                    crate::widgets::declare_action(declared, rect, true);
+                    crate::widgets::action_glyph_room()
+                }
+                None => 0.0,
+            };
+            foot_button(batch, atlas, rect, &label, cursor, flags, room);
+        }
+        pages
+    }
 }
 impl<S: Screen + Default> Hosted for Shell<S> {
     fn open(&mut self) {
@@ -2575,79 +3015,21 @@ impl<S: Screen + Default> Hosted for Shell<S> {
             .frame_draw
             .take()
             .expect("shell background before contents");
-        let cols = view.cols;
-        let current = self.current(&view);
-        self::mark(batch, atlas, &cols, &lang::get(self.screen.title()));
-        let pages = self.page_list(&view, Some(atlas));
-        self.draw_pages(batch, atlas, &view, &pages, cursor);
-        side_lines(batch, atlas, &cols, pages.used, &self.screen.side());
+        let mut search = self.search.clone();
+        let pages = self.draw_view(batch, atlas, cursor, &view, &mut search);
+        self.search = search;
         self.drawn = Some(pages);
-        let focused = self.focus == Some(Target::Search);
-        search_field(&mut self.search, batch, atlas, &cols, cursor, focused);
-        let name_of = |page| {
-            view.pages
-                .iter()
-                .find(|p| p.id == page)
-                .map(|p| p.name.clone())
-        };
-        let query = self.search.value.trim();
-        let heading = if query.is_empty() {
-            current.and_then(name_of).unwrap_or_default()
-        } else {
-            lang::get("Results for \"%s\"").replace("%s", query)
-        };
-        self::plate(batch, atlas, &cols, &heading);
-        let over_list = cursor.1 >= cols.top && cursor.1 < cols.bottom;
-        let mut described = None;
-        let mut waiting = None;
-        self::list(
-            batch,
-            atlas,
-            &cols,
-            &view.lines,
-            self.scroll.amount,
-            |page| name_of(page).unwrap_or_default(),
-            |batch, i, y| {
-                let row = &view.rows[i];
-                let [rx, ry, rw, rh] = cols.row(y);
-                let hover = over_list && ui::hovered(cursor, rx, ry, rw, rh);
-                let focused = self.shows_focus(Target::Row(row.id))
-                    || self.shows_focus(Target::Reset(row.id));
-                // A wait is what the strip says; then the pointer's row wins over the keyboard's.
-                if self.waits(row) {
-                    waiting = Some(i);
-                }
-                if hover || self.dragging == Some(row.id) || (focused && described.is_none()) {
-                    described = Some(i);
-                }
-                self.draw_row(batch, atlas, &cols, row, y, over_list.then_some(cursor));
-            },
-        );
-        scroller(batch, atlas, &cols, view.content, self.scroll.amount);
-        if let Some((_, row)) = self.first_row(&view) {
-            crate::widgets::focus_link(cols.search(), true, row);
-        }
-        self.draw_dock(batch, atlas, &view, waiting.or(described), current);
-        // Undo and Apply, over Done, only once there is something for them to do. A controller's
-        // X presses Apply where there is one, else Undo.
-        for (target, rect) in self.foot(&cols) {
-            use crate::widgets::Action as Declared;
-            let (label, declared, primary) = match target {
-                Target::Undo => (UNDO, (!self.pending).then_some(Declared::Apply), false),
-                Target::Apply => (APPLY, Some(Declared::Apply), true),
-                _ => (DONE, Some(Declared::Done), true),
-            };
-            let label = Text::literal(lang::get(label));
-            let flags = (self.shows_focus(target), primary);
-            let room = match declared {
-                Some(declared) => {
-                    crate::widgets::declare_action(declared, rect, true);
-                    crate::widgets::action_glyph_room()
-                }
-                None => 0.0,
-            };
-            foot_button(batch, atlas, rect, &label, cursor, flags, room);
-        }
+    }
+    fn collect_widgets(
+        &self,
+        s: &Settings,
+        batch: &mut HudBatch,
+        atlas: &HudAtlas,
+        cursor: (f32, f32),
+    ) {
+        let view = self.build(s, (batch.width, batch.height));
+        let mut search = self.search.clone();
+        let _ = self.draw_view(batch, atlas, cursor, &view, &mut search);
     }
     fn click_with_outcome(
         &mut self,
@@ -2680,7 +3062,16 @@ impl<S: Screen + Default> Hosted for Shell<S> {
         {
             return (Vec::new(), true);
         }
-        if at(cols.search()) {
+        let search_msg =
+            (!self.search.message.is_empty()).then(|| Text::literal(&self.search.message));
+        if at(cols.search())
+            && crate::widgets::matches_selected_engine_widget(
+                crate::widgets::WidgetBucket::Field,
+                search_msg.as_ref(),
+                None,
+                0,
+            )
+        {
             if !self.search.value.is_empty() && at(cols.clear()) {
                 self.search.set_value("");
                 self.searched();
@@ -2695,7 +3086,19 @@ impl<S: Screen + Default> Hosted for Shell<S> {
             self.focus = None;
         }
         for (target, rect) in self.foot(&cols) {
-            if !at(rect) {
+            let label = Text::literal(lang::get(match target {
+                Target::Undo => UNDO,
+                Target::Apply => APPLY,
+                _ => DONE,
+            }));
+            if !at(rect)
+                || !crate::widgets::matches_selected_engine_widget(
+                    crate::widgets::WidgetBucket::Button,
+                    Some(&label),
+                    None,
+                    0,
+                )
+            {
                 continue;
             }
             let outputs = match target {
@@ -2716,23 +3119,108 @@ impl<S: Screen + Default> Hosted for Shell<S> {
             return (outputs, true);
         }
         for (page, rect, _) in self.places(&view).places {
-            if at(rect) && self.has(page, &view) {
+            let name = view
+                .pages
+                .iter()
+                .find(|p| p.id == page)
+                .map(|p| p.name.as_str())
+                .unwrap_or_default();
+            let label = Text::literal(name);
+            if at(rect)
+                && self.has(page, &view)
+                && crate::widgets::matches_selected_engine_widget(
+                    crate::widgets::WidgetBucket::Button,
+                    Some(&label),
+                    None,
+                    0,
+                )
+            {
                 self.focus = Some(Target::Page(page));
                 self.pick(page, &view);
                 return (vec![CLICK], true);
             }
         }
-        let Some((row, row_y)) = self.row_at(&view, (x, y)).filter(|(row, _)| row.live) else {
-            return (Vec::new(), false);
-        };
-        self.focus = Some(Target::Row(row.id));
-        if row.binding().is_some_and(|b| b.reset == Reset::Changed) && at(reset_rect(&cols, row_y))
-        {
-            return (self.reset(s, row.id), true);
+        // Match the clicked row or its reset button against the selected widget identity (using
+        // the exact visible draw-order occurrence counts from `draw_view`).
+        let mut counts: std::collections::HashMap<(String, crate::widgets::WidgetBucket), u32> =
+            std::collections::HashMap::new();
+        for (page, _, _) in self.places(&view).places {
+            let name = view
+                .pages
+                .iter()
+                .find(|p| p.id == page)
+                .map(|p| p.name.as_str())
+                .unwrap_or_default();
+            let key_str = crate::widgets::stable_key_from_text(&Text::literal(name));
+            *counts
+                .entry((key_str, crate::widgets::WidgetBucket::Button))
+                .or_insert(0) += 1;
         }
-        // A press on the track sets the value there; on the name, only focuses.
-        let track = (x >= cols.track().0).then(|| cols.slider_at(x));
-        (self.activate(s, row, shift, track, self.clicks_step), true)
+        if y < cols.top || y >= cols.bottom {
+            return (Vec::new(), false);
+        }
+        let reset_label = Text::literal(lang::get("controls.reset"));
+        let reset_key_str = crate::widgets::stable_key_from_text(&reset_label);
+        for (row, row_y) in self.placed(&view) {
+            if row_y + style::ROW <= cols.top || row_y >= cols.bottom {
+                continue;
+            }
+            let Some((bucket, label_text)) = self.row_widget_spec(row) else {
+                continue;
+            };
+            let key_str = label_text
+                .as_ref()
+                .map(crate::widgets::stable_key_from_text)
+                .unwrap_or_default();
+            let row_occ = {
+                let entry = counts.entry((key_str, bucket)).or_insert(0);
+                let o = *entry;
+                *entry += 1;
+                o
+            };
+            let reset_occ = if row.binding().is_some_and(|b| b.reset.shown()) {
+                let entry = counts
+                    .entry((reset_key_str.clone(), crate::widgets::WidgetBucket::Button))
+                    .or_insert(0);
+                let o = *entry;
+                *entry += 1;
+                Some(o)
+            } else {
+                None
+            };
+            if !row.live || !at(cols.row(row_y)) {
+                continue;
+            }
+            if row.binding().is_some_and(|b| b.reset == Reset::Changed)
+                && at(reset_rect(&cols, row_y))
+            {
+                if let Some(occ) = reset_occ
+                    && crate::widgets::matches_selected_engine_widget(
+                        crate::widgets::WidgetBucket::Button,
+                        Some(&reset_label),
+                        None,
+                        occ,
+                    )
+                {
+                    self.focus = Some(Target::Row(row.id));
+                    return (self.reset(s, row.id), true);
+                }
+                continue;
+            }
+            if !crate::widgets::matches_selected_engine_widget(
+                bucket,
+                label_text.as_ref(),
+                None,
+                row_occ,
+            ) {
+                continue;
+            }
+            self.focus = Some(Target::Row(row.id));
+            // A press on the track sets the value there; on the name, only focuses.
+            let track = (x >= cols.track().0).then(|| cols.slider_at(x));
+            return (self.activate(s, row, shift, track, self.clicks_step), true);
+        }
+        (Vec::new(), false)
     }
     fn drag(
         &mut self,
@@ -2819,6 +3307,10 @@ impl<S: Screen + Default> Hosted for Shell<S> {
         } else {
             (None, scrolled)
         }
+    }
+    fn cancel_drag(&mut self) {
+        self.dragging = None;
+        self.scroll.release();
     }
     fn reveal(&mut self, s: &Settings, size: (f32, f32), [x, y, w, h]: [f32; 4]) -> Option<f32> {
         let view = self.view(s, size);
@@ -2981,14 +3473,24 @@ impl<S: Screen + Default> Hosted for Shell<S> {
             self.reveal_page(next, &view);
             return Vec::new();
         }
-        let focusables = self.focusables(&view, key != K::Tab);
+        let near = matches!(
+            key,
+            K::ArrowUp | K::ArrowDown | K::ArrowLeft | K::ArrowRight
+        );
+        let focusables = self.focusables_with_groups(&view, near);
+        if focusables.is_empty() {
+            return Vec::new();
+        }
         let current = self
             .focus
-            .and_then(|f| focusables.iter().position(|&(t, _)| t == f));
+            .and_then(|f| focusables.iter().position(|&(t, _, _)| t == f));
         if key == K::Tab {
-            let next = tab_step(focusables.len(), current, shift);
-            self.keyed = true;
-            self.focus_on(focusables[next], &view);
+            let groups: Vec<i32> = focusables.iter().map(|&(_, _, g)| g).collect();
+            if let Some(next) = crate::options_ui::tab_step_grouped(&groups, current, shift) {
+                let (target, rect, _) = focusables[next];
+                self.keyed = true;
+                self.focus_on((target, rect), &view);
+            }
             return Vec::new();
         }
         if key == K::ArrowDown
@@ -3031,15 +3533,22 @@ impl<S: Screen + Default> Hosted for Shell<S> {
             key,
             K::ArrowUp | K::ArrowDown | K::ArrowLeft | K::ArrowRight
         ) {
+            let arrow_targets: Vec<(Target<S::Page, S::Row>, [f32; 4])> =
+                focusables.iter().map(|&(t, r, _)| (t, r)).collect();
             let is_row = |t| matches!(t, Target::Row(_));
-            if let Some(next) = arrow_step(&focusables, current, key, &view.cols, is_row) {
+            if let Some(next) = arrow_step(&arrow_targets, current, key, &view.cols, is_row) {
                 self.keyed = true;
-                self.focus_on(focusables[next], &view);
+                self.focus_on(arrow_targets[next], &view);
                 self.can_change_value = false;
             }
             return Vec::new();
         }
         if !matches!(key, K::Space | K::Enter | K::NumpadEnter) {
+            return Vec::new();
+        }
+        if let Some(target) = self.focus
+            && !focusables.iter().any(|&(t, _, _)| t == target)
+        {
             return Vec::new();
         }
         match self.focus {

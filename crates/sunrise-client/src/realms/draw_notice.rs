@@ -74,21 +74,58 @@ impl Screen {
         if notification.dismissable {
             let hovered =
                 crate::ui::hovered(cursor, dismiss[0], dismiss[1], dismiss[2], dismiss[3]);
-            let sprite = if hovered {
-                "widget/cross_button_highlighted"
-            } else {
-                "widget/cross_button"
-            };
-            crate::ui::nine_slice(
-                batch,
-                atlas,
-                sprite,
-                dismiss[0],
-                dismiss[1],
-                dismiss[2],
-                dismiss[3],
-                u32::MAX,
-            );
+            // Vanilla `RealmsMainScreen.CrossButton` uses 6-arg `ImageButton` (`CommonComponents.EMPTY`);
+            // the dismiss tooltip is not `getMessage()`.
+            match crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
+                bucket: crate::widgets::WidgetBucket::Button,
+                rect: dismiss,
+                label: None,
+                explicit_key: Some("mco.notification.dismiss"),
+                active: true,
+                hovered,
+                focused: false,
+                tab_order_group: 0,
+            }) {
+                crate::widgets::ResolvedEngineWidget::Skip => {}
+                crate::widgets::ResolvedEngineWidget::Unchanged => {
+                    let sprite = if hovered {
+                        "widget/cross_button_highlighted"
+                    } else {
+                        "widget/cross_button"
+                    };
+                    crate::ui::nine_slice(
+                        batch,
+                        atlas,
+                        sprite,
+                        dismiss[0],
+                        dismiss[1],
+                        dismiss[2],
+                        dismiss[3],
+                        u32::MAX,
+                    );
+                }
+                crate::widgets::ResolvedEngineWidget::Draw(props) => {
+                    let lit = props
+                        .override_render_highlighted_sprite
+                        .unwrap_or(props.active && props.hovered);
+                    let sprite = if lit {
+                        "widget/cross_button_highlighted"
+                    } else {
+                        "widget/cross_button"
+                    };
+                    let tint = crate::widgets::white_abgr_alpha(props.alpha);
+                    crate::ui::nine_slice(
+                        batch,
+                        atlas,
+                        sprite,
+                        props.rect[0],
+                        props.rect[1],
+                        props.rect[2],
+                        props.rect[3],
+                        tint,
+                    );
+                }
+            }
         }
         self.notice_rects.set([button, dismiss]);
         self.notice_height.set(height);

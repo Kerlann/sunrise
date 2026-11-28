@@ -53,6 +53,19 @@ impl crate::game::ServerGame<'_> {
             .knot_state
             .knot_ids
             .retain(|p, _| fences.contains(p));
+        #[cfg(feature = "state-digest")]
+        if crate::game::state_transcript::is_recording() {
+            for knot in self.common.resident_entities.knots.iter() {
+                if !fences.contains(&knot.fence) {
+                    crate::game::state_transcript::record_departure(
+                        self.common.dim,
+                        knot.id,
+                        "minecraft:leash_knot",
+                        Some("discarded"),
+                    );
+                }
+            }
+        }
         self.common
             .resident_entities
             .knots
@@ -83,6 +96,19 @@ impl crate::game::ServerGame<'_> {
             return;
         }
         self.server.knot_state.knot_ids.remove(&fence);
+        #[cfg(feature = "state-digest")]
+        if crate::game::state_transcript::is_recording() {
+            for knot in self.common.resident_entities.knots.iter() {
+                if knot.fence == fence {
+                    crate::game::state_transcript::record_departure(
+                        self.common.dim,
+                        knot.id,
+                        "minecraft:leash_knot",
+                        Some("discarded"),
+                    );
+                }
+            }
+        }
         self.common
             .resident_entities
             .knots
@@ -206,6 +232,8 @@ impl crate::game::ServerGame<'_> {
         let facts = self.common.res.facts();
         let fences = self.common.res.items().block_tags.get("minecraft:fences");
         let mut untied = Vec::new();
+        #[cfg(feature = "state-digest")]
+        let dim = self.common.dim;
         self.server.others.0.retain_mut(|knot| {
             let Some(check) = knot.knot_check.as_mut() else {
                 return true;
@@ -214,12 +242,19 @@ impl crate::game::ServerGame<'_> {
             if !ticking(at.x, at.z) || !world.chunks.contains_key(&(at.x >> 4, at.z >> 4)) {
                 return true;
             }
+            crate::game::record_turn!(dim, knot.id, "minecraft:leash_knot", None);
             // Vanilla compares the old postincrement value: first check is tick 101.
             if *check >= 100 {
                 *check = 0;
                 let state = facts.get(world.block(at.x, at.y, at.z));
                 if !fences.is_some_and(|f| f.contains(&*state.name)) {
                     untied.push(knot.position.components());
+                    crate::game::record_departure!(
+                        dim,
+                        knot.id,
+                        "minecraft:leash_knot",
+                        Some("discarded")
+                    );
                     return false;
                 }
             } else {
@@ -512,6 +547,22 @@ impl crate::game::ServerGame<'_> {
         if let Some(fence) = self.natural_knot(id) {
             let at = leash::knot_state(fence).position.components();
             self.server.knot_state.knot_ids.remove(&fence);
+            #[cfg(feature = "state-digest")]
+            if crate::game::state_transcript::is_recording()
+                && self
+                    .common
+                    .resident_entities
+                    .knots
+                    .iter()
+                    .any(|k| k.id == id)
+            {
+                crate::game::state_transcript::record_departure(
+                    self.common.dim,
+                    id,
+                    "minecraft:leash_knot",
+                    Some("killed"),
+                );
+            }
             self.common.resident_entities.knots.retain(|k| k.id != id);
             if !self.server.knot_state.broken_knots.contains(&fence) {
                 self.server.knot_state.broken_knots.push(fence);
@@ -528,6 +579,12 @@ impl crate::game::ServerGame<'_> {
             .position(|o| o.id == id && o.kind == "minecraft:leash_knot")
         {
             let knot = self.server.others.0.remove(i);
+            crate::game::record_departure!(
+                self.common.dim,
+                knot.id,
+                "minecraft:leash_knot",
+                Some("killed")
+            );
             let at = knot.position.components();
             self.entity_killed_event_by(at, source);
             self.lead_sound("untied", at);

@@ -257,10 +257,14 @@ impl WinScreen {
         }
     }
 
-    /// Advance by `delta_ticks`, then draw the rolling logo and text.
-    pub fn draw_contents(&mut self, batch: &mut HudBatch, atlas: &HudAtlas, delta_ticks: f32) {
-        let (w, h) = (batch.width, batch.height);
+    /// Advance the scroll by `delta_ticks` (`WinScreen.extractRenderState`, `WinScreen.java:246-249`).
+    pub fn advance(&mut self, delta_ticks: f32) {
         self.scroll = (self.scroll + delta_ticks * self.scroll_speed).max(0.0);
+    }
+
+    /// Draw the rolling logo and text at the current scroll position.
+    pub fn draw_contents(&self, batch: &mut HudBatch, atlas: &HudAtlas) {
+        let (w, h) = (batch.width, batch.height);
         let logo_x = (w / 2.0).floor() - 128.0;
         let logo_y = h + 50.0;
         // Everything below is drawn translated by `y_offs`.
@@ -481,16 +485,19 @@ mod tests {
         let h = batch.height;
         let end = (s.total_scroll_length as f32 + 2.0 * h + 24.0) / 0.75;
         s.draw_background(&mut batch, &atlas, EndPortalFill::default());
-        s.draw_contents(&mut batch, &atlas, end - 1.0);
+        s.advance(end - 1.0);
+        s.draw_contents(&mut batch, &atlas);
         assert!(!s.finished(h));
         // Scrolling back never goes above the start.
         s.key(Key::Up, true);
         s.draw_background(&mut batch, &atlas, EndPortalFill::default());
-        s.draw_contents(&mut batch, &atlas, end * 2.0);
+        s.advance(end * 2.0);
+        s.draw_contents(&mut batch, &atlas);
         assert_eq!(s.scroll(), 0.0);
         s.key(Key::Up, false);
         s.draw_background(&mut batch, &atlas, EndPortalFill::default());
-        s.draw_contents(&mut batch, &atlas, end + 1.0);
+        s.advance(end + 1.0);
+        s.draw_contents(&mut batch, &atlas);
         assert!(s.finished(h));
     }
 }

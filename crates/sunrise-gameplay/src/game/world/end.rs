@@ -50,6 +50,8 @@ impl crate::game::ServerGame<'_> {
     pub(in crate::game::server_side) fn tick_summoned_eyes(&mut self) {
         let ticking = self.entity_ticking_area();
         let mut shattered = Vec::new();
+        #[cfg(feature = "state-digest")]
+        let dim = self.common.dim;
         self.server.others.0.retain_mut(|o| {
             let Some(eye) = o.eye.as_mut() else {
                 return true;
@@ -58,6 +60,7 @@ impl crate::game::ServerGame<'_> {
             if !ticking(o.position.x.floor() as i32, o.position.z.floor() as i32) {
                 return true;
             }
+            crate::game::record_turn!(dim, o.id, "minecraft:eye_of_ender", None);
             // Entity.baseTick: the eye burns down; its hurt does nothing.
             if eye.fire_ticks > 0 {
                 eye.fire_ticks -= 1;
@@ -70,6 +73,7 @@ impl crate::game::ServerGame<'_> {
                 return true;
             }
             shattered.push([o.position.x, o.position.y, o.position.z]);
+            crate::game::record_departure!(dim, o.id, "minecraft:eye_of_ender", Some("discarded"));
             false
         });
         for at in shattered {

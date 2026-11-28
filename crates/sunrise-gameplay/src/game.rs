@@ -644,6 +644,36 @@ pub(in crate::game) use server_side::spawner_server;
 #[cfg(feature = "state-digest")]
 #[allow(unused_imports)]
 pub(in crate::game) use server_side::state_digest;
+#[cfg(feature = "state-digest")]
+pub(in crate::game) use server_side::state_transcript;
+
+#[cfg(feature = "state-digest")]
+macro_rules! record_turn {
+    ($dim:expr, $id:expr, $ty:expr, $vehicle:expr) => {
+        if crate::game::state_transcript::is_recording() {
+            crate::game::state_transcript::record_turn($dim, $id, $ty, $vehicle);
+        }
+    };
+}
+#[cfg(not(feature = "state-digest"))]
+macro_rules! record_turn {
+    ($dim:expr, $id:expr, $ty:expr, $vehicle:expr) => {};
+}
+pub(in crate::game) use record_turn;
+
+#[cfg(feature = "state-digest")]
+macro_rules! record_departure {
+    ($dim:expr, $id:expr, $ty:expr, $reason:expr) => {
+        if crate::game::state_transcript::is_recording() {
+            crate::game::state_transcript::record_departure($dim, $id, $ty, $reason);
+        }
+    };
+}
+#[cfg(not(feature = "state-digest"))]
+macro_rules! record_departure {
+    ($dim:expr, $id:expr, $ty:expr, $reason:expr) => {};
+}
+pub(in crate::game) use record_departure;
 #[allow(unused_imports)]
 pub use server_side::stats;
 #[allow(unused_imports)]

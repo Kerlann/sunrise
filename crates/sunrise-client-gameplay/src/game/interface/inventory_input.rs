@@ -220,19 +220,24 @@ impl crate::game::ClientGame<'_> {
         if self.mod_browser_press(right) {
             return true;
         }
-        if !right && self.sort_press() {
-            return true;
-        }
-        // AbstractRecipeBookScreen lets the book handle its buttons before
-        // AbstractContainerScreen starts a drag or chooses an outside slot.
-        // Toggling it can move the inventory under the pointer before release.
-        if self.recipe_book_click(right) {
-            self.client.inv_clicks.skip_release();
-            return true;
+        if !sunrise_client::widgets::is_blocking_engine_widget_click() {
+            if !right && self.sort_press() {
+                return true;
+            }
+            // AbstractRecipeBookScreen lets the book handle its buttons before
+            // AbstractContainerScreen starts a drag or chooses an outside slot.
+            // Toggling it can move the inventory under the pointer before release.
+            if self.recipe_book_click(right) {
+                self.client.inv_clicks.skip_release();
+                return true;
+            }
         }
         if self.native_screen_press(right) {
             self.client.inv_clicks.skip_release();
             return true;
+        }
+        if self.is_redirecting_engine_click() {
+            return self.station_widget_click(right);
         }
         let (slot, outside) = self.inventory_target();
         // mouseClicked: `lastClickSlot = slot` for every press that reaches

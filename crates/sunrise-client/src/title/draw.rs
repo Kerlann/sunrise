@@ -120,23 +120,6 @@ impl Title {
                 if let Some(nightly) = sunrise_core::release::nightly_label() {
                     batch.text(atlas, &nightly, 2.0, 2.0, u32::MAX, true);
                 }
-                // `extractContents` underlines the notice while hovered or focused, and its
-                // press opens the credits; a mod may have removed it at init.
-                if !self.removed_children.contains(&CREDITS_ID) {
-                    let (notice, rect) = credits_notice(atlas, w, h);
-                    self.credits_button.set(rect);
-                    crate::widgets::record(&notice, rect, true);
-                    let inside = cursor.0 >= rect[0]
-                        && cursor.0 < rect[0] + rect[2]
-                        && cursor.1 >= rect[1]
-                        && cursor.1 < rect[1] + rect[3];
-                    crate::widgets::widget_cursor(inside, true);
-                    let mut text = Text::literal(notice);
-                    if inside {
-                        text = text.underlined();
-                    }
-                    batch.text_styled(atlas, &text, rect[0], rect[1], u32::MAX, true);
-                }
             }
             Mode::Select { worlds, selected } => {
                 crate::ui::menu_background(batch, atlas, 0.0, 0.0, w, h, false);
@@ -517,28 +500,79 @@ impl Title {
                     centered(atlas, batch, line, 70.0 + i as f32 * 9.0, u32::MAX);
                 }
                 // The Checkbox: at `width / 2 - 155 + 80`, `76 + textSize`.
+                let label_text = Text::translate("selectWorld.backupEraseCache", &[]);
                 let label = lang::get_or("selectWorld.backupEraseCache", "Erase Cached Data");
                 let width = BOX + 4.0 + HudBatch::text_width(atlas, &label).ceil();
                 let x = (w / 2.0).floor() - 155.0 + 80.0;
                 let y = 76.0 + (lines.len() as f32 + 1.0) * 9.0;
-                self.erase_check.set([x, y, width, BOX]);
-                crate::widgets::target([x, y, width, BOX]);
+                let default_rect = [x, y, width, BOX];
+                self.erase_check.set(default_rect);
                 let hover = (x..x + width).contains(&cursor.0) && (y..y + BOX).contains(&cursor.1);
-                let sprite = match (*erase_cache, hover) {
-                    (true, true) => "widget/checkbox_selected_highlighted",
-                    (true, false) => "widget/checkbox_selected",
-                    (false, true) => "widget/checkbox_highlighted",
-                    (false, false) => "widget/checkbox",
-                };
-                batch.sprite_scaled(atlas, sprite, x, y, BOX, BOX, u32::MAX);
-                batch.text(
-                    atlas,
-                    &label,
-                    x + BOX + 4.0,
-                    y + 4.0,
-                    rgba(224, 224, 224, 255),
-                    true,
-                );
+                match crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
+                    bucket: crate::widgets::WidgetBucket::Checkbox,
+                    rect: default_rect,
+                    label: Some(&label_text),
+                    explicit_key: None,
+                    active: true,
+                    hovered: hover,
+                    focused: false,
+                    tab_order_group: 0,
+                }) {
+                    crate::widgets::ResolvedEngineWidget::Skip => {}
+                    crate::widgets::ResolvedEngineWidget::Unchanged => {
+                        crate::widgets::record(&label, default_rect, true);
+                        crate::widgets::target(default_rect);
+                        let sprite = match (*erase_cache, hover) {
+                            (true, true) => "widget/checkbox_selected_highlighted",
+                            (true, false) => "widget/checkbox_selected",
+                            (false, true) => "widget/checkbox_highlighted",
+                            (false, false) => "widget/checkbox",
+                        };
+                        batch.sprite_scaled(atlas, sprite, x, y, BOX, BOX, u32::MAX);
+                        batch.text(
+                            atlas,
+                            &label,
+                            x + BOX + 4.0,
+                            y + 4.0,
+                            rgba(224, 224, 224, 255),
+                            true,
+                        );
+                    }
+                    crate::widgets::ResolvedEngineWidget::Draw(props) => {
+                        let [rx, ry, rw, rh] = props.rect;
+                        let draw_text = props.message.as_ref().unwrap_or(&label_text);
+                        crate::widgets::record(&draw_text.plain(), [rx, ry, rw, rh], props.active);
+                        if props.active {
+                            crate::widgets::target([rx, ry, rw, rh]);
+                        }
+                        let lit = props
+                            .override_render_highlighted_sprite
+                            .unwrap_or(props.active && props.hovered);
+                        let sprite = match (*erase_cache, lit) {
+                            (true, true) => "widget/checkbox_selected_highlighted",
+                            (true, false) => "widget/checkbox_selected",
+                            (false, true) => "widget/checkbox_highlighted",
+                            (false, false) => "widget/checkbox",
+                        };
+                        let tint = crate::widgets::white_abgr_alpha(props.alpha);
+                        let text_color = crate::widgets::scale_abgr_alpha(
+                            props
+                                .label_text_color
+                                .map(crate::hud_layout::abgr)
+                                .unwrap_or_else(|| rgba(224, 224, 224, 255)),
+                            props.alpha,
+                        );
+                        batch.sprite_scaled(atlas, sprite, rx, ry, BOX, BOX, tint);
+                        batch.text_styled(
+                            atlas,
+                            draw_text,
+                            rx + BOX + 4.0,
+                            ry + 4.0,
+                            text_color,
+                            true,
+                        );
+                    }
+                }
             }
             Mode::Optimize { world } => {
                 crate::ui::menu_background(batch, atlas, 0.0, 0.0, w, h, false);
@@ -716,38 +750,112 @@ impl Title {
                     );
                 }
                 // Checkbox: the box, its label right of it (as the dialogs draw theirs).
+                let label_text = Text::translate("multiplayerWarning.check", &[]);
                 let label =
                     lang::get_or("multiplayerWarning.check", "Do not show this screen again");
                 let width = BOX + 4.0 + HudBatch::text_width(atlas, &label).ceil();
                 let x = (w / 2.0).floor() - (width / 2.0).floor();
                 let y = top + 57.0 + lines.len() as f32 * 9.0;
-                self.warning_check.set([x, y, width, BOX]);
-                crate::widgets::target([x, y, width, BOX]);
+                let default_rect = [x, y, width, BOX];
+                self.warning_check.set(default_rect);
                 let hover = (x..x + width).contains(&cursor.0) && (y..y + BOX).contains(&cursor.1);
-                crate::widgets::narratable(|| {
-                    crate::widgets::Narratable::checkbox(
-                        label.clone(),
-                        *check,
-                        [x, y, width, BOX],
-                        true,
-                    )
-                    .hovered(hover)
-                });
-                let sprite = match (*check, hover) {
-                    (true, true) => "widget/checkbox_selected_highlighted",
-                    (true, false) => "widget/checkbox_selected",
-                    (false, true) => "widget/checkbox_highlighted",
-                    (false, false) => "widget/checkbox",
-                };
-                batch.sprite_scaled(atlas, sprite, x, y, BOX, BOX, u32::MAX);
-                batch.text(
-                    atlas,
-                    &label,
-                    x + BOX + 4.0,
-                    y + 4.0,
-                    rgba(224, 224, 224, 255),
-                    true,
-                );
+                match crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
+                    bucket: crate::widgets::WidgetBucket::Checkbox,
+                    rect: default_rect,
+                    label: Some(&label_text),
+                    explicit_key: None,
+                    active: true,
+                    hovered: hover,
+                    focused: false,
+                    tab_order_group: 0,
+                }) {
+                    crate::widgets::ResolvedEngineWidget::Skip => {}
+                    crate::widgets::ResolvedEngineWidget::Unchanged => {
+                        crate::widgets::record(&label, default_rect, true);
+                        crate::widgets::target(default_rect);
+                        crate::widgets::narratable(|| {
+                            crate::widgets::Narratable::checkbox(
+                                label.clone(),
+                                *check,
+                                default_rect,
+                                true,
+                            )
+                            .hovered(hover)
+                        });
+                        let sprite = match (*check, hover) {
+                            (true, true) => "widget/checkbox_selected_highlighted",
+                            (true, false) => "widget/checkbox_selected",
+                            (false, true) => "widget/checkbox_highlighted",
+                            (false, false) => "widget/checkbox",
+                        };
+                        batch.sprite_scaled(atlas, sprite, x, y, BOX, BOX, u32::MAX);
+                        batch.text(
+                            atlas,
+                            &label,
+                            x + BOX + 4.0,
+                            y + 4.0,
+                            rgba(224, 224, 224, 255),
+                            true,
+                        );
+                    }
+                    crate::widgets::ResolvedEngineWidget::Draw(props) => {
+                        let [rx, ry, rw, rh] = props.rect;
+                        let draw_text = props.message.as_ref().unwrap_or(&label_text);
+                        let draw_plain = draw_text.plain();
+                        let props_active = props.active;
+                        let props_hovered = props.hovered;
+                        let tab_order_group = props.tab_order_group;
+                        let tooltip_hint = props.tooltip_narration.clone();
+                        crate::widgets::record(&draw_plain, [rx, ry, rw, rh], props_active);
+                        if props_active {
+                            crate::widgets::target([rx, ry, rw, rh]);
+                        }
+                        crate::widgets::narratable(|| {
+                            let mut n = crate::widgets::Narratable::checkbox(
+                                draw_plain.clone(),
+                                *check,
+                                [rx, ry, rw, rh],
+                                props_active,
+                            );
+                            crate::widgets::apply_narration_overrides(
+                                &mut n,
+                                [rx, ry, rw, rh],
+                                props_active,
+                                props_hovered,
+                                Some(&draw_plain),
+                                tab_order_group,
+                                tooltip_hint,
+                            );
+                            n
+                        });
+                        let lit = props
+                            .override_render_highlighted_sprite
+                            .unwrap_or(props_active && props_hovered);
+                        let sprite = match (*check, lit) {
+                            (true, true) => "widget/checkbox_selected_highlighted",
+                            (true, false) => "widget/checkbox_selected",
+                            (false, true) => "widget/checkbox_highlighted",
+                            (false, false) => "widget/checkbox",
+                        };
+                        let tint = crate::widgets::white_abgr_alpha(props.alpha);
+                        let text_color = crate::widgets::scale_abgr_alpha(
+                            props
+                                .label_text_color
+                                .map(crate::hud_layout::abgr)
+                                .unwrap_or_else(|| rgba(224, 224, 224, 255)),
+                            props.alpha,
+                        );
+                        batch.sprite_scaled(atlas, sprite, rx, ry, BOX, BOX, tint);
+                        batch.text_styled(
+                            atlas,
+                            draw_text,
+                            rx + BOX + 4.0,
+                            ry + 4.0,
+                            text_color,
+                            true,
+                        );
+                    }
+                }
             }
             Mode::Onboarding(_) => {
                 fade_from = Some(self.draw_onboarding(atlas, batch, w, h, phases))
@@ -794,63 +902,93 @@ impl Title {
         // The hovered button's `Tooltip`, drawn once the widgets are.
         let mut button_tooltip = None;
         for b in self.buttons(w, h) {
-            crate::widgets::record(&b.label, [b.x, b.y, b.w, 20.0], b.enabled);
-            // Realms' icon buttons have no label to record.
-            if b.enabled && b.label.trim().is_empty() {
-                crate::widgets::target([b.x, b.y, b.w, 20.0]);
+            let rect = [b.x, b.y, b.w, 20.0];
+            let inside = crate::ui::hovered(cursor, b.x, b.y, b.w, 20.0);
+            let label = b.display_text();
+            let tip_overridden =
+                crate::widgets::active_tooltip_overridden(&crate::widgets::EngineWidgetKey {
+                    key: crate::widgets::stable_key_from_text(label.as_ref()),
+                    bucket: crate::widgets::WidgetBucket::Button,
+                    occurrence: 0,
+                });
+            if inside
+                && !tip_overridden
+                && let Some(key) = self.button_tooltip(b.id)
+            {
+                button_tooltip = Some((key, rect));
             }
-            if let Some(action) = b.action.filter(|_| !self.preparing) {
-                crate::widgets::declare_action(action, [b.x, b.y, b.w, 20.0], b.enabled);
-            }
-            let inside =
-                cursor.0 >= b.x && cursor.0 < b.x + b.w && cursor.1 >= b.y && cursor.1 < b.y + 20.0;
-            crate::widgets::narratable(|| self.button_narration(&b).hovered(inside));
-            crate::widgets::widget_cursor(inside, b.enabled);
-            if inside && let Some(key) = self.button_tooltip(b.id) {
-                button_tooltip = Some((key, [b.x, b.y, b.w, 20.0]));
-            }
-            let is_focused = self.focused_button == Some(b.id);
-            let hover = b.enabled && (inside || is_focused);
-            let sprite = if !b.enabled {
-                "widget/button_disabled"
-            } else if hover {
-                "widget/button_highlighted"
-            } else {
-                "widget/button"
-            };
-            // `AbstractButton.extractDefaultSprite`: `blitSprite`, as the sprite's `gui.scaling` says.
-            crate::ui::nine_slice(batch, atlas, sprite, b.x, b.y, b.w, 20.0, u32::MAX);
-            let color = if b.enabled {
-                u32::MAX
-            } else {
-                rgba(160, 160, 160, 255)
-            };
-            if let Some((icon, size)) = b.icon {
-                // CenteredIcon divides the button and sprite sizes separately:
-                // a 15px icon in a 20px button starts at 10 - 7 = 3, not 2.
-                batch.sprite_scaled(
-                    atlas,
+            let icon = b
+                .icon
+                .map(|(sprite, size)| crate::ui::ButtonIcon::Centered { sprite, size })
+                .or_else(|| {
+                    b.trailing
+                        .map(|(sprite, size)| crate::ui::ButtonIcon::Trailing { sprite, size })
+                });
+            crate::ui::button_decorated(
+                batch,
+                atlas,
+                rect,
+                label.as_ref(),
+                crate::ui::ButtonVisualState {
+                    active: b.enabled,
+                    hovered: inside,
+                    focused: self.focused_button == Some(b.id),
+                },
+                crate::ui::ButtonStyle {
+                    action: b.action.filter(|_| !self.preparing),
                     icon,
-                    b.x + (b.w / 2.0).floor() - (size / 2.0).floor(),
-                    b.y + 10.0 - (size / 2.0).floor(),
-                    size,
-                    size,
-                    u32::MAX,
-                );
-                continue;
-            }
-            b.draw_label(batch, atlas, color);
-            if let Some((icon, size)) = b.trailing {
-                // TextAndIcon: `x + width - spriteWidth - 2`, centred in the height.
-                batch.sprite_scaled(
-                    atlas,
-                    icon,
-                    b.x + b.w - size - 2.0,
-                    b.y + 10.0 - (size / 2.0).floor(),
-                    size,
-                    size,
-                    u32::MAX,
-                );
+                    ..crate::ui::ButtonStyle::default()
+                },
+                |_| self.button_narration(&b),
+            );
+        }
+        // `TitleScreen.init`'s bottom `PlainTextButton`: added last, after Quit Game.
+        if matches!(self.mode, Mode::Main) {
+            let (notice, rect) = credits_notice(atlas, w, h);
+            self.credits_button.set(rect);
+            let inside = cursor.0 >= rect[0]
+                && cursor.0 < rect[0] + rect[2]
+                && cursor.1 >= rect[1]
+                && cursor.1 < rect[1] + rect[3];
+            let credits_text = Text::translate(CREDITS_KEY, &[]);
+            match crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
+                bucket: crate::widgets::WidgetBucket::Button,
+                rect,
+                label: Some(&credits_text),
+                explicit_key: None,
+                active: true,
+                hovered: inside,
+                focused: false,
+                tab_order_group: 0,
+            }) {
+                crate::widgets::ResolvedEngineWidget::Skip => {}
+                crate::widgets::ResolvedEngineWidget::Unchanged => {
+                    crate::widgets::record(&notice, rect, true);
+                    crate::widgets::widget_cursor(inside, true);
+                    let mut text = Text::literal(notice);
+                    if inside {
+                        text = text.underlined();
+                    }
+                    batch.text_styled(atlas, &text, rect[0], rect[1], u32::MAX, true);
+                }
+                crate::widgets::ResolvedEngineWidget::Draw(props) => {
+                    let [rx, ry, rw, rh] = props.rect;
+                    let draw_text = props.message.as_ref().unwrap_or(&credits_text);
+                    crate::widgets::record(&draw_text.plain(), [rx, ry, rw, rh], props.active);
+                    crate::widgets::widget_cursor(props.hovered, props.active);
+                    let mut styled = draw_text.clone();
+                    if props.hovered && props.active {
+                        styled = styled.underlined();
+                    }
+                    let color = crate::widgets::label_abgr_color(
+                        props.active,
+                        props.label_text_color,
+                        props.alpha,
+                    );
+                    if (color >> 24) != 0 {
+                        batch.text_styled(atlas, &styled, rx, ry, color, true);
+                    }
+                }
             }
         }
         // RealmsHeader's notification badges sit on their buttons, so they draw after.

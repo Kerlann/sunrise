@@ -1,0 +1,5 @@
+# LevelRef::is_unobstructed (#6036).
+sunrise-client cut_layout::game::native_state_shapes::tests::is_unobstructed_tests_the_supplied_states_shape_against_building_entities lib daily child-process
+sunrise-client cut_layout::game::native_state_shapes::tests::is_unobstructed_counts_a_dead_guest_until_its_body_is_removed lib daily child-process
+sunrise-client cut_layout::game::lan_actions::tick::building_cache_tests::a_guest_killed_mid_tick_still_blocks_until_its_body_is_removed lib daily resources
+sunrise-client cut_layout::game::lan_actions::tick::building_cache_tests::a_guests_placement_is_refused_at_a_dead_guests_body_until_it_is_removed lib daily resources

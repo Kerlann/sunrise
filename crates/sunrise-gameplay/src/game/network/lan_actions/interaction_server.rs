@@ -242,22 +242,27 @@ impl crate::game::ServerGame<'_> {
             self.send_guest_motion(conn, sent);
             return Ok(Struck::Landed);
         }
-        // A ghast's fireball or a wind charge: turned along the guest's own
-        // view (ServerGamePacketListenerImpl.handleInteract, then
-        // Player.attack's AIM_DEFLECT).
-        if let Some(i) = self.creatures.projectiles.iter().position(|p| {
-            p.id != 0
-                && p.id as i32 == id
-                && sunrise_gameplay_common::game::deflect_common::attackable(p)
-        }) {
+        // A projectile in `#redirectable_projectile`: turned along the guest's
+        // own view (ServerGamePacketListenerImpl.handleInteract, then
+        // Player.attack's `deflectProjectile`, tried before any damage). A
+        // shulker bullet outside the tag is hurt instead.
+        if let Some(i) = self
+            .creatures
+            .projectiles
+            .iter()
+            .position(|p| p.id != 0 && p.id as i32 == id && self.projectile_is_pickable(p))
+        {
             let deflected = self.as_guest_at(gi, conn, |g| {
                 if packet && !g.within_interaction_range(i) {
                     return false;
                 }
-                if matches!(
-                    g.common.creatures.projectiles[i].kind,
-                    sunrise_sim::projectiles::ProjectileKind::ShulkerBullet { .. }
-                ) {
+                let p = &g.common.creatures.projectiles[i];
+                if !g.projectile_redirectable(p)
+                    && matches!(
+                        p.kind,
+                        sunrise_sim::projectiles::ProjectileKind::ShulkerBullet { .. }
+                    )
+                {
                     g.hit_shulker_bullet(i);
                 } else {
                     g.deflect(i);
@@ -532,12 +537,25 @@ impl crate::game::ServerGame<'_> {
                 Vec3::new(p.x + half, p.y + knot.height, p.z + half),
             ));
         }
-        self.common
+        if let Some(p) = self
+            .common
             .creatures
             .projectiles
             .iter()
             .find(|p| p.id != 0 && p.id as i32 == id)
-            .map(|p| p.bounds())
+        {
+            return Some(p.bounds());
+        }
+        // Tridents and firework rockets live in their own lists, not the projectile list.
+        let id = u32::try_from(id).ok().filter(|&id| id != 0)?;
+        if let Some(t) = self.common.tridents.iter().find(|t| t.id == id) {
+            return Some(sunrise_gameplay_common::game::entity::Entity::bounds(t));
+        }
+        self.common
+            .rockets
+            .iter()
+            .find(|r| r.id == id)
+            .map(sunrise_gameplay_common::game::entity::Entity::bounds)
     }
     pub(in crate::game::server_side) fn guest_tick_death(&mut self, gi: usize) {
         let removed = self.server.lan.as_mut().and_then(|host| {

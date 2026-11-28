@@ -48,7 +48,7 @@ impl crate::game::ClientGame<'_> {
             .iter()
             .find(|p| p.id as i32 == id)
         {
-            if !sunrise_gameplay_common::game::deflect_common::redirectable(projectile) {
+            if !self.projectile_redirectable(projectile) {
                 let bullet = matches!(
                     projectile.kind,
                     sunrise_sim::projectiles::ProjectileKind::ShulkerBullet { .. }

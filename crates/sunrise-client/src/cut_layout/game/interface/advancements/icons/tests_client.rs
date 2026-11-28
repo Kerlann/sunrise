@@ -185,6 +185,7 @@ fn advancement_icons_reach_local_and_remote_ui_surfaces() {
         let widget_glint = glint_vertices(&screen, 314.0, 236.0);
         game.client.cursor = (320.0, 240.0);
         let mut hover = batch();
+        game.tick_advancements_for_size((hover.width, hover.height));
         game.draw_advancements(&mut hover);
         assert_icon(&hover, 314.0, 236.0, !refused, !refused);
         assert_eq!(

@@ -61,11 +61,21 @@ pub(in crate::game) fn mob_render_bounds(
         ));
     }
 
-    let horizontal = (width * 2.0).max(height * 1.5).max(3.5);
-    let vertical = height * 3.0 + 0.5;
+    let mut horizontal = (width * 2.0).max(height * 1.5).max(3.5);
+    let mut vertical_below = height * 3.0 + 0.5;
+    let mut vertical_above = vertical_below;
+    if mob.species() == Species::Illusioner && mob.is_invisible() {
+        use sunrise_sim::mobs::illusioner;
+        // Mirror images scatter up to `MAX_HORIZONTAL_SCATTER` in +/-X/Z and up to
+        // `MAX_VERTICAL_SCATTER` above the body (+Y only), plus wobble on each axis,
+        // independent of `minecraft:scale`.
+        horizontal += illusioner::MAX_HORIZONTAL_SCATTER + illusioner::HORIZONTAL_WOBBLE;
+        vertical_below += illusioner::VERTICAL_WOBBLE;
+        vertical_above += illusioner::MAX_VERTICAL_SCATTER + illusioner::VERTICAL_WOBBLE;
+    }
     Some(Aabb::new(
-        at.subtract(Vec3::new(horizontal, vertical, horizontal)),
-        at.add_vector(Vec3::new(horizontal, vertical, horizontal)),
+        at.subtract(Vec3::new(horizontal, vertical_below, horizontal)),
+        at.add_vector(Vec3::new(horizontal, vertical_above, horizontal)),
     ))
 }
 
