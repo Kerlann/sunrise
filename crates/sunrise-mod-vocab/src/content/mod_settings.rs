@@ -159,14 +159,6 @@ pub enum SettingError {
     Duplicate(String),
     /// No setting with this key is registered by the calling mod.
     UnknownSetting(String),
-    /// A conditional setting row refers to itself, a later-registered setting, a non-choice
-    /// controller, or a choice option outside the controller's registered options.
-    InvalidVisibility {
-        /// The setting row whose visibility condition is invalid.
-        setting: String,
-        /// The choice setting controlling the row's visibility.
-        controller: String,
-    },
     /// The label, the category, or an option of a choice is empty.
     EmptyLabel,
     /// A choice has no options, or its default is not one of them.
@@ -179,6 +171,14 @@ pub enum SettingError {
     DefaultOutOfRange,
     /// A colour holds alpha or more than 24 bits.
     ColorAlpha,
+    /// A conditional setting row refers to itself, a later-registered setting, a non-choice
+    /// controller, or a choice option outside the controller's registered options.
+    InvalidVisibility {
+        /// The setting row whose visibility condition is invalid.
+        setting: String,
+        /// The choice setting controlling the row's visibility.
+        controller: String,
+    },
 }
 
 impl std::fmt::Display for SettingError {
