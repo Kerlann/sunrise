@@ -63,13 +63,49 @@ pub fn is_unobstructed<W: EntityObstructionWorld>(
         {
             continue;
         }
-        let other = VoxelShape::from_box(entity.bounds).map_err(ObstructionError::Shape)?;
-        if shape
-            .join_is_not_empty(&other, ShapeOp::AND)
-            .map_err(ObstructionError::Shape)?
-        {
+        if shape_meets_box(shape, bounds, entity.bounds).map_err(ObstructionError::Shape)? {
             return Ok(false);
         }
     }
     Ok(true)
+}
+
+/// The per-entity test of `EntityGetter.isUnobstructed`: whether `blocker` overlaps `shape`
+/// (whose bounds are `bounds`), `Shapes.joinIsNotEmpty(shape, Shapes.create(blocker),
+/// BooleanOp.AND)`. A join that cannot be evaluated (a merged grid over the size limit) is an
+/// error, never clear.
+pub fn shape_meets_box(
+    shape: &VoxelShape,
+    bounds: Aabb,
+    blocker: Aabb,
+) -> Result<bool, ShapeError> {
+    if !blocker.intersects(bounds) {
+        return Ok(false);
+    }
+    shape.join_is_not_empty(&VoxelShape::from_box(blocker)?, ShapeOp::AND)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sunrise_core::geometry::Vec3;
+
+    #[test]
+    fn a_blocker_whose_join_exceeds_the_grid_limit_is_an_error_not_clear() {
+        // 1024 x 1024 x 1 cells is the grid limit; the box's z faces at 0.25 and 0.75 split
+        // the single z cell, so the merged grid is over the limit.
+        let shape = VoxelShape::from_cube([1024, 1024, 1], &vec![true; 1024 * 1024]).unwrap();
+        let bounds = shape.bounds().unwrap();
+        let blocker = Aabb::new(Vec3::new(0.0, 0.0, 0.25), Vec3::new(1.0, 1.0, 0.75));
+        assert!(shape_meets_box(&shape, bounds, blocker).is_err());
+        // A blocker outside the bounds never reaches the join.
+        let apart = Aabb::new(Vec3::new(2.0, 0.0, 0.25), Vec3::new(3.0, 1.0, 0.75));
+        assert_eq!(shape_meets_box(&shape, bounds, apart), Ok(false));
+        let cell = VoxelShape::block();
+        let inside = Aabb::new(Vec3::new(0.2, 0.2, 0.2), Vec3::new(0.8, 0.8, 0.8));
+        assert_eq!(
+            shape_meets_box(&cell, cell.bounds().unwrap(), inside),
+            Ok(true)
+        );
+    }
 }

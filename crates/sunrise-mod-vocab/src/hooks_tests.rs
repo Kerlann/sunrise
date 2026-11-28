@@ -1124,6 +1124,9 @@ fn level_queries_take_their_hosts(
             core::ops::ControlFlow::Break(())
         });
     let _: Option<bool> = level.has_collisions(read, bounds);
+    if let Some(state) = level.block_state(read, [0, 64, 0]) {
+        let _: Result<bool, LevelReadError> = level.is_unobstructed(read, [0, 64, 0], state);
+    }
     let _: Option<Vec<EntityRayHit>> =
         level.ray_trace_entities(read, [0.0; 3], [8.0, 0.0, 0.0], 0.3, Some(shooter));
     let _: Result<Option<EntityRayHit>, LevelReadError> = level.ray_trace_nearest_entity(

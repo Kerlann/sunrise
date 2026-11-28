@@ -21,6 +21,16 @@ pub fn collision_shape(
     state: BlockStateId,
     pos: [i32; 3],
 ) -> VoxelShape {
+    try_collision_shape(collision, world, state, pos).unwrap_or_else(VoxelShape::empty)
+}
+
+/// [`collision_shape`], or `None` when the shape cannot be evaluated.
+pub fn try_collision_shape(
+    collision: &BlockCollisionRegistry<'_>,
+    world: &World,
+    state: BlockStateId,
+    pos: [i32; 3],
+) -> Option<VoxelShape> {
     let mut scene = SceneCollisions {
         world,
         binding: collision,
@@ -33,7 +43,7 @@ pub fn collision_shape(
             BlockPos::new(pos[0], pos[1], pos[2]),
             &CollisionContext::empty(false),
         )
-        .unwrap_or_else(|_| VoxelShape::empty())
+        .ok()
 }
 
 /// The geometry chosen by selection, before its column offset is applied.

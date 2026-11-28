@@ -1,7 +1,8 @@
 //! The players' boxes the guests' turns of one tick share (`building_cache`):
 //! a guest teleported, killed or put in spectator mode in the middle of the
 //! tick blocks placement where it is now, as when each turn built the boxes
-//! afresh, not at its box from the start of the tick.
+//! afresh, not at its box from the start of the tick. A killed guest's body
+//! still blocks until `LivingEntity.tickDeath` removes it at death tick 20.
 use crate::settings::Settings;
 use std::sync::{Arc, atomic::AtomicI32, mpsc};
 use sunrise_level::chunk::Chunk;
@@ -20,10 +21,7 @@ pub(crate) type Boxes = Vec<([f64; 3], [f64; 3])>;
 pub(crate) fn game<'a>(
     resources: &'a mut Option<std::sync::Arc<sunrise_gameplay_common::game::Resources>>,
 ) -> sunrise_gameplay::game::ServerGame<'a> {
-    let root = std::path::PathBuf::from(
-        std::env::var_os("SUNRISE_TEST_RESOURCES")
-            .expect("set SUNRISE_TEST_RESOURCES to prepared resources"),
-    );
+    let root = crate::prepared_test_root::prepared_root(&[]);
     let settings = Settings::default();
     let loaded = load_resources(
         sunrise_assets::resource_source::ResourceRoot::directory(root.clone()),
@@ -158,12 +156,67 @@ fn a_teleported_guest_blocks_where_it_went_not_where_the_tick_began() {
 
 #[test]
 #[ignore = "daily"]
-fn a_guest_killed_mid_tick_no_longer_blocks() {
+fn a_guest_killed_mid_tick_still_blocks_until_its_body_is_removed() {
     // The kill takes its health; the guest dies in its own turn of the tick.
+    // `ServerPlayer.die` leaves the body in the level (its pose may shrink the box).
     let (before, cached, fresh) = the_mover_changed_mid_tick("kill Mover", true);
     assert!(mover_at(&before, 8.5));
-    assert!(!mover_at(&cached, 8.5));
+    assert!(
+        cached
+            .iter()
+            .any(|(min, max)| min[0] <= 8.5 && 8.5 <= max[0])
+    );
     assert_eq!(cached, fresh);
+}
+
+/// `BlockItem.canPlace` in a guest's turn: the Builder's stone is refused in the
+/// cell of the Mover's dead body for its death ticks 0 to 19 and placed at tick
+/// 20, when `LivingEntity.tickDeath` has removed the body (`EntityGetter.isUnobstructed`
+/// skips only removed entities and spectators).
+#[test]
+#[ignore = "daily"]
+fn a_guests_placement_is_refused_at_a_dead_guests_body_until_it_is_removed() {
+    use sunrise_gameplay_common::game::{GuestUse, Hit};
+    use sunrise_items::items::ItemStack;
+    use sunrise_sim::first_person_sim::Hand;
+    let mut resources = None;
+    let mut game = game(&mut resources);
+    let (floor, cell) = ([8, 99, 8], [8, 100, 8]);
+    let hub = &mut game.server.lan.as_mut().unwrap().hub;
+    hub.guests
+        .update(1, |builder| builder.position = [10.5, 100.0, 8.5]);
+    let air = game.world.block(cell[0], cell[1], cell[2]);
+    let hit = Hit {
+        pos: floor,
+        face: [0, 1, 0],
+        point: [8.5, 100.0, 8.5],
+        inside: false,
+    };
+    for death_time in [0, 19, 20] {
+        game.server
+            .lan
+            .as_mut()
+            .unwrap()
+            .hub
+            .guests
+            .update(0, |mover| {
+                mover.health = 0.0;
+                mover.dead = true;
+                mover.death_time = death_time;
+            });
+        game.as_guest(3, |g| {
+            g.using = None;
+            g.cooldowns = Default::default();
+            *g.held_mut() = Some(ItemStack::new("minecraft:stone", 1));
+            g.server.forced_hit = Some(hit);
+            g.server.guest_use = Some(GuestUse::on_block(Hand::Main));
+            g.with_player_actor(|g| g.use_hand(Some(&hit))).unwrap();
+            g.server.guest_use = None;
+        })
+        .unwrap();
+        let placed = game.world.block(cell[0], cell[1], cell[2]) != air;
+        assert_eq!(placed, death_time >= 20, "death tick {death_time}");
+    }
 }
 
 #[test]

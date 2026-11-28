@@ -193,8 +193,7 @@ pub(in crate::game) fn building_player(g: &sunrise_sim::lan::guest::Guest) -> Bu
         bounds: (g.participates_in_player_simulation()
             && g.placed
             && g.loaded
-            && !g.dead
-            && !g.spectator())
+            && g.blocks_building())
         .then(|| g.bounds()),
         borrowed: false,
     }
