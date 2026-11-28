@@ -422,8 +422,8 @@ Defaults marked "true" for the shadow-content keys are not stated by `[OF-SP]`; 
 | Key | Value | Meaning | Tier / source |
 |---|---|---|---|
 | `alphaTest.<program>` | `off` or `<func> <ref>`; func ∈ `NEVER LESS EQUAL LEQUAL GREATER NOTEQUAL GEQUAL GL_ALWAYS` | alpha test of a gbuffers program. With `gl_FragColor`/`gl_FragData` output the loader applies it to output 0; with `out` variables only `alphaTestRef` is passed and the pack discards itself | A `[OF-SP]`, `[IR:rendering]`, `[IR:Uniforms/rendering]` |
-| `blend.<program>` | `off` or `<src> <dst> <srcA> <dstA>` | blend factors of a gbuffers program; factors: `ZERO ONE SRC_COLOR ONE_MINUS_SRC_COLOR DST_COLOR ONE_MINUS_DST_COLOR SRC_ALPHA ONE_MINUS_SRC_ALPHA DST_ALPHA ONE_MINUS_DST_ALPHA SRC_ALPHA_SATURATE` | A |
-| `blend.<program>.<buffer>` | same | per output buffer (`colortex5`...); others keep the program's | A (`PER_BUFFER_BLENDING` E queries support) |
+| `blend.<program>` | `off` or `<src> <dst> <srcA> <dstA>` | blend factors of a gbuffers program, or of a begin, prepare, deferred or composite program (below); factors: `ZERO ONE SRC_COLOR ONE_MINUS_SRC_COLOR DST_COLOR ONE_MINUS_DST_COLOR SRC_ALPHA ONE_MINUS_SRC_ALPHA DST_ALPHA ONE_MINUS_DST_ALPHA SRC_ALPHA_SATURATE` | A |
+| `blend.<program>.<buffer>` | same | per output buffer (`colortex5`...) of a gbuffers program; others keep the program's. No effect on begin, prepare, deferred or composite programs (below) | A (`PER_BUFFER_BLENDING` E queries support) |
 | `scale.<program>` | `<s>` or `<s> <ox> <oy>`, each 0..1 | viewport of a composite-style program within its output: only the region is drawn, buffer size unchanged | A `[OF-SP]`, `[IR:rendering]`; `[SD]` says offsets unsupported, OQ-22 |
 | `flip.<program>.<buffer>` | bool | force or suppress the main/alt flip of that buffer after that program (6.1.6) | A |
 | `size.buffer.<buffer>` | `<w> <h>`: integers = pixels, decimals = fraction of the render size | fixed size of a colortex buffer; gbuffers programs cannot render to it; one program renders only to buffers of one size | A `[OF-SP]`, `[IR:rendering]` |
@@ -435,7 +435,15 @@ Defaults marked "true" for the shadow-content keys are not stated by `[OF-SP]`; 
 | `beacon.beam.depth` | bool | the opaque inner beam writes depth (all depth buffers) | A, default false |
 
 The default blend for translucent geometry is `SRC_ALPHA ONE_MINUS_SRC_ALPHA ONE ONE_MINUS_SRC_ALPHA` `[IR:rendering]`.
-Composite-style programs draw with blending disabled `[OF-SH Color Attachments]`. Other per-program defaults: OQ-23.
+Begin, prepare, deferred and composite programs draw with blending disabled when `shaders.properties` has no
+`blend.<program>` for them `[OF-SH Color Attachments]`. A `blend.<program>` line blends every buffer such a program
+writes, and its `blend.<program>.<buffer>` lines have no effect: a buffer's `off` under a program blend still blends,
+and a buffer's factors without a program blend do not blend. Evidence: an observation with Iris 1.11.7 and a probe
+pack of Sunrise's own (commit `0582226502`: 0.25 drawn over 0.75 with `SRC_ALPHA ONE_MINUS_SRC_ALPHA ONE ZERO` read
+0.625). The rules are stated in the comment in `sunrise_shaders::load_post` and pinned for deferred and composite
+programs by its test `composite_programs_blend_as_their_program_says`. No probe of begin or prepare programs is
+recorded: for them both rules are assumed to match, unprobed. `shadowcomp` and `final` were not part of the
+observation; for them the `[OF-SH]` rule (blending disabled) stands. Other per-program defaults: OQ-23.
 
 #### Custom uniforms
 
@@ -856,7 +864,8 @@ How the smoothing is stepped (per frame with frame time, or per tick) is not doc
   the n-th buffer of the list. Without either, the program writes buffers 0–7 in order. At most 8 outputs at once. `[OF-SH]`, `[IR:Constants/rendertargets]`
 - Begin, prepare, gbuffers, deferred and composite programs can write any colortex buffer. `[IR:Buffers/colortex]`
 - A listed buffer that the shader does not write receives undefined data. `[IR:Constants/rendertargets]`
-- Composite-style programs write with blending off. Writing a buffer that the same program samples gives artefacts
+- Composite-style programs write with blending off, except that a begin, prepare, deferred or composite program
+  blends as its `blend.<program>` says (3.2). Writing a buffer that the same program samples gives artefacts
   unless the flip (6.1.6) separates them. `[OF-SH]`
 - `final` writes to the screen; its output 0 is the displayed colour.
 
