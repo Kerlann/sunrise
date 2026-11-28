@@ -4086,6 +4086,10 @@ fn press_id_and_mutating_widgets_from_screen_input_hooks_and_lazy_discovery() {
             );
             send_mouse_button(game, win_id, MouseButton::Left, true);
             let fov_after_press = game.client.settings.fov;
+            // A foreign right press and release while Left owns the Options slider drag
+            // must not drop active_pointer or end the drag.
+            send_mouse_button(game, win_id, MouseButton::Right, true);
+            send_mouse_button(game, win_id, MouseButton::Right, false);
             move_mouse(
                 game,
                 win_id,
@@ -4093,11 +4097,23 @@ fn press_id_and_mutating_widgets_from_screen_input_hooks_and_lazy_discovery() {
                 f64::from(online_rect[1] + online_rect[3] * 0.5),
             );
             let fov_after_drag = game.client.settings.fov;
-            send_mouse_button(game, win_id, MouseButton::Left, false);
             assert!(
                 fov_after_drag > fov_after_press,
-                "moved slider over Online button must receive press and drag"
+                "moved slider over Online button must still receive Left drag after Right press/release"
             );
+            // Hiding the Options slider mid-drag cancels the drag so further Left motion has no effect.
+            assert!(game.screen_widgets().unwrap().set_visible(fov_id, false));
+            move_mouse(
+                game,
+                win_id,
+                f64::from(online_rect[0] + 10.0),
+                f64::from(online_rect[1] + online_rect[3] * 0.5),
+            );
+            assert_eq!(
+                game.client.settings.fov, fov_after_drag,
+                "hiding Options slider mid-drag must cancel further Left drag motion"
+            );
+            send_mouse_button(game, win_id, MouseButton::Left, false);
             assert_eq!(
                 game.client.chat_ui.options.page(),
                 sunrise_client::options_ui::Page::Main,
