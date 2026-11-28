@@ -83,12 +83,12 @@ impl MobWorld<'_> {
             let chunk = match cached_chunk {
                 Some((k, c)) if k == key => c,
                 _ => {
-                    let c = self.world.chunks.get(&key).map(std::sync::Arc::as_ref);
+                    let c = self.world.chunk_at(key.0, key.1);
                     cached_chunk = Some((key, c));
                     c
                 }
             };
-            chunk.map_or(self.world.air, |c| c.block(bx & 15, by, bz & 15))
+            self.world.block_with_chunk(bx, by, bz, chunk)
         };
         for dx in -1..=1 {
             let nx = x.saturating_add(dx);
