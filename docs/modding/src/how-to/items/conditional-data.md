@@ -7,7 +7,7 @@ instruments, damage types, advancements, other supported synchronized vanilla re
 [mod-declared datapack registries](../content-mods.md), even if their entries are never sent to clients.
 Every condition must hold; a false condition omits the file. Mods can also
 [register custom conditions](#registering-custom-conditions) for this same evaluator.
-Register one handler per id using the read-only `RegistrationContext`. A handler
+Register one handler per id through `Registrar` in `Hooks::register`. A handler
 reads the condition's JSON from a borrowed raw value and validates its own
 arguments. Invalid mod input must return `ConditionError`, never panic.
 

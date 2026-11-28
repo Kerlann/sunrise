@@ -88,10 +88,14 @@ bulk results by reference. Keep IDs or keys and read again with the next host, o
 copy only when needed: `data_map_value(host, registry, entry, map)?.cloned()` for a tag, or
 `data_map_entries(host, registry, map)?.to_vec()` for all the rows. A point read answers:
 
-- `Ok(Some(value))`: the merged value. The newest file wins, a `#tag` gives every entry in it the
-  value, `replace` drops what earlier files set and `remove` takes entries away.
+- `Ok(Some(value))`: the merged value. With the default merger the newest file wins (custom
+  mergers combine overlapping values across files and when `#tag` and direct entries overlap
+  within the same file, in file order), a `#tag` gives every entry in it the value, `replace`
+  drops what earlier files set, and `remove` takes entries away.
 - `Ok(None)`: the map gives this entry no value.
-- `Err(DataMapError::UnknownType)`: neither the engine nor a mod registered the map for that registry during startup.
+- `Err(DataMapError::UnknownType)`: this side has a data-map publication, but it does not
+  contain the requested map for this registry (for example, it was not registered during startup,
+  or on a client it was not synced).
 - `Err(DataMapError::Undecodable)`: a typed read's `decode` refused the entry's NBT value.
 - `Err(DataMapError::Unavailable)`: no maps are loaded here (a client that has not received
   synced data maps, a server before its world's data first loads, or a host without a game).
@@ -194,18 +198,18 @@ survives reloads and uses the mod `Wire` format for `Identifier` (a length-prefi
 and a length-prefixed path); this is not the vanilla `ResourceKey.streamCodec` network format.
 
 `host.biome("minecraft:plains")` (or `key.view(host)`) resolves a scoped, generation-bound
-`BiomeView<'_>` (vanilla's `Holder<Biome>`) borrowing from the installed server world registry.
-Its `id()` borrows the canonical name (`&str`) directly from the snapshot and `key()` borrows
-its `BiomeKey`, with no wire codec and no way to outlive the host borrow. Both
-`key.data(host, &map)` and `view.data(host, &map)` return an owned value from maps whose
-`DataMap::Entry` is `BiomeKey`, including `neoforge:villager_types` in
-`minecraft:worldgen/biome`. Missing entries return `Ok(None)`. Lookups return
-`BiomeKeyError::Unavailable` (and `data` returns `DataMapError::Unavailable`) on clients,
-before world data is installed, or in phases that forbid world-data reads. An invalid identifier
-returns `BiomeKeyError::InvalidIdentifier`; an unregistered biome returns
-`BiomeKeyError::UnknownBiome` (or `DataMapError::InvalidKey` from `data`), and
-a view checked against another host or generation returns `BiomeKeyError::WrongGeneration`
-(or `DataMapError::InvalidKey` from `data`).
+`BiomeView<'_>` (vanilla's `Holder<Biome>`) borrowing from the installed biome registry (the
+server's world biome registry or a joined client's synced biome registry). Its `id()` borrows the
+canonical name (`&str`) directly from the snapshot and `key()` borrows its `BiomeKey`, with no
+wire codec and no way to outlive the host borrow. Both `key.data(host, &map)` and
+`view.data(host, &map)` return an owned value from maps whose `DataMap::Entry` is `BiomeKey`,
+including `neoforge:villager_types` in `minecraft:worldgen/biome`. Missing entries return
+`Ok(None)`. Lookups return `BiomeKeyError::Unavailable` (and `data` returns
+`DataMapError::Unavailable`) before world data is installed, on a client before synced registries
+and data maps arrive, or in phases that forbid world-data reads. An invalid identifier returns
+`BiomeKeyError::InvalidIdentifier`; an unregistered biome returns `BiomeKeyError::UnknownBiome`
+(or `DataMapError::InvalidKey` from `data`), and a view checked against another host or
+generation returns `BiomeKeyError::WrongGeneration` (or `DataMapError::InvalidKey` from `data`).
 
 Game events use `GameEventKey`, resolved with `host.game_event_key("minecraft:step")`
 after startup registry completion. The key is load-owned and survives world data
@@ -214,5 +218,5 @@ or `GameEventKeyError`; unknown slots return `InvalidKey` rather than panicking.
 `let name = key.id(host)?;` and `name.as_str()` instead of copying it. A `DataMap` whose
 `Entry` is `GameEventKey` reads `minecraft:game_event`, including
 `neoforge:vibration_frequencies` (canonical NBT compound with an `Int` `frequency` field). Missing values return
-`Ok(None)`; clients and reads before data installation return
+`Ok(None)`; reads before data installation (or on a client before synced data maps arrive) return
 `DataMapError::Unavailable`. Invalid keys return `DataMapError::InvalidKey`.

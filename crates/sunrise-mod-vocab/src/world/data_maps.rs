@@ -95,9 +95,10 @@ pub trait DataMap: Send + Sync + 'static {
     fn network_value(&self, value: &Tag) -> Option<Tag> {
         Some(value.clone())
     }
-    /// Combine an older layer's value with a newer layer's value for the same entry when
-    /// the newer entry did not set `"replace": true` (`DataMapValueMerger`).
-    /// Default is last-wins (`Ok(incoming.clone())`).
+    /// Combine an existing value with an incoming value for the same entry when the incoming
+    /// entry did not set `"replace": true` (`DataMapValueMerger`). Invoked both across pack
+    /// layers and when overlapping `#tag` and direct entries target the same entry within a
+    /// single file (in file order). Default is last-wins (`Ok(incoming.clone())`).
     fn merge(&self, _entry: &Identifier, _existing: &Tag, incoming: &Tag) -> Result<Tag, String> {
         Ok(incoming.clone())
     }
@@ -721,8 +722,9 @@ impl entry::Entry for BiomeKey {
 }
 impl BiomeKey {
     /// Read this biome's data as for [`ItemKey::data`], validating the key against the
-    /// currently installed server world biome registry. Unknown biomes return
-    /// [`DataMapError::InvalidKey`]; no installed registry returns `Unavailable`.
+    /// currently installed biome registry (the server's world biome registry or a joined
+    /// client's synced biome registry). Unknown biomes return [`DataMapError::InvalidKey`];
+    /// no installed registry returns `Unavailable`.
     pub fn data<M: DataMap<Entry = BiomeKey>>(
         &self,
         host: &dyn Host,
@@ -802,8 +804,9 @@ pub enum DataMapError {
     /// No data maps are loaded here: a client that has not received synced data maps, a server
     /// before its world's data first loads, or a host with no game behind it.
     Unavailable,
-    /// Neither the engine nor a mod registered the map for this registry during startup
-    /// (`Registrar::register_data_map` / `Registrar::register_data_map_by_name`).
+    /// This side has a data-map publication, but it does not contain the requested map for this
+    /// registry (for example, it was not registered during startup, or on a client it was not
+    /// synced).
     UnknownType,
     /// A typed read's [`DataMap::decode`] refused the entry's NBT value.
     Undecodable,
