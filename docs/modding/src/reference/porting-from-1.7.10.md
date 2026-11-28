@@ -19,7 +19,7 @@ come back here for the mapping and the clean-room rules.
 A native mod carries its own `data/` and `assets/` exactly as a content mod does; no manifest flag is needed for
 that. `[native] serves_content = true` and a top-level `served_by` are only for a *separate* content package that
 delegates its namespaces to a native runtime, such as a script or bytecode host that generates packages: both
-packages opt in, and the content layer loads after its host. Unless you are writing such a host, keep one package.
+packages opt in, and the content layer loads after its host. Any installed content package can name an opting-in runtime; the runtime decides which packages it understands. Unless you are writing such a host, keep one package.
 
 A content mod describes what exists; a native mod decides what happens. Content declarations are checked and
 admitted atomically, and a server refuses a join when the two sides' both-side mods differ, so keep the mod id
@@ -39,7 +39,7 @@ writing code: identifiers, hook names and event fields are checked against the p
 | `@Mod.EventHandler` init, post-init, server-starting | `Hooks::register` for declarations and parts, then the load phases in [Load phases and access](../concepts/load-phases.md). |
 | `@SideOnly(Side.CLIENT)`, client and common proxies | The manifest's `side` decides what a joining client must have. Hooks and parts declare their own side; a client hook receives a `ClientHost`, so the wrong side does not compile. See [Hooks and the Host](../concepts/hooks-and-the-host.md). |
 | `Configuration` / `ForgeConfiguration` | `register_config` with a `ConfigSpec`; a `ConfigListener` receives a `ConfigSnapshot`. See [Config files and settings](../how-to/mod-settings.md). |
-| `FMLInterModComms`, hard `@Mod` dependencies | `[dependencies]` declares a requirement and its load order: a required entry must be installed at a matching version, and its content and listeners load first. It sends no messages. For inter-mod communication, call the library's published functions and use its typed mod events (`#[subscribe]`, `Registrar::add_listener`). See [Dependencies between mods](../concepts/dependencies.md) and [Events between mods](../concepts/mod-events.md). |
+| `FMLInterModComms`, hard `@Mod` dependencies | `[dependencies]` declares a requirement and its load order: a required entry must be installed at a matching version, and by default its content and dispatch order come first. Load order is not listener priority. It sends no messages. For inter-mod communication, call the library's published functions and use its typed mod events (`#[subscribe]`, `Registrar::add_listener`). See [Dependencies between mods](../concepts/dependencies.md) and [Events between mods](../concepts/mod-events.md). |
 | A coremod, `IClassTransformer`, a Mixin class | A `[[native.mixin]]` row: name the function, the place in it and a small Rust helper. See [Mixins](../concepts/native-route/2-mixins.md). Use a hook or a Part first when one exposes the same point. |
 
 ### Content and registries
@@ -49,9 +49,9 @@ writing code: identifiers, hook names and event fields are checked against the p
 | `GameRegistry.registerBlock` / `registerItem` | `data/<id>/sunrise/block/<path>.json` and `data/<id>/sunrise/item/<path>.json`, each copying a vanilla template. Code mods use `BlocksEvent` and `ItemsEvent` with `mod_api::Block::new` / `mod_api::Item::new`. See [Content mods](../how-to/content-mods.md). |
 | `OreDictionary.registerOre` and `getOres` | Item, block and fluid tags under `data/<ns>/tags/{item,block,fluid}/`; request one with `TagsRegistrar::tag_key`, attach parts to every member with `attach_item_part_tag` / `attach_block_part_tag`, and read membership through `Host::tags`. See [Item and tag parts](../concepts/parts/item-and-tag-parts.md). |
 | `metadata 0..15` on a block | Typed block states: declare the properties on the block and use `BlockState` plus `BlockMetadata` instead of a numeric metadata byte. See [Registry keys](../concepts/registry-keys.md). |
-| Item damage / metadata as a variant | Typed data components on the stack, not a metadata word: read with `stack.get(&component)` and write with `set` or `remove`. `damage_component()` only reports the stored durability override (an explicit zero, or none), never a variant or metadata id. See [Owned item values](../how-to/items/item-stack-values.md). |
+| Item damage / metadata as a variant | Typed data components on the stack, not a metadata word: read with `stack.get(&component)` and write with `set` or `remove`. `damage_component()` returns the stored numeric override, including zero, or `None`, never a variant or metadata id. See [Owned item values](../how-to/items/item-stack-values.md). |
 | `Block`, `BlockContainer`, `ITickable` | A block declaration plus `BlockPart` (or `BlockEntityPart`) methods, and a block entity type with a ticker selector when it ticks. |
-| `TileEntity`, `readFromNBT` / `writeToNBT` | A block entity type and a `BlockEntityPart`: `block_entity_save_additional` writes into a `mod_api::Compound` copy of the stored payload, and `block_entity_load_additional` refreshes live state after a payload is applied. Keep per-instance values in a `BlockEntityPartState` key, or in an attachment declared with `.serialize(codec)`. See [Block entity types](../concepts/parts/block-entity-types.md) and [Attachments](../concepts/attachments.md). |
+| `TileEntity`, `readFromNBT` / `writeToNBT` | A block entity type and a `BlockEntityPart`: `block_entity_save_additional` writes into a `mod_api::Compound` copy of the stored payload, and `block_entity_load_additional` refreshes live state after a payload is applied. `BlockEntityPartState` is attachment-backed: declare `.serialize(codec)` when the value must persist across a reload. See [Block entity types](../concepts/parts/block-entity-types.md) and [Attachments](../concepts/attachments.md). |
 | `IInventory`, `ISidedInventory`, hoppers and pipes | Item capability `ITEMS` offered by a block entity or block provider, with per-face addresses. See [Capabilities](../concepts/capabilities.md). |
 | `IFluidHandler`, tanks | Fluid capability (`FLUIDS`) with attached storage. See [Block fluids](../concepts/capabilities/block-fluids.md). |
 | `IEnergyStorage`, GT EU buffers | `EnergyHandler` behind the `ENERGY` capability, with `AttachedEnergy` for engine-managed buffers. See [Block energy](../concepts/capabilities/block-energy.md). |
@@ -83,7 +83,7 @@ private copy of engine code; say which capability the port needs and why.
 ## Clean-room and licence rules
 
 These rules decide whether a port can be accepted, independently of whether it works. A port in your own project
-answers to the original mod's licence; a contribution to Sunrise also answers to the repository's rule, that only
+answers to the terms of whatever it reuses from the original; a contribution to Sunrise also answers to the repository's rule, that only
 original code or code whose licence allows its use may be read and used
 ([CONTRIBUTING.md](https://github.com/sunrise-org/sunrise/blob/main/CONTRIBUTING.md#only-original-code-or-code-whose-license-allows-it)).
 
@@ -104,18 +104,16 @@ original code or code whose licence allows its use may be read and used
   [Java jars as external assets](../how-to/content-mods.md#java-jars-as-external-assets).
 - **Obligations follow the material actually reused.** Copied or adapted code, assets, models, textures, sounds,
   lang files or data tables carry their own terms: keep the copyright line and licence text, and add the notice
-  entry `THIRD_PARTY_NOTICES.md` requires. A rewrite from documented or observed behaviour reuses no expression and
-  inherits no obligation from the original's source licence; that is not permission to reuse the expression, and a
-  licence that forbids derivative or commercial use still limits the port.
-- **Record what you ported from.** Fill the manifest's `license` (and `license_url`) with the original's licence, and
-  name the original in `credits`; keep its licence text with your project. In a Sunrise pull request, add the
+  entry `THIRD_PARTY_NOTICES.md` requires. Check the terms of the material you actually reuse; a licence that forbids
+  derivative or commercial use still limits a port that reuses it.
+- **Record what you ported from.** Fill the manifest's `license` and `license_url` for the port package itself, and
+  credit and link the original separately in `credits`; keep the licence text of any reused material with your project. In a Sunrise pull request, add the
   `THIRD_PARTY_NOTICES.md` entry and say what you read, copied or adapted, with a link to the commit and the licence
   at that commit. `NOASSERTION` and `UNKNOWN` are not permission.
 - **A manifest field or a registry entry is metadata, not permission.** The `license` field describes your package,
   and the registry's checks review its packaging and code, not whether you had the right to reuse the original.
-  Publishing a port still needs the original's licence, or the author's written permission for whatever it reuses.
-- **Copying IDs is reuse too.** Registration IDs, registry names and data tables taken from the original to "stay
-  compatible" are its expression; treat them as reused material and check the licence, or choose your own names.
+  Publishing a port still needs permission, by licence or from the author, for whatever it reuses.
+- **Data tables taken from the original** are reused material: check their terms.
 
 ## Checklist before you open a pull request
 
