@@ -3117,6 +3117,10 @@ pub struct MobWorld<'a> {
     pub loop_context: &'a sunrise_world::native_load_context::LoopContext,
     /// The side's level data beyond blocks: weather, features, tags and block entities.
     pub side: &'a dyn crate::motion::SideLevel,
+    /// The world's frozen variant registries, lent by whoever builds the mob world: a dry
+    /// test or probe side passes none, so absence stays real and block contact never names
+    /// the mob module.
+    pub variant_tables: Option<&'a crate::mobs::variants::VariantTables>,
     pub world: &'a World,
     pub registry: &'a sunrise_world::registry::BlockRegistry,
     pub facts: &'a BlockFacts,
@@ -3231,6 +3235,13 @@ pub struct MobWorld<'a> {
     /// (`Entity.collectColliders`); None: nothing stops them there.
     pub border: Option<&'a sunrise_core::geometry::border::BorderGeometry>,
     pub section_writer: Option<living::section_writes::Observer>,
+}
+
+impl<'a> MobWorld<'a> {
+    /// The variant registries lent when this world was built, typed for the mob code.
+    pub fn variant_tables(&self) -> Option<&'a crate::mobs::variants::VariantTables> {
+        self.variant_tables
+    }
 }
 /// The read-only decision from a registered effect's native tick Parts.
 pub struct ModEffectTick {
@@ -3434,17 +3445,7 @@ pub fn infested_silverfish(random: &mut LegacyRandom, look: [f64; 3]) -> Vec<Vec
         })
         .collect()
 }
-/// `Entity.random` of a client's copy of entity `id` first seen at `position`: vanilla's is its
-/// own (`RandomSource.create()`), drawn on by nothing else; this one is seeded from the two.
-pub fn entity_random(id: u32, position: Vec3) -> LegacyRandom {
-    let mut random = LegacyRandom::new(
-        i64::from(id).wrapping_mul(0x5DEE_CE66D)
-            ^ (position.x.to_bits() as i64)
-            ^ (position.z.to_bits() as i64).rotate_left(17),
-    );
-    let _ = random.next_int();
-    random
-}
+pub use crate::motion::entity_random;
 /// The own random (`Entity.random`) of a living entity the server makes, as
 /// `LivingEntity.<init>` leaves it: its first two draws made the UUID
 /// (`Mth.createInsecureUUID`), returned here, then the kind's constructor draws its synced data and yaw in `constructor_draws`.

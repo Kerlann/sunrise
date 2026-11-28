@@ -1,11 +1,7 @@
 //! Stored player health and server damage for the resident scene.
 //! World/audio/network consumers are queued explicitly; full death and tick
 //! lifecycles (drops, respawn, effects) remain separate work.
-use crate::{
-    Result,
-    items::ItemStack,
-    motion::{MotionEvent, PlayerMotion},
-};
+use crate::{Result, items::ItemStack};
 pub use mod_api::entity::health::{HurtSource, ShieldBlock, Victim};
 #[cfg(test)]
 use std::fs;
@@ -24,11 +20,11 @@ use sunrise_world::{
     living_hurt::{HurtState, HurtTag, HurtWorld, PendingHurt},
     player_health::{PlayerAttributeHealth, PlayerFloatIds},
     player_hurt::{CausingEntity, PlayerHurtWorld, ServerPlayerHurtWorld},
-    server_player_combat::{CombatEnvironment, ServerPlayerCombat},
+    server_player_combat::CombatEnvironment,
     server_player_damage::{PlayerBodyRead, ServerDamageEnvironment},
     synced_floats::{FloatValue, Observer, SyncedFloats},
 };
-pub(crate) type Attributes = LiveAttributes<Box<dyn sunrise_world::attributes::live::Identities>>;
+pub type Attributes = LiveAttributes<Box<dyn sunrise_world::attributes::live::Identities>>;
 pub(crate) type State = HurtState<DamageTypeId>;
 
 /// The typed body a heal or movement hook lends; the mob side builds it
