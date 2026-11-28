@@ -4183,3 +4183,96 @@ fn render_pre_veto_preserves_widget_ids_and_overrides() {
         });
     });
 }
+
+#[test]
+#[ignore = "daily"]
+fn closing_overlay_preserves_revealed_screen_widgets_without_reinit() {
+    if run_fresh_cases(
+        "cut_layout::game::client_side::native_hooks_client::base::screen_widgets_tests::closing_overlay_preserves_revealed_screen_widgets_without_reinit",
+        "SUNRISE_WIDGETS_OVERLAY_REVEAL_CHILD",
+        &["window"],
+    ) {
+        return;
+    }
+
+    struct OverlayRevealProbe {
+        chat_inits: Arc<AtomicUsize>,
+        prompt_inits: Arc<AtomicUsize>,
+        chat_drops: Arc<AtomicUsize>,
+    }
+
+    #[mod_api::__subscriptions]
+    impl Hooks for OverlayRevealProbe {
+        fn screen_init_post(&self, _host: &dyn ClientHost, event: &mut ScreenInitPostEvent<'_>) {
+            if event.screen.id == "chat" {
+                self.chat_inits.fetch_add(1, Ordering::SeqCst);
+                let drop_guard = DropCounter(self.chat_drops.clone());
+                event.widgets.add_button(Button::new(
+                    [10.0, 10.0, 90.0, 20.0],
+                    ApiText::literal("ChatKeep"),
+                    move |_state, _host| {
+                        let _ = &drop_guard;
+                    },
+                ));
+            } else if event.screen.id == "link_prompt" {
+                self.prompt_inits.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    let chat_inits = Arc::new(AtomicUsize::new(0));
+    let prompt_inits = Arc::new(AtomicUsize::new(0));
+    let chat_drops = Arc::new(AtomicUsize::new(0));
+    let mods = vec![ModEntry::new(
+        "overlay_reveal_probe",
+        Box::new(OverlayRevealProbe {
+            chat_inits: chat_inits.clone(),
+            prompt_inits: prompt_inits.clone(),
+            chat_drops: chat_drops.clone(),
+        }),
+    )]
+    .into();
+    with_mods(mods, || {
+        with_client_game(|game| {
+            let (_el, _win_id) = attach_offscreen_window(game);
+
+            // Open chat screen and verify init fired once with our mounted button.
+            game.set_screen(Screen::Chat);
+            game.observe_screen();
+            assert_eq!(chat_inits.load(Ordering::SeqCst), 1);
+            let chat_btn_id = game
+                .screen_widgets()
+                .unwrap()
+                .children()
+                .iter()
+                .find(|c| c.message == Some(ApiText::literal("ChatKeep")))
+                .expect("chat mounted button")
+                .id;
+
+            // Open a link_prompt overlay over chat.
+            game.client.link_prompt = Some("https://example.com".into());
+            game.observe_screen();
+            assert_eq!(prompt_inits.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                chat_drops.load(Ordering::SeqCst),
+                0,
+                "underlying chat widgets must stay alive while overlay is open"
+            );
+
+            // Close the link_prompt overlay: chat is revealed without re-running Init.Pre/Post.
+            game.answer_link_prompt(false);
+            game.observe_screen();
+            assert_eq!(
+                chat_inits.load(Ordering::SeqCst),
+                1,
+                "closing an overlay must not re-run Init on the revealed screen"
+            );
+            assert_eq!(chat_drops.load(Ordering::SeqCst), 0);
+            let revealed = game.screen_widgets().unwrap();
+            assert!(
+                revealed.children().iter().any(|c| c.id == chat_btn_id),
+                "revealed chat screen must keep its existing mounted widget ID"
+            );
+        });
+    });
+}

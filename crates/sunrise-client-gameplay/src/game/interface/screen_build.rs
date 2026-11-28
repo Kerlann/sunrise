@@ -357,6 +357,11 @@ pub struct ScreenState {
     /// book drew none.
     pub(in crate::game) drawn_book_tabs: std::cell::Cell<Option<[f32; 4]>>,
     pub widgets: super::screen_widgets::MountedScreenWidgets,
+    /// Underlying screen observations and mounted widget collections suspended while an overlay
+    /// (such as a link prompt, pack prompt, or dialog) sits on top, restored without re-running
+    /// `screen_init_pre`/`screen_init_post` when the overlay closes and reveals them.
+    pub(in crate::game) suspended_under_overlay:
+        Vec<(ObservedScreen, super::screen_widgets::MountedScreenWidgets)>,
     /// A mod's context menu over this screen (`ClientHost::open_context_menu`).
     #[cfg(feature = "client")]
     pub(in crate::game) context_menu: Option<super::context_menu::ContextMenu>,

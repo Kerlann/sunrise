@@ -870,7 +870,63 @@ impl crate::game::ClientGame<'_> {
                     from.is_some(),
                 );
             }
+            let opening_overlay = current.as_ref().is_some_and(|new| new.overlay);
+            let revealed_suspended = old.is_some()
+                && current.as_ref().is_some_and(|new| {
+                    self.client
+                        .screen_state
+                        .0
+                        .suspended_under_overlay
+                        .last()
+                        .is_some_and(|(saved, _)| saved.same_receiver(new))
+                });
             self.client.screen_state.0.bump_instance();
+            if opening_overlay {
+                if let Some(prev) = self.client.screen_state.0.observed.take() {
+                    let saved_widgets = std::mem::take(&mut self.client.screen_state.0.widgets);
+                    self.client
+                        .screen_state
+                        .0
+                        .suspended_under_overlay
+                        .push((prev, saved_widgets));
+                }
+                sunrise_client::preedit::reset();
+                self.client.ime_area = None;
+                self.client.screen_state.0.observed = current.clone();
+                if let Some(new) = &current
+                    && self.common.options.execution_role.is_client()
+                {
+                    self.init_screen_widgets(&new.view());
+                }
+                return;
+            }
+            if revealed_suspended {
+                self.clear_screen_widgets();
+                let (saved_obs, saved_widgets) = self
+                    .client
+                    .screen_state
+                    .0
+                    .suspended_under_overlay
+                    .pop()
+                    .expect("revealed suspended screen exists");
+                self.client.screen_state.0.widgets = saved_widgets;
+                self.client.screen_state.0.observed = current.clone();
+                if let Some(new) = &current
+                    && saved_obs.screen_size != new.screen_size
+                    && self.common.options.execution_role.is_client()
+                {
+                    if self.screen_repositions_on_resize(new.id) {
+                        self.reposition_screen_widgets();
+                    } else {
+                        self.clear_screen_widgets();
+                        self.init_screen_widgets(&new.view());
+                    }
+                } else {
+                    self.sync_children_cache();
+                }
+                return;
+            }
+            self.client.screen_state.0.suspended_under_overlay.clear();
             self.clear_screen_widgets();
             self.client.screen_state.0.observed = current.clone();
             if let Some(new) = &current
