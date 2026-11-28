@@ -65,13 +65,14 @@ mod culled_file;
             allowed = {("sunrise-relay", "lib", "tests::otherwise_unselected", "needs prepared resources"): {
                 "rationale": "An external runner supplies this private fixture."}}
             self.assertEqual(ignored_inventory.problems([daily], functions, allowed), [])
+            identities = {(function.package, function.target, function.name) for function in functions}
             for name in ("culled_file::culled", "culled_external::culled", "culled_inline::culled",
                          "culled_fn", "culled_attr"):
                 with self.subTest(name=name):
                     stale = daily._replace(test=name)
+                    self.assertNotIn((stale.package, stale.reference, stale.test), identities)
                     errors = ignored_inventory.problems([daily, stale], functions, allowed)
                     self.assertEqual(len(errors), 1)
-                    self.assertIn(f'{name}: daily row selects no #[ignore = "daily"] test', errors[0])
             paths = set(ignored_inventory.discovery(root, ("--files",)))
             self.assertIn("crates/sunrise-client/src/lib.rs", paths)
             gated = {f"crates/sunrise-client/src/{name}.rs"

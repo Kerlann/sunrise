@@ -93,7 +93,7 @@ def main():
     rust_out = build / 'rust.txt'
     rust_out.unlink(missing_ok=True)
     harness.run_logged(
-        [lab.parity_fixtures(), FIXTURE, '--exact'],
+        ['cargo', 'test', '--locked', '-p', 'sunrise-gameplay', '--lib', '--', '--ignored', '--exact', FIXTURE],
         build, 'rust',
         env=dict(os.environ,
                  SUNRISE_DRAGON_SPAWN_CASES=str(inputs),
