@@ -32,23 +32,6 @@ pub enum TurnRefused {
     Nested,
 }
 
-/// `LivingEntity.getAttributeValue` of a body's attribute without creating an
-/// instance the body does not have: a missing attribute reads `None`.
-fn body_attribute(
-    motion: Option<&sunrise_sim::motion::PlayerMotion>,
-    name: &str,
-) -> Option<f64> {
-    let motion = motion?;
-    let key = motion.attributes.key(name)?;
-    motion
-        .attributes
-        .value(
-            Some(key),
-            sunrise_world::attribute_map::ValueKind::Computed,
-        )
-        .ok()
-}
-
 /// `Player.isWithinEntityInteractionRange(entity, buffer)` for a guest: the
 /// eyes of its body pose closer than its live entity interaction range plus
 /// `buffer` to the entity's box.
@@ -61,10 +44,17 @@ pub fn guest_within_entity_range(
         .motion
         .as_ref()
         .map_or_else(|| g.eye_height(), |m| f64::from(m.dimensions.eye_height));
-    let live = body_attribute(
-        g.motion.as_deref(),
-        "minecraft:entity_interaction_range",
-    );
+    // `LivingEntity.getAttributeValue` without creating an instance the body does
+    // not have: a missing attribute reads `None`.
+    let live = g.motion.as_deref().and_then(|motion| {
+        let key = motion
+            .attributes
+            .key("minecraft:entity_interaction_range")?;
+        motion
+            .attributes
+            .value(Some(key), sunrise_world::attribute_map::ValueKind::Computed)
+            .ok()
+    });
     let eye = [g.position[0], g.position[1] + eye_height, g.position[2]];
     let (lo, hi) = (bounds.min_position(), bounds.max_position());
     let d = [
@@ -84,62 +74,69 @@ mod issue_6825_tests {
     use sunrise_core::geometry::{Aabb, Vec3};
     use sunrise_sim::pose::Pose;
 
-    /// The prepared vanilla data this test needs; skipped without it.
-    fn motion_resources() -> Option<sunrise_sim::motion::MotionResources> {
+    /// The prepared vanilla data this test needs; a missing or unloadable input fails.
+    fn motion_resources() -> sunrise_sim::motion::MotionResources {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../.local/sunrise-client")
             .join(sunrise_core::VANILLA_VERSION);
-        if !root.join("movement-properties.nbt").exists() {
-            return None;
-        }
-        let assets = sunrise_level::assets::Assets::load(&root).ok()?;
-        sunrise_sim::motion::MotionResources::load(&root, &assets).ok()
+        let assets = sunrise_level::assets::Assets::load(&root)
+            .expect("prepared resources load for the reach fixture");
+        sunrise_sim::motion::MotionResources::load(&root, &assets)
+            .expect("prepared movement properties load for the reach fixture")
     }
 
     /// A guest's live body decides entity reach: raise
-    /// `minecraft:entity_interaction_range` and the same box is reachable, and a
-    /// swimming pose's lower eyes put a box above the guest out of reach (#6825).
+    /// `minecraft:entity_interaction_range` and the same box is reachable, lower it and a
+    /// box the default reaches is not, and a swimming pose's lower eyes put a box above the
+    /// guest out of reach (#6825).
     #[test]
+    #[ignore = "daily"]
     fn issue_6825_entity_reach_reads_the_live_body() {
-        let Some(resources) = motion_resources() else {
-            return;
-        };
+        // Loading the fixture sets process-wide block tables: own process.
+        crate::game::in_own_process(
+            "game::lan_actions::issue_6825_tests::issue_6825_entity_reach_reads_the_live_body",
+            reach_reads_the_live_body,
+        );
+    }
+
+    fn reach_reads_the_live_body() {
+        let resources = motion_resources();
         let mut g = crate::game::native_player_death::tests::new_guest(1, 123);
         g.position = [0.0, 0.0, 0.0];
         let mut motion = sunrise_sim::motion::PlayerMotion::new(&resources, Vec3::ZERO).unwrap();
         motion.dimensions = Pose::Standing.dimensions(1.0);
         g.motion = Some(Box::new(motion));
+        let set_range = |g: &mut sunrise_sim::lan::guest::Guest, amount: f64, present: bool| {
+            g.motion
+                .as_mut()
+                .unwrap()
+                .set_modifier(
+                    "minecraft:entity_interaction_range",
+                    "sunrise:test",
+                    amount,
+                    "add_value",
+                    present,
+                )
+                .unwrap();
+        };
 
         // Eight blocks away: out of the 3-block default plus the menus' 4-block buffer.
         let far = Aabb::new(Vec3::new(8.0, 0.0, 0.0), Vec3::new(9.0, 2.0, 1.0));
         assert!(!guest_within_entity_range(&g, &far, 4.0));
-        g.motion
-            .as_mut()
-            .unwrap()
-            .set_modifier(
-                "minecraft:entity_interaction_range",
-                "sunrise:test",
-                2.0,
-                "add_value",
-                true,
-            )
-            .unwrap();
+        set_range(&mut g, 2.0, true);
         assert!(guest_within_entity_range(&g, &far, 4.0));
+
+        // Six blocks away: inside the default 3 plus 4, outside a live range lowered to 1.
+        let six = Aabb::new(Vec3::new(6.0, 0.0, 0.0), Vec3::new(7.0, 2.0, 1.0));
+        set_range(&mut g, 0.0, false);
+        assert!(guest_within_entity_range(&g, &six, 4.0));
+        set_range(&mut g, -2.0, true);
+        assert!(!guest_within_entity_range(&g, &six, 4.0));
+        set_range(&mut g, 0.0, false);
 
         // The same guest standing reaches a box above it; swimming lowers the eyes
         // by 1.22 blocks and the box leaves the range.
         let above = Aabb::new(Vec3::new(0.0, 7.5, 0.0), Vec3::new(1.0, 8.5, 1.0));
-        g.motion
-            .as_mut()
-            .unwrap()
-            .set_modifier(
-                "minecraft:entity_interaction_range",
-                "sunrise:test",
-                0.0,
-                "add_value",
-                false,
-            )
-            .unwrap();
         assert!(guest_within_entity_range(&g, &above, 4.0));
         g.motion.as_mut().unwrap().dimensions = Pose::Swimming.dimensions(1.0);
         assert!(!guest_within_entity_range(&g, &above, 4.0));
