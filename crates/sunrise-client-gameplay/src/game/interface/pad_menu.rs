@@ -2647,10 +2647,16 @@ impl crate::game::ClientGame<'_> {
                 .is_some_and(|t| t.list_focused()),
             gui: self.gui_size(),
         };
-        let act = if dialog && matches!(nav, Nav::Tab { .. }) {
-            let warning = self.dialog_warning_icon();
+        let act = if matches!(nav, Nav::Tab { .. }) {
+            let warning = dialog.then(|| self.dialog_warning_icon()).flatten();
+            let meta = widgets::last_targets_with_meta();
             key_focus::act_with_tab_groups(nav, focus, &targets, ctx, |target| {
-                if !matches!(target.kind, Kind::Mounted { .. }) && Some(target.rect) == warning {
+                let group = self.tab_order_group_for_target(target, &meta);
+                if group != 0 {
+                    group
+                } else if !matches!(target.kind, Kind::Mounted { .. })
+                    && Some(target.rect) == warning
+                {
                     -10
                 } else {
                     0

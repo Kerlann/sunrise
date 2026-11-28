@@ -664,7 +664,7 @@ impl crate::game::ClientGame<'_> {
                 _ => Text::translate(key, &[]),
             }
         };
-        let buttons: Vec<(u8, [f32; 4])> = layout
+        let buttons: Vec<(u8, [f32; 4], i32)> = layout
             .buttons
             .iter()
             .copied()
@@ -678,13 +678,18 @@ impl crate::game::ClientGame<'_> {
                     [b.0, b.1, b.2, 20.0],
                     b.5,
                 )?;
-                Some((b.4, rect))
+                let key = widgets::EngineWidgetKey {
+                    key: widgets::stable_key_from_text(&label),
+                    bucket: widgets::WidgetBucket::Button,
+                    occurrence: 0,
+                };
+                Some((b.4, rect, self.engine_tab_order_group(&key)))
             })
             .collect();
         let icons = layout.icons;
-        let mut active_ids: Vec<u8> = buttons.iter().map(|b| b.0).collect();
+        let mut active_entries: Vec<(u8, i32)> = buttons.iter().map(|b| (b.0, b.2)).collect();
         let friends = self.friends_shown();
-        active_ids.extend(pause_icon_focus_ids(friends).into_iter().filter(|&id| {
+        active_entries.extend(pause_icon_focus_ids(friends).into_iter().filter_map(|id| {
             let idx = if id == 10 {
                 FRIENDS_ICON
             } else {
@@ -698,9 +703,16 @@ impl crate::game::ClientGame<'_> {
                 0,
                 [icons[idx].0, icons[idx].1, 20.0, 20.0],
                 icon_active(idx, friends),
-            )
-            .is_some()
+            )?;
+            let key = widgets::EngineWidgetKey {
+                key: widgets::stable_key_from_text(&label),
+                bucket: widgets::WidgetBucket::Button,
+                occurrence: 0,
+            };
+            Some((id, self.engine_tab_order_group(&key)))
         }));
+        active_entries.sort_by_key(|&(_, group)| group);
+        let active_ids: Vec<u8> = active_entries.into_iter().map(|(id, _)| id).collect();
         if active_ids.is_empty() {
             return Ok(false);
         }
@@ -741,7 +753,7 @@ impl crate::game::ClientGame<'_> {
             KeyCode::ArrowUp | KeyCode::ArrowDown | KeyCode::ArrowLeft | KeyCode::ArrowRight => {
                 let mut rects: Vec<(u8, f32, f32, f32)> = buttons
                     .iter()
-                    .map(|&(id, [x, y, bw, _])| (id, x, y, bw))
+                    .map(|&(id, [x, y, bw, _], _)| (id, x, y, bw))
                     .collect();
                 let friends = self.friends_shown();
                 for (i, &(x, y, _)) in icons.iter().enumerate() {

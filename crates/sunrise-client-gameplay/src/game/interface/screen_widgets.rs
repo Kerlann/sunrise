@@ -1175,6 +1175,73 @@ impl crate::game::ClientGame<'_> {
         Some(self)
     }
 
+    /// Resolved `tab_order_group` for an engine widget identified by collector key `key`.
+    pub(in crate::game) fn engine_tab_order_group(&self, key: &widgets::EngineWidgetKey) -> i32 {
+        let inner = self.client.screen_state.0.widgets.inner.borrow();
+        if let Some(group) = inner
+            .engine_overrides
+            .overrides
+            .get(key)
+            .and_then(|ov| ov.tab_order_group)
+        {
+            return group;
+        }
+        inner
+            .engine_children
+            .iter()
+            .find(|slot| &slot.key == key)
+            .map_or(0, |slot| slot.default_tab_order_group)
+    }
+
+    /// Resolved `tab_order_group` for any focus `Target` (mounted or engine) for real Tab
+    /// traversal (`ContainerEventHandler.nextFocusPath`).
+    pub(in crate::game) fn tab_order_group_for_target(
+        &self,
+        target: Target,
+        target_meta: &[(Target, widgets::TargetMeta)],
+    ) -> i32 {
+        if let Kind::Mounted { id, .. } = target.kind {
+            let wid = ScreenWidgetId::from_raw(id);
+            let inner = self.client.screen_state.0.widgets.inner.borrow();
+            if let Some(entry) = inner.entries.iter().flatten().find(|e| e.id == wid) {
+                return match &entry.kind {
+                    MountedWidgetKind::Button { state, .. } => state.tab_order_group,
+                    MountedWidgetKind::TextField {
+                        tab_order_group, ..
+                    } => *tab_order_group,
+                    MountedWidgetKind::Custom(_) => self
+                        .client
+                        .screen_state
+                        .0
+                        .widgets
+                        .children_cache
+                        .iter()
+                        .find(|c| c.id == wid)
+                        .map_or(0, |c| c.tab_order_group),
+                };
+            }
+            return 0;
+        }
+        if let Some((_, meta)) = target_meta
+            .iter()
+            .find(|(t, _)| t.kind == target.kind && t.rect == target.rect)
+        {
+            if let Some(key) = &meta.key {
+                let inner = self.client.screen_state.0.widgets.inner.borrow();
+                if let Some(group) = inner
+                    .engine_overrides
+                    .overrides
+                    .get(key)
+                    .and_then(|ov| ov.tab_order_group)
+                {
+                    return group;
+                }
+            }
+            return meta.tab_order_group;
+        }
+        0
+    }
+
     /// Whether `screen_init_pre` cancelled engine widgets on the active screen.
     pub(in crate::game) fn engine_overrides_suppress_all(&self) -> bool {
         let inner = self.client.screen_state.0.widgets.inner.borrow();
