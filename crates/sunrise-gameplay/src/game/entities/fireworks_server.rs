@@ -856,6 +856,12 @@ impl crate::game::ServerGame<'_> {
                 self.explode_rocket(&r);
             }
             self.common.rockets.retire_extracted(id, join);
+            crate::game::record_departure!(
+                self.common.dim,
+                id,
+                "minecraft:firework_rocket",
+                Some("discarded")
+            );
             return false;
         }
         let (from, to) = (r.previous, r.position);
@@ -881,6 +887,7 @@ impl crate::game::ServerGame<'_> {
             // list tail twice per entity, which is O(n^2) for a crowd of rockets.
             let id = self.common.rockets[i].id;
             let rocket = self.common.rockets[i].clone();
+            crate::game::record_turn!(self.common.dim, id, "minecraft:firework_rocket", None);
             let kept = self.tick_rocket(i, rocket);
             // A hook may have added or removed rockets: resume right after this one
             // where it stands, or at `i` when it is gone.

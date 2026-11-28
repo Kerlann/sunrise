@@ -91,6 +91,12 @@ impl crate::game::ServerGame<'_> {
                     // Its rider's client moves it, but the server still wears
                     // off its damage and then burns it.
                     if ticking(p.x.floor() as i32, p.z.floor() as i32) {
+                        crate::game::record_turn!(
+                            self.common.dim,
+                            id,
+                            self.common.boats[i].entity_type_name(),
+                            None
+                        );
                         if driven.contains(&id) {
                             self.common.boats.update(i, |b| b.wear_off_hurt());
                         }
@@ -125,6 +131,12 @@ impl crate::game::ServerGame<'_> {
                 else {
                     break 'boat;
                 };
+                crate::game::record_turn!(
+                    self.common.dim,
+                    id,
+                    self.common.boats[i].entity_type_name(),
+                    None
+                );
                 self.common.boats.update(i, |b| b.wear_off_hurt());
                 // Entity.baseTick burns it before it moves; the fire may break it.
                 if !self.boat_fire_tick(i) && !self.boat_below_world(i) {

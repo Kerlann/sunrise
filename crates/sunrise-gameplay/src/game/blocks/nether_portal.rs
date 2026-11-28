@@ -1346,6 +1346,12 @@ impl crate::game::ServerGame<'_> {
     /// entity is saved and removed, and waits for its dimension to load.
     pub(in crate::game::server_side) fn remove_portal_vehicle_tree(&mut self, root: u32) {
         let tree = self.vehicle_tree_ids(root);
+        #[cfg(feature = "state-digest")]
+        crate::game::state_transcript::record_vehicle_tree_departures(
+            self,
+            &tree,
+            Some("changed_dimension"),
+        );
         self.remove_vehicle_rows(&tree);
         for id in tree {
             self.detach_entity(id);
@@ -1450,6 +1456,94 @@ impl crate::game::ServerGame<'_> {
                 );
             }
             let state = self.take_transferred_entity_state(id);
+            #[cfg(feature = "state-digest")]
+            if crate::game::state_transcript::is_recording() {
+                let kind: Option<String> = match target {
+                    Target::Stand(_) => self
+                        .common
+                        .armor_stands
+                        .iter()
+                        .any(|e| e.id == id)
+                        .then(|| "minecraft:armor_stand".to_owned()),
+                    Target::Frame(_) => self
+                        .common
+                        .item_frames
+                        .iter()
+                        .find(|e| e.id == id)
+                        .map(|e| e.kind().to_owned()),
+                    Target::Painting(_) => self
+                        .common
+                        .paintings
+                        .iter()
+                        .any(|e| e.id == id)
+                        .then(|| "minecraft:painting".to_owned()),
+                    Target::Falling(_) => self
+                        .common
+                        .falling
+                        .iter()
+                        .any(|e| e.id == id)
+                        .then(|| "minecraft:falling_block".to_owned()),
+                    Target::Cushion(_) => self
+                        .common
+                        .cushions
+                        .iter()
+                        .any(|e| e.id == id)
+                        .then(|| "minecraft:cushion".to_owned()),
+                    Target::Other(_) => self
+                        .server
+                        .others
+                        .0
+                        .iter()
+                        .find(|e| e.id == id)
+                        .map(|e| e.kind.clone()),
+                    Target::Fangs(_) => self
+                        .common
+                        .fangs
+                        .list
+                        .iter()
+                        .any(|e| e.id == id)
+                        .then(|| "minecraft:evoker_fangs".to_owned()),
+                    Target::Crystal(_) => self
+                        .common
+                        .crystals
+                        .iter()
+                        .any(|e| e.id == id)
+                        .then(|| "minecraft:end_crystal".to_owned()),
+                    Target::Dragon(_) => self
+                        .common
+                        .dragon
+                        .as_ref()
+                        .filter(|d| d.id == id)
+                        .map(|_| "minecraft:ender_dragon".to_owned()),
+                    Target::Spawner(_) => self
+                        .common
+                        .ominous_spawners
+                        .iter()
+                        .any(|e| e.id == id)
+                        .then(|| "minecraft:ominous_item_spawner".to_owned()),
+                    Target::Cloud(_) => self
+                        .common
+                        .breath_clouds
+                        .iter()
+                        .any(|e| e.id == id)
+                        .then(|| "minecraft:area_effect_cloud".to_owned()),
+                    Target::Bolt(_) => self
+                        .common
+                        .bolts
+                        .iter()
+                        .any(|e| e.id == id)
+                        .then(|| "minecraft:lightning_bolt".to_owned()),
+                    _ => None,
+                };
+                if let Some(kind) = kind {
+                    crate::game::state_transcript::record_departure(
+                        self.common.dim,
+                        id,
+                        kind,
+                        Some("changed_dimension"),
+                    );
+                }
+            }
             // Remove only the resident body: no death, drops, or discard effects.
             match target {
                 Target::Stand(_) => self.common.armor_stands.retain(|e| e.id != id),
@@ -1564,27 +1658,62 @@ impl crate::game::ServerGame<'_> {
         let state = self.take_transferred_entity_state(id);
         match list {
             List::Item => {
+                #[cfg(feature = "state-digest")]
+                let _reason =
+                    crate::game::state_transcript::override_departure_reason("changed_dimension");
                 self.remove_dropped(i);
                 self.detach_entity(id);
             }
             List::Tnt => {
                 self.common.tnts.remove(i);
+                crate::game::record_departure!(
+                    self.common.dim,
+                    id,
+                    "minecraft:tnt",
+                    Some("changed_dimension")
+                );
                 self.forget_entity(id);
             }
             List::Trident => {
                 self.common.tridents.remove(i);
+                crate::game::record_departure!(
+                    self.common.dim,
+                    id,
+                    "minecraft:trident",
+                    Some("changed_dimension")
+                );
                 self.forget_entity(id);
             }
             List::Rocket => {
                 self.common.rockets.remove(i);
+                crate::game::record_departure!(
+                    self.common.dim,
+                    id,
+                    "minecraft:firework_rocket",
+                    Some("changed_dimension")
+                );
                 self.forget_entity(id);
             }
             List::Orb => {
                 self.common.orbs.remove(i);
+                crate::game::record_departure!(
+                    self.common.dim,
+                    id,
+                    "minecraft:experience_orb",
+                    Some("changed_dimension")
+                );
                 self.forget_entity(id);
             }
             List::Projectile => {
+                #[cfg(feature = "state-digest")]
+                let kind = self.common.creatures.projectiles[i].entity_type();
                 self.common.creatures.projectiles.remove(i);
+                crate::game::record_departure!(
+                    self.common.dim,
+                    id,
+                    kind,
+                    Some("changed_dimension")
+                );
                 self.forget_entity(id);
             }
         }

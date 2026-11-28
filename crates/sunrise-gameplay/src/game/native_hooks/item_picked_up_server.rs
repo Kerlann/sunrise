@@ -401,6 +401,12 @@ impl crate::game::ServerGame<'_> {
                         *index += 1;
                     } else {
                         items.remove(*index);
+                        crate::game::record_departure!(
+                            self.common.dim,
+                            id,
+                            "minecraft:item",
+                            Some("discarded")
+                        );
                     }
                 }
                 PickupSlot::Resident { taken, .. } => {

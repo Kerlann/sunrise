@@ -599,6 +599,12 @@ impl crate::game::ServerGame<'_> {
                         let kept = sunrise_sim::mobs::ai::despawn_check(m, &w);
                         m.despawn = mod_api::Despawn::default();
                         if !kept {
+                            crate::game::record_departure!(
+                                self.common.dim,
+                                m.id,
+                                crate::game::native_hooks::mob_kind(m),
+                                Some("discarded")
+                            );
                             died.remove(&m.id);
                             snapshot[slot].alive = false;
                             snapshot[slot].removed = true;
@@ -813,6 +819,16 @@ impl crate::game::ServerGame<'_> {
                             as sunrise_sim::mobs::living::section_writes::Observer
                     });
                     w.controlling_player_movement = controlling_player_movement;
+                    #[cfg(feature = "state-digest")]
+                    let pre_tick = (!resuming && crate::game::state_transcript::is_recording())
+                        .then(|| {
+                            (
+                                m.id,
+                                crate::game::native_hooks::mob_kind(m),
+                                m.extra.mount,
+                                m.age,
+                            )
+                        });
                     ticked.insert(m.id);
                     // `sunrise-report`'s cost by mob type (tick_profile.rs).
                     let sampled = if resuming {
@@ -973,6 +989,21 @@ impl crate::game::ServerGame<'_> {
                             break;
                         }
                     };
+                    #[cfg(feature = "state-digest")]
+                    if let Some((turn_id, turn_kind, turn_mount, pre_age)) = pre_tick
+                        && (mobs[i].age != pre_age
+                            || !matches!(
+                                progress,
+                                sunrise_sim::mobs::ai::TickProgress::Complete(false)
+                            ))
+                    {
+                        crate::game::state_transcript::record_turn(
+                            self.common.dim,
+                            turn_id,
+                            turn_kind,
+                            turn_mount,
+                        );
+                    }
                     let kept = match progress {
                         sunrise_sim::mobs::ai::TickProgress::Complete(kept) => {
                             movement = None;
@@ -1114,6 +1145,18 @@ impl crate::game::ServerGame<'_> {
                         dead.push(m.clone());
                     }
                     if !kept {
+                        if !was_removed {
+                            crate::game::record_departure!(
+                                self.common.dim,
+                                m.id,
+                                crate::game::native_hooks::mob_kind(m),
+                                if !m.alive() {
+                                    Some("killed")
+                                } else {
+                                    Some("discarded")
+                                }
+                            );
+                        }
                         died.remove(&m.id);
                     }
                     keep[slot] = kept;

@@ -156,6 +156,20 @@ impl ServerGame<'_> {
     }
     /// Load terrain until the player stands in lit chunks.
     fn harness_settle(&mut self, deadline: Instant, required: Option<&Value>) -> Result<()> {
+        let required_chunks = match required.and_then(Value::as_array) {
+            Some(chunks) => {
+                let mut parsed = Vec::with_capacity(chunks.len());
+                for chunk in chunks {
+                    let (x, z) = chunk[0]
+                        .as_i64()
+                        .zip(chunk[1].as_i64())
+                        .ok_or("command harness: malformed chunk coordinate in required_chunks")?;
+                    parsed.push((x as i32, z as i32));
+                }
+                Some(parsed)
+            }
+            None => None,
+        };
         loop {
             self.server_update_world();
             // The oracle's settle takes its tickets at once (getChunk runs the
@@ -171,24 +185,30 @@ impl ServerGame<'_> {
                 // timing cannot change which command positions are loaded.
                 if (std::env::var_os("SUNRISE_HARNESS_TERRAIN_ONLY").is_some()
                     || !self.server.streaming.busy())
-                    && required.and_then(Value::as_array).map_or_else(
-                        || {
-                            (-1..=1).all(|dz| {
-                                (-1..=1).all(|dx| self.server.streaming.is_lit(cx + dx, cz + dz))
-                            })
-                        },
-                        |chunks| {
-                            chunks.iter().all(|chunk| {
-                                chunk[0]
-                                    .as_i64()
-                                    .zip(chunk[1].as_i64())
-                                    .is_some_and(|(x, z)| {
-                                        self.server.streaming.is_lit(x as i32, z as i32)
-                                    })
-                            })
-                        },
-                    )
+                    && match required_chunks.as_deref() {
+                        None => (-1..=1).all(|dz| {
+                            (-1..=1).all(|dx| self.server.streaming.is_lit(cx + dx, cz + dz))
+                        }),
+                        Some(chunks) => chunks.iter().all(|&(x, z)| {
+                            self.server.streaming.is_lit(x, z)
+                                && self.common.world.chunks.contains_key(&(x, z))
+                        }),
+                    }
                 {
+                    if let Some(chunks) = required_chunks.as_deref() {
+                        let levels = self.server.chunk_ticking.tickets.levels();
+                        let not_ticking: Vec<(i32, i32)> = chunks
+                            .iter()
+                            .copied()
+                            .filter(|&(x, z)| !levels.entity_ticking(x, z))
+                            .collect();
+                        if !not_ticking.is_empty() {
+                            return Err(format!(
+                                "command harness: required chunks are not entity-ticking: {not_ticking:?}"
+                            )
+                            .into());
+                        }
+                    }
                     // The oracle's settle also waits for the entities saved
                     // in those chunks (areEntitiesActuallyLoadedAndTicking):
                     // after a dimension change they come back from the save.
@@ -251,12 +271,36 @@ impl ServerGame<'_> {
             std::fs::write(path, serde_json::to_vec(&rows)?)?;
         }
         let mut out = String::new();
-        for line in std::fs::read_to_string(script)?.lines() {
+        #[cfg(feature = "state-digest")]
+        let mut transcript: Option<super::state_transcript::TranscriptWriter> = None;
+        #[cfg(feature = "state-digest")]
+        let mut script_line = 0usize;
+        let script_text = std::fs::read_to_string(script)?;
+        for line in script_text.lines() {
+            #[cfg(feature = "state-digest")]
+            {
+                script_line += 1;
+            }
             if line.trim().is_empty() {
                 continue;
             }
             let op: Value = serde_json::from_str(line)?;
             match op["op"].as_str().unwrap_or("") {
+                #[cfg(feature = "state-digest")]
+                "state_transcript" => {
+                    let enabled = op["on"]
+                        .as_bool()
+                        .ok_or("state_transcript: missing boolean `on`")?;
+                    if enabled && transcript.is_none() {
+                        transcript = Some(super::state_transcript::TranscriptWriter::open(
+                            self,
+                            script_text.as_bytes(),
+                        )?);
+                    }
+                    if let Some(writer) = transcript.as_mut() {
+                        writer.set_enabled(enabled)?;
+                    }
+                }
                 "cmd" => {
                     let command = op["cmd"].as_str().unwrap_or("");
                     self.server.chat_capture = Some(Vec::new());
@@ -325,6 +369,10 @@ impl ServerGame<'_> {
                             out.push_str(&record.to_string());
                             out.push('\n');
                         }
+                    }
+                    #[cfg(feature = "state-digest")]
+                    if let Some(writer) = transcript.as_mut() {
+                        writer.record_point(self, script_line, false)?;
                     }
                 }
                 "mob_damage_state" => {
@@ -493,8 +541,17 @@ impl ServerGame<'_> {
                 "chunk_ready" => {
                     let [x, z] =
                         std::array::from_fn(|i| op["chunk"][i].as_i64().unwrap_or(0) as i32);
+                    #[cfg(feature = "state-digest")]
+                    let check_entity_ticking = op["entity_ticking"].as_bool() == Some(true);
+                    #[cfg(feature = "state-digest")]
+                    let mut entity_ticking = false;
                     let state = self.harness_owner(|g| {
                         let resident = g.world.chunks.contains_key(&(x, z));
+                        #[cfg(feature = "state-digest")]
+                        if check_entity_ticking {
+                            entity_ticking =
+                                resident && g.server.chunk_ticking.tickets.levels().entity_ticking(x, z);
+                        }
                         Ok([
                             resident,
                             g.server.streaming.is_lit(x, z),
@@ -506,9 +563,24 @@ impl ServerGame<'_> {
                                     .any(|(key, _)| *key == (x, z)),
                         ])
                     })?;
+                    #[cfg(feature = "state-digest")]
+                    let results: Vec<Value> = if check_entity_ticking {
+                        state
+                            .into_iter()
+                            .chain(std::iter::once(entity_ticking))
+                            .map(|ready| json!([true, i32::from(ready)]))
+                            .collect()
+                    } else {
+                        state
+                            .map(|ready| json!([true, i32::from(ready)]))
+                            .into_iter()
+                            .collect()
+                    };
+                    #[cfg(not(feature = "state-digest"))]
+                    let results = state.map(|ready| json!([true, i32::from(ready)]));
                     out.push_str(
                         &json!({"cmd": format!("#chunk_ready {x} {z}"), "messages": [],
-                        "results": state.map(|ready| json!([true, i32::from(ready)]))})
+                        "results": results})
                         .to_string(),
                     );
                     out.push('\n');
@@ -581,6 +653,15 @@ impl ServerGame<'_> {
                     out.push('\n');
                 }
                 "player_loop" => {
+                    #[cfg(feature = "state-digest")]
+                    if transcript
+                        .as_ref()
+                        .is_some_and(super::state_transcript::TranscriptWriter::is_enabled)
+                    {
+                        return Err(
+                            "player_loop is not permitted while state_transcript is enabled".into(),
+                        );
+                    }
                     let ticks = op["n"].as_u64().unwrap_or(1);
                     let count = |g: &mut Self| {
                         Ok(g.stats
@@ -623,6 +704,16 @@ impl ServerGame<'_> {
                     out.push('\n');
                 }
                 "align_game_time" => {
+                    #[cfg(feature = "state-digest")]
+                    if transcript
+                        .as_ref()
+                        .is_some_and(super::state_transcript::TranscriptWriter::is_enabled)
+                    {
+                        return Err(
+                            "align_game_time is not permitted while state_transcript is enabled"
+                                .into(),
+                        );
+                    }
                     let target = op["target"]
                         .as_i64()
                         .ok_or("align_game_time: missing target")?;
@@ -653,7 +744,18 @@ impl ServerGame<'_> {
                         {
                             std::thread::sleep(Duration::from_millis(1));
                         }
+                        #[cfg(feature = "state-digest")]
+                        let tick_guard = transcript
+                            .as_mut()
+                            .and_then(|writer| writer.begin_tick(self));
                         self.tick_server(false)?;
+                        #[cfg(feature = "state-digest")]
+                        {
+                            drop(tick_guard);
+                            if let Some(writer) = transcript.as_mut() {
+                                writer.record_point(self, script_line, true)?;
+                            }
+                        }
                         if let Some(ms) = op["pace_ms"].as_u64() {
                             std::thread::sleep(
                                 Duration::from_millis(ms * (i + 1))
@@ -1307,15 +1409,54 @@ impl ServerGame<'_> {
                         field("entity_id")?,
                         field("level_seed")?,
                     );
+                    #[cfg(feature = "state-digest")]
+                    let rand_value = match op.get("rand_value") {
+                        None => None,
+                        Some(v) => {
+                            let n = v
+                                .as_i64()
+                                .ok_or("sync_randoms: `rand_value` must be an integer")?;
+                            Some(
+                                i32::try_from(n)
+                                    .map_err(|_| "sync_randoms: `rand_value` out of i32 range")?,
+                            )
+                        }
+                    };
+                    #[cfg(feature = "state-digest")]
+                    let player_seed = match op.get("player_seed") {
+                        None => None,
+                        Some(v) => Some(
+                            v.as_i64()
+                                .ok_or("sync_randoms: `player_seed` must be an integer")?,
+                        ),
+                    };
                     sunrise_level::random_source::set_thread_uniquifier(uniquifier)?;
                     self.harness_owner(|g| {
+                        #[cfg(feature = "state-digest")]
+                        if player_seed.is_some() && g.common.player.is_none() {
+                            return Err("sync_randoms: player_seed requested with no player".into());
+                        }
                         g.server.next_entity = u32::try_from(entity_id)?;
                         sunrise_core::random::RandomSource::set_seed(
                             &mut g.world.random,
                             level_seed,
                         );
+                        #[cfg(feature = "state-digest")]
+                        if let Some(rv) = rand_value {
+                            g.common.block_ticks.random_tick_value = rv;
+                        }
+                        #[cfg(feature = "state-digest")]
+                        if let Some(ps) = player_seed
+                            && let Some(player) = g.common.player.as_mut()
+                        {
+                            sunrise_core::random::RandomSource::set_seed(&mut player.random, ps);
+                        }
                         Ok(())
                     })?;
+                    #[cfg(feature = "state-digest")]
+                    if let Some(writer) = transcript.as_mut() {
+                        writer.record_point(self, script_line, false)?;
+                    }
                 }
                 "break" => {
                     let pos = std::array::from_fn(|i| op["pos"][i].as_i64().unwrap_or(0) as i32);
@@ -1365,6 +1506,10 @@ impl ServerGame<'_> {
                 }
                 other => return Err(format!("command harness: unknown op {other}").into()),
             }
+        }
+        #[cfg(feature = "state-digest")]
+        if let Some(mut writer) = transcript {
+            writer.complete()?;
         }
         std::fs::write(output, out)?;
         Ok(())
