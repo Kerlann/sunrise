@@ -76,13 +76,34 @@ impl Hooks for CrossLevelRespawn {
     }
 }
 
-/// A server of `role` with one survival player at (3.5, 64, 5.5) in the Overworld, its options as
-/// `integrated.rs`'s server Game and a dedicated server set them.
 fn with_server(
     role: ExecutionRole,
     test: impl FnOnce(&mut sunrise_gameplay::game::ServerGame<'_>),
 ) {
     let root = std::path::PathBuf::from(std::env::var_os("SUNRISE_TEST_RESOURCES").unwrap());
+    with_server_at(root, role, test);
+}
+
+fn with_prepared_server(
+    role: ExecutionRole,
+    test: impl FnOnce(&mut sunrise_gameplay::game::ServerGame<'_>),
+) {
+    use sunrise_core::prepared_test_support::{SERVER_INPUTS, WORLDGEN_INPUTS};
+    let root = crate::prepared_test_root::prepared_root(&[
+        WORLDGEN_INPUTS,
+        SERVER_INPUTS,
+        &["movement-properties.nbt"],
+    ]);
+    with_server_at(root, role, test);
+}
+
+/// A server of `role` with one survival player at (3.5, 64, 5.5) in the Overworld, its options as
+/// `integrated.rs`'s server Game and a dedicated server set them.
+fn with_server_at(
+    root: std::path::PathBuf,
+    role: ExecutionRole,
+    test: impl FnOnce(&mut sunrise_gameplay::game::ServerGame<'_>),
+) {
     with_game_role(root, role, |game| {
         game.options.dedicated = Some(Vec::new());
         let config = HubConfig {
@@ -212,7 +233,7 @@ fn finish_trip(game: &mut sunrise_gameplay::game::ServerGame<'_>, dim: Dim) {
 fn deferred_end_entry_turns_the_server_and_client_motion_to_the_west_facing_arrival() {
     use sunrise_protocol::{buf::Reader, packets::play::Clientbound};
     use sunrise_sim::lan::Out;
-    with_server(ExecutionRole::DedicatedServer, |game| {
+    with_prepared_server(ExecutionRole::DedicatedServer, |game| {
         let (tx, rx) = std::sync::mpsc::channel();
         game.server
             .lan
@@ -330,7 +351,7 @@ fn cross_level_command_stops_and_native_teleport_keeps_the_motion_on_both_sides(
     let role = ExecutionRole::DedicatedServer;
     let entered = Vec3::new(0.25, 0.125, -0.5);
     for keep in [false, true] {
-        with_server(role, |game| {
+        with_prepared_server(role, |game| {
             let (tx, rx) = std::sync::mpsc::channel();
             game.server
                 .lan
@@ -905,7 +926,7 @@ fn credits_respawn_position_cross_dimension_resets_player_tick_count() {
 #[ignore = "daily"]
 fn credits_restore_live_food_and_reapply_speed_to_the_replacement() {
     use sunrise_sim::effects::EffectInstance;
-    with_server(ExecutionRole::DedicatedServer, |game| {
+    with_prepared_server(ExecutionRole::DedicatedServer, |game| {
         prepare_end_exit(game, false);
         game.server
             .lan

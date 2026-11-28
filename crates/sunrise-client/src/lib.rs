@@ -38,6 +38,9 @@ pub(crate) use sunrise_level::chunk;
 pub(crate) use sunrise_sim::{datapack_net, entities, motion, raw_payloads};
 pub use sunrise_sim::{lan, orb_limits, save};
 #[cfg(test)]
+#[path = "../../sunrise-core/src/prepared_test_root.rs"]
+mod prepared_test_root;
+#[cfg(test)]
 mod test_game_dir;
 
 pub use sunrise_level::{crash, logging, spans};

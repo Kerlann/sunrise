@@ -5869,14 +5869,11 @@ pub(super) mod tests {
     #[ignore = "daily"]
     fn nether_portal_landing_rotates_the_same_body_and_sends_its_delta() {
         use sunrise_core::geometry::Vec3;
-        let fixture = crate::test_fixtures::vanilla().expect("prepared vanilla resources");
+        let motion = crate::test_fixtures::prepared_motion();
         let at = [10.5, 70.0, 10.5];
         for (yaw, expected_z) in [(15.0, 0.0), (105.0, 1.0)] {
             let (mut hub, rx) = hub_with_a_guest();
-            let mut body = Box::new(crate::motion::PlayerMotion::new(
-                &fixture.motion,
-                Vec3::ZERO,
-            ));
+            let mut body = Box::new(crate::motion::PlayerMotion::new(&motion, Vec3::ZERO));
             body.velocity = Vec3::new(1.0, 0.25, 0.0);
             let identity = std::ptr::from_ref(body.as_ref());
             hub.guests.update(0, |g| {
