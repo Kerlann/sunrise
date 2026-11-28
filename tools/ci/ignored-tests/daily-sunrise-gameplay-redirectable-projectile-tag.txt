@@ -1,0 +1,2 @@
+# The bound #minecraft:redirectable_projectile decides what a blow turns and what is picked (#4939); needs a Game with prepared resources.
+sunrise-gameplay game::server_side::deflect::tests::the_bound_tag_decides_what_a_blow_turns_and_what_is_picked lib daily resources
