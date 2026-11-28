@@ -566,6 +566,14 @@ fn level_shapes(
     (shapes, stems.into_iter().map(Dim::from_id).collect())
 }
 
+/// `FlatLevelSource.getSeaLevel` for a flat stem: -63, unless the mod that
+/// declares the level set `DimensionSettings::sea_level`. A pack's noise
+/// settings, even ones it replaces, never apply to a flat stem. This is the
+/// value the level reports; the flat generator still builds its water at -63.
+fn flat_sea_level(explicit: Option<i32>) -> i32 {
+    explicit.unwrap_or(-63)
+}
+
 fn set_level_sea_levels(
     overrides: &sunrise_world::worldgen::overrides::WorldgenOverrides,
     mods: &[sunrise_world::worldgen::overrides::ModDimension],
@@ -604,15 +612,20 @@ fn resolve_level_sea_levels(
         // The noise settings are what the terrain is built with; `sea_level` of the mod is for
         // a generator that has none.
         let stem = serde_json::from_str::<serde_json::Value>(stem).ok();
-        // A superflat generator builds at -63 (`FlatLevelSource.getSeaLevel`) whatever its level
-        // is told; a mod's explicit sea level still wins for it.
-        let flat = stem
-            .as_ref()
-            .is_some_and(|stem| stem["generator"]["type"].as_str() == Some("minecraft:flat"));
-        let sea = stem
-            .and_then(|stem| stem_sea_level(&stem, &read))
-            .or(own)
-            .or(flat.then_some(-63));
+        // A superflat generator builds at -63 (`FlatLevelSource.getSeaLevel`) whatever its
+        // level's noise settings say; a mod's explicit sea level still wins for it. The stem
+        // codec accepts both the canonical id and the bare `flat` alias.
+        let flat = stem.as_ref().is_some_and(|stem| {
+            matches!(
+                stem["generator"]["type"].as_str(),
+                Some("minecraft:flat" | "flat")
+            )
+        });
+        let sea = if flat {
+            own.or(Some(-63))
+        } else {
+            stem.and_then(|stem| stem_sea_level(&stem, &read)).or(own)
+        };
         if let (Some(sea), Ok(key)) = (sea, sunrise_core::LevelKey::parse(id)) {
             levels.push((key, sea));
         }
@@ -983,6 +996,16 @@ pub fn make_streaming(
             sunrise_world::level::register_sea_level(key, sea_level);
         }
     };
+    // A flat stem's `-63` must not overwrite a mod's explicit `DimensionSettings::sea_level`
+    // (#6736). Read it from the mod's declaration, not from the registry: a level ID reopened
+    // after another generator had it must not inherit that generator's value.
+    let register_flat_sea_level = || {
+        let explicit = sunrise_world::worldgen::overrides::mod_dimensions()
+            .iter()
+            .find(|declared| declared.id == dim.id())
+            .and_then(|declared| declared.sea_level);
+        register_sea_level(flat_sea_level(explicit));
+    };
     let mut streaming = if let Some(super::runtime_levels::Generate::Layers { flat, biome }) =
         runtime
     {
@@ -994,6 +1017,7 @@ pub fn make_streaming(
             *biome,
         )
         .ok_or("a runtime level's layers use a block the game lacks")?;
+        // These layers specify no sea level: they build at -63 regardless of the ID's past.
         register_sea_level(-63);
         generator_type = Identifier::parse("minecraft:flat").unwrap();
         ChunkStreamer::new(
@@ -1026,7 +1050,7 @@ pub fn make_streaming(
             })
             .transpose()
             .map_err(|e| format!("{}: cannot build flat dimension: {e}", dim.id()))?;
-        register_sea_level(-63);
+        register_flat_sea_level();
         generator_type = Identifier::parse("minecraft:flat").unwrap();
         locator = staged.clone();
         if let Some(inner) = staged.filter(|_| automatic_structures || flat.features || flat.lakes)
@@ -1943,6 +1967,61 @@ mod tests {
         assert_eq!(entry("test:inline"), Some(20));
         assert_eq!(entry("test:plain"), None);
         assert_eq!(entry("minecraft:the_nether"), None);
+    }
+
+    /// A flat stem's sea level comes from the winning generator: a pack's replaced noise
+    /// settings do not leak into it, and only a mod's explicit `sea_level` wins (#6736).
+    #[test]
+    fn issue_6736_a_flat_stem_ignores_noise_settings_but_keeps_an_explicit_sea_level() {
+        use sunrise_world::worldgen::overrides::WorldgenOverrides;
+
+        let flat_stem = |kind: &str| {
+            format!(
+                r#"{{"type":"minecraft:overworld","generator":{{"type":"{kind}"}},"settings":{{"sea_level":100}}}}"#
+            )
+        };
+        let read = |stem: &str| {
+            let mut overrides = WorldgenOverrides::default();
+            overrides.set("dimensions", "minecraft:overworld", stem.to_owned());
+            overrides.set(
+                "settings",
+                "minecraft:overworld",
+                r#"{"sea_level":100}"#.to_owned(),
+            );
+            let levels = resolve_level_sea_levels(&overrides, &[], std::path::Path::new("."));
+            let key = sunrise_core::LevelKey::parse("minecraft:overworld").unwrap();
+            levels
+                .iter()
+                .find(|(level, _)| *level == key)
+                .map(|&(_, sea)| sea)
+        };
+        // The flat decoder accepts the bare alias too; both hide the pack's noise settings.
+        assert_eq!(read(&flat_stem("flat")), Some(-63));
+        assert_eq!(read(&flat_stem("minecraft:flat")), Some(-63));
+        // A noise stem (and a built-in level with no stem) still reports its replaced settings.
+        assert_eq!(read(&flat_stem("minecraft:noise")), Some(100));
+
+        // A mod's explicit value remains the level's reported sea level.
+        let mod_ = sunrise_world::worldgen::overrides::ModDimension {
+            id: "test:flat".into(),
+            stem: r#"{"type":"test:flat","generator":{"type":"minecraft:flat"}}"#.into(),
+            dimension_type: "{}".into(),
+            sea_level: Some(10),
+        };
+        let overrides = {
+            let mut o = WorldgenOverrides::default();
+            o.add_mod_dimension(&mod_);
+            o
+        };
+        let levels = resolve_level_sea_levels(&overrides, &[mod_], std::path::Path::new("."));
+        let key = sunrise_core::LevelKey::parse("test:flat").unwrap();
+        assert_eq!(
+            levels
+                .iter()
+                .find(|(level, _)| *level == key)
+                .map(|&(_, sea)| sea),
+            Some(10)
+        );
     }
 
     #[test]
