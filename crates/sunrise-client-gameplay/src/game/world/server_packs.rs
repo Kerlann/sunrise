@@ -594,6 +594,15 @@ impl crate::game::ClientGame<'_> {
         }
     }
 
+    pub(in crate::game) fn pack_prompt_press_child(&mut self, tag: u64) -> Result<bool> {
+        if self.client.server_packs.0.prompt.is_none() || tag > 1 {
+            return Ok(false);
+        }
+        self.play_audio_button_click();
+        self.answer_pack_prompt(tag == 0)?;
+        Ok(true)
+    }
+
     /// A left click on the prompt: its answer when it hit a button.
     pub(in crate::game::client_side) fn pack_prompt_click(&mut self) -> Result<bool> {
         let Some(prompt) = &self.client.server_packs.0.prompt else {

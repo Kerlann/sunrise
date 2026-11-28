@@ -853,7 +853,6 @@ sunrise-gameplay game::lan_actions::tests::crafting_guest_self_swap_keeps_eight_
 sunrise-client cut_layout::game::server_side::lan_actions_server::tests::fake_body_does_not_count_toward_sleep lib daily resources
 sunrise-gameplay game::lan_actions::tests::menu_rules_match_guest_packets_and_prediction lib daily resources
 sunrise-gameplay game::lan_actions::tests::replacing_empty_note_block_use_does_not_award_vanilla_stats lib daily resources
-sunrise-client cut_layout::game::lan_actions::tick::building_cache_tests::a_guest_killed_mid_tick_no_longer_blocks lib daily resources
 sunrise-client cut_layout::game::lan_actions::tick::building_cache_tests::a_guest_put_in_spectator_mid_tick_no_longer_blocks lib daily resources
 sunrise-client cut_layout::game::lan_actions::tick::building_cache_tests::a_teleported_guest_blocks_where_it_went_not_where_the_tick_began lib daily resources
 sunrise-client cut_layout::game::lan_actions::tick::fall_sound_tests::five_block_fall_sends_stone_once_except_guest lib daily child-process

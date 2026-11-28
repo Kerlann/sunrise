@@ -1540,6 +1540,12 @@ impl crate::game::ServerGame<'_> {
     /// world with the player (`setRemoved(UNLOADED_WITH_PLAYER)`).
     pub fn remove_vehicle_tree(&mut self, root: u32) {
         let gone = self.vehicle_tree_ids(root);
+        #[cfg(feature = "state-digest")]
+        crate::game::state_transcript::record_vehicle_tree_departures(
+            self,
+            &gone,
+            Some("unloaded_with_player"),
+        );
         self.remove_vehicle_rows(&gone);
         for id in gone {
             self.forget_entity(id);

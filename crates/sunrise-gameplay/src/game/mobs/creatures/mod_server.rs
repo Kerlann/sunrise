@@ -39,7 +39,7 @@ use sunrise_gameplay_common::game::creatures::from_loot;
 use sunrise_gameplay_common::game::creatures::killed_by_mob;
 use sunrise_gameplay_common::game::creatures::mob_effect_instance;
 use sunrise_gameplay_common::game::creatures::projectile_targets::{
-    NonMobHit, ProjectileHitInfo, TargetQuery, is_pickable_projectile,
+    NonMobHit, ProjectileHitInfo, TargetQuery,
 };
 use sunrise_gameplay_common::game::creatures::seen;
 use sunrise_gameplay_common::game::creatures::to_loot;
@@ -1542,6 +1542,12 @@ impl crate::game::ServerGame<'_> {
                 .creatures
                 .projectiles
                 .retire_extracted(arrow.id, arrow.join);
+            crate::game::record_departure!(
+                self.common.dim,
+                arrow.id,
+                arrow.entity_type(),
+                Some("discarded")
+            );
         }
         Ok(())
     }
@@ -6361,7 +6367,7 @@ impl crate::game::ServerGame<'_> {
             for (j, q) in projectiles.iter().enumerate() {
                 if j != i
                     && keep_flags[j]
-                    && is_pickable_projectile(q)
+                    && self.projectile_is_pickable(q)
                     && (!skip_wind
                         || !matches!(
                             q.kind,
@@ -6381,6 +6387,8 @@ impl crate::game::ServerGame<'_> {
             }
             {
                 let host_dead = self.player_view().is_some_and(|p| !p.alive);
+                #[cfg(feature = "state-digest")]
+                let dim = self.common.dim;
                 projectiles.update(i, |p| {
                     if vanish
                         && matches!(p.kind, ProjectileKind::EnderPearl)
@@ -6398,6 +6406,7 @@ impl crate::game::ServerGame<'_> {
                         keep_flags[i] = false;
                         return;
                     }
+                    crate::game::record_turn!(dim, p.id, p.entity_type(), None);
                     // The projectile as it was, to fly on if a mod cancels its impact.
                     let before = (hear && !p.stuck).then(|| p.clone());
                     let wind_before = vehicle_winds.before(p);
@@ -6608,6 +6617,19 @@ impl crate::game::ServerGame<'_> {
                 impact.keep = keep_flags[i];
                 if !projectiles[i].destroyed {
                     keep_flags[i] = true;
+                }
+            }
+        }
+        #[cfg(feature = "state-digest")]
+        if crate::game::state_transcript::is_recording() {
+            for (p, &keep) in projectiles.iter().zip(keep_flags.iter()) {
+                if !keep {
+                    crate::game::state_transcript::record_departure(
+                        self.common.dim,
+                        p.id,
+                        p.entity_type(),
+                        Some("discarded"),
+                    );
                 }
             }
         }
@@ -8202,8 +8224,15 @@ impl crate::game::ServerGame<'_> {
                     .creatures
                     .projectiles
                     .retire_extracted(pid, join);
+                crate::game::record_departure!(
+                    self.common.dim,
+                    pid,
+                    p.entity_type(),
+                    Some("discarded")
+                );
                 continue;
             }
+            crate::game::record_turn!(self.common.dim, pid, p.entity_type(), None);
             let section_from = p.position;
             let before = (self.native_hears_impacts() && !p.stuck).then(|| p.clone());
             let mob_shot = !matches!(p.owner, Some(Who::Player));
@@ -8360,6 +8389,12 @@ impl crate::game::ServerGame<'_> {
                     ..self.entity_event_context(pid, None)
                 };
                 self.shulker_bullet_hurt(at, silent);
+                crate::game::record_departure!(
+                    self.common.dim,
+                    pid,
+                    p.entity_type(),
+                    Some("killed")
+                );
                 self.common
                     .creatures
                     .projectiles
@@ -8401,6 +8436,12 @@ impl crate::game::ServerGame<'_> {
                 && keep
                 && let Some(ceiling) = self.wind_ceiling_contact(&p)
             {
+                crate::game::record_departure!(
+                    self.common.dim,
+                    pid,
+                    p.entity_type(),
+                    Some("discarded")
+                );
                 self.common
                     .creatures
                     .projectiles
@@ -8412,6 +8453,12 @@ impl crate::game::ServerGame<'_> {
             if keep || hit != Hit::None && p.arrow.is_none() {
                 self.sweep_projectile_inside(&mut p, None);
                 if p.destroyed {
+                    crate::game::record_departure!(
+                        self.common.dim,
+                        pid,
+                        p.entity_type(),
+                        Some("discarded")
+                    );
                     self.common
                         .creatures
                         .projectiles
@@ -8459,6 +8506,12 @@ impl crate::game::ServerGame<'_> {
                 continue;
             }
             if hit == Hit::None {
+                crate::game::record_departure!(
+                    self.common.dim,
+                    pid,
+                    p.entity_type(),
+                    Some("discarded")
+                );
                 self.common
                     .creatures
                     .projectiles
@@ -8473,6 +8526,12 @@ impl crate::game::ServerGame<'_> {
                     }
                 });
             } else {
+                crate::game::record_departure!(
+                    self.common.dim,
+                    pid,
+                    p.entity_type(),
+                    Some("discarded")
+                );
                 self.common
                     .creatures
                     .projectiles
@@ -8869,6 +8928,12 @@ impl crate::game::ServerGame<'_> {
                 .creatures
                 .projectiles
                 .retire_extracted(arrow.id, arrow.join);
+            crate::game::record_departure!(
+                self.common.dim,
+                arrow.id,
+                arrow.entity_type(),
+                Some("discarded")
+            );
         }
     }
 

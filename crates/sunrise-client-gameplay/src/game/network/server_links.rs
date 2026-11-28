@@ -154,54 +154,131 @@ impl crate::game::ClientGame<'_> {
         let tx = ((w - tw - 30.0) / 2.0).floor();
         batch.text_styled(atlas, &title, tx, 12.0, u32::MAX, true);
         let (wx, wy) = warning_button(w, h, tw);
+        let warn_rect = [wx, wy, WARNING_BUTTON, WARNING_BUTTON];
         let wh = ui::hovered(self.client.cursor, wx, wy, WARNING_BUTTON, WARNING_BUTTON);
+        let warn_label = Text::translate("menu.custom_screen_info.button_narration", &[]);
         // DialogScreen.createWarningButton: an ImageButton with its own
         // message and its tooltip.
-        sunrise_client::widgets::narratable(|| {
-            sunrise_client::widgets::Narratable::button(
-                super::screen_info::tr("menu.custom_screen_info.button_narration", &[]),
-                [wx, wy, WARNING_BUTTON, WARNING_BUTTON],
-                true,
+        match sunrise_client::widgets::with_native_action(1 << 32, || {
+            sunrise_client::widgets::resolve_engine_widget(
+                sunrise_client::widgets::EngineWidgetInput {
+                    bucket: sunrise_client::widgets::WidgetBucket::Button,
+                    rect: warn_rect,
+                    label: Some(&warn_label),
+                    explicit_key: Some("menu.custom_screen_info.button_narration"),
+                    active: true,
+                    hovered: wh,
+                    focused: false,
+                    tab_order_group: -10,
+                },
             )
-            .hovered(wh)
-            .hint(super::screen_info::tr(
-                "menu.custom_screen_info.tooltip",
-                &[],
-            ))
-        });
-        sunrise_client::widgets::record(
-            "menu.custom_screen_info.tooltip",
-            [wx, wy, WARNING_BUTTON, WARNING_BUTTON],
-            true,
-        );
-        batch.sprite_scaled(
-            atlas,
-            if wh {
-                "dialog/warning_button_highlighted"
-            } else {
-                "dialog/warning_button"
-            },
-            wx,
-            wy,
-            WARNING_BUTTON,
-            WARNING_BUTTON,
-            u32::MAX,
-        );
+        }) {
+            sunrise_client::widgets::ResolvedEngineWidget::Skip => {}
+            sunrise_client::widgets::ResolvedEngineWidget::Unchanged => {
+                sunrise_client::widgets::narratable(|| {
+                    sunrise_client::widgets::Narratable::button(
+                        super::screen_info::tr("menu.custom_screen_info.button_narration", &[]),
+                        warn_rect,
+                        true,
+                    )
+                    .hovered(wh)
+                    .hint(super::screen_info::tr(
+                        "menu.custom_screen_info.tooltip",
+                        &[],
+                    ))
+                });
+                sunrise_client::widgets::record("menu.custom_screen_info.tooltip", warn_rect, true);
+                batch.sprite_scaled(
+                    atlas,
+                    if wh {
+                        "dialog/warning_button_highlighted"
+                    } else {
+                        "dialog/warning_button"
+                    },
+                    wx,
+                    wy,
+                    WARNING_BUTTON,
+                    WARNING_BUTTON,
+                    u32::MAX,
+                );
+            }
+            sunrise_client::widgets::ResolvedEngineWidget::Draw(props) => {
+                let msg_plain = props.message.as_ref().map(Text::plain);
+                let props_active = props.active;
+                let props_hovered = props.hovered;
+                let tab_order_group = props.tab_order_group;
+                let tooltip_hint = props.tooltip_narration.clone();
+                sunrise_client::widgets::narratable(|| {
+                    let mut n = sunrise_client::widgets::Narratable::button(
+                        msg_plain.clone().unwrap_or_else(|| {
+                            super::screen_info::tr("menu.custom_screen_info.button_narration", &[])
+                        }),
+                        props.rect,
+                        props_active,
+                    )
+                    .hovered(props_hovered)
+                    .hint(tooltip_hint.clone().unwrap_or_else(|| {
+                        super::screen_info::tr("menu.custom_screen_info.tooltip", &[])
+                    }))
+                    .order(tab_order_group);
+                    sunrise_client::widgets::apply_narration_overrides(
+                        &mut n,
+                        props.rect,
+                        props_active,
+                        props_hovered,
+                        msg_plain.as_deref(),
+                        tab_order_group,
+                        tooltip_hint.clone(),
+                    );
+                    n
+                });
+                sunrise_client::widgets::record(
+                    msg_plain
+                        .as_deref()
+                        .unwrap_or("menu.custom_screen_info.tooltip"),
+                    props.rect,
+                    props.active,
+                );
+                let lit = props
+                    .override_render_highlighted_sprite
+                    .unwrap_or(props.active && props.hovered);
+                let tint = sunrise_client::widgets::white_abgr_alpha(props.alpha);
+                batch.sprite_scaled(
+                    atlas,
+                    if lit {
+                        "dialog/warning_button_highlighted"
+                    } else {
+                        "dialog/warning_button"
+                    },
+                    props.rect[0],
+                    props.rect[1],
+                    props.rect[2],
+                    props.rect[3],
+                    tint,
+                );
+            }
+        }
         let first = batch.vertices.len();
         let inside = self.client.cursor.1 >= HEADER && self.client.cursor.1 < h - FOOTER;
-        for (link, (x, y)) in links.iter().zip(link_buttons(w, top, links.len())) {
+        for (i, (link, (x, y))) in links
+            .iter()
+            .zip(link_buttons(w, top, links.len()))
+            .enumerate()
+        {
             let hover = inside && ui::hovered(self.client.cursor, x, y, LINK_WIDTH, 20.0);
-            ui::button(
-                batch,
-                atlas,
-                x,
-                y,
-                LINK_WIDTH,
-                20.0,
-                &link_label(link),
-                true,
-                hover,
-            );
+            sunrise_client::widgets::with_native_action(i as u64, || {
+                ui::button(
+                    batch,
+                    atlas,
+                    x,
+                    y,
+                    LINK_WIDTH,
+                    20.0,
+                    &link_label(link),
+                    true,
+                    hover,
+                );
+            });
         }
         batch.clip_since(first, 0.0, HEADER, w, h - FOOTER);
         ui::scrollbar(
@@ -215,18 +292,20 @@ impl crate::game::ClientGame<'_> {
         );
         let (bx, by) = back_button(w, h);
         let hover = ui::hovered(self.client.cursor, bx, by, 200.0, 20.0);
-        ui::action_button(
-            batch,
-            atlas,
-            sunrise_client::widgets::Action::Back,
-            bx,
-            by,
-            200.0,
-            20.0,
-            &Text::translate("gui.back", &[]),
-            true,
-            hover,
-        );
+        sunrise_client::widgets::with_native_action(2 << 32, || {
+            ui::action_button(
+                batch,
+                atlas,
+                sunrise_client::widgets::Action::Back,
+                bx,
+                by,
+                200.0,
+                20.0,
+                &Text::translate("gui.back", &[]),
+                true,
+                hover,
+            );
+        });
         self.draw_screen_phase(batch, sunrise_client::screen_draw::RenderPhase::Foreground);
         if wh {
             ui::tooltip(
@@ -237,6 +316,33 @@ impl crate::game::ClientGame<'_> {
             );
         }
     }
+    pub(in crate::game) fn server_links_press_child(&mut self, tag: u64) -> Result<bool> {
+        let kind = tag >> 32;
+        let payload = (tag & 0xFFFF_FFFF) as usize;
+        match kind {
+            0 => {
+                let links = self.server_links().to_vec();
+                let Some(link) = links.get(payload) else {
+                    return Ok(false);
+                };
+                self.play_audio_button_click();
+                self.click_link(&link.link);
+                Ok(true)
+            }
+            1 => {
+                self.play_audio_button_click();
+                self.set_screen(Screen::DialogWarning);
+                Ok(true)
+            }
+            2 => {
+                self.play_audio_button_click();
+                self.set_screen(Screen::Paused);
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
     /// A click on `Screen::ServerLinks`: a link, the warning button or Back.
     pub(in crate::game::client_side) fn server_links_click(&mut self) -> Result<bool> {
         let (w, h) = self.gui_size();
@@ -362,21 +468,39 @@ impl crate::game::ClientGame<'_> {
                 true,
             );
         }
-        for ((x, y), key) in layout.buttons.iter().zip(labels) {
+        for (i, ((x, y), key)) in layout.buttons.iter().zip(labels).enumerate() {
             let hover = ui::hovered(self.client.cursor, *x, *y, 100.0, 20.0);
-            ui::button(
-                batch,
-                atlas,
-                *x,
-                *y,
-                100.0,
-                20.0,
-                &Text::translate(key, &[]),
-                true,
-                hover,
-            );
+            sunrise_client::widgets::with_native_action(i as u64, || {
+                ui::button(
+                    batch,
+                    atlas,
+                    *x,
+                    *y,
+                    100.0,
+                    20.0,
+                    &Text::translate(key, &[]),
+                    true,
+                    hover,
+                );
+            });
         }
         self.draw_screen_phase(batch, sunrise_client::screen_draw::RenderPhase::Foreground);
+    }
+    pub(in crate::game) fn confirm_link_press_child(&mut self, tag: u64) -> bool {
+        if tag > 2 {
+            return false;
+        }
+        let url = self.client.links_ui.confirm.clone().unwrap_or_default();
+        self.play_audio_button_click();
+        match tag {
+            0 => open_uri(&url),
+            1 => {
+                self.client.clipboard.0.set(&url);
+            }
+            _ => {}
+        }
+        self.close_confirm_link();
+        true
     }
     /// ConfirmLinkScreen's answer: yes opens the browser, the middle button
     /// copies the link, no closes; all return to Server Links.
@@ -429,7 +553,12 @@ impl crate::game::ClientGame<'_> {
         } else {
             "menu.returnToMenu"
         };
-        for ((x, y), key) in layout.buttons.into_iter().zip([quit, "gui.back"]) {
+        for (i, ((x, y), key)) in layout
+            .buttons
+            .into_iter()
+            .zip([quit, "gui.back"])
+            .enumerate()
+        {
             let hover = ui::hovered(self.client.cursor, x, y, 150.0, 20.0);
             if key == "gui.back" {
                 sunrise_client::widgets::declare_action(
@@ -438,19 +567,37 @@ impl crate::game::ClientGame<'_> {
                     true,
                 );
             }
-            ui::button(
-                batch,
-                atlas,
-                x,
-                y,
-                150.0,
-                20.0,
-                &Text::translate(key, &[]),
-                true,
-                hover,
-            );
+            sunrise_client::widgets::with_native_action(i as u64, || {
+                ui::button(
+                    batch,
+                    atlas,
+                    x,
+                    y,
+                    150.0,
+                    20.0,
+                    &Text::translate(key, &[]),
+                    true,
+                    hover,
+                );
+            });
         }
         self.draw_screen_phase(batch, sunrise_client::screen_draw::RenderPhase::Foreground);
+    }
+    pub(in crate::game) fn dialog_warning_press_child(&mut self, tag: u64) -> Result<bool> {
+        if tag > 1 {
+            return Ok(false);
+        }
+        self.play_audio_button_click();
+        if tag == 0 {
+            self.leave_server(Some(Text::translate_with_fallback(
+                "menu.custom_screen_info.disconnect",
+                "Custom screen rejected",
+                &[],
+            )))?;
+        } else {
+            self.set_screen(Screen::ServerLinks);
+        }
+        Ok(true)
     }
     /// WarningScreen's answer: disconnect, or back to Server Links.
     pub(in crate::game::client_side) fn dialog_warning_click(&mut self) -> Result<bool> {

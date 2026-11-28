@@ -140,7 +140,7 @@ impl Hooks for WidgetScreen {
                         .lock()
                         .map(|draft| draft.clone())
                         .unwrap_or_default();
-                    state.label = if text.is_empty() {
+                    state.message = if text.is_empty() {
                         Text::translate("widget_example.screen.echo", vec![])
                     } else {
                         Text::literal(text)

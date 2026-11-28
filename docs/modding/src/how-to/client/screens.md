@@ -342,13 +342,25 @@ for a 133-high hopper layout. Chest layouts use `height - 94`; a shulker box's
 When building a complete `MenuScreenLayout` literal, include `title_label: None` and
 `inventory_label: None`, or use `..Default::default()`.
 
-## Mounting widgets on a screen
+## Mounting and editing widgets on a screen
 
 Mount buttons ([`Button`]), single-line text fields ([`TextField`]), and custom widgets
-([`ScreenWidget`]) inside `Hooks::screen_init_post` (`ScreenEvent.Init.Post`) through
-`event.widgets` (`ScreenWidgets`). This works on your own mod screen (`host.mod_screen() == Some(id)`)
-and on vanilla screens alike, matching vanilla's `Screen.addRenderableWidget` and NeoForge's
-`ScreenEvent.Init.Post`.
+([`ScreenWidget`]) — or inspect, edit, remove, and press existing widgets — through
+[`ScreenWidgets`]. This works on your own mod screen (`host.mod_screen() == Some(id)`) and on
+built-in screens alike, matching vanilla's `Screen.addRenderableWidget` and NeoForge's
+`ScreenEvent.Init.Pre` / `ScreenEvent.Init.Post`.
+
+- **`Hooks::screen_init_pre` (`ScreenEvent.Init.Pre`)**: fires before a screen builds its own
+  widgets. Return `Flow::Cancel` to suppress the screen's built-in widgets while leaving its
+  background, container slots, and pages intact; widgets mounted in `screen_init_pre` stay, and
+  `screen_init_post` still runs afterwards.
+- **`Hooks::screen_init_post` (`ScreenEvent.Init.Post`)**: fires once the screen's built-in
+  widgets and any `screen_init_pre` mounts are registered.
+- **Live access (`ClientHost::screen_widgets()`)**: returns `Some(&mut dyn ScreenWidgets)` for
+  the open screen from ticks, screen input hooks (which receive `&mut dyn ClientHost`), and
+  widget callbacks. Render hooks (`screen_render_*`) stay read-only while the frame reads the
+  override table: change widgets from a tick, input or widget callback; the effect shows on the
+  next frame.
 
 ```rust
 {{#include ../../../examples/src/widget_screen.rs:widget_screen}}
@@ -362,20 +374,25 @@ The engine owns drawing order (mounted widgets draw inside the screen's Pre-guar
 before `screen_render_foreground` and tooltips, so cancelling `screen_render_pre` skips them),
 hover, focus, unified Tab / Shift+Tab and arrow navigation across native and mounted controls,
 controller navigation, narration, and mouse/keyboard dispatch on screens, title screens, and
-overlays alike. Mounted widgets are cleared when the screen closes or rebuilds its children
-(for example on a resize that calls `Screen.rebuildWidgets`). A reposition-only resize preserves
-children and focus, and same-instance resizes preserve `MouseHandler` double-click timing. Keep
-text or selection that must survive a rebuild on your mod struct and seed the new widgets from it. Use
-`event.widgets.set_initial_focus(id)` to focus a widget mounted by your listener on open
-(`Screen.setInitialFocus`). Read `event.widgets.children()` for the ordered child list and
-use `event.widgets.remove(child.id)` to remove a listed child (`ScreenEvent.Init.removeListener`).
-The list includes earlier accepted mounts and the native controls on the pause menu and the
-title screen, in vanilla's order (on the title screen: Singleplayer, Multiplayer, Minecraft Realms,
-the Mods button while it shows, the Friends, Language and Accessibility icons, Options..., Quit Game
-and the bottom notice), each labelled with its translation key. A removed native control is neither drawn nor
-pressed until the screen initializes again. A later
-listener sees your edits only if your callback completes normally. There is no live focus setter
-or mutable lookup for built-in widgets.
+overlays alike. Mounted widgets and engine overrides are cleared when the screen closes or
+rebuilds its children (including resizes on screens that inherit `Screen.repositionElements`,
+which calls `rebuildWidgets` and re-fires `screen_init_pre` and `screen_init_post`). On screens
+whose vanilla counterpart overrides `repositionElements` to re-layout existing children, a resize
+clears only engine bounds overrides while keeping non-bounds overrides, mounted widgets (with
+their bounds), and focus; same-instance resizes preserve `MouseHandler` double-click timing. Keep
+text or selection that must survive a rebuild on your mod struct and seed the new widgets from it.
+
+Read `widgets.children()` for the ordered child list (`ScreenChild`) on any open screen, and use
+`ScreenWidgets` mutators (`set_bounds`, `set_position`, `set_size`, `set_message`, `set_active`,
+`set_visible`, `set_alpha`, `set_label_text_color`, `set_tooltip`, `set_tooltip_delay`,
+`set_tab_order_group`, `set_sprites`, `set_override_render_highlighted_sprite`, `remove`, `clear`,
+and `press`) to change or activate built-in and mounted widgets by `ScreenWidgetId`. Stale ids
+return `false`. Each `ScreenChild.message` carries vanilla's `AbstractWidget.getMessage()` (`None`
+when empty, such as unlabelled image or icon widgets; tooltips and internal identity keys are
+never placed in `message`). Use `widgets.set_initial_focus(id)` to focus a mounted widget on open
+(`Screen.setInitialFocus`). A later `screen_init_*` listener sees your edits only if your callback
+completes normally. See the rustdoc of `ScreenWidgets`, `ScreenChild`, and `ScreenWidget` for the
+full contract.
 A custom widget can track its own focus via `set_focused` and read or change the state it owns.
 
 ### Buttons with your own art
@@ -410,8 +427,9 @@ the custom normal sprite, then to the vanilla nine-slice for that state. `label_
 pixels and moves only the label, not the hitbox or overflow clip. Mounted buttons register for
 narration and controller focus automatically. They activate on left click, on Enter or Space with
 keyboard focus, and through controller activation with controller focus. Controller activation
-calls the widget without dispatching screen mouse hooks. Inside `on_press`, mutate `&mut ButtonState` (`rect`, `label`, `active`, `visible`,
-`sprites`) directly.
+calls the widget without dispatching screen mouse hooks. Inside `on_press`, mutate `&mut ButtonState` (`rect`, `message`, `active`, `visible`, `alpha`,
+`label_text_color`, `tooltip`, `tooltip_delay`, `tab_order_group`, `sprites`,
+`override_render_highlighted_sprite`) directly.
 
 ### Text fields, IME and double-click
 
@@ -438,8 +456,9 @@ mounted text fields support:
 
 Implement [`ScreenWidget`] for controls beyond vanilla buttons and text fields and mount them with
 `event.widgets.add_widget(Box::new(...))`. Implement `bounds(&self) -> [f32; 4]` and override only
-the callbacks you need (`visible`, `active`, `render`, `mouse_clicked`, `mouse_released`,
-`mouse_dragged`, `mouse_scrolled`, `key_pressed`, `key_released`, `char_typed`, `captures_input`,
+the callbacks you need (`visible`, `active`, `tab_order_group`, `render`, `mouse_moved`,
+`mouse_clicked`, `mouse_released`, `mouse_dragged`, `mouse_scrolled`, `key_pressed`,
+`key_released`, `char_typed`, `captures_input`, `should_take_focus_after_interaction`,
 `set_focused`). Every input callback defaults to `false` (unhandled). A pointer press goes only
 to the first hit child; if that child declines it, focus stays where it was. Return `true` from
 `captures_input()` when a focused custom

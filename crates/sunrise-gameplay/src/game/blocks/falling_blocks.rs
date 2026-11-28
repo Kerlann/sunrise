@@ -79,6 +79,12 @@ impl crate::game::ServerGame<'_> {
                 // collision search excludes falling blocks. Finish this entity
                 // now so subsequent falls see its placed block.
                 game.server.ordered.landed.insert(join);
+                crate::game::record_departure!(
+                    game.common.dim,
+                    id,
+                    "minecraft:falling_block",
+                    Some("discarded")
+                );
                 return Ok(());
             }
             // Only terminal owners leave storage. Carry the original lifetime
@@ -102,6 +108,12 @@ impl crate::game::ServerGame<'_> {
                 return Ok(());
             }
             game.falling.retire_extracted(id, join);
+            crate::game::record_departure!(
+                game.common.dim,
+                id,
+                "minecraft:falling_block",
+                Some("discarded")
+            );
             Ok(())
         })
     }

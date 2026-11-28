@@ -423,6 +423,21 @@ impl ItemRenderState {
         pose: Mat4,
         sink: &mut dyn ItemSink,
     ) {
+        self.submit_poses(renderer, sprites, host, &[pose], sink);
+    }
+    /// `ItemStackRenderState.submit` under each pose in `poses`, resolving special-model
+    /// state (such as player skins and banner/shield patterns) once across all poses.
+    pub fn submit_poses(
+        &self,
+        renderer: &ItemRenderer,
+        sprites: &HashMap<String, Rect>,
+        host: &dyn SpecialHost,
+        poses: &[Mat4],
+        sink: &mut dyn ItemSink,
+    ) {
+        if poses.is_empty() {
+            return;
+        }
         let mut tinted;
         let sink: &mut dyn ItemSink = if let Some(tint) = self.held_tint {
             tinted = TintedItemSink { sink, tint };
@@ -430,22 +445,69 @@ impl ItemRenderState {
         } else {
             sink
         };
-        for layer in &self.layers {
-            let m = pose * layer.matrix;
-            match &layer.geometry {
-                LayerGeometry::Quads(baked) => {
-                    submit_quads(renderer, baked, layer, m, sprites, sink);
+        if let [pose] = *poses {
+            for layer in &self.layers {
+                let m = pose * layer.matrix;
+                match &layer.geometry {
+                    LayerGeometry::Quads(baked) => {
+                        submit_quads(renderer, baked, layer, m, sprites, sink);
+                    }
+                    LayerGeometry::Special { model, argument } => special::submit(
+                        renderer,
+                        model,
+                        argument,
+                        layer.foil != FoilType::None,
+                        &[m],
+                        sprites,
+                        host,
+                        sink,
+                    ),
                 }
-                LayerGeometry::Special { model, argument } => special::submit(
+            }
+            return;
+        }
+        let has_special = self
+            .layers
+            .iter()
+            .any(|layer| matches!(layer.geometry, LayerGeometry::Special { .. }));
+        if !has_special {
+            for &pose in poses {
+                for layer in &self.layers {
+                    let LayerGeometry::Quads(baked) = &layer.geometry else {
+                        continue;
+                    };
+                    submit_quads(renderer, baked, layer, pose * layer.matrix, sprites, sink);
+                }
+            }
+            return;
+        }
+        let prepared: Vec<Option<special::Prepared<'_>>> = self
+            .layers
+            .iter()
+            .map(|layer| match &layer.geometry {
+                LayerGeometry::Quads(_) => None,
+                LayerGeometry::Special { model, argument } => Some(special::prepare(
                     renderer,
                     model,
                     argument,
                     layer.foil != FoilType::None,
-                    m,
                     sprites,
                     host,
-                    sink,
-                ),
+                )),
+            })
+            .collect();
+        for &pose in poses {
+            for (layer, special) in self.layers.iter().zip(&prepared) {
+                let m = pose * layer.matrix;
+                match (&layer.geometry, special) {
+                    (LayerGeometry::Quads(baked), _) => {
+                        submit_quads(renderer, baked, layer, m, sprites, sink);
+                    }
+                    (LayerGeometry::Special { .. }, Some(prepared)) => {
+                        prepared.submit(m, sink);
+                    }
+                    _ => {}
+                }
             }
         }
     }
@@ -477,7 +539,7 @@ impl ItemRenderState {
                     model,
                     argument,
                     layer.foil != FoilType::None,
-                    m_joml.to_glam(),
+                    &[m_joml.to_glam()],
                     sprites,
                     host,
                     sink,
@@ -1841,7 +1903,28 @@ impl ItemRenderer {
         host: &dyn SpecialHost,
         sink: &mut dyn ItemSink,
     ) {
-        special::submit(self, model, argument, has_foil, pose, sprites, host, sink);
+        special::submit(
+            self,
+            model,
+            argument,
+            has_foil,
+            &[pose],
+            sprites,
+            host,
+            sink,
+        );
+    }
+    /// Resolves a `Head` or `PlayerHead` special model once and submits it at every pose in `poses`.
+    pub fn submit_special_head_poses(
+        &self,
+        model: &SpecialModel,
+        argument: &Value,
+        poses: &[Mat4],
+        sprites: &HashMap<String, Rect>,
+        host: &dyn SpecialHost,
+        sink: &mut dyn ItemSink,
+    ) {
+        special::submit(self, model, argument, false, poses, sprites, host, sink);
     }
     /// Shared `minecraft:item` registry id table (`Item.getId`).
     pub fn item_ids(&self) -> &Arc<HashMap<String, i32>> {

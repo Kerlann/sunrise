@@ -38,6 +38,12 @@ impl crate::game::ServerGame<'_> {
         {
             drop(self.common.rockets.extract(join)?);
             self.common.rockets.retire_extracted(id, join);
+            crate::game::record_departure!(
+                self.common.dim,
+                id,
+                "minecraft:firework_rocket",
+                Some("discarded")
+            );
             return None;
         }
         let r = self.common.rockets[at].clone();

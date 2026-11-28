@@ -125,7 +125,7 @@ impl Hooks for Observe {
 
     fn screen_mouse_button_pressed_pre(
         &self,
-        _: &dyn ClientHost,
+        _: &mut dyn ClientHost,
         _: &mut ScreenMouseButtonPressedPreEvent<'_>,
     ) -> Flow {
         let mut state = self.0.lock().unwrap();
@@ -135,7 +135,7 @@ impl Hooks for Observe {
 
     fn screen_mouse_button_pressed_post(
         &self,
-        _: &dyn ClientHost,
+        _: &mut dyn ClientHost,
         event: &mut ScreenMouseButtonPressedPostEvent<'_>,
     ) {
         self.0.lock().unwrap().seen.push(Seen::PressPost(
@@ -146,7 +146,7 @@ impl Hooks for Observe {
 
     fn screen_mouse_button_released_post(
         &self,
-        _: &dyn ClientHost,
+        _: &mut dyn ClientHost,
         event: &mut ScreenMouseButtonReleasedPostEvent<'_>,
     ) {
         self.0.lock().unwrap().seen.push(Seen::ReleasePost(
@@ -164,7 +164,7 @@ impl Hooks for Observe {
 
     fn screen_key_released_pre(
         &self,
-        _: &dyn ClientHost,
+        _: &mut dyn ClientHost,
         event: &mut ScreenKeyReleasedPreEvent<'_>,
     ) -> Flow {
         let mut state = self.0.lock().unwrap();
@@ -174,7 +174,7 @@ impl Hooks for Observe {
 
     fn screen_key_released_post(
         &self,
-        _: &dyn ClientHost,
+        _: &mut dyn ClientHost,
         event: &mut ScreenKeyReleasedPostEvent<'_>,
     ) -> Flow {
         let mut state = self.0.lock().unwrap();
@@ -184,7 +184,7 @@ impl Hooks for Observe {
 
     fn screen_mouse_dragged_pre(
         &self,
-        _: &dyn ClientHost,
+        _: &mut dyn ClientHost,
         event: &mut ScreenMouseDraggedPreEvent<'_>,
     ) -> Flow {
         let mut state = self.0.lock().unwrap();
@@ -196,7 +196,7 @@ impl Hooks for Observe {
 
     fn screen_mouse_dragged_post(
         &self,
-        _: &dyn ClientHost,
+        _: &mut dyn ClientHost,
         _: &mut ScreenMouseDraggedPostEvent<'_>,
     ) {
         self.0.lock().unwrap().seen.push(Seen::DragPost);
@@ -204,7 +204,7 @@ impl Hooks for Observe {
 
     fn screen_mouse_moved_pre(
         &self,
-        _: &dyn ClientHost,
+        _: &mut dyn ClientHost,
         event: &mut mod_api::ScreenMouseMovedPreEvent<'_>,
     ) -> Flow {
         let mut state = self.0.lock().unwrap();
@@ -242,7 +242,7 @@ impl Hooks for Observe {
 
     fn screen_mouse_scrolled_pre(
         &self,
-        _: &dyn ClientHost,
+        _: &mut dyn ClientHost,
         event: &mut ScreenMouseScrolledPreEvent<'_>,
     ) -> Flow {
         let mut state = self.0.lock().unwrap();
@@ -252,7 +252,7 @@ impl Hooks for Observe {
 
     fn screen_mouse_scrolled_post(
         &self,
-        _: &dyn ClientHost,
+        _: &mut dyn ClientHost,
         event: &mut ScreenMouseScrolledPostEvent<'_>,
     ) {
         self.0

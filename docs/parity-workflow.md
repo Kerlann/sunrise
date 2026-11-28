@@ -231,6 +231,43 @@ runs, the comparators print player component differences at the first tick where
 - `tools/state_digest_compare.py A/digest.txt B/digest.txt` names the earliest differing group and reports each group’s first differing step and game time. First compare two runs of the same binary. With either comparator, repeat `--ignore-group GROUP` for observed run-to-run differences that should remain visible without failing the comparison. The player comparator also accepts `player_summary` for `players.txt`. Compare runs built with the same digest groups and Rust toolchain.
 - Keep the measured window free of chunk loading, generation and lighting, and of trial spawners, ominous item spawners and `/item modify` (clock-seeded UUIDs and loot random).
 
+### State transcript
+
+The state transcript compares what the integrated server does with the same scripted scene in vanilla and
+Sunrise. Start with the pinned server artifacts and prepared client resources from the vanilla harness setup.
+Use the JDK from the research lock on `PATH`.
+
+```sh
+python3 tools/test_state_transcript_parity.py --scene base --repeat
+python3 tools/test_state_transcript_parity.py --scene riding --binary target/fast/sunrise-client
+```
+
+The harness is manual and `parity.py` leaves it out. An existing client binary needs the
+`sunrise-client/state-digest` feature. Use `--only vanilla` or `--only sunrise` to record one engine.
+`--repeat` checks that fresh runs of each selected engine produce byte-identical transcripts with the oracle
+cache disabled before comparing across engines. The harness checks each engine's reported view and
+simulation distances, scene chunk readiness, and the clock and membership before the scene summons.
+
+Each run writes its script, fixture manifest, logs and transcripts to a fresh directory under
+`.local/state_transcript/<scene>/`. The cross-engine comparison writes `report.json` there.
+Keep those outputs local.
+
+The transcript covers overworld entities in the ticking set, their stored order, actual turns and departures,
+and the recorded member and level fields. A turn can survive its entity's removal from the ticking set.
+The riding group covers vehicles and passengers. Leashes, block and inventory state, packets, rendering,
+and other levels are outside the comparison.
+
+`tools/state_transcript_compare.py A B` validates the records and script and fixture provenance. Read the
+earliest differing point first, then the first difference in each group. The report includes the entity,
+field, values from both files, and nearby lines for the earliest difference. Later differences can follow
+from that first one. Member state is paired by id and type up to the first divergence in the id sequence
+at each point. The report counts any points with unmatched member state as uncompared. An unknown value
+is counted even when both engines report it. Only differences between known values enter the earliest
+difference or differing-point count. Repeat `--ignore-group GROUP`
+to keep a group visible while omitting it from the result. Use `--json PATH` to save the report.
+The comparator exits with 0 when the included groups match and have full coverage, 1 for a difference,
+unknown value or uncompared state, and 2 for invalid input.
+
 ### Packet capture
 
 A build with `--features net-trace` on `sunrise-game` or `sunrise-client` (off by default and compiled out; enabling it on `sunrise-sim` alone is for transport tests without gameplay tick updates) and `SUNRISE_PACKET_CAPTURE=<dir>` pointing at a fresh empty directory atomically claims `<dir>` via `.capture-claim` (failing server startup immediately if `<dir>` is nonempty, already claimed, or unwritable) and records each play connection into `<player>-<conn>.pkt` plus an atomically renamed `manifest.tsv` on server shutdown (covering process crashes and termination, not OS/power-loss durability). Each packet is assigned its per-connection sequence number on the connection's network worker only after framing succeeds—covering reliable sends (after holding and transaction scopes commit), prepared and pairing payloads, keep-alives, kicks, and live droppable payloads in exact wire order without changing pending-byte refund timing—while prepared decompression, hashing (packet id plus length and XXH3-128 of the uncompressed payload after the packet id), file opens/writes, and overflow logging run off both game and network threads on one bounded writer thread (capped in both entry count and retained bytes). The `tick` column is the owning server's world game time at admission for reliable sends and at worker selection for keep-alives, kicks, and droppable sends (so frozen ticks share one game time and pre-advance work carries the previous value). On shutdown, capture seals the play admission gate, waits up to a deadline for active sessions to acknowledge close, drains accepted records, and writes `# end` footers and `# manifest v2` with a terminal session count; incomplete, truncated, overflowed, timed-out, or unflushed recordings fail validation. To compare two runs, record each into its own empty directory and run `python3 tools/packet_capture_compare.py A B` (optionally pinning `--run-id-a` / `--run-id-b`): it validates the manifest, claim, unique connection IDs, contiguous per-player ordinals, filenames, and `# end` footers, matches connections by exact `(player, ordinal)`, prints the first difference per connection (sequence number, tick, packet id and name, lengths, and hashes), and exits non-zero on any difference, unequal count, unmatched connection, or invalid/incomplete capture. Pass `--ignore` (off by default; `--help` lists the protocol packets carrying wall-clock fields) only when needed—filtered passes prove equality solely for retained records, and controlled parity runs should avoid clock-dependent commands (such as `/debug stop`) and network-driven chunk batching.

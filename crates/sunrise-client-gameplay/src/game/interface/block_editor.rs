@@ -253,10 +253,95 @@ impl crate::game::ClientGame<'_> {
         }
     }
 
-    pub(in crate::game::client_side) fn close_block_editor(&mut self) {
+    pub fn close_block_editor(&mut self) {
         self.client.block_editor.0 = None;
         self.set_screen(Screen::Playing);
         self.capture(true);
+    }
+
+    /// Test-only helper: open a `Screen::BlockEditor` whose layout has two buttons with identical
+    /// original bounds (`id = 1` "Alpha", `id = 2` "Beta") and a slider (`id = 3` "Gain"), logging
+    /// every native `press(id)` and `slide(id)` invocation for selected-child dispatch tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn open_test_coincident_block_editor(
+        &mut self,
+        pos: Pos,
+    ) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
+        struct CoincidentEditor {
+            log: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+            slider: f32,
+        }
+        impl Editor for CoincidentEditor {
+            fn edits(&mut self) -> &mut [EditBox] {
+                &mut []
+            }
+            fn items(&self, _entity: &BlockEntity, _w: f32, _h: f32) -> Vec<Item> {
+                vec![
+                    Item::Button {
+                        id: 1,
+                        x: 100.0,
+                        y: 100.0,
+                        w: 80.0,
+                        label: Text::literal("Alpha"),
+                        active: true,
+                        action: None,
+                    },
+                    Item::Button {
+                        id: 2,
+                        x: 100.0,
+                        y: 100.0,
+                        w: 80.0,
+                        label: Text::literal("Beta"),
+                        active: true,
+                        action: None,
+                    },
+                    Item::Slider {
+                        id: 3,
+                        x: 100.0,
+                        y: 140.0,
+                        w: 100.0,
+                        label: Text::literal("Gain"),
+                        value: self.slider,
+                    },
+                ]
+            }
+            fn press(
+                &mut self,
+                _entity: &mut BlockEntity,
+                _pos: Pos,
+                id: u8,
+                _shift: bool,
+                _alt: bool,
+            ) -> Outcome {
+                self.log.lock().unwrap().push(format!("button:{id}"));
+                Outcome::Stay
+            }
+            fn slide(&mut self, id: u8, value: f32) {
+                self.slider = value;
+                self.log.lock().unwrap().push(format!("slider:{id}"));
+            }
+            fn done(&mut self, _entity: &mut BlockEntity, _pos: Pos) -> Outcome {
+                Outcome::Stay
+            }
+            fn cancel(&mut self, _entity: &mut BlockEntity) {}
+        }
+        use sunrise_level::structure_block::{StructureBlock, StructureMode};
+
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        self.common
+            .world
+            .block_entities
+            .get_or_insert_with(pos, || {
+                BlockEntity::StructureBlock(Box::new(StructureBlock::new(StructureMode::Load)))
+            });
+        self.open_block_editor(
+            pos,
+            Box::new(CoincidentEditor {
+                log: std::sync::Arc::clone(&log),
+                slider: 0.25,
+            }),
+        );
+        log
     }
 
     /// Run `f` on the open screen with its block entity; the screen closes
@@ -333,20 +418,22 @@ impl crate::game::ClientGame<'_> {
         // widgets before the screen draws its own.
         for item in &items {
             if let Item::Button {
+                id,
                 x,
                 y,
                 w: bw,
                 label,
                 active,
                 action,
-                ..
             } = item
             {
                 let hover = ui::hovered(cursor, *x, *y, *bw, 20.0);
                 if let Some(action) = *action {
                     sunrise_client::widgets::declare_action(action, [*x, *y, *bw, 20.0], *active);
                 }
-                ui::button(batch, atlas, *x, *y, *bw, 20.0, label, *active, hover);
+                sunrise_client::widgets::with_native_action(u64::from(*id), || {
+                    ui::button(batch, atlas, *x, *y, *bw, 20.0, label, *active, hover);
+                });
             }
         }
         for item in &items {
@@ -373,7 +460,12 @@ impl crate::game::ClientGame<'_> {
                 Item::Edit { index, x, y, w: ew } => {
                     if let Some(edit) = screen.editor.edits().get_mut(*index) {
                         (edit.x, edit.y, edit.width, edit.height) = (*x, *y, *ew, 20.0);
-                        edit.draw(batch, atlas, None);
+                        sunrise_client::widgets::with_native_action(
+                            (2 << 32) | (*index as u64),
+                            || {
+                                edit.draw(batch, atlas, None);
+                            },
+                        );
                     }
                 }
                 Item::Button { .. } => {}
@@ -399,9 +491,11 @@ impl crate::game::ClientGame<'_> {
                 } => {
                     let hover = ui::hovered(cursor, *x, *y, *sw, 20.0);
                     let dragging = screen.dragging.is_some_and(|(d, _, _)| d == *id);
-                    ui::slider(
-                        batch, atlas, *x, *y, *sw, label, *value, hover, true, dragging,
-                    );
+                    sunrise_client::widgets::with_native_action((1 << 32) | u64::from(*id), || {
+                        ui::slider(
+                            batch, atlas, *x, *y, *sw, label, *value, hover, true, dragging,
+                        );
+                    });
                 }
             }
         }
@@ -498,6 +592,70 @@ impl crate::game::ClientGame<'_> {
             }
         }
         false
+    }
+
+    /// Directly activate the selected BlockEditor child by its bound native action tag without
+    /// coordinate re-hit-testing. Remapped coordinates are used only to interpret slider/edit value.
+    pub(in crate::game) fn block_editor_press_child(
+        &mut self,
+        tag: u64,
+        mapped_cursor: (f32, f32),
+        original_rect: [f32; 4],
+    ) -> bool {
+        let kind = tag >> 32;
+        let payload = (tag & 0xFFFF_FFFF) as usize;
+        let shift = self.has_shift_down();
+        let alt = self.client.keys.raw(&KeyCode::AltLeft);
+        match kind {
+            0 => {
+                let id = payload as u8;
+                self.play_audio_button_click();
+                if let Some(outcome) = self.with_block_editor(|s, e| {
+                    let pos = s.pos;
+                    s.editor.press(e, pos, id, shift, alt)
+                }) {
+                    self.block_editor_outcome(outcome);
+                    true
+                } else {
+                    false
+                }
+            }
+            1 => {
+                let id = payload as u8;
+                let (x, w) = (original_rect[0], original_rect[2]);
+                let value = ui::slider_value(x, w, mapped_cursor.0) as f32;
+                let Some(mut screen) = self.client.block_editor.0.take() else {
+                    return false;
+                };
+                screen.dragging = Some((id, x, w));
+                screen.editor.slide(id, value);
+                self.client.block_editor.0 = Some(screen);
+                true
+            }
+            2 => {
+                let index = payload;
+                let Some(mut screen) = self.client.block_editor.0.take() else {
+                    return false;
+                };
+                let ok = if let Some(edit) = screen.editor.edits().get_mut(index) {
+                    screen.focus = Some(index);
+                    (edit.x, edit.width) = (original_rect[0], original_rect[2]);
+                    edit.click(&self.client.gui.atlas, mapped_cursor.0, false, false);
+                    true
+                } else {
+                    false
+                };
+                self.client.block_editor.0 = Some(screen);
+                ok
+            }
+            _ => false,
+        }
+    }
+
+    pub(in crate::game) fn block_editor_cancel_drag(&mut self) {
+        if let Some(screen) = self.client.block_editor.0.as_mut() {
+            screen.dragging = None;
+        }
     }
 
     /// The cursor moved with a slider held (`AbstractSliderButton.onDrag`).

@@ -105,10 +105,10 @@ fn draw_registered_book(
     ui: &ModRecipeUi,
     (xo, yo): (f32, f32),
     cursor: (f32, f32),
-) -> (Vec<Drawn>, usize) {
-    let mut calls = screen::draw(layout);
+) -> (screen::DrawnBook, usize) {
+    let mut drawn = screen::draw_grouped(layout);
     // The tab sprites, and the category arrows painted beside them (none under an overlay).
-    let first_category_arrow = calls.len();
+    let first_category_arrow = drawn.calls.len();
     if ui.overlay.is_none() {
         for (_, [x, y, w, h], name, key) in tab_arrows(ui, xo, yo) {
             let hover = inside(cursor, x, y, w, h);
@@ -116,7 +116,8 @@ fn draw_registered_book(
                 "recipe_book/{name}{}",
                 if hover { "_highlighted" } else { "" }
             );
-            calls.push(Drawn {
+            let start = drawn.calls.len();
+            drawn.calls.push(Drawn {
                 call: Call::Sprite {
                     id,
                     x: x as i32,
@@ -127,14 +128,26 @@ fn draw_registered_book(
                 pose: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
             });
             if hover {
-                calls.push(Drawn {
+                drawn.calls.push(Drawn {
                     call: Call::Tooltip(vec![vec![screen::Run::plain((layout.translate)(key))]]),
                     pose: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
                 });
             }
+            drawn.widgets.push(screen::BookWidget {
+                range: start..drawn.calls.len(),
+                bucket: sunrise_client::widgets::WidgetBucket::Button,
+                explicit_key: format!("recipe_book/category_{name}"),
+                message: screen::BookWidgetMessage::Translate(key.to_owned()),
+                tooltip_key: Some(key.to_owned()),
+                rect: [x, y, w, h],
+                hovered: hover,
+                focused: false,
+                active: true,
+                highlightable: true,
+            });
         }
     }
-    (calls, first_category_arrow)
+    (drawn, first_category_arrow)
 }
 
 fn registered_book_tab_bounds(calls: &[Drawn], first_category_arrow: usize) -> Option<[f32; 4]> {
@@ -324,16 +337,7 @@ impl crate::game::ClientGame<'_> {
         self.refresh_mod_book();
         let (open, filtering) = self.mod_book_flags()?;
         let (bx, by) = self.mod_book_button(batch);
-        batch.sprite(
-            &self.client.gui.atlas,
-            &sprite(if inside(self.client.cursor, bx, by, 20.0, 18.0) {
-                "button_highlighted"
-            } else {
-                "button"
-            }),
-            bx,
-            by,
-        );
+        self.draw_recipe_book_toggle(batch, bx, by);
         if !self.shift_down_or_ctrl() {
             self.client.recipe_ui.0.time += self.client.frame_ticks;
         }
@@ -391,7 +395,7 @@ impl crate::game::ClientGame<'_> {
             translate: &translate,
             text_width: &text_width,
         };
-        let (calls, first_category_arrow) =
+        let (drawn, first_category_arrow) =
             draw_registered_book(&layout, ui, (xo, yo), self.client.cursor);
         // The tabs and arrows as painted are the region `ScreenView::regions` reports.
         if self.screen_view_listened() {
@@ -399,9 +403,12 @@ impl crate::game::ClientGame<'_> {
                 .screen_state
                 .0
                 .drawn_book_tabs
-                .set(registered_book_tab_bounds(&calls, first_category_arrow));
+                .set(registered_book_tab_bounds(
+                    &drawn.calls,
+                    first_category_arrow,
+                ));
         }
-        self.paint_book(batch, &calls)
+        self.paint_book_grouped(batch, &drawn)
     }
     pub(in crate::game) fn mod_book_click(&mut self, right: bool) -> bool {
         self.refresh_mod_book();
@@ -705,14 +712,14 @@ mod tests {
             }),
             ..ModRecipeUi::default()
         };
-        let (calls, first_category_arrow) =
+        let (drawn, first_category_arrow) =
             draw_registered_book(&layout, &ui, (54.0, 37.0), (0.0, 0.0));
-        assert!(calls.iter().any(|drawn| {
-            matches!(&drawn.call, Call::Sprite { id, x: 147, .. }
+        assert!(drawn.calls.iter().any(|call| {
+            matches!(&call.call, Call::Sprite { id, x: 147, .. }
                 if id == "recipe_book/page_forward")
         }));
         assert_eq!(
-            registered_book_tab_bounds(&calls, first_category_arrow),
+            registered_book_tab_bounds(&drawn.calls, first_category_arrow),
             Some([22.0, 40.0, 35.0, 157.0])
         );
     }

@@ -14,6 +14,11 @@ impl Vec3 {
     fn subtract(self, o: Vec3) -> Vec3 { Vec3::new(self.x - o.x, self.y - o.y, self.z - o.z) }
     fn add_vector(self, o: Vec3) -> Vec3 { Vec3::new(self.x + o.x, self.y + o.y, self.z + o.z) }
 }
+mod game {
+    macro_rules! record_turn { ($($t:tt)*) => {}; }
+    macro_rules! record_departure { ($($t:tt)*) => {}; }
+    pub(crate) use {record_departure, record_turn};
+}
 mod sunrise_sim {
     pub mod join_seq { pub type JoinSeq = u32; }
     pub mod orb_limits { pub const MAX_COUNT: u32 = i32::MAX as u32; }

@@ -61,6 +61,12 @@ impl crate::game::ServerGame<'_> {
                 }
             };
             if taken {
+                crate::game::record_departure!(
+                    self.common.dim,
+                    shot.id,
+                    shot.entity_type(),
+                    Some("discarded")
+                );
                 picked.push(shot.clone());
             }
             !taken

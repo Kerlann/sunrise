@@ -174,6 +174,7 @@ impl crate::game::ServerGame<'_> {
         let before = self.common.bolts.len();
         self.common.bolts.retain(|b| b.id != id);
         if self.common.bolts.len() != before {
+            crate::game::record_departure!(self.common.dim, id, "minecraft:lightning_bolt", None);
             if let Some(uuid) = uuid {
                 self.common
                     .score
@@ -359,6 +360,7 @@ impl crate::game::ServerGame<'_> {
                 continue;
             }
             let mount = self.common.bolts[i].mount;
+            crate::game::record_turn!(self.common.dim, id, "minecraft:lightning_bolt", mount);
             let mount_gone = mount.is_some_and(|vehicle| {
                 self.level_entity(vehicle as i32).is_none()
                     && !self
@@ -926,6 +928,12 @@ impl crate::game::ServerGame<'_> {
                     ) && self.common.orbs[i].hurt(5.0)
                     {
                         self.common.orbs.remove(i);
+                        crate::game::record_departure!(
+                            self.common.dim,
+                            id,
+                            "minecraft:experience_orb",
+                            Some("killed")
+                        );
                     }
                 }
                 _ => {}

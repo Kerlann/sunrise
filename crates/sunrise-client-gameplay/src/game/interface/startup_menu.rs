@@ -1432,8 +1432,9 @@ impl Loading {
             let delta_ticks = now.duration_since(*frame).as_secs_f32() * 20.0;
             *frame = now;
             sunrise_client::widgets::begin_screen(|| win.screen_info());
+            win.advance(delta_ticks);
             win.draw_background(batch, &gui.atlas, Default::default());
-            win.draw_contents(batch, &gui.atlas, delta_ticks);
+            win.draw_contents(batch, &gui.atlas);
             if win.finished(batch.height) {
                 self.menu.win = None;
             }
