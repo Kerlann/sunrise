@@ -1192,6 +1192,9 @@ pub struct ClientState {
     pub agent: agent::Agent,
     /// Connected to a server: the world comes from the network (game/network/remote/mod.rs).
     pub remote: Option<remote_client::Remote>,
+    /// The packet's entity type, available to the constructor's size callback.
+    pub(in crate::game) constructing_size_kind:
+        Option<(mod_api::EntityRef, Option<mod_api::EntityTypeKey>)>,
     /// The current connection came from Realms (retained for reconnect).
     pub(in crate::game::client_side) realm_session: bool,
     /// The current connection came from the LAN list (`ServerData.isLan`).
@@ -1976,6 +1979,7 @@ impl ClientState {
             native_leave: None,
             agent: agent::Agent::default(),
             remote: None,
+            constructing_size_kind: None,
             realm_session: false,
             lan_session: false,
             integrated: None,

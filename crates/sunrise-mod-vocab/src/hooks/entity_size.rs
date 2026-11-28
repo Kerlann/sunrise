@@ -13,7 +13,8 @@ pub trait Hooks {
     /// is ignored if any component is non-finite, negative or greater than 32 blocks. This bounds
     /// collision and pathfinding work while allowing sizes larger than naturally occurring
     /// vanilla entities. `host` reads the side that asks; the entity may be new, so read only
-    /// what you need of it.
+    /// what you need of it. A client's constructor callback can read the type with
+    /// `EntityRef::kind` before the entity joins the level.
     ///
     /// Every entity asks, of every kind, on whichever side runs that refresh: the server for its
     /// own entities, and a client for its copies of the server's: when one is added, when the

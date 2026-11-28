@@ -29,6 +29,11 @@ impl crate::game::ClientGame<'_> {
         &self,
         entity: EntityRef,
     ) -> Option<mod_api::EntityTypeKey> {
+        if let Some((constructing, kind)) = self.client.constructing_size_kind
+            && constructing == entity
+        {
+            return kind;
+        }
         match self.native_entity_read_target(entity) {
             Some(target) => self.native_entity_kind_key(target),
             None => {

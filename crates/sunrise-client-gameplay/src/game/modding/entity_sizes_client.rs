@@ -57,7 +57,7 @@ impl ClientGame<'_> {
 
     /// `EntityEvent.Size` from the constructor of a client's copy `id` of type `kind`.
     pub(in crate::game) fn native_constructing_size(
-        &self,
+        &mut self,
         id: u32,
         kind: &str,
     ) -> Option<SizeAnswer> {
@@ -66,7 +66,12 @@ impl ClientGame<'_> {
         }
         let vanilla = super::entity_type_rows::entity_type_rows(&self.common.options.resources)
             .dimensions(kind)?;
-        self.ask_entity_size(id, Pose::Standing, vanilla, None)
+        let entity = mod_api::EntityRef::new(self.common.native_lifecycle.epoch()?, id);
+        let kind = mod_api::__private::resolved_entity_type_key(kind);
+        let previous = self.client.constructing_size_kind.replace((entity, kind));
+        let answer = self.ask_entity_size(id, Pose::Standing, vanilla, None);
+        self.client.constructing_size_kind = previous;
+        answer
     }
 
     /// Keep the constructor's answer on the copy it was asked for, now that it exists.
@@ -243,3 +248,78 @@ pub mod tests {
 }
 
 use sunrise_gameplay_common::game::entity_sizes_common::EntitySizesCommonGameExt1 as _;
+
+#[cfg(test)]
+mod construction_tests {
+    use crate::game::client_side::{
+        native_client_session::tests::logged_client,
+        native_entity_refs::tests::{run_fresh_cases, with_client_game},
+    };
+    use mod_api::{EntityRef, EntitySizeEvent, Hooks, Host, ModEntry};
+    use sunrise_protocol::packets::play::{AddEntity, Clientbound};
+
+    struct SizeZombie;
+
+    #[mod_api::__subscriptions]
+    impl Hooks for SizeZombie {
+        fn entity_size(&self, host: &dyn Host, event: &mut EntitySizeEvent<'_>) {
+            if event
+                .entity
+                .kind(host)
+                .and_then(|kind| kind.id(host))
+                .is_some_and(|id| id == "minecraft:zombie")
+            {
+                *event.size = [1.5, 4.0, 3.5];
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn a_type_specific_size_applies_on_the_first_client_box() {
+        if run_fresh_cases(
+            &format!(
+                "{}::a_type_specific_size_applies_on_the_first_client_box",
+                module_path!().split_once("::").unwrap().1,
+            ),
+            "SUNRISE_TEST_CLIENT_CONSTRUCTION_SIZE",
+            &["a_type_specific_size_applies_on_the_first_client_box"],
+        ) {
+            return;
+        }
+        let mods = vec![ModEntry::new("size_zombie", Box::new(SizeZombie))].into();
+        mod_platform::testing::with_mods(mods, || {
+            with_client_game(|game| {
+                let _server = logged_client(game);
+                game.common.native_lifecycle.begin_open(None);
+                let kind = game
+                    .client
+                    .remote
+                    .as_ref()
+                    .unwrap()
+                    .builtin
+                    .get("minecraft:entity_type")
+                    .unwrap()
+                    .id("minecraft:zombie")
+                    .unwrap();
+                game.handle_packet(Clientbound::AddEntity(AddEntity {
+                    id: 32,
+                    uuid: 32,
+                    kind,
+                    position: [8.5, 70.0, 8.5],
+                    velocity: [0.0; 3],
+                    pitch: 0,
+                    yaw: 0,
+                    head_yaw: 0,
+                    data: 0,
+                }))
+                .unwrap();
+                let entity = EntityRef::new(game.common.native_lifecycle.epoch().unwrap(), 32);
+                assert_eq!(
+                    game.client_entity_bounding_box(entity),
+                    Some([[7.75, 70.0, 7.75], [9.25, 74.0, 9.25]]),
+                );
+            });
+        });
+    }
+}
