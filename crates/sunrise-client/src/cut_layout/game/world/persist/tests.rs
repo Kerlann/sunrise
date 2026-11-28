@@ -179,7 +179,6 @@ include!("position_load_tests.rs");
 #[test]
 #[ignore = "daily"]
 fn terrain_unload_keeps_entities_in_a_pending_entity_chunk() {
-    use mod_api::__private::{ModPhase, PhaseOwner};
     use sunrise_gameplay::game::native_entity_refs::tests::with_game;
     use sunrise_sim::save::{LevelShape, SaveDir};
 
@@ -214,7 +213,6 @@ fn terrain_unload_keeps_entities_in_a_pending_entity_chunk() {
 
     mod_platform::testing::with_mods(Default::default(), || {
         with_game(|game| {
-            let _world = PhaseOwner::scope(ModPhase::World);
             game.server.save.0 = Arc::new(open_save());
             for (x, z) in [a, b] {
                 game.world
