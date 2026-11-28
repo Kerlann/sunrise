@@ -2853,14 +2853,26 @@ impl crate::game::ClientGame<'_> {
         if !widgets::last_input_screen_is(self.key_screen()) {
             return None;
         }
+        if self.engine_overrides_suppress_all() {
+            return None;
+        }
         let inventory = self.observed_overlay_now().is_none()
             && matches!(self.client.screen, Screen::Inventory | Screen::Creative);
         let (cx, cy) = self.client.cursor;
-        key_focus::keyboard_targets(key_focus::drawn_targets(), inventory)
+        widgets::last_targets_with_meta()
             .into_iter()
+            .filter(|(t, meta)| {
+                !matches!(t.kind, Kind::Mounted { .. })
+                    && !(inventory && matches!(t.kind, Kind::Slot))
+                    && meta
+                        .key
+                        .as_ref()
+                        .is_none_or(|k| !self.engine_key_blocked(k))
+            })
+            .map(|(t, _)| t)
             .find(|t| {
                 let [x, y, w, h] = t.rect;
-                cx >= x && cy >= y && cx < x + w && cy < y + h && !self.engine_rect_blocked(t.rect)
+                cx >= x && cy >= y && cx < x + w && cy < y + h
             })
     }
 

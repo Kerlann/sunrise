@@ -1515,7 +1515,12 @@ impl crate::game::ClientGame<'_> {
                                     ));
                             let handled = handled
                                 || (self.client.screen_state.0.screen_instance == initial_instance
-                                    && self.screen_drag_response(overlay, button, size, (w, h))?);
+                                    && self.screen_drag_response_with_overrides(
+                                        overlay,
+                                        button,
+                                        size,
+                                        (w, h),
+                                    )?);
                             if let Some(post) = mouse_post.as_mut() {
                                 post.handled = handled;
                             }

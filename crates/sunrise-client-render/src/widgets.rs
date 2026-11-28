@@ -147,6 +147,13 @@ impl Target {
     }
 }
 
+/// Collector identity and resolved `tab_order_group` captured alongside a drawn [`Target`].
+#[derive(Clone, Debug, Default)]
+pub struct TargetMeta {
+    pub key: Option<EngineWidgetKey>,
+    pub tab_order_group: i32,
+}
+
 thread_local! {
     /// Buttons drawn since the last `end_frame`, and the last frame's.
     static WIDGETS: RefCell<(Vec<Widget>, Vec<Widget>, u64)> = const { RefCell::new((Vec::new(), Vec::new(), 0)) };
@@ -154,6 +161,8 @@ thread_local! {
     /// on-screen keyboard's keys), labelled or not: where a controller can move focus. Drawn since
     /// `end_frame`, the last frame's, and how many frames rotated.
     static TARGETS: RefCell<(Vec<Target>, Vec<Target>, u64)> = const { RefCell::new((Vec::new(), Vec::new(), 0)) };
+    /// Parallel identity and tab-order metadata for `TARGETS`.
+    static TARGET_META: RefCell<(Vec<TargetMeta>, Vec<TargetMeta>)> = const { RefCell::new((Vec::new(), Vec::new())) };
     /// The buttons drawn since the last `end_frame` that declared their job, and the last frame's.
     static ACTIONS: RefCell<(Vec<DeclaredAction>, Vec<DeclaredAction>)> = const { RefCell::new((Vec::new(), Vec::new())) };
     /// The pad drives, so declared buttons show their glyph (labels leave it room).
@@ -180,6 +189,7 @@ pub struct Saved(
     (Vec<ScrollArea>, Vec<ScrollArea>),
     (Vec<FocusLink>, Vec<FocusLink>),
     (Vec<[f32; 4]>, Vec<[f32; 4]>),
+    (Vec<TargetMeta>, Vec<TargetMeta>),
 );
 
 /// This thread's buttons and targets, leaving none.
@@ -193,6 +203,7 @@ pub fn take() -> Saved {
         SCROLL_AREAS.take(),
         FOCUS_LINKS.take(),
         STEPPERS.take(),
+        TARGET_META.take(),
     )
 }
 
@@ -203,6 +214,7 @@ pub fn put(saved: Saved) {
     SCROLL_AREAS.set(saved.5);
     FOCUS_LINKS.set(saved.6);
     STEPPERS.set(saved.7);
+    TARGET_META.set(saved.8);
     ACTIONS.set(saved.2);
     ACTION_GLYPHS.set(saved.3);
     ACTION_SCREENS.set(saved.4);
@@ -290,12 +302,19 @@ pub fn target(rect: [f32; 4]) {
 
 /// An interactive rectangle of a given kind.
 pub fn target_as(rect: [f32; 4], kind: Kind) {
+    let (key, tab_order_group) = widgets_override::take_last_resolved_target_meta();
     if !rect.iter().all(|v| v.is_finite()) || rect[2] <= 0.0 || rect[3] <= 0.0 {
         return;
     }
     TARGETS.with_borrow_mut(|(current, _, _)| {
         if current.len() < 1024 {
             current.push(Target { rect, kind });
+            TARGET_META.with_borrow_mut(|(meta, _)| {
+                meta.push(TargetMeta {
+                    key,
+                    tab_order_group,
+                });
+            });
         }
     });
 }
@@ -309,15 +328,20 @@ pub fn targets_mark() -> usize {
 /// (GUI pixels): rows a scrolling list clipped away.
 pub fn clip_targets(mark: usize, y0: f32, y1: f32) {
     TARGETS.with_borrow_mut(|(current, _, _)| {
-        let mut i = mark.min(current.len());
-        while i < current.len() {
-            let [_, y, _, h] = current[i].rect;
-            if y < y0 - 0.5 || y + h > y1 + 0.5 {
-                current.remove(i);
-            } else {
-                i += 1;
+        TARGET_META.with_borrow_mut(|(meta, _)| {
+            let mut i = mark.min(current.len());
+            while i < current.len() {
+                let [_, y, _, h] = current[i].rect;
+                if y < y0 - 0.5 || y + h > y1 + 0.5 {
+                    current.remove(i);
+                    if i < meta.len() {
+                        meta.remove(i);
+                    }
+                } else {
+                    i += 1;
+                }
             }
-        }
+        });
     });
 }
 
@@ -354,10 +378,18 @@ pub fn clip_frame((labelled, targets): (usize, usize), y0: f32, y1: f32) {
         });
     });
     TARGETS.with_borrow_mut(|(current, _, _)| {
-        let mut at = 0;
-        current.retain(|t| {
-            at += 1;
-            at <= targets || shown(t.rect[1], t.rect[3])
+        TARGET_META.with_borrow_mut(|(meta, _)| {
+            let mut i = targets.min(current.len());
+            while i < current.len() {
+                if shown(current[i].rect[1], current[i].rect[3]) {
+                    i += 1;
+                } else {
+                    current.remove(i);
+                    if i < meta.len() {
+                        meta.remove(i);
+                    }
+                }
+            }
         });
     });
 }
@@ -367,6 +399,7 @@ pub fn clip_frame((labelled, targets): (usize, usize), y0: f32, y1: f32) {
 pub fn cover_frame() {
     WIDGETS.with_borrow_mut(|(current, _, _)| current.clear());
     TARGETS.with_borrow_mut(|(current, _, _)| current.clear());
+    TARGET_META.with_borrow_mut(|(current, _)| current.clear());
     ACTIONS.with_borrow_mut(|(current, _)| current.clear());
     SCROLL_AREAS.with_borrow_mut(|(current, _)| current.clear());
     FOCUS_LINKS.with_borrow_mut(|(current, _)| current.clear());
@@ -452,6 +485,21 @@ pub fn last_steps_value(focus: [f32; 4]) -> bool {
 /// The focus targets of the last drawn frame.
 pub fn last_targets() -> Vec<Target> {
     TARGETS.with_borrow(|(_, last, _)| last.clone())
+}
+
+/// The focus targets of the last drawn frame paired with their collector identity and
+/// `tab_order_group`.
+pub fn last_targets_with_meta() -> Vec<(Target, TargetMeta)> {
+    TARGETS.with_borrow(|(_, last_targets, _)| {
+        TARGET_META.with_borrow(|(_, last_meta)| {
+            last_targets
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(i, target)| (target, last_meta.get(i).cloned().unwrap_or_default()))
+                .collect()
+        })
+    })
 }
 
 /// Counts drawn frames: focus waits for a new one after scrolling a list.
@@ -540,6 +588,9 @@ pub fn end_frame(frames: u64) {
             TARGETS.with_borrow_mut(|(current, last, generation)| {
                 *last = std::mem::take(current);
                 *generation += 1;
+            });
+            TARGET_META.with_borrow_mut(|(current, last)| {
+                *last = std::mem::take(current);
             });
             ACTIONS.with_borrow_mut(|(current, last)| {
                 *last = std::mem::take(current);

@@ -189,6 +189,16 @@ thread_local! {
     static COLLECTOR: RefCell<Option<CollectorState>> = const { RefCell::new(None) };
     static ACTIVE_OVERRIDES: RefCell<Option<ActiveOverridePass>> = const { RefCell::new(None) };
     static INPUT_OVERRIDES: RefCell<Option<EngineOverrideMaps>> = const { RefCell::new(None) };
+    static LAST_TARGET_META: RefCell<Option<(EngineWidgetKey, i32)>> = const { RefCell::new(None) };
+}
+
+/// Take the collector identity and resolved `tab_order_group` of the engine widget most recently
+/// resolved by [`resolve_engine_widget`] for the `widgets::target_as` call immediately following it.
+pub(super) fn take_last_resolved_target_meta() -> (Option<EngineWidgetKey>, i32) {
+    match LAST_TARGET_META.take() {
+        Some((key, group)) => (Some(key), group),
+        None => (None, 0),
+    }
 }
 
 /// Whether a widget discovery pass is currently running on this thread.
@@ -406,6 +416,7 @@ pub fn with_widget_overrides<R>(
                 .take()
                 .or_else(|| ACTIVE_OVERRIDES.replace(self.prev_pass.take()));
             HAS_OVERRIDES.set(self.prev_has_overrides);
+            LAST_TARGET_META.set(None);
             if let Some(mut pass) = active {
                 if normal_exit {
                     pass.maps.hover_since = pass.next_hover_since;
@@ -586,6 +597,10 @@ pub fn resolve_engine_widget(input: EngineWidgetInput<'_>) -> ResolvedEngineWidg
             None
         };
         let blocks_original = moved || (!active && input.active);
+        let resolved_tab_group = ov
+            .and_then(|o| o.tab_order_group)
+            .unwrap_or(input.tab_order_group);
+        LAST_TARGET_META.set(Some((key.clone(), resolved_tab_group)));
         pass.output.hits.push(EngineHitEntry {
             key,
             original_rect: input.rect,
@@ -603,7 +618,7 @@ pub fn resolve_engine_widget(input: EngineWidgetInput<'_>) -> ResolvedEngineWidg
             hovered,
             alpha: ov.alpha.unwrap_or(1.0),
             label_text_color: ov.label_text_color.flatten(),
-            tab_order_group: ov.tab_order_group.unwrap_or(input.tab_order_group),
+            tab_order_group: resolved_tab_group,
             sprites: ov.sprites.clone().flatten(),
             override_render_highlighted_sprite: ov.override_render_highlighted_sprite.flatten(),
             tooltip_narration,

@@ -50,7 +50,10 @@ pub(in crate::game) struct EngineChildSlot {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(in crate::game) enum EngineClickRoute {
     PassThrough,
-    Redirect((f32, f32)),
+    Redirect {
+        resolved: [f32; 4],
+        original: [f32; 4],
+    },
     Block,
 }
 
@@ -69,6 +72,7 @@ pub(in crate::game) struct MountedWidgetsInner {
     pub(in crate::game) overrides_active: bool,
     pub(in crate::game) focused: Option<usize>,
     pub(in crate::game) dragging: Option<(usize, i32)>,
+    pub(in crate::game) active_redirect: Option<([f32; 4], [f32; 4])>,
 }
 
 /// Mounted widgets and engine widget overrides attached to the currently open screen.
@@ -107,6 +111,7 @@ impl Default for MountedScreenWidgets {
                 overrides_active: false,
                 focused: None,
                 dragging: None,
+                active_redirect: None,
             }),
         }
     }
@@ -188,6 +193,7 @@ impl MountedScreenWidgets {
             inner.pending_tooltip = None;
             inner.mounted_hover_since.clear();
             inner.dragging = None;
+            inner.active_redirect = None;
             inner.discovered = false;
             inner.needs_engine_resync = false;
             inner.overrides_active = false;
@@ -1169,35 +1175,15 @@ impl crate::game::ClientGame<'_> {
         Some(self)
     }
 
-    /// Whether an engine widget whose original rectangle matches `rect` is non-interactive
-    /// (removed, hidden, disabled, or suppressed by `screen_init_pre` cancellation), regardless
-    /// of whether it has been moved.
-    pub(in crate::game) fn engine_rect_suppressed(&self, rect: [f32; 4]) -> bool {
+    /// Whether `screen_init_pre` cancelled engine widgets on the active screen.
+    pub(in crate::game) fn engine_overrides_suppress_all(&self) -> bool {
         let inner = self.client.screen_state.0.widgets.inner.borrow();
-        if !inner.overrides_active {
-            return false;
-        }
-        if inner.engine_overrides.suppress_all {
-            return true;
-        }
-        inner.engine_hits.iter().any(|hit| {
-            !hit.interactive
-                && hit
-                    .original_rect
-                    .iter()
-                    .zip(rect)
-                    .all(|(a, b)| (a - b).abs() < 0.5)
-        })
+        inner.overrides_active && inner.engine_overrides.suppress_all
     }
 
-    /// Whether an engine widget whose original rectangle matches `rect` is currently blocked
-    /// (removed, hidden, disabled, moved away, or suppressed by `screen_init_pre` cancellation).
-    /// During redirected or programmatic (`press`) engine clicks, moved-but-interactive widgets
-    /// remain clickable.
-    pub(in crate::game) fn engine_rect_blocked(&self, rect: [f32; 4]) -> bool {
-        if REDIRECTING_ENGINE_CLICK.get() {
-            return self.engine_rect_suppressed(rect);
-        }
+    /// Whether the engine widget identified by collector key `key` is currently non-interactive
+    /// (removed, hidden, disabled, or suppressed by `screen_init_pre` cancellation).
+    pub(in crate::game) fn engine_key_blocked(&self, key: &widgets::EngineWidgetKey) -> bool {
         let inner = self.client.screen_state.0.widgets.inner.borrow();
         if !inner.overrides_active {
             return false;
@@ -1205,14 +1191,10 @@ impl crate::game::ClientGame<'_> {
         if inner.engine_overrides.suppress_all {
             return true;
         }
-        inner.engine_hits.iter().any(|hit| {
-            hit.blocks_original
-                && hit
-                    .original_rect
-                    .iter()
-                    .zip(rect)
-                    .all(|(a, b)| (a - b).abs() < 0.5)
-        })
+        let Some(ov) = inner.engine_overrides.overrides.get(key) else {
+            return false;
+        };
+        ov.removed || ov.visible == Some(false) || ov.active == Some(false)
     }
 
     /// Run a scoped collector pass over the currently open engine screen or overlay to enumerate
@@ -1397,11 +1379,10 @@ impl crate::game::ClientGame<'_> {
             .find(|hit| hit.interactive && point_in_rect(pt, hit.resolved_rect))
         {
             if hit.resolved_rect != hit.original_rect {
-                let [rx, ry, rw, rh] = hit.resolved_rect;
-                let [ox, oy, ow, oh] = hit.original_rect;
-                let u = ((cursor.0 - rx) / rw).clamp(0.01, 0.99);
-                let v = ((cursor.1 - ry) / rh).clamp(0.01, 0.99);
-                return EngineClickRoute::Redirect((ox + u * ow, oy + v * oh));
+                return EngineClickRoute::Redirect {
+                    resolved: hit.resolved_rect,
+                    original: hit.original_rect,
+                };
             }
             return EngineClickRoute::PassThrough;
         }
@@ -1432,10 +1413,54 @@ impl crate::game::ClientGame<'_> {
         widgets::with_input_overrides(&mut maps, || f(self))
     }
 
+    fn map_redirect_cursor(
+        cursor: (f32, f32),
+        [rx, ry, rw, rh]: [f32; 4],
+        [ox, oy, ow, oh]: [f32; 4],
+    ) -> (f32, f32) {
+        let u = (cursor.0 - rx) / rw;
+        let v = (cursor.1 - ry) / rh;
+        (ox + u * ow, oy + v * oh)
+    }
+
+    /// Route a real mouse drag through any active redirected engine widget mapping before calling
+    /// [`Self::screen_drag_response`].
+    pub(in crate::game) fn screen_drag_response_with_overrides(
+        &mut self,
+        overlay: Option<&str>,
+        button: MouseButton,
+        framebuffer: [u32; 2],
+        gui: (f32, f32),
+    ) -> Result<bool> {
+        let redirect = self
+            .client
+            .screen_state
+            .0
+            .widgets
+            .inner
+            .borrow()
+            .active_redirect;
+        if let Some((resolved, original)) = redirect {
+            let prev = self.client.cursor;
+            self.client.cursor = Self::map_redirect_cursor(prev, resolved, original);
+            let res = self.with_redirecting_engine_click(|game| {
+                game.with_screen_input_overrides(|game| {
+                    game.screen_drag_response(overlay, button, framebuffer, gui)
+                })
+            });
+            self.client.cursor = prev;
+            res
+        } else {
+            self.with_screen_input_overrides(|game| {
+                game.screen_drag_response(overlay, button, framebuffer, gui)
+            })
+        }
+    }
+
     /// Route a real mouse button edge through active engine widget overrides before calling
-    /// [`Self::route_screen_button`], so moved engine widgets click at their new rectangle,
-    /// removed/hidden/disabled/suppressed widgets never activate, and container screens still
-    /// dispatch slots when an engine widget is blocked.
+    /// [`Self::route_screen_button`], so moved engine widgets click, drag, and release at their
+    /// new rectangle, removed/hidden/disabled/suppressed widgets never activate, and container
+    /// screens still dispatch slots when an engine widget is blocked.
     pub(in crate::game) fn route_screen_button_with_overrides(
         &mut self,
         button: MouseButton,
@@ -1444,6 +1469,26 @@ impl crate::game::ClientGame<'_> {
         double_click: bool,
     ) -> Result<bool> {
         if !pressed {
+            let redirect = self
+                .client
+                .screen_state
+                .0
+                .widgets
+                .inner
+                .borrow_mut()
+                .active_redirect
+                .take();
+            if let Some((resolved, original)) = redirect {
+                let prev = self.client.cursor;
+                self.client.cursor = Self::map_redirect_cursor(prev, resolved, original);
+                let res = self.with_redirecting_engine_click(|game| {
+                    game.with_screen_input_overrides(|game| {
+                        game.route_screen_button(button, code, false, double_click)
+                    })
+                });
+                self.client.cursor = prev;
+                return res;
+            }
             return self.with_screen_input_overrides(|game| {
                 game.route_screen_button(button, code, false, double_click)
             });
@@ -1459,25 +1504,64 @@ impl crate::game::ClientGame<'_> {
                 super::Screen::Inventory | super::Screen::Creative
             );
         let res = if direct_override_screen {
+            self.client
+                .screen_state
+                .0
+                .widgets
+                .inner
+                .borrow_mut()
+                .active_redirect = None;
             self.with_screen_input_overrides(|game| {
                 game.route_screen_button(button, code, true, double_click)
             })
         } else {
             match self.resolve_engine_click_cursor(self.client.cursor) {
-                EngineClickRoute::PassThrough => self.with_screen_input_overrides(|game| {
-                    game.route_screen_button(button, code, true, double_click)
-                }),
+                EngineClickRoute::PassThrough => {
+                    self.client
+                        .screen_state
+                        .0
+                        .widgets
+                        .inner
+                        .borrow_mut()
+                        .active_redirect = None;
+                    self.with_screen_input_overrides(|game| {
+                        game.route_screen_button(button, code, true, double_click)
+                    })
+                }
                 EngineClickRoute::Block if container_screen => {
+                    self.client
+                        .screen_state
+                        .0
+                        .widgets
+                        .inner
+                        .borrow_mut()
+                        .active_redirect = None;
                     widgets::with_blocking_engine_widget_click(|| {
                         self.with_screen_input_overrides(|game| {
                             game.route_screen_button(button, code, true, double_click)
                         })
                     })
                 }
-                EngineClickRoute::Block => Ok(false),
-                EngineClickRoute::Redirect(mapped) => {
+                EngineClickRoute::Block => {
+                    self.client
+                        .screen_state
+                        .0
+                        .widgets
+                        .inner
+                        .borrow_mut()
+                        .active_redirect = None;
+                    Ok(false)
+                }
+                EngineClickRoute::Redirect { resolved, original } => {
+                    self.client
+                        .screen_state
+                        .0
+                        .widgets
+                        .inner
+                        .borrow_mut()
+                        .active_redirect = Some((resolved, original));
                     let prev = self.client.cursor;
-                    self.client.cursor = mapped;
+                    self.client.cursor = Self::map_redirect_cursor(prev, resolved, original);
                     let res = self.with_redirecting_engine_click(|game| {
                         game.with_screen_input_overrides(|game| {
                             game.route_screen_button(button, code, true, double_click)

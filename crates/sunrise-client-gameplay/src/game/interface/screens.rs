@@ -417,7 +417,12 @@ impl crate::game::ClientGame<'_> {
                     ui::button(batch, atlas, x, y, bw, 20.0, &label, active, hover);
                 }
                 // PauseScreen's customAdditions button: CUSTOM_OPTIONS_TOOLTIP.
-                if (id == 11 || id == 14) && hover && !self.engine_rect_blocked([x, y, bw, 20.0]) {
+                let btn_key = widgets::EngineWidgetKey {
+                    key: widgets::stable_key_from_text(&label),
+                    bucket: widgets::WidgetBucket::Button,
+                    occurrence: 0,
+                };
+                if (id == 11 || id == 14) && hover && !self.engine_key_blocked(&btn_key) {
                     *tooltip = Some(Text::translate("menu.custom_options.tooltip", &[]));
                 }
             };
@@ -432,12 +437,17 @@ impl crate::game::ClientGame<'_> {
             let is_focused = self.client.pause_focus == Some(id);
             let hover = active && (ui::hovered(self.client.cursor, x, y, 20.0, 20.0) || is_focused);
             let rect = [x, y, 20.0, 20.0];
-            let blocked = self.engine_rect_blocked(rect);
+            let label = Text::translate(ICON_LABELS[i], &[]);
+            let icon_key = widgets::EngineWidgetKey {
+                key: widgets::stable_key_from_text(&label),
+                bucket: widgets::WidgetBucket::Button,
+                occurrence: 0,
+            };
+            let blocked = self.engine_key_blocked(&icon_key);
             // Keep the control socket's legacy name for the Friends icon when not suppressed.
             if i == FRIENDS_ICON && !blocked {
                 sunrise_client::widgets::record(super::friends::TITLE, rect, active);
             }
-            let label = Text::translate(ICON_LABELS[i], &[]);
             ui::button_decorated(
                 batch,
                 atlas,
