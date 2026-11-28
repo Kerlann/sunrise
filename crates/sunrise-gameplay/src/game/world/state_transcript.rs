@@ -282,11 +282,12 @@ impl TranscriptWriter {
             game.common.dim.id(),
         ))?;
         self.write_row(&format!(
-            "L\tlevel_random={}\trand_value={}\tlast_entity_id={}\tmembers={}",
+            "L\tlevel_random={}\trand_value={}\tlast_entity_id={}\tmembers={}\tday_time={}",
             fmt_random(&game.common.world.random),
             game.common.block_ticks.random_tick_value,
             game.server.next_entity as i32,
             members.len(),
+            game.common.world.day_time,
         ))?;
         let mut line = String::with_capacity(320);
         for (i, member) in members.iter().enumerate() {
