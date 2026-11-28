@@ -43,10 +43,10 @@ runs sunrise-mod-package's with `-- --ignored --exact`).
 `--windows-rows` prints every `windows` daily row as `PACKAGE TARGET TEST`, one per line. With `--run`, it runs
 those rows by exact name, one Cargo process per row (windows-runtime-leases.yml). No Linux leg runs or expects them.
 `--report FILE` also writes the run's verdict as JSON for the daily run's summary (tools/ci/daily_summary.py): each
-problem's package, test identity, kind, panic location and policy file, the tests that passed, and the runs that
-did not complete with why (stopped()). It is written before each run too, naming that run as in progress, so a job
-stopped at its time limit still leaves one. It holds only names and numbers this script prints anyway, never test
-output.
+problem's package, test identity, kind, panic location and policy file, the tests that passed or were skipped for
+lack of a hardware GPU, and the runs that did not complete with why (stopped()). It is written before each run
+too, naming that run as in progress, so a job stopped at its time limit still leaves one. It holds only names
+and numbers this script prints anyway, never test output.
 
 Every reader refuses a malformed row, a test listed twice, a folder with no rows or with a file other than `*.txt`
 and README.md, and a file at the retired single-list path (tools/ci/check_ignored_test_rows.py checks this alone).
@@ -1434,7 +1434,7 @@ def main(shards, report=None):
     global _active_budget
     _active_budget = [FAILURE_TOTAL_BYTES]
     _panic_locations.clear()
-    verdict = {"shards": list(shards), "problems": [], "passed": [], "incomplete": []}
+    verdict = {"shards": list(shards), "problems": [], "passed": [], "skipped": [], "incomplete": []}
 
     def problem(package, test, kind, policy=None):
         verdict["problems"].append({"package": package, "test": safe_identity(test), "kind": kind,
@@ -1453,14 +1453,25 @@ def main(shards, report=None):
         skipped.add("gpu")
         print("no Vulkan driver on this runner: the tests marked `gpu` are skipped")
     hardware_vulkan = has_hardware_vulkan(summaries)
-    if not hardware_vulkan:
-        print("no hardware Vulkan adapter detected: hardware-gpu daily rows are skipped")
+    grouped_legs = ignored_shards.DAILY_ROWS_LEGS.values()
+    package_shards = [parse_shard(shard) for shard in shards if shard not in grouped_legs]
     daily, skipped_daily = [], []
     for row in rows:
         if row.mark != "daily":
             continue
-        if kept_out(row) or (row.reason == HARDWARE_GPU_REASON and not hardware_vulkan):
+        if kept_out(row):
             skipped_daily.append(row)
+        elif row.reason == HARDWARE_GPU_REASON and not hardware_vulkan:
+            skipped_daily.append(row)
+            if shard_runs(row.package, row.reference):
+                selected = any(row.package == package and in_leg(row.test, number, count)
+                               for package, number, count in package_shards)
+            else:
+                selected = ignored_shards.daily_rows_leg(row.package) in shards
+            if selected:
+                test = safe_identity(row.test)
+                verdict["skipped"].append({"package": row.package, "test": test, "reason": row.reason})
+                print(f"{row.package} {test}: SKIPPED ({row.reason}: no hardware Vulkan adapter)", flush=True)
         else:
             daily.append(row)
     groups = daily_rows_groups(daily)
@@ -1477,7 +1488,7 @@ def main(shards, report=None):
             if shard == "sunrise-client-lib" else
             [f"{shard}:{package}" for package in sorted({package for package, _ in groups})
              if ignored_shards.daily_rows_leg(package) == shard]
-            if shard in ignored_shards.DAILY_ROWS_LEGS.values() else (shard,)
+            if shard in grouped_legs else (shard,)
         )
     ]
     binaries = None
@@ -1486,7 +1497,7 @@ def main(shards, report=None):
         # names the run in progress; the run's own outcome replaces it.
         write_report(report, dict(verdict, incomplete=[*verdict["incomplete"], {
             "shard": shard, "in_progress": True, "started_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}]))
-        daily_group = shard.split(":", 1)[0] in ignored_shards.DAILY_ROWS_LEGS.values()
+        daily_group = shard.split(":", 1)[0] in grouped_legs
         if daily_group:
             _, package = shard.split(":", 1)
             # Every target of the package in one cargo run: one build that links its test binaries in parallel,

@@ -13,11 +13,12 @@ use super::pack_layer_frame_tests::{
 use crate::game::server_side::native_entity_refs::tests::with_client_game;
 use sunrise_client_gameplay::game::ClientGame;
 use sunrise_gameplay_common::game::tables::GameItems as _;
-use sunrise_gameplay_common::game::test_fixtures::{run_fresh_cases, run_fresh_cases_with_env};
+use sunrise_gameplay_common::game::test_fixtures::run_fresh_cases_with_env;
 use sunrise_protocol::packets::play::Clientbound;
 
 const NAME: &str =
     "cut_layout::game::pack_tag_id_frame_tests::a_tags_id_reaches_the_terrain_and_follows_the_tags";
+const FLAT_NAME: &str = "cut_layout::game::pack_tag_id_frame_tests::a_tags_id_reaches_the_terrain_and_follows_the_tags_with_flat_draws";
 const STREAM_NAME: &str = "cut_layout::game::pack_tag_id_frame_tests::a_tags_id_reaches_the_terrain_through_the_normal_stream";
 const CASE: &str = "SUNRISE_PACK_TAG_ID_FRAME_CASE";
 
@@ -28,14 +29,17 @@ const VERTEX: &str = "#version 120\nattribute vec4 mc_Entity;\nvarying vec4 glco
 const FRAGMENT: &str =
     "#version 120\nvarying vec4 glcolor;\nvoid main() {\n    gl_FragData[0] = glcolor;\n}\n";
 
-/// The issue's case through flat draws and per-section draws reading the arena's pages.
+/// The issue's case through per-section draws reading the arena's pages.
 #[test]
 #[ignore = "daily"]
 fn a_tags_id_reaches_the_terrain_and_follows_the_tags() {
-    if run_fresh_cases(NAME, CASE, &["flat", "pages"]) {
-        return;
-    }
-    tag_id_frames(NAME);
+    tag_id_frames(NAME, TerrainDraws::Pages);
+}
+
+#[test]
+#[ignore = "daily"]
+fn a_tags_id_reaches_the_terrain_and_follows_the_tags_with_flat_draws() {
+    tag_id_frames(FLAT_NAME, TerrainDraws::Flat);
 }
 
 /// The same through per-section draws on the normal stream: with no storage reads in vertex
@@ -44,16 +48,13 @@ fn a_tags_id_reaches_the_terrain_and_follows_the_tags() {
 #[test]
 #[ignore = "daily"]
 fn a_tags_id_reaches_the_terrain_through_the_normal_stream() {
-    if run_fresh_cases_with_env(
-        STREAM_NAME,
-        CASE,
-        &["normals"],
-        1,
-        &[("SUNRISE_SHADER_PACK_WITHOUT", "vertex-storage")],
-    ) {
-        return;
-    }
-    tag_id_frames(STREAM_NAME);
+    tag_id_frames(STREAM_NAME, TerrainDraws::Normals);
+}
+
+enum TerrainDraws {
+    Flat,
+    Pages,
+    Normals,
 }
 
 /// The world's tags replaced, as a server's tags packet (which `/reload` sends) replaces them:
@@ -102,9 +103,18 @@ fn item_and_entity_ids(game: &ClientGame<'_>) -> [i32; 7] {
 /// - replaced again with the slab in `minecraft:logs`: the slab is 42;
 /// - the pack picked again, and the tags replaced while its pipelines build: it runs with the
 ///   ids of the tags replaced, not of those it was loaded with.
-fn tag_id_frames(name: &str) {
-    let case = std::env::var(CASE).unwrap();
-    let flat = case == "flat";
+fn tag_id_frames(name: &str, draws: TerrainDraws) {
+    let (case, env): (_, &[(&str, &str)]) = match draws {
+        TerrainDraws::Flat => ("flat", &[]),
+        TerrainDraws::Pages => ("pages", &[]),
+        TerrainDraws::Normals => (
+            "normals",
+            &[("SUNRISE_SHADER_PACK_WITHOUT", "vertex-storage")],
+        ),
+    };
+    if run_fresh_cases_with_env(name, CASE, &[case], 1, env) {
+        return;
+    }
     let scratch = tempfile::tempdir().unwrap();
     let pack = scratch.path().join("tagged");
     write_files(
@@ -131,7 +141,7 @@ fn tag_id_frames(name: &str) {
                 ),
             ]
         };
-        let Some(_event_loop) = scene_of(game, flat, blocks) else {
+        let Some(_event_loop) = scene_of(game, matches!(draws, TerrainDraws::Flat), blocks) else {
             sunrise_client_render::gfx::test_gpu::skip_or_fail(format_args!(
                 "{name}: this adapter has no flat section draws"
             ));
@@ -169,10 +179,10 @@ fn tag_id_frames(name: &str) {
             renderer.section_arena_pages().0,
             renderer.section_arena_normals().0,
         );
-        match case.as_str() {
-            "pages" => assert!(pages && !normals, "per-section draws read the pages"),
-            "normals" => assert!(normals, "per-section draws read the stream"),
-            _ => {}
+        match draws {
+            TerrainDraws::Pages => assert!(pages && !normals, "per-section draws read the pages"),
+            TerrainDraws::Normals => assert!(normals, "per-section draws read the stream"),
+            TerrainDraws::Flat => {}
         }
         assert_eq!(
             item_and_entity_ids(game),

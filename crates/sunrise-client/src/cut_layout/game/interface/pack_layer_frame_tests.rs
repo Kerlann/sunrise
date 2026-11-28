@@ -9,7 +9,9 @@ use sunrise_shaders::RenderLayer;
 use sunrise_world::registry::BlockStateId;
 
 const NAME: &str = "cut_layout::game::pack_layer_frame_tests::layer_rules_move_states_between_the_packs_terrain_programs";
+const FLAT_NAME: &str = "cut_layout::game::pack_layer_frame_tests::layer_rules_move_states_between_the_packs_terrain_programs_with_flat_draws";
 const SHADOW_NAME: &str = "cut_layout::game::pack_layer_frame_tests::layer_rules_move_states_between_the_packs_shadow_programs";
+const FLAT_SHADOW_NAME: &str = "cut_layout::game::pack_layer_frame_tests::layer_rules_move_states_between_the_packs_shadow_programs_with_flat_draws";
 const CASE: &str = "SUNRISE_PACK_LAYER_FRAME_CASE";
 
 const VERTEX: &str = "#version 120\nvoid main() {\n    gl_Position = ftransform();\n}\n";
@@ -191,10 +193,19 @@ pub(super) fn scene_of(
 #[test]
 #[ignore = "daily"]
 fn layer_rules_move_states_between_the_packs_terrain_programs() {
-    if run_fresh_cases(NAME, CASE, &["flat", "sections"]) {
+    terrain_layer_rule_frames(NAME, false);
+}
+
+#[test]
+#[ignore = "daily"]
+fn layer_rules_move_states_between_the_packs_terrain_programs_with_flat_draws() {
+    terrain_layer_rule_frames(FLAT_NAME, true);
+}
+
+fn terrain_layer_rule_frames(name: &str, flat: bool) {
+    if run_fresh_cases(name, CASE, &[if flat { "flat" } else { "sections" }]) {
         return;
     }
-    let flat = std::env::var(CASE).unwrap() == "flat";
     let scratch = tempfile::tempdir().unwrap();
     let pack = scratch.path().join("layers");
     write_pack(&pack, "layer.translucent=oak_slab:type=bottom\n");
@@ -205,7 +216,7 @@ fn layer_rules_move_states_between_the_packs_terrain_programs() {
     with_client_game(|game| {
         let Some(_event_loop) = scene(game, flat) else {
             sunrise_client_render::gfx::test_gpu::skip_or_fail(format_args!(
-                "{NAME}: this adapter has no flat section draws"
+                "{name}: this adapter has no flat section draws"
             ));
             return;
         };
@@ -310,10 +321,19 @@ fn shadow_drawn(game: &mut ClientGame<'_>) -> [u8; 4] {
 #[test]
 #[ignore = "daily"]
 fn layer_rules_move_states_between_the_packs_shadow_programs() {
-    if run_fresh_cases(SHADOW_NAME, CASE, &["flat", "sections"]) {
+    shadow_layer_rule_frames(SHADOW_NAME, false);
+}
+
+#[test]
+#[ignore = "daily"]
+fn layer_rules_move_states_between_the_packs_shadow_programs_with_flat_draws() {
+    shadow_layer_rule_frames(FLAT_SHADOW_NAME, true);
+}
+
+fn shadow_layer_rule_frames(name: &str, flat: bool) {
+    if run_fresh_cases(name, CASE, &[if flat { "flat" } else { "sections" }]) {
         return;
     }
-    let flat = std::env::var(CASE).unwrap() == "flat";
     let scratch = tempfile::tempdir().unwrap();
     let final_fsh = "#version 120\n\
         const int shadowMapResolution = 64;\nconst float shadowDistance = 16.0;\n\
@@ -355,7 +375,7 @@ fn layer_rules_move_states_between_the_packs_shadow_programs() {
     with_client_game(|game| {
         let Some(_event_loop) = scene(game, flat) else {
             sunrise_client_render::gfx::test_gpu::skip_or_fail(format_args!(
-                "{SHADOW_NAME}: this adapter has no flat section draws"
+                "{name}: this adapter has no flat section draws"
             ));
             return;
         };

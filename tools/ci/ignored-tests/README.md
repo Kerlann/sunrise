@@ -32,8 +32,9 @@ stable release's green daily must include). A daily row is not a known failure: 
 and pass. Its package's shard runs it when that shard builds its target, and the `daily-rows` leg runs every
 other one except the tests run by the Windows or book quickstart jobs. For `gpu` daily rows, a missing adapter
 fails the test instead of skipping it; these are distinct from the adapter-gated `gpu` policy rows above.
-A `hardware-gpu` daily row is selected only if the Vulkan probe reports a non-CPU adapter. Both the package
-shards and `daily-rows` leave it out on a software-only runner or when the probe finds no adapter.
+A `hardware-gpu` daily row is selected only if the Vulkan probe reports a non-CPU adapter. It must run and
+pass when selected. On a software-only runner or when the probe finds no adapter, its shard reports it by
+name as skipped in the log and the daily summary, not as passed or missing.
 An `own-sdk` row names an integration test that needs the daily head's SDK. The daily calls
 `book-quickstart.yml` with `own_sdk: true`, and that workflow runs the test by exact name after setting
 `SUNRISE_SDK_BASE`. No generic shard selects it.
@@ -110,7 +111,7 @@ nowhere, so verify-static fails it until it has a row: `daily` to run it in the 
 
 verify-static fails an un-ignored test that starts a child process (`check_process_tests.py`): it runs a
 `Command`, directly or through a helper of its file or one listed in `tools/ci/process-spawns.txt`. Such a test is a
-`daily` row with reason `child-process`.
+`daily` row with reason `child-process` unless a more specific requirement governs where it can run.
 
 `verify` times its test binaries (`tools/ci/run_test_binaries.py --time-limits 2,5`): a test over 5 s is rerun once,
 alone after all binary workers finish, with the same binary and environment. It fails by name if that isolated
