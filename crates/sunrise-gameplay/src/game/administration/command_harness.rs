@@ -196,7 +196,7 @@ impl ServerGame<'_> {
                     }
                 {
                     if let Some(chunks) = required_chunks.as_deref() {
-                        let levels = self.server.tickets.0.levels();
+                        let levels = self.server.chunk_ticking.tickets.levels();
                         let not_ticking: Vec<(i32, i32)> = chunks
                             .iter()
                             .copied()
@@ -550,7 +550,7 @@ impl ServerGame<'_> {
                         #[cfg(feature = "state-digest")]
                         if check_entity_ticking {
                             entity_ticking =
-                                resident && g.server.tickets.0.levels().entity_ticking(x, z);
+                                resident && g.server.chunk_ticking.tickets.levels().entity_ticking(x, z);
                         }
                         Ok([
                             resident,

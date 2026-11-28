@@ -675,7 +675,7 @@ pub(in crate::game) fn thrown_potion_type(item: &str) -> &'static str {
 }
 
 fn collect_members(game: &ServerGame<'_>) -> sunrise_game_data::Result<Vec<Member>> {
-    let levels = game.server.tickets.0.levels();
+    let levels = game.server.chunk_ticking.tickets.levels();
     let in_ticking = |pos: Vec3| {
         let bx = pos.x.floor() as i32;
         let bz = pos.z.floor() as i32;
