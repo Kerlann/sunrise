@@ -2,42 +2,29 @@
 //! real loopback connection (`Lan` + `Hub` + `net::Session`), matching NeoForge's
 //! `SyncRegistries`, `RegistryManager`, `ConfigurationInitialization` and `ClientPayloadHandler`.
 extern crate sunrise_client_lib as sunrise_client;
+#[path = "support/loopback.rs"]
+mod loopback;
+
+use loopback::{Host, Resources, connect_vanilla_to_config};
 use mod_api::Identifier;
 use std::{
     any::Any,
-    collections::BTreeMap,
     sync::Arc,
     time::{Duration, Instant},
 };
 use sunrise_client::{
-    chunk::MIN_Y,
     custom_registry_net::{
         self, LocalRegistries, Snapshot, SnapshotRegistry, SyncedCustomRegistries,
     },
-    lan::{
-        Lan, NetConfig,
-        chunks::ChunkEncoder,
-        data::SyncData,
-        hub::{HostEvent, Hub, HubConfig, TickCtx},
-    },
+    data_map_net::LocalDataMaps,
+    lan::{Lan, NetConfig, data::SyncData},
     net::{Event, LocalInventory, Session},
-    world::World,
 };
-use sunrise_protocol::{
-    PROTOCOL_VERSION,
-    connection::Connection,
-    crypto::offline_uuid,
-    packets::{
-        Empty,
-        configuration::{self as cfg, ClientInformation, RegistryTags, TagEntry},
-        handshake, login,
-    },
+use sunrise_protocol::packets::{
+    Empty,
+    configuration::{self as cfg, RegistryTags, TagEntry},
 };
-use sunrise_world::{
-    item_defaults::ItemData,
-    native_load_context::{DataLoadOrigin, LoadContext, LoadInputs},
-    registry::BlockStateId,
-};
+use sunrise_world::item_defaults::ItemData;
 
 struct LocalDir {
     id: String,
@@ -86,129 +73,16 @@ impl mod_api::__private::RegistryDirectory for LocalDir {
     }
 }
 
-fn load_context(origin: DataLoadOrigin) -> LoadContext {
-    LoadContext::new(
-        origin,
-        Arc::new(LoadInputs::new(BTreeMap::new(), Default::default())),
-        [],
-    )
-}
-
-struct Resources(std::path::PathBuf);
-
-impl Resources {
-    fn new(name: &str) -> (Self, Arc<ItemData>) {
-        let root = std::env::temp_dir().join(format!(
-            "sunrise-custom-registry-join-{name}-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("items.json"), "{}").unwrap();
-        let data = ItemData::load(&root, load_context(DataLoadOrigin::ClientPreload)).unwrap();
-        (Self(root), Arc::new(data))
-    }
-}
-
-impl Drop for Resources {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).ok();
-    }
-}
-
-struct Host {
-    hub: Hub,
-    world: World,
-    next_entity: u32,
-    joined: Vec<u32>,
-}
-
-impl Host {
-    fn start(sync: SyncData) -> Self {
-        let sync = Arc::new(sync);
-        let net = NetConfig {
-            announce: false,
-            ..NetConfig::loopback(0, "Custom registry join".into(), 8)
-        };
-        let lan = Lan::start_with(sync.clone(), net).unwrap();
-        let encoder = ChunkEncoder::new(
-            [] as [(Arc<str>, bool); 0],
-            &sunrise_protocol::registry::Builtin::default(),
-            &[],
-            &[],
-            Default::default(),
-        );
-        let config = HubConfig {
-            allow_flight: false,
-            default_game_mode: 0,
-            guest_commands: false,
-            force_game_mode: false,
-            hardcore: false,
-            view_distance: 3,
-            simulation_distance: 3,
-            integrated: true,
-            dimension: "minecraft:overworld".into(),
-            seed: 1,
-            max_players: 8,
-            levels: Default::default(),
-            level_seeds: Default::default(),
-        };
-        let load = Arc::new(
-            load_context(DataLoadOrigin::ServerDataLoad)
-                .loop_context(sunrise_world::native_load_context::LoopSide::Server, []),
-        );
-        Self {
-            hub: Hub::new(lan, sync, encoder, config, load),
-            world: World::new(BlockStateId(0), 0),
-            next_entity: 100,
-            joined: Vec::new(),
-        }
-    }
-
-    fn port(&self) -> u16 {
-        self.hub.lan.port
-    }
-
-    fn tick(&mut self) {
-        let mut ctx = TickCtx {
-            sea_level: 63,
-            world: &mut self.world,
-            entities: &[],
-            next_entity: &mut self.next_entity,
-            spawn: [8.5, f64::from(MIN_Y + 5), 8.5],
-            spawn_angle: [0.0; 2],
-            spawn_dimension: "minecraft:overworld",
-            difficulty: 2,
-            difficulty_locked: false,
-            clock_rate: 1.0,
-            tick_rate: 20.0,
-            tick_frozen: false,
-            tick_steps: Default::default(),
-            collision: None,
-            border: &sunrise_client::worldborder::WorldBorder::default(),
-            streaming: None,
-        };
-        for event in self.hub.tick(&mut ctx) {
-            if let HostEvent::Joined(conn, _) = event {
-                self.joined.push(conn);
-            }
-        }
-    }
-}
-
 fn connect(
     port: u16,
     name: &str,
     data: &Arc<ItemData>,
     local_registries: LocalRegistries,
 ) -> Session {
-    Session::connect(
-        &format!("127.0.0.1:{port}"),
+    loopback::connect(
+        port,
         name,
-        None,
-        ClientInformation::new(8),
-        Arc::new(Default::default()),
-        Arc::clone(data),
-        Arc::default(),
+        data,
         LocalInventory {
             custom_registries: local_registries,
             ..Default::default()
@@ -301,8 +175,8 @@ fn matching_synced_registries_join_and_decode_tags_across_differing_orders() {
             ids: vec![0],
         }],
     });
-    let (_resources, data) = Resources::new("matching");
-    let mut host = Host::start(sync);
+    let (_resources, data) = Resources::new("custom-registry-join", "matching");
+    let mut host = Host::start(sync, "Custom registry join", LocalDataMaps::default());
     let session = connect(host.port(), "Alchemist", &data, local);
     let (registries, synced) = drive_join(&mut host, &session).expect("matching client joins");
 
@@ -329,8 +203,12 @@ fn client_missing_non_empty_synced_registry_disconnects_naming_registry() {
     })));
     let local = LocalRegistries::new(vec![]);
 
-    let (_resources, data) = Resources::new("missing-reg");
-    let mut host = Host::start(SyncData::empty());
+    let (_resources, data) = Resources::new("custom-registry-join", "missing-reg");
+    let mut host = Host::start(
+        SyncData::empty(),
+        "Custom registry join",
+        LocalDataMaps::default(),
+    );
     let session = connect(host.port(), "PlainSunrise", &data, local);
     let reason = drive_join(&mut host, &session).unwrap_err();
     assert!(
@@ -357,8 +235,12 @@ fn client_missing_synced_entry_disconnects_naming_registry_and_entry() {
         &["chemlib:oxygen"],
     )]);
 
-    let (_resources, data) = Resources::new("missing-entry");
-    let mut host = Host::start(SyncData::empty());
+    let (_resources, data) = Resources::new("custom-registry-join", "missing-entry");
+    let mut host = Host::start(
+        SyncData::empty(),
+        "Custom registry join",
+        LocalDataMaps::default(),
+    );
     let session = connect(host.port(), "HalfModded", &data, local);
     let reason = drive_join(&mut host, &session).unwrap_err();
     assert!(
@@ -393,52 +275,7 @@ fn vanilla_client_joins_without_custom_registry_payload_or_disconnect() {
         ..NetConfig::loopback(0, "Vanilla custom registry join".into(), 8)
     };
     let lan = Lan::start_with(Arc::new(sync), net).unwrap();
-    let mut c = Connection::connect("127.0.0.1", lan.port, Duration::from_secs(5)).unwrap();
-    c.reader
-        .set_read_timeout(Some(Duration::from_secs(20)))
-        .unwrap();
-    c.send(
-        &handshake::Serverbound::Intention(handshake::Intention {
-            protocol: PROTOCOL_VERSION,
-            host: "127.0.0.1".into(),
-            port: lan.port,
-            intent: handshake::LOGIN,
-        })
-        .encode(),
-    )
-    .unwrap();
-    c.send(
-        &login::Serverbound::Hello(login::ServerHello {
-            name: "Vanilla".into(),
-            uuid: offline_uuid("Vanilla"),
-        })
-        .encode(),
-    )
-    .unwrap();
-    loop {
-        let (id, payload) = c.recv().unwrap();
-        match login::Clientbound::decode(id, &payload).unwrap() {
-            login::Clientbound::Compression(p) => c.set_compression(p.threshold),
-            login::Clientbound::LoginFinished(_) => {
-                c.send(&login::Serverbound::LoginAcknowledged(Empty).encode())
-                    .unwrap();
-                break;
-            }
-            other => panic!("unexpected login packet {other:?}"),
-        }
-    }
-    c.send(&cfg::Serverbound::ClientInformation(ClientInformation::new(4)).encode())
-        .unwrap();
-    let mut name = ::sunrise_core::vanilla_bytes::Writer::new();
-    name.string("vanilla");
-    c.send(
-        &cfg::Serverbound::CustomPayload(cfg::CustomPayload {
-            channel: "minecraft:brand".into(),
-            data: name.data,
-        })
-        .encode(),
-    )
-    .unwrap();
+    let mut c = connect_vanilla_to_config(lan.port, "Vanilla");
     loop {
         let (id, payload) = c.recv().unwrap();
         match cfg::Clientbound::decode(id, &payload).unwrap() {
