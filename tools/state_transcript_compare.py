@@ -165,7 +165,7 @@ class Reader:
             repeated_tick = tick and previous.row.fields['phase'] == 'after_tick'
             if op < previous_op or (op == previous_op and not repeated_tick):
                 self.fail('op must advance to the next script line or continue a multi-tick op', row.line)
-        level = self.read('L', {**LEVEL, 'members': UINT}, LEVEL)
+        level = self.read('L', {**LEVEL, 'members': UINT, 'day_time': INT}, LEVEL)
         members = self.stream('M', 'i', MEMBER, MEMBER)
         if level.fields['members'] != str(len(members)):
             self.fail(f'L.members declares {level.fields["members"]}, found {len(members)} M records', level.line)
@@ -278,7 +278,7 @@ def point_differences(left, right):
         'departures': sequence_difference(left.departures, right.departures, left.row, right.row, 'departure',
                                           DEPARTURE),
         'level': next(field_differences(left.row, right.row, ('game_time', 'dim')), None)
-        or next(field_differences(left.level, right.level, LEVEL), None),
+        or next(field_differences(left.level, right.level, (*LEVEL, 'day_time')), None),
     }
     for group, fields in MEMBER_GROUPS.items():
         differences[group] = next(

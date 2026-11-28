@@ -143,9 +143,7 @@ def expected_command_results(ops, engine):
     for op in ops:
         kind = op['op']
         if kind == 'cmd':
-            command = op['cmd']
-            results = [[True, scenes.NIGHT]] if command == scenes.BASELINE_PROBE else None
-            yield command, results
+            yield op['cmd'], None
         elif kind == 'server_distances':
             yield '#server_distances', [[True, scenes.DISTANCE]] * 2
         elif kind == 'chunk_ready':
@@ -187,6 +185,11 @@ def check_transcript(path, engine, ops, script_hash, fixture_hash):
             line = point.row.line if point else run.footer.line
             raise transcript.InvalidTranscript(f'{path}:{line}: expected point {expected}, got {actual}')
     baseline = run.points[0]
+    day_time = baseline.level.fields['day_time']
+    if day_time != str(scenes.NIGHT):
+        raise transcript.InvalidTranscript(
+            f'{path}:{baseline.level.line}: expected baseline day_time={scenes.NIGHT}, got {day_time}'
+        )
     if [member.fields['type'] for member in baseline.members] != ['minecraft:player']:
         raise transcript.InvalidTranscript(
             f'{path}:{baseline.level.line}: expected only the player before scene summons, '

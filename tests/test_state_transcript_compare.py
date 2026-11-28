@@ -28,13 +28,13 @@ def row(kind, **fields):
     return '\t'.join([kind, *(f'{key}={value}' for key, value in fields.items())])
 
 
-def point(step, members=(PIG, COW), turns=(), departures=(), changes=None, ordinal=0):
+def point(step, members=(PIG, COW), turns=(), departures=(), changes=None, ordinal=0, day_time=scenes.NIGHT):
     changes = changes or {}
     phase = 'after_tick' if step else 'after_op'
     rows = [
         row('P', step=step, phase=phase, ord=ordinal, op=step + ordinal + 1,
             game_time=100 + step, dim='minecraft:overworld'),
-        row('L', level_random=RANDOM, rand_value=0, last_entity_id=3, members=len(members)),
+        row('L', level_random=RANDOM, rand_value=0, last_entity_id=3, members=len(members), day_time=day_time),
     ]
     for index, (entity_id, kind) in enumerate(members):
         fields = dict(pos=POS, motion=POS, rot='00000000,00000000', ground=1, tick_count=step,
@@ -185,6 +185,22 @@ class StateTranscriptCompareTests(unittest.TestCase):
         self.assertEqual((first['left'], first['right']), ('41200000', '40a00000'))
         self.assertTrue(any('health=40a00000' in row['text'] for row in first['right_context']))
         self.assertIn('Later differences', first['note'])
+
+    def test_compares_day_time_in_level_group(self):
+        report = self.compare(transcript(point(0)), transcript(point(0, day_time=13001)))
+        self.assertEqual(report['earliest']['group'], 'level')
+        self.assertEqual(report['earliest']['field'], 'day_time')
+        self.assertEqual(report['earliest']['right'], '13001')
+
+    def test_requires_day_time_at_end_of_level_record(self):
+        data = transcript(point(0))
+        day_time = f'\tday_time={scenes.NIGHT}'
+        for malformed in (data.replace(day_time, ''), data.replace(day_time, '\tday_time=?'),
+                          data.replace('\tmembers=2' + day_time, day_time + '\tmembers=2')):
+            with self.subTest(malformed=malformed):
+                code, output = self.cli(data, malformed)
+                self.assertEqual(code, 2)
+                self.assertIn(f'{self.right}:3:', output)
 
     def test_unknown_on_one_side(self):
         left = transcript(point(0))
@@ -372,6 +388,16 @@ class StateTranscriptHarnessTests(unittest.TestCase):
                 else:
                     with self.assertRaisesRegex(compare.InvalidTranscript, 'expected only the player'):
                         harness.check_transcript(output, 'sunrise', ops, 'a' * 64, 'b' * 64)
+
+    def test_rejects_wrong_day_time_before_scene_summons(self):
+        ops = [{'op': 'state_transcript', 'on': True}, {'op': 'cmd', 'cmd': scenes.BASELINE_PROBE}]
+        player = ('1', 'minecraft:player')
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'transcript.txt'
+            data = transcript(point(0, members=(player,), day_time=13001)).replace('\top=1', '\top=2')
+            output.write_text(data, encoding='utf-8')
+            with self.assertRaisesRegex(compare.InvalidTranscript, 'expected baseline day_time=13000'):
+                harness.check_transcript(output, 'sunrise', ops, 'a' * 64, 'b' * 64)
 
     def test_requires_entity_ticking_in_readiness_report(self):
         op = {'op': 'chunk_ready', 'chunk': [0, 1], 'entity_ticking': True}
