@@ -506,8 +506,10 @@ mod tests {
         game.lan_guest_joined(CONN, &[], PREPARED, Some(PREPARED_SPAWN));
     }
 
-    /// Drive a configured join through the packet handler and check hook order and player
-    /// visibility, including that commands see saved health at the prepared spawn position.
+    /// Drive a configured join through the packet handler and check that each observed hook
+    /// fires once in order, including `datapack_sync` for the joining player after file load
+    /// and before commands. Check player visibility and that commands see saved health at
+    /// the prepared spawn position.
     #[test]
     #[ignore = "daily"]
     fn prepared_join_calls_login_then_announces_once() {
@@ -522,6 +524,7 @@ mod tests {
             Entities,
             Construct,
             File,
+            DatapackSync,
             Commands,
             ClientInformation,
             Announced,
@@ -570,6 +573,14 @@ mod tests {
                 assert_eq!(event.player, self.player);
                 assert!(host.player(event.player).is_none());
                 self.stages.lock().unwrap().push(Stage::File);
+            }
+            fn datapack_sync(
+                &self,
+                _: &mut dyn ServerHost,
+                event: &mut mod_api::DatapackSyncEvent<'_>,
+            ) {
+                assert_eq!(event.player.uuid(), self.player);
+                self.stages.lock().unwrap().push(Stage::DatapackSync);
             }
             fn player_commands_sent(
                 &self,
@@ -734,6 +745,7 @@ mod tests {
                         Stage::Entities,
                         Stage::Construct,
                         Stage::File,
+                        Stage::DatapackSync,
                         Stage::Commands,
                         Stage::ClientInformation,
                         Stage::Announced,
