@@ -1017,7 +1017,7 @@ impl crate::game::ServerGame<'_> {
                     None => player_entity(),
                 },
                 Holder::Mob(id) | Holder::Boat(id) => Some(id as i32),
-                Holder::Knot(p) => self.server.knot_ids.get(&p).map(|&id| id as i32),
+                Holder::Knot(p) => self.server.knot_state.knot_ids.get(&p).map(|&id| id as i32),
             });
             let idle = idle_at(m.position);
             let place = super::lan_idle::Place {

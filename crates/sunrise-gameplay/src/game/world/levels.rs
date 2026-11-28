@@ -170,6 +170,13 @@ pub struct ChunkTickingLevelState {
     pub(in crate::game::server_side) random_tick_sections: RandomTickSections,
 }
 
+/// Per-level fence knot ids and broken fence positions.
+#[derive(Default)]
+pub struct KnotLevelState {
+    pub knot_ids: HashMap<[i32; 3], u32>,
+    pub broken_knots: Vec<[i32; 3]>,
+}
+
 /// A level that is not in place: every per-level field of `Game`.
 pub struct Parked {
     pub world: World,
@@ -202,9 +209,7 @@ pub struct Parked {
     general: super::general::GeneralStore,
     hoppers: HashMap<(i32, i32, i32), HopperState>,
     pub mobs: sunrise_sim::join_seq::JoinList<Mob>,
-    /// The entity ids of the level's fence knots (`knot_ids`).
-    knot_ids: HashMap<[i32; 3], u32>,
-    broken_knots: Vec<[i32; 3]>,
+    knot_state: KnotLevelState,
     knots: sunrise_sim::join_seq::JoinList<Knot>,
     projectiles: sunrise_sim::join_seq::JoinList<sunrise_sim::projectiles::Projectile, false>,
     dropped: sunrise_sim::join_seq::JoinList<ItemEntity>,
@@ -1040,8 +1045,7 @@ fn box_parked(
         hoppers: HashMap::new(),
         chunk_spawn_enemies: true,
         mobs: Default::default(),
-        knot_ids: HashMap::new(),
-        broken_knots: Vec::new(),
+        knot_state: Default::default(),
         knots: Default::default(),
         projectiles: Default::default(),
         dropped: Default::default(),
@@ -1352,8 +1356,7 @@ impl crate::game::ServerGame<'_> {
         swap(&mut self.common.tnts, &mut p.tnts);
         swap(&mut self.server.hoppers, &mut p.hoppers);
         swap(&mut self.common.mobs, &mut p.mobs);
-        swap(&mut self.server.knot_ids, &mut p.knot_ids);
-        swap(&mut self.server.broken_knots, &mut p.broken_knots);
+        swap(&mut self.server.knot_state, &mut p.knot_state);
         swap(&mut self.common.resident_entities.knots, &mut p.knots);
         swap(&mut self.common.resident_entities.general, &mut p.general);
         swap(&mut self.common.creatures.projectiles, &mut p.projectiles);

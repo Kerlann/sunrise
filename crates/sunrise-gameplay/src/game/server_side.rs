@@ -1108,11 +1108,7 @@ pub struct ServerState {
     pub(in crate::game::server_side) watched_vehicles: Vec<lan_vehicles::WatchedVehicle>,
     /// The ender dragon fight (game/mobs/dragon.rs).
     pub fight: dragon::Fight,
-    /// The entity ids a hosted server gives the knots its mobs hang on, by
-    /// block, while a lead is tied there.
-    pub knot_ids: HashMap<[i32; 3], u32>,
-    /// Fence posts whose natural knot was killed and whose leads drop next tick.
-    pub broken_knots: Vec<[i32; 3]>,
+    pub knot_state: levels::KnotLevelState,
     /// This window's player's place in `riding`'s passengers, as `Guest.vehicle_order` is a guest's.
     pub(in crate::game::server_side) riding_order: i64,
     /// Vehicles that gained a rider this tick whose `START_RIDING_TRIGGER` was
@@ -1469,8 +1465,7 @@ impl ServerState {
             leash_boats: Vec::new(),
             watched_vehicles: Vec::new(),
             fight: dragon::Fight::default(),
-            knot_ids: Default::default(),
-            broken_knots: Vec::new(),
+            knot_state: Default::default(),
             riding_order: 0,
             started_riding: Vec::new(),
             rotation_forced: false,

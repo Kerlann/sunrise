@@ -849,6 +849,7 @@ impl crate::game::ServerGame<'_> {
     /// The fence of the knot whose entity id is `id` (`lan_assign_ids`).
     pub(in crate::game::server_side) fn knot_at_id(&self, id: i32) -> Option<[i32; 3]> {
         self.server
+            .knot_state
             .knot_ids
             .iter()
             .find(|&(_, &knot)| knot as i32 == id)
