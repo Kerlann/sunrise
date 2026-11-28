@@ -567,67 +567,160 @@ pub(super) fn submit_book(
     );
 }
 
-/// `SpecialModelRenderer.submit`.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn submit(
-    renderer: &ItemRenderer,
-    model: &SpecialModel,
+#[derive(Clone, Copy)]
+pub(super) enum PartAdjust<'a> {
+    None,
+    Book {
+        openness: f32,
+        flip1: f32,
+        flip2: f32,
+    },
+    Chest {
+        open: f32,
+    },
+    Shulker {
+        progress: f32,
+    },
+    Statue,
+    Skull {
+        kind: &'a str,
+        animation: f32,
+    },
+}
+
+impl PartAdjust<'_> {
+    fn apply(self, name: &str, p: &mut [f32; 9]) {
+        match self {
+            Self::None => {}
+            Self::Book {
+                openness,
+                flip1,
+                flip2,
+            } => book_pose(openness, flip1, flip2)(name, p),
+            Self::Chest { open } => chest_pose(open)(name, p),
+            Self::Shulker { progress } => shulker_pose(progress)(name, p),
+            Self::Statue => statue_pose(name, p),
+            Self::Skull { kind, animation } => skull_pose(kind, animation)(name, p),
+        }
+    }
+}
+
+/// Resolved special-model state ready to submit at one or more poses without repeating
+/// `SpecialHost` lookups (player skins, banner/shield patterns), atlas lookups, or glint
+/// atlas locks.
+pub(super) enum Prepared<'a> {
+    Empty,
+    Part {
+        part: &'a ModelPart,
+        adjust: PartAdjust<'a>,
+        sprite: Rect,
+        color: u32,
+        foil: Foil,
+        entity_glint: bool,
+        oit: bool,
+    },
+    Banner {
+        main: Option<(&'a ModelPart, Rect)>,
+        flag_base: Option<(&'a ModelPart, Rect)>,
+        flag_part: Option<&'a ModelPart>,
+        pattern_base: Option<Rect>,
+        base_color: u32,
+        patterns: Vec<(Rect, u32)>,
+    },
+    Shield {
+        part: &'a ModelPart,
+        base_rect: Option<Rect>,
+        has_patterns: bool,
+        has_foil: bool,
+        glint_rect: Option<Rect>,
+        pattern_base: Option<Rect>,
+        base_dye: u32,
+        patterns: Vec<(Rect, u32)>,
+    },
+    DecoratedPot {
+        base_parts: Vec<(&'a ModelPart, &'static str, Rect)>,
+        side_draws: Vec<(&'a ModelPart, &'static str, Rect)>,
+    },
+}
+
+/// Resolves a `SpecialModelRenderer`'s parts, sprites, skins, patterns, and glint rect once.
+pub(super) fn prepare<'a>(
+    renderer: &'a ItemRenderer,
+    model: &'a SpecialModel,
     argument: &Value,
     has_foil: bool,
-    pose: Mat4,
     sprites: &HashMap<String, Rect>,
     host: &dyn SpecialHost,
-    sink: &mut dyn ItemSink,
-) {
+) -> Prepared<'a> {
     let white = argb(-1);
-    let mut part = |key: &str, adjust: Adjust, texture: &str, color: u32, foil: Foil| {
-        if let (Some(p), Some(r)) = (renderer.part(key), sprites.get(texture).copied()) {
-            draw(p, "root", pose, adjust, r, color, foil, false, None, sink);
+    let part = |key: &str, adjust: PartAdjust<'a>, texture: &str, color: u32, foil: Foil| {
+        if let (Some(part), Some(sprite)) = (renderer.part(key), sprites.get(texture).copied()) {
+            Prepared::Part {
+                part,
+                adjust,
+                sprite,
+                color,
+                foil,
+                entity_glint: false,
+                oit: false,
+            }
+        } else {
+            Prepared::Empty
         }
     };
     match &model.kind {
-        SpecialKind::Bell => part("bell", &none, "entity/bell/bell_body", white, Foil::None),
+        SpecialKind::Bell => part(
+            "bell",
+            PartAdjust::None,
+            "entity/bell/bell_body",
+            white,
+            Foil::None,
+        ),
         SpecialKind::Book {
             open_angle,
             page1,
             page2,
         } => part(
             "book",
-            &book_pose(open_angle * (PI / 180.0), *page1, *page2),
+            PartAdjust::Book {
+                openness: open_angle * (PI / 180.0),
+                flip1: *page1,
+                flip2: *page2,
+            },
             "entity/enchantment/enchanting_table_book",
             white,
             Foil::None,
         ),
-        SpecialKind::Conduit => {
-            part(
-                "conduit_shell",
-                &none,
-                "entity/conduit/base",
-                white,
-                Foil::None,
-            );
-        }
+        SpecialKind::Conduit => part(
+            "conduit_shell",
+            PartAdjust::None,
+            "entity/conduit/base",
+            white,
+            Foil::None,
+        ),
         SpecialKind::Chest {
             texture,
             openness,
             chest_type,
         } => part(
             chest_model(chest_type),
-            &chest_pose(*openness),
+            PartAdjust::Chest { open: *openness },
             &mapped("chest", texture),
             white,
             Foil::None,
         ),
         SpecialKind::ShulkerBox { texture, openness } => part(
             "shulker_box",
-            &shulker_pose(*openness),
+            PartAdjust::Shulker {
+                progress: *openness,
+            },
             &mapped("shulker", texture),
             white,
             Foil::None,
         ),
         SpecialKind::CopperGolemStatue { texture, pose: p } => part(
             statue_layer(p),
-            &statue_pose,
+            PartAdjust::Statue,
             &texture_sprite(texture),
             white,
             Foil::None,
@@ -646,11 +739,14 @@ pub(super) fn submit(
                 );
             part(
                 skull_layer(kind),
-                &skull_pose(kind, *animation),
+                PartAdjust::Skull {
+                    kind,
+                    animation: *animation,
+                },
                 &skin,
                 white,
                 Foil::None,
-            );
+            )
         }
         SpecialKind::PlayerHead => {
             let skin = (!argument.is_null())
@@ -658,85 +754,83 @@ pub(super) fn submit(
                 .flatten()
                 .unwrap_or_else(|| "entity/player/slim/steve".to_owned());
             // `PlayerHeadSpecialRenderer`: the skin's `entityTranslucent` render type.
-            if let (Some(p), Some(r)) = (renderer.part("player"), sprites.get(&skin).copied()) {
-                draw(
-                    p,
-                    "root",
-                    pose,
-                    &none,
-                    r,
-                    white,
-                    Foil::None,
-                    false,
-                    None,
-                    &mut OitEntity(sink),
-                );
+            if let (Some(part), Some(sprite)) =
+                (renderer.part("player"), sprites.get(&skin).copied())
+            {
+                Prepared::Part {
+                    part,
+                    adjust: PartAdjust::None,
+                    sprite,
+                    color: white,
+                    foil: Foil::None,
+                    entity_glint: false,
+                    oit: true,
+                }
+            } else {
+                Prepared::Empty
             }
         }
         SpecialKind::Trident => {
             let foil = if has_foil { Foil::Standard } else { Foil::None };
-            if let (Some(p), Some(r)) = (
+            if let (Some(part), Some(sprite)) = (
                 renderer.part("trident"),
                 sprites.get("entity/trident/trident").copied(),
             ) {
-                draw(p, "root", pose, &none, r, white, foil, true, None, sink);
+                Prepared::Part {
+                    part,
+                    adjust: PartAdjust::None,
+                    sprite,
+                    color: white,
+                    foil,
+                    entity_glint: true,
+                    oit: false,
+                }
+            } else {
+                Prepared::Empty
             }
         }
         SpecialKind::Banner { color, wall } => {
-            let (main, flag) = if *wall {
+            let (main_key, flag_key) = if *wall {
                 ("wall_banner", "wall_banner_flag")
             } else {
                 ("standing_banner", "standing_banner_flag")
             };
-            part(main, &none, "entity/banner/banner_base", white, Foil::None);
-            part(
-                flag,
-                &flag_pose,
-                "entity/banner/banner_base",
-                white,
-                Foil::None,
-            );
+            let base_rect = sprites.get("entity/banner/banner_base").copied();
+            let main = renderer.part(main_key).zip(base_rect);
+            let flag_part = renderer.part(flag_key);
+            let flag_base = flag_part.zip(base_rect);
+            let pattern_base = sprites.get("entity/banner/base").copied();
+            let base_color = dye(color);
             // `submitPatterns`: the base layer in the banner's colour, then up to 16 layers.
-            if let Some(p) = renderer.part(flag) {
-                let mut pattern_sink = BannerPattern(sink);
-                if let Some(r) = sprites.get("entity/banner/base").copied() {
-                    draw(
-                        p,
-                        "root",
-                        pose,
-                        &flag_pose,
-                        r,
-                        dye(color),
-                        Foil::None,
-                        false,
-                        None,
-                        &mut pattern_sink,
-                    );
-                }
-                for (pattern, color) in pattern_layers(argument).into_iter().take(16) {
-                    if let Some(t) = pattern_texture(host, true, &pattern)
-                        && let Some(r) = sprites.get(&t).copied()
-                    {
-                        draw(
-                            p,
-                            "root",
-                            pose,
-                            &flag_pose,
-                            r,
-                            dye(&color),
-                            Foil::None,
-                            false,
-                            None,
-                            &mut pattern_sink,
-                        );
-                    }
-                }
+            let patterns: Vec<(Rect, u32)> = if flag_part.is_some() {
+                pattern_layers(argument)
+                    .into_iter()
+                    .take(16)
+                    .filter_map(|(pattern, color)| {
+                        let t = pattern_texture(host, true, &pattern)?;
+                        let r = sprites.get(&t).copied()?;
+                        Some((r, dye(&color)))
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            Prepared::Banner {
+                main,
+                flag_base,
+                flag_part,
+                pattern_base,
+                base_color,
+                patterns,
             }
         }
         SpecialKind::Shield => {
-            let patterns = pattern_layers(&argument["minecraft:banner_patterns"]);
+            let Some(part) = renderer.part("shield") else {
+                return Prepared::Empty;
+            };
+            let raw_patterns = pattern_layers(&argument["minecraft:banner_patterns"]);
             let base_color = argument["minecraft:base_color"].as_str();
-            let has_patterns = !patterns.is_empty() || base_color.is_some();
+            let has_patterns = !raw_patterns.is_empty() || base_color.is_some();
             let base = if has_patterns {
                 "entity/shield/shield_base"
             } else {
@@ -751,89 +845,340 @@ pub(super) fn submit(
                     atlas.get_or_missing(base)
                 })
                 .flatten();
-            let shield_part = |texture: &str,
-                               color: u32,
-                               foil: Foil,
-                               rect: Option<Rect>,
-                               target: &mut dyn ItemSink| {
-                if let (Some(p), Some(r)) = (renderer.part("shield"), sprites.get(texture).copied())
-                {
-                    draw(p, "root", pose, &none, r, color, foil, true, rect, target);
-                }
-            };
-            if !has_patterns {
-                let foil = if has_foil { Foil::Standard } else { Foil::None };
-                shield_part(base, white, foil, glint_rect, sink);
+            let base_rect = sprites.get(base).copied();
+            let (pattern_base, base_dye, patterns) = if has_patterns {
+                let pattern_base = sprites.get("entity/shield/base").copied();
+                let base_dye = dye(base_color.unwrap_or("white"));
+                let patterns = raw_patterns
+                    .into_iter()
+                    .take(16)
+                    .filter_map(|(pattern, color)| {
+                        let t = pattern_texture(host, false, &pattern)?;
+                        let r = sprites.get(&t).copied()?;
+                        Some((r, dye(&color)))
+                    })
+                    .collect();
+                (pattern_base, base_dye, patterns)
             } else {
-                shield_part(base, white, Foil::None, None, sink);
-                let mut pattern_sink = BannerPattern(sink);
-                shield_part(
-                    "entity/shield/base",
-                    dye(base_color.unwrap_or("white")),
-                    Foil::None,
-                    None,
-                    &mut pattern_sink,
-                );
-                for (pattern, color) in patterns.into_iter().take(16) {
-                    if let Some(t) = pattern_texture(host, false, &pattern) {
-                        shield_part(&t, dye(&color), Foil::None, None, &mut pattern_sink);
-                    }
-                }
-                if has_foil {
-                    // `ShieldSpecialRenderer.submit`: one `patternedShieldGlint` pass after patterns.
-                    shield_part(base, white, Foil::GlintOnly, glint_rect, sink);
-                }
+                (None, white, Vec::new())
+            };
+            Prepared::Shield {
+                part,
+                base_rect,
+                has_patterns,
+                has_foil,
+                glint_rect,
+                pattern_base,
+                base_dye,
+                patterns,
             }
         }
         SpecialKind::DecoratedPot => {
             let sides = pot_sides(argument);
-            // `DecoratedPotRenderer` draws every part with `entitySolid`.
-            let sink = &mut CullBack(sink);
-            if let Some(base) = renderer.part("decorated_pot_base")
-                && let Some(r) = sprites
-                    .get("entity/decorated_pot/decorated_pot_base")
-                    .copied()
-            {
-                for name in ["neck", "top", "bottom"] {
-                    if let Some(p) = child(base, name) {
+            let base_parts: Vec<(&ModelPart, &'static str, Rect)> = renderer
+                .part("decorated_pot_base")
+                .zip(
+                    sprites
+                        .get("entity/decorated_pot/decorated_pot_base")
+                        .copied(),
+                )
+                .map(|(base, r)| {
+                    ["neck", "top", "bottom"]
+                        .into_iter()
+                        .filter_map(|name| child(base, name).map(|p| (p, name, r)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let side_draws: Vec<(&ModelPart, &'static str, Rect)> = renderer
+                .part("decorated_pot_sides")
+                .map(|side_parts| {
+                    ["back", "left", "right", "front"]
+                        .into_iter()
+                        .enumerate()
+                        .filter_map(|(i, name)| {
+                            let texture = pot_side(sides[i].as_deref());
+                            let p = child(side_parts, name)?;
+                            let r = sprites.get(&texture).copied()?;
+                            Some((p, name, r))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Prepared::DecoratedPot {
+                base_parts,
+                side_draws,
+            }
+        }
+        // `EndCubeSpecialRenderer` draws the end portal/gateway effect; no
+        // bundled item uses it.
+        SpecialKind::EndCube { .. } => Prepared::Empty,
+    }
+}
+
+impl Prepared<'_> {
+    /// Submits this prepared special model at `pose`.
+    pub(super) fn submit(&self, pose: Mat4, sink: &mut dyn ItemSink) {
+        let white = argb(-1);
+        match self {
+            Self::Empty => {}
+            Self::Part {
+                part,
+                adjust,
+                sprite,
+                color,
+                foil,
+                entity_glint,
+                oit,
+            } => {
+                let adjust_fn = |name: &str, p: &mut [f32; 9]| adjust.apply(name, p);
+                if *oit {
+                    let mut oit_sink = OitEntity(sink);
+                    draw(
+                        part,
+                        "root",
+                        pose,
+                        &adjust_fn,
+                        *sprite,
+                        *color,
+                        *foil,
+                        *entity_glint,
+                        None,
+                        &mut oit_sink,
+                    );
+                } else {
+                    draw(
+                        part,
+                        "root",
+                        pose,
+                        &adjust_fn,
+                        *sprite,
+                        *color,
+                        *foil,
+                        *entity_glint,
+                        None,
+                        sink,
+                    );
+                }
+            }
+            Self::Banner {
+                main,
+                flag_base,
+                flag_part,
+                pattern_base,
+                base_color,
+                patterns,
+            } => {
+                if let Some((p, r)) = *main {
+                    draw(
+                        p,
+                        "root",
+                        pose,
+                        &none,
+                        r,
+                        white,
+                        Foil::None,
+                        false,
+                        None,
+                        sink,
+                    );
+                }
+                if let Some((p, r)) = *flag_base {
+                    draw(
+                        p,
+                        "root",
+                        pose,
+                        &flag_pose,
+                        r,
+                        white,
+                        Foil::None,
+                        false,
+                        None,
+                        sink,
+                    );
+                }
+                if let Some(p) = *flag_part {
+                    let mut pattern_sink = BannerPattern(sink);
+                    if let Some(r) = *pattern_base {
                         draw(
                             p,
-                            name,
+                            "root",
+                            pose,
+                            &flag_pose,
+                            r,
+                            *base_color,
+                            Foil::None,
+                            false,
+                            None,
+                            &mut pattern_sink,
+                        );
+                    }
+                    for &(r, c) in patterns {
+                        draw(
+                            p,
+                            "root",
+                            pose,
+                            &flag_pose,
+                            r,
+                            c,
+                            Foil::None,
+                            false,
+                            None,
+                            &mut pattern_sink,
+                        );
+                    }
+                }
+            }
+            Self::Shield {
+                part,
+                base_rect,
+                has_patterns,
+                has_foil,
+                glint_rect,
+                pattern_base,
+                base_dye,
+                patterns,
+            } => {
+                if !*has_patterns {
+                    let foil = if *has_foil {
+                        Foil::Standard
+                    } else {
+                        Foil::None
+                    };
+                    if let Some(r) = *base_rect {
+                        draw(
+                            part,
+                            "root",
+                            pose,
+                            &none,
+                            r,
+                            white,
+                            foil,
+                            true,
+                            *glint_rect,
+                            sink,
+                        );
+                    }
+                } else {
+                    if let Some(r) = *base_rect {
+                        draw(
+                            part,
+                            "root",
                             pose,
                             &none,
                             r,
                             white,
                             Foil::None,
-                            false,
+                            true,
                             None,
+                            sink,
+                        );
+                    }
+                    {
+                        let mut pattern_sink = BannerPattern(sink);
+                        if let Some(r) = *pattern_base {
+                            draw(
+                                part,
+                                "root",
+                                pose,
+                                &none,
+                                r,
+                                *base_dye,
+                                Foil::None,
+                                true,
+                                None,
+                                &mut pattern_sink,
+                            );
+                        }
+                        for &(r, c) in patterns {
+                            draw(
+                                part,
+                                "root",
+                                pose,
+                                &none,
+                                r,
+                                c,
+                                Foil::None,
+                                true,
+                                None,
+                                &mut pattern_sink,
+                            );
+                        }
+                    }
+                    if *has_foil && let Some(r) = *base_rect {
+                        // `ShieldSpecialRenderer.submit`: one `patternedShieldGlint` pass after patterns.
+                        draw(
+                            part,
+                            "root",
+                            pose,
+                            &none,
+                            r,
+                            white,
+                            Foil::GlintOnly,
+                            true,
+                            *glint_rect,
                             sink,
                         );
                     }
                 }
             }
-            if let Some(side_parts) = renderer.part("decorated_pot_sides") {
-                for (i, name) in ["back", "left", "right", "front"].into_iter().enumerate() {
-                    let texture = pot_side(sides[i].as_deref());
-                    if let (Some(p), Some(r)) = (child(side_parts, name), sprites.get(&texture)) {
-                        draw(
-                            p,
-                            name,
-                            pose,
-                            &none,
-                            *r,
-                            white,
-                            Foil::None,
-                            false,
-                            None,
-                            sink,
-                        );
-                    }
+            Self::DecoratedPot {
+                base_parts,
+                side_draws,
+            } => {
+                // `DecoratedPotRenderer` draws every part with `entitySolid`.
+                let sink = &mut CullBack(sink);
+                for &(p, name, r) in base_parts {
+                    draw(
+                        p,
+                        name,
+                        pose,
+                        &none,
+                        r,
+                        white,
+                        Foil::None,
+                        false,
+                        None,
+                        sink,
+                    );
+                }
+                for &(p, name, r) in side_draws {
+                    draw(
+                        p,
+                        name,
+                        pose,
+                        &none,
+                        r,
+                        white,
+                        Foil::None,
+                        false,
+                        None,
+                        sink,
+                    );
                 }
             }
         }
-        // `EndCubeSpecialRenderer` draws the end portal/gateway effect; no
-        // bundled item uses it.
-        SpecialKind::EndCube { .. } => {}
+    }
+}
+
+/// `SpecialModelRenderer.submit` across one or more poses, resolving part, texture, skin,
+/// pattern, and glint state once before drawing each pose.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn submit(
+    renderer: &ItemRenderer,
+    model: &SpecialModel,
+    argument: &Value,
+    has_foil: bool,
+    poses: &[Mat4],
+    sprites: &HashMap<String, Rect>,
+    host: &dyn SpecialHost,
+    sink: &mut dyn ItemSink,
+) {
+    if poses.is_empty() {
+        return;
+    }
+    let prepared = prepare(renderer, model, argument, has_foil, sprites, host);
+    for &pose in poses {
+        prepared.submit(pose, sink);
     }
 }
 
@@ -1113,7 +1458,7 @@ mod tests {
             &model,
             &Value::Null,
             false,
-            Mat4::IDENTITY,
+            &[Mat4::IDENTITY],
             &sprites,
             &super::super::NoHost,
             &mut quads,
@@ -1123,5 +1468,221 @@ mod tests {
             quads.iter().all(|q| q.cull_back),
             "entitySolid culls the pot's back faces"
         );
+    }
+
+    /// Submitting a composite (`Quads` + `PlayerHead`) held item or worn `PlayerHead` across
+    /// multiple mirror poses resolves the profile's skin once through `SpecialHost::player_skin`
+    /// while preserving per-pose layer submission order (`Q0, S0, Q1, S1, ...`) bit-for-bit.
+    #[test]
+    fn a_player_head_state_resolves_skin_once_across_multiple_poses() {
+        use super::super::{ItemRenderState, LayerGeometry, LayerRender, LayerTints};
+        use std::{cell::Cell, sync::Arc};
+        use sunrise_assets::{
+            bake::ModelQuad,
+            item_bake::BakedItemModel,
+            item_model::{DisplayContext, FoilType},
+            model::{Direction, Material},
+        };
+
+        struct CountingHost {
+            skin_calls: Cell<usize>,
+        }
+        impl SpecialHost for CountingHost {
+            fn banner_texture(&self, _: &str) -> Option<String> {
+                None
+            }
+            fn shield_texture(&self, _: &str) -> Option<String> {
+                None
+            }
+            fn player_skin(&self, _profile: &Value) -> Option<String> {
+                self.skin_calls.set(self.skin_calls.get() + 1);
+                Some("entity/player/custom_test_skin".to_owned())
+            }
+        }
+
+        let root =
+            std::env::temp_dir().join(format!("sunrise-player-head-poses-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("items.json"), "{}").unwrap();
+        std::fs::write(
+            root.join("entity-models.json"),
+            serde_json::json!({"minecraft:player_head#main": {
+                "pose": [0, 0, 0, 0, 0, 0, 1, 1, 1],
+                "polygons": [[[0, 0, 0, 0, 0], [1, 0, 0, 1, 0],
+                              [1, 1, 0, 1, 1], [0, 1, 0, 0, 1]]],
+                "children": {}
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        let library = crate::model_library::ParsedModels::default().into_item_library();
+        let data = crate::test_resources::item_data(
+            &root,
+            sunrise_world::native_load_context::DataLoadOrigin::ClientPreload,
+        )
+        .unwrap();
+        let renderer = ItemRenderer::load_with_library(
+            &sunrise_assets::resource_source::ResourceRoot::directory(root.to_path_buf()),
+            library,
+            &data,
+        )
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+
+        let quad_rect = Rect {
+            u0: 0.0,
+            v0: 0.0,
+            u1: 0.25,
+            v1: 0.25,
+            w: 16,
+            h: 16,
+        };
+        let custom_rect = Rect {
+            u0: 0.25,
+            v0: 0.5,
+            u1: 0.5,
+            v1: 0.75,
+            w: 64,
+            h: 64,
+        };
+        let mut sprites = HashMap::new();
+        sprites.insert("item/test_quad_layer".to_owned(), quad_rect);
+        sprites.insert("entity/player/custom_test_skin".to_owned(), custom_rect);
+
+        let profile = serde_json::json!({"name": "IllusionerTest"});
+        let poses = [
+            Mat4::from_translation(Vec3::new(2.5, 1.0, -1.5)),
+            Mat4::from_translation(Vec3::new(-2.0, 0.0, 2.0)),
+            Mat4::from_translation(Vec3::new(1.5, 1.0, 2.5)),
+            Mat4::from_translation(Vec3::new(-3.0, 0.0, -2.5)),
+        ];
+        let quad_material = Material {
+            sprite: "minecraft:item/test_quad_layer".into(),
+            force_translucent: false,
+        };
+        let baked_quad = Arc::new(BakedItemModel {
+            quads: vec![ModelQuad {
+                positions: [
+                    [-0.5, 0.5, 0.0],
+                    [-0.5, -0.5, 0.0],
+                    [0.5, -0.5, 0.0],
+                    [0.5, 0.5, 0.0],
+                ],
+                uv: [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]],
+                facing: Direction::South,
+                cull: None,
+                material: quad_material.clone(),
+                tint_index: -1,
+                shade_direction_override: None,
+                light_emission: 0,
+                light: [0; 2],
+                color: None,
+                ambient_occlusion: None,
+                render_type: None,
+                shade: true,
+            }],
+            uses_block_light: false,
+            particle: quad_material,
+            transforms: Default::default(),
+        });
+        let layer_matrix = Mat4::from_translation(Vec3::new(0.125, -0.25, 0.5));
+        let model = SpecialModel {
+            kind: SpecialKind::PlayerHead,
+        };
+        // Composite state (`minecraft:composite`): an ordinary quad layer `Q` followed by a
+        // special `PlayerHead` layer `S`.
+        let state = ItemRenderState {
+            display: DisplayContext::ThirdPersonRightHand,
+            layers: vec![
+                LayerRender {
+                    geometry: LayerGeometry::Quads(baked_quad),
+                    tints: LayerTints::Owned(Vec::new()),
+                    foil: FoilType::None,
+                    matrix: Mat4::IDENTITY,
+                    particle: "item/test_quad_layer".into(),
+                    uses_block_light: false,
+                    extents: Default::default(),
+                    display: DisplayContext::ThirdPersonRightHand,
+                    submit_options: mod_api::SpecialModelSubmitOptions::default(),
+                    render_type: None,
+                },
+                LayerRender {
+                    geometry: LayerGeometry::Special {
+                        model: model.clone(),
+                        argument: profile.clone(),
+                    },
+                    tints: LayerTints::Owned(Vec::new()),
+                    foil: FoilType::None,
+                    matrix: layer_matrix,
+                    particle: "".into(),
+                    uses_block_light: false,
+                    extents: Default::default(),
+                    display: DisplayContext::ThirdPersonRightHand,
+                    submit_options: mod_api::SpecialModelSubmitOptions::default(),
+                    render_type: None,
+                },
+            ],
+            oversized_in_gui: false,
+            animated: false,
+            cit_glint: None,
+            hdr_tier: 0,
+            hdr_light: 0,
+            held_tint: None,
+        };
+
+        // Composite held-item multi-pose path (`ItemRenderState::submit_poses`).
+        let held_host = CountingHost {
+            skin_calls: Cell::new(0),
+        };
+        let mut multi_held = Vec::new();
+        state.submit_poses(&renderer, &sprites, &held_host, &poses, &mut multi_held);
+        assert_eq!(
+            held_host.skin_calls.get(),
+            1,
+            "held composite player head must resolve player_skin once across all four poses"
+        );
+        let mut single_held = Vec::new();
+        for &pose in &poses {
+            state.submit(&renderer, &sprites, &held_host, pose, &mut single_held);
+        }
+        assert_eq!(
+            multi_held.iter().map(|q| q.oit).collect::<Vec<_>>(),
+            [false, true, false, true, false, true, false, true],
+            "composite item must preserve per-pose Q, S layer order"
+        );
+        assert_eq!(multi_held, single_held);
+
+        // Worn-skull multi-pose path (`ItemRenderer::submit_special_head_poses`).
+        let worn_host = CountingHost {
+            skin_calls: Cell::new(0),
+        };
+        let mut multi_worn = Vec::new();
+        renderer.submit_special_head_poses(
+            &model,
+            &profile,
+            &poses,
+            &sprites,
+            &worn_host,
+            &mut multi_worn,
+        );
+        assert_eq!(
+            worn_host.skin_calls.get(),
+            1,
+            "worn player head must resolve player_skin once across all four poses"
+        );
+        let mut single_worn = Vec::new();
+        for &pose in &poses {
+            renderer.submit_special(
+                &model,
+                &profile,
+                false,
+                pose,
+                &sprites,
+                &worn_host,
+                &mut single_worn,
+            );
+        }
+        assert_eq!(multi_worn.len(), 4);
+        assert_eq!(multi_worn, single_worn);
     }
 }

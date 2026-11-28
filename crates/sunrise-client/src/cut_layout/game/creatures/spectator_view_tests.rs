@@ -147,13 +147,39 @@ fn a_spectator_sees_the_invisible_body() {
 }
 
 /// Issue #6915: an invisible illusioner hides its real body and draws its four scattered mirror
-/// images (plus held bow at each mirror) through the real `begin_mob_geometry` / `mob_run_geometry`
-/// -> `living_geometry` pass for an ordinary survival viewer (both `LivingFrame.skinning = false`
-/// and `LivingFrame.skinning = true`, verified against a visible GPU-skinned control), keeps all
-/// four mirrors visible alongside their outline when glowing, and stays opaque for a spectator.
+/// images (plus held bow and worn head item at each mirror, using the vanilla 26.3 float-pose
+/// translation order) through the real `begin_mob_geometry` / `mob_run_geometry` ->
+/// `living_geometry` pass for an ordinary survival viewer (both `LivingFrame.skinning = false`
+/// and `LivingFrame.skinning = true`, verified against a visible GPU-skinned control and exact
+/// bit-for-bit placements including GPU-skinned bow matrices), keeps all four mirrors visible
+/// alongside their outline when glowing, and stays opaque for a spectator. Runs in a fresh child
+/// process so `load_resources` never mutates the shared test process's block namespace table.
 #[test]
 #[ignore = "daily"]
 fn an_invisible_illusioner_draws_four_mirrors_for_an_ordinary_player() {
+    const CHILD: &str = "SUNRISE_ILLUSIONER_MIRRORS_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let name = "cut_layout::game::creatures::spectator_view_tests::an_invisible_illusioner_draws_four_mirrors_for_an_ordinary_player";
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([name, "--exact", "--include-ignored", "--test-threads=1"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            out.status.success()
+                && report
+                    .lines()
+                    .any(|line| line.starts_with("test result: ok. 1 passed;")),
+            "{name} failed in its own process:\n{report}"
+        );
+        return;
+    }
+
     use sunrise_items::items::ItemStack;
     use sunrise_sim::mobs::illusioner;
 
@@ -162,12 +188,16 @@ fn an_invisible_illusioner_draws_four_mirrors_for_an_ordinary_player() {
     let profile = game.client.remote.as_ref().unwrap().profile();
     let types = MobTypes::load(&root()).unwrap();
     let kind = Arc::new(types.types["minecraft:illusioner"].clone());
-    let mut mob = Mob::new(1, kind, Vec3::new(0.5, 64.0, 0.5), 0.0);
+    // Non-dyadic camera-relative coordinates so folding the mirror offset in `f64` before
+    // rounding to `f32` differs by a float step from vanilla's rounded origin + float translate.
+    let mob_pos = Vec3::new(10.3, 64.0, 0.5);
+    let camera = glam::DVec3::new(0.1, 65.0, 6.5);
+    let alpha = 0.25_f64;
+
+    let mut mob = Mob::new(1, kind, mob_pos, 0.0);
     mob.age = 13;
     // Vanilla `IllusionerRenderer`'s `ItemInHandLayer` shows the bow only when aggressive or casting.
     mob.ai.aggressive = true;
-    let camera = glam::DVec3::new(0.5, 65.0, 6.5);
-    let alpha = 0.25_f64;
 
     let set_mode = |game: &mut sunrise_client_gameplay::game::ClientGame<'_>, mode: GameMode| {
         game.handle_packet(C::PlayerInfoUpdate(play::PlayerInfoUpdate {
@@ -184,81 +214,68 @@ fn an_invisible_illusioner_draws_four_mirrors_for_an_ordinary_player() {
     };
     set_mode(&mut game, GameMode::Survival);
 
-    // Baseline: visible illusioner holding a bow draws 1 body + 1 held bow.
-    let draw_mobs = |game: &sunrise_client_gameplay::game::ClientGame<'_>, skinning: bool| {
-        game.client.skin_frame.borrow_mut().clear_draws();
-        let mut frame = game.begin_mob_geometry(camera, alpha);
-        frame.living.skinning = skinning;
-        let mut out = Vec::new();
-        game.mob_run_geometry(&frame, 0..game.mobs.len(), &mut out);
-        let skin_jobs = game.client.skin_frame.borrow().jobs.len();
-        (out, skin_jobs)
-    };
+    let draw_mobs_at =
+        |game: &sunrise_client_gameplay::game::ClientGame<'_>, cam: glam::DVec3, skinning: bool| {
+            game.client.skin_frame.borrow_mut().clear_draws();
+            let mut frame = game.begin_mob_geometry(cam, alpha);
+            frame.living.skinning = skinning;
+            let mut out = Vec::new();
+            game.mob_run_geometry(&frame, 0..game.mobs.len(), &mut out);
+            let skin = game.client.skin_frame.borrow();
+            let matrices: Vec<[f32; 16]> = skin
+                .jobs
+                .iter()
+                .map(|j| skin.parts[j.part as usize].matrix)
+                .collect();
+            (out, matrices)
+        };
 
-    mob.extra
-        .set_main_hand_stack(Some(ItemStack::new("minecraft:bow", 1)));
-    let mut bare = mob.clone();
-    bare.extra.set_main_hand_stack(None);
-    game.mobs.push(bare);
-    let (visible_body_only, bare_cpu_jobs) = draw_mobs(&game, false);
-    assert_eq!(bare_cpu_jobs, 0);
+    // Baseline: visible bare illusioner (both CPU and GPU-skinned positive control).
+    let bare = mob.clone();
+    game.mobs.push(bare.clone());
+    let (visible_body_only, bare_cpu_mats) = draw_mobs_at(&game, camera, false);
+    assert!(bare_cpu_mats.is_empty());
     let body_verts = visible_body_only.len();
     assert!(body_verts > 0, "visible illusioner draws a body");
-    let body_center = {
-        let n = body_verts as f64;
-        let s = visible_body_only.iter().fold([0.0; 3], |a, v| {
-            [
-                a[0] + f64::from(v.pos[0]),
-                a[1] + f64::from(v.pos[1]),
-                a[2] + f64::from(v.pos[2]),
-            ]
-        });
-        [s[0] / n, s[1] / n, s[2] / n]
-    };
-    // Positive control: `LivingFrame.skinning = true` actually poses a visible illusioner body on GPU.
-    let (bare_skinned_out, bare_skin_jobs) = draw_mobs(&game, true);
+    let (bare_skinned_out, bare_skin_mats) = draw_mobs_at(&game, camera, true);
     assert!(
         bare_skinned_out.is_empty(),
         "visible illusioner body should pose on GPU when LivingFrame.skinning = true"
     );
     assert!(
-        bare_skin_jobs > 0,
+        !bare_skin_mats.is_empty(),
         "visible illusioner should emit GPU skin jobs when LivingFrame.skinning = true"
     );
 
-    game.mobs.clear();
-    game.mobs.push(mob.clone());
-    let (visible_with_bow, _) = draw_mobs(&game, false);
-    let bow_verts = visible_with_bow.len() - body_verts;
-    assert!(bow_verts > 0, "visible illusioner draws its held bow");
-    let (vis_bow_skinned_out, vis_bow_skin_jobs) = draw_mobs(&game, true);
-    let bow_skin_jobs = vis_bow_skin_jobs - bare_skin_jobs;
-    let bow_cpu_verts_when_skinned = vis_bow_skinned_out.len();
-    assert!(
-        bow_skin_jobs > 0 || bow_cpu_verts_when_skinned == bow_verts,
-        "visible held bow accounts for either GPU skin jobs or CPU vertices"
+    // Add both held bow and worn head item (`CustomHeadLayer`) so both equipment paths are checked.
+    mob.extra
+        .set_main_hand_stack(Some(ItemStack::new("minecraft:bow", 1)));
+    mob.extra.set_slot_stack(
+        sunrise_items::equipment::HEAD,
+        Some(ItemStack::new("minecraft:carved_pumpkin", 1)),
     );
-    let bow_center = {
-        let slice = &visible_with_bow[body_verts..];
-        let n = bow_verts as f64;
-        let s = slice.iter().fold([0.0; 3], |a, v| {
-            [
-                a[0] + f64::from(v.pos[0]),
-                a[1] + f64::from(v.pos[1]),
-                a[2] + f64::from(v.pos[2]),
-            ]
-        });
-        [s[0] / n, s[1] / n, s[2] / n]
-    };
+    game.mobs[0] = mob.clone();
+    let (visible_with_gear, _) = draw_mobs_at(&game, camera, false);
+    let gear_verts = visible_with_gear.len() - body_verts;
+    assert!(
+        gear_verts > 0,
+        "visible illusioner draws held bow and head item"
+    );
+    let (vis_gear_skinned_out, vis_gear_skin_mats) = draw_mobs_at(&game, camera, true);
+    let bow_skin_job_count = vis_gear_skin_mats.len() - bare_skin_mats.len();
+    let gear_cpu_verts_when_skinned = vis_gear_skinned_out.len();
+    assert!(
+        bow_skin_job_count > 0,
+        "held bow should take the GPU-skinned item path when LivingFrame.skinning = true"
+    );
 
-    // Invisible + scattered offsets: 4 opaque mirrors + 4 held bows for an ordinary viewer.
+    // Scattered offsets + independent 26.3 Mth.cos wobble at age = 13.25.
     let offsets = [
         [2.5, 1.0, -1.5],
         [-2.0, 0.0, 2.0],
         [1.5, 1.0, 2.5],
         [-3.0, 0.0, -2.5],
     ];
-    // Independent 26.3 Mth.cos wobble at age = 13.25.
     let want_wobble: [[f64; 3]; illusioner::COPIES] = [
         [
             f64::from_bits(0x3f98_1e83_cccc_cccd),
@@ -281,6 +298,90 @@ fn an_invisible_illusioner_draws_four_mirrors_for_an_ordinary_player() {
             f64::from_bits(0x3f98_8536_1999_999a),
         ],
     ];
+
+    // Confirm this fixture genuinely separates vanilla's float-pose order from folding in `f64`.
+    let origin_f32 = glam::DVec3::new(
+        mob_pos.x - camera.x,
+        mob_pos.y - camera.y,
+        mob_pos.z - camera.z,
+    )
+    .as_vec3();
+    let mirror_origins_f32: [glam::Vec3; illusioner::COPIES] = std::array::from_fn(|i| {
+        let off = glam::Vec3::new(
+            (offsets[i][0] + want_wobble[i][0]) as f32,
+            (offsets[i][1] + want_wobble[i][1]) as f32,
+            (offsets[i][2] + want_wobble[i][2]) as f32,
+        );
+        origin_f32 + off
+    });
+    assert!(
+        (0..illusioner::COPIES).any(|i| {
+            let folded = glam::DVec3::new(
+                (mob_pos.x + offsets[i][0] + want_wobble[i][0]) - camera.x,
+                (mob_pos.y + offsets[i][1] + want_wobble[i][1]) - camera.y,
+                (mob_pos.z + offsets[i][2] + want_wobble[i][2]) - camera.z,
+            )
+            .as_vec3();
+            folded.x.to_bits() != mirror_origins_f32[i].x.to_bits()
+                || folded.y.to_bits() != mirror_origins_f32[i].y.to_bits()
+                || folded.z.to_bits() != mirror_origins_f32[i].z.to_bits()
+        }),
+        "fixture must distinguish rounded-origin + f32 translate from f64 camera shift"
+    );
+
+    // Build bit-exact expected placements for each of the 4 mirrors by rendering a visible copy
+    // at `camera = ZERO` with position equal to the exact vanilla-ordered `f32` origin.
+    let mut want_body_pos = Vec::with_capacity(illusioner::COPIES);
+    let mut want_bow_cpu_pos = Vec::with_capacity(illusioner::COPIES);
+    let mut want_head_cpu_pos = Vec::with_capacity(illusioner::COPIES);
+    let mut want_bow_skin_mats = Vec::with_capacity(illusioner::COPIES * bow_skin_job_count);
+    for target in mirror_origins_f32 {
+        let mut ref_mob = mob.clone();
+        ref_mob.position = Vec3::new(
+            f64::from(target.x),
+            f64::from(target.y),
+            f64::from(target.z),
+        );
+        ref_mob.previous = ref_mob.position;
+        // Split bow-only vs bow+head vertices cleanly so we match exact layer submission order.
+        let mut bow_only_mob = ref_mob.clone();
+        bow_only_mob
+            .extra
+            .set_slot_stack(sunrise_items::equipment::HEAD, None);
+        game.mobs[0] = bow_only_mob;
+        let (ref_cpu_bow, _) = draw_mobs_at(&game, glam::DVec3::ZERO, false);
+        let bow_v_count = ref_cpu_bow.len() - body_verts;
+        assert!(bow_v_count > 0);
+        want_body_pos.push(
+            ref_cpu_bow[..body_verts]
+                .iter()
+                .map(|v| v.pos.map(f32::to_bits))
+                .collect::<Vec<_>>(),
+        );
+        want_bow_cpu_pos.push(
+            ref_cpu_bow[body_verts..]
+                .iter()
+                .map(|v| v.pos.map(f32::to_bits))
+                .collect::<Vec<_>>(),
+        );
+        let (_, ref_skin_mats) = draw_mobs_at(&game, glam::DVec3::ZERO, true);
+        want_bow_skin_mats.extend_from_slice(&ref_skin_mats[bare_skin_mats.len()..]);
+
+        game.mobs[0] = ref_mob;
+        let (ref_cpu_all, _) = draw_mobs_at(&game, glam::DVec3::ZERO, false);
+        let head_v_count = ref_cpu_all.len() - body_verts - bow_v_count;
+        assert!(head_v_count > 0, "worn carved pumpkin draws head vertices");
+        want_head_cpu_pos.push(
+            ref_cpu_all[body_verts + bow_v_count..]
+                .iter()
+                .map(|v| v.pos.map(f32::to_bits))
+                .collect::<Vec<_>>(),
+        );
+    }
+    let bow_verts = want_bow_cpu_pos[0].len();
+    let head_verts = want_head_cpu_pos[0].len();
+
+    // Invisible + scattered offsets: verify exact placements for both `skinning = false` and `true`.
     mob.invisible = true;
     mob.extra.illusions = Some(illusioner::Illusions {
         ticks: 0,
@@ -289,71 +390,75 @@ fn an_invisible_illusioner_draws_four_mirrors_for_an_ordinary_player() {
     game.mobs[0] = mob.clone();
 
     for skinning in [false, true] {
-        let (out, skinned_jobs) = draw_mobs(&game, skinning);
-        if !skinning {
-            assert_eq!(skinned_jobs, 0, "no GPU skin jobs when skinning is off");
-            assert_eq!(
-                out.len(),
-                (body_verts + bow_verts) * illusioner::COPIES,
-                "CPU path draws 4 mirror bodies plus 4 held bows"
-            );
-            // Verify the 4 held bows sit at the 4 scattered mirror positions (not at the real body).
-            let mirror_bows = &out[body_verts * illusioner::COPIES..];
-            for (i, chunk) in mirror_bows.chunks_exact(bow_verts).enumerate() {
-                let n = bow_verts as f64;
-                let s = chunk.iter().fold([0.0; 3], |a, v| {
-                    [
-                        a[0] + f64::from(v.pos[0]),
-                        a[1] + f64::from(v.pos[1]),
-                        a[2] + f64::from(v.pos[2]),
-                    ]
-                });
-                let center = [s[0] / n, s[1] / n, s[2] / n];
-                for k in 0..3 {
-                    let want = bow_center[k] + offsets[i][k] + want_wobble[i][k];
-                    assert!(
-                        (center[k] - want).abs() < 1e-4,
-                        "mirror bow {i} axis {k}: got {}, want {want}",
-                        center[k]
-                    );
-                }
-            }
-        } else {
-            // With `LivingFrame.skinning = true`, the 4 mirror bodies still fall back to CPU
-            // (`posable = false`) while only the 4 held bows follow the skinned-item path.
-            assert_eq!(
-                skinned_jobs,
-                bow_skin_jobs * illusioner::COPIES,
-                "invisible illusioner bodies must stay off GPU skinning"
-            );
-            assert_eq!(
-                out.len(),
-                (body_verts + bow_cpu_verts_when_skinned) * illusioner::COPIES,
-                "skinning=true draws 4 CPU mirror bodies plus expected mirror bow vertices"
-            );
-        }
-        // First 4 * body_verts are the four CPU mirror bodies at the exact independent offsets.
+        let (out, skin_mats) = draw_mobs_at(&game, camera, skinning);
+        // First 4 * body_verts are the four CPU mirror bodies at exact bit-for-bit positions.
         let mirror_bodies = &out[..body_verts * illusioner::COPIES];
         assert!(
             mirror_bodies.iter().all(|v| v.color >> 24 == 0xFF),
             "mirrors draw opaque"
         );
         for (i, chunk) in mirror_bodies.chunks_exact(body_verts).enumerate() {
-            let n = body_verts as f64;
-            let s = chunk.iter().fold([0.0; 3], |a, v| {
-                [
-                    a[0] + f64::from(v.pos[0]),
-                    a[1] + f64::from(v.pos[1]),
-                    a[2] + f64::from(v.pos[2]),
-                ]
-            });
-            let center = [s[0] / n, s[1] / n, s[2] / n];
-            for k in 0..3 {
-                let want = body_center[k] + offsets[i][k] + want_wobble[i][k];
-                assert!(
-                    (center[k] - want).abs() < 1e-4,
-                    "skinning={skinning} mirror {i} axis {k}: got {}, want {want}",
-                    center[k]
+            let got: Vec<[u32; 3]> = chunk.iter().map(|v| v.pos.map(f32::to_bits)).collect();
+            assert_eq!(
+                got, want_body_pos[i],
+                "skinning={skinning}: mirror body {i} vertices must match vanilla float-pose order bit-for-bit"
+            );
+        }
+        if !skinning {
+            assert!(
+                skin_mats.is_empty(),
+                "no GPU skin jobs when skinning is off"
+            );
+            assert_eq!(
+                out.len(),
+                (body_verts + bow_verts + head_verts) * illusioner::COPIES,
+                "CPU path draws 4 mirror bodies + 4 bows + 4 head items"
+            );
+            let bow_slice = &out
+                [body_verts * illusioner::COPIES..(body_verts + bow_verts) * illusioner::COPIES];
+            for (i, chunk) in bow_slice.chunks_exact(bow_verts).enumerate() {
+                let got: Vec<[u32; 3]> = chunk.iter().map(|v| v.pos.map(f32::to_bits)).collect();
+                assert_eq!(
+                    got, want_bow_cpu_pos[i],
+                    "CPU mirror bow {i} vertices must match vanilla float-pose order bit-for-bit"
+                );
+            }
+            let head_slice = &out[(body_verts + bow_verts) * illusioner::COPIES..];
+            for (i, chunk) in head_slice.chunks_exact(head_verts).enumerate() {
+                let got: Vec<[u32; 3]> = chunk.iter().map(|v| v.pos.map(f32::to_bits)).collect();
+                assert_eq!(
+                    got, want_head_cpu_pos[i],
+                    "CPU mirror head item {i} vertices must match vanilla float-pose order bit-for-bit"
+                );
+            }
+        } else {
+            assert_eq!(
+                skin_mats.len(),
+                bow_skin_job_count * illusioner::COPIES,
+                "only the 4 mirror bows use GPU skinning; mirror bodies stay on CPU"
+            );
+            assert_eq!(
+                out.len(),
+                (body_verts + gear_cpu_verts_when_skinned) * illusioner::COPIES,
+                "skinning=true draws 4 CPU mirror bodies plus 4 CPU head items"
+            );
+            // Verify every GPU-skinned mirror bow's 4x4 matrix bit-for-bit!
+            let got_bits: Vec<[u32; 16]> = skin_mats.iter().map(|m| m.map(f32::to_bits)).collect();
+            let want_bits: Vec<[u32; 16]> = want_bow_skin_mats
+                .iter()
+                .map(|m| m.map(f32::to_bits))
+                .collect();
+            assert_eq!(
+                got_bits, want_bits,
+                "GPU-skinned mirror bow matrices must match vanilla float-pose order bit-for-bit"
+            );
+            // Worn head item stays CPU and matches exact mirror placements.
+            let head_slice = &out[body_verts * illusioner::COPIES..];
+            for (i, chunk) in head_slice.chunks_exact(head_verts).enumerate() {
+                let got: Vec<[u32; 3]> = chunk.iter().map(|v| v.pos.map(f32::to_bits)).collect();
+                assert_eq!(
+                    got, want_head_cpu_pos[i],
+                    "skinning=true mirror head item {i} vertices must match bit-for-bit"
                 );
             }
         }
@@ -363,8 +468,10 @@ fn an_invisible_illusioner_draws_four_mirrors_for_an_ordinary_player() {
     game.client.glowing_vertices.borrow_mut().clear();
     game.mobs[0].glowing = true;
     game.mobs[0].extra.set_main_hand_stack(None);
-    let mut glow_out = Vec::new();
-    game.mob_geometry(camera, alpha, &mut glow_out);
+    game.mobs[0]
+        .extra
+        .set_slot_stack(sunrise_items::equipment::HEAD, None);
+    let (glow_out, _) = draw_mobs_at(&game, camera, false);
     assert_eq!(glow_out.len(), body_verts * illusioner::COPIES);
     assert_eq!(
         game.client.glowing_vertices.borrow().len(),
@@ -374,8 +481,7 @@ fn an_invisible_illusioner_draws_four_mirrors_for_an_ordinary_player() {
     // Spectator view: illusioner mirrors stay opaque (0xFF), not forced translucent (0x26).
     game.mobs[0].glowing = false;
     set_mode(&mut game, GameMode::Spectator);
-    let mut spec_out = Vec::new();
-    game.mob_geometry(camera, alpha, &mut spec_out);
+    let (spec_out, _) = draw_mobs_at(&game, camera, false);
     assert_eq!(spec_out.len(), body_verts * illusioner::COPIES);
     assert!(spec_out.iter().all(|v| v.color >> 24 == 0xFF));
 }

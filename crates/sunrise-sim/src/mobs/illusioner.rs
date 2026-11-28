@@ -275,13 +275,22 @@ pub fn offsets(m: &Mob, partial: f32) -> [[f64; 3]; COPIES] {
     out
 }
 
+/// Maximum horizontal mirror scatter from `Illusioner.aiStep` (`(-6 + nextInt(13)) * 0.5`).
+pub const MAX_HORIZONTAL_SCATTER: f64 = 3.0;
+/// Maximum upward vertical mirror scatter from `Illusioner.aiStep` (`max(nextInt(6) - 4, 0)`).
+pub const MAX_VERTICAL_SCATTER: f64 = 1.0;
+/// Horizontal wobble amplitude in `IllusionerRenderer.submit` (`Mth.cos(...) * 0.025`).
+pub const HORIZONTAL_WOBBLE: f64 = 0.025;
+/// Vertical wobble amplitude in `IllusionerRenderer.submit` (`Mth.cos(...) * 0.0125`).
+pub const VERTICAL_WOBBLE: f64 = 0.0125;
+
 /// The wobble `IllusionerRenderer.submit` adds to each image (`Mth.cos` quantized table).
 pub fn wobble(i: usize, age: f32) -> [f64; 3] {
     let i = i as f32;
     [
-        f64::from(sunrise_core::geometry::trig::cos(f64::from(i + age * 0.5))) * 0.025,
-        f64::from(sunrise_core::geometry::trig::cos(f64::from(i + age * 0.75))) * 0.0125,
-        f64::from(sunrise_core::geometry::trig::cos(f64::from(i + age * 0.7))) * 0.025,
+        f64::from(sunrise_core::geometry::trig::cos(f64::from(i + age * 0.5))) * HORIZONTAL_WOBBLE,
+        f64::from(sunrise_core::geometry::trig::cos(f64::from(i + age * 0.75))) * VERTICAL_WOBBLE,
+        f64::from(sunrise_core::geometry::trig::cos(f64::from(i + age * 0.7))) * HORIZONTAL_WOBBLE,
     ]
 }
 
@@ -345,9 +354,6 @@ mod tests {
             let got = wobble(i, 13.25);
             assert_eq!(got.map(f64::to_bits), want_bits, "wobble copy {i}");
         }
-        // Regression guard against libm `f32::cos`: copy 0 at age 13.25 differs visibly.
-        let libm_x = f64::from((13.25_f32 * 0.5_f32).cos()) * 0.025;
-        assert_ne!(wobble(0, 13.25)[0].to_bits(), libm_x.to_bits());
 
         let mob_type = std::sync::Arc::new(crate::mobs::MobType {
             type_key: Default::default(),

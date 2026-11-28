@@ -1170,8 +1170,8 @@ impl Layer {
         }
     }
 }
-/// The mob's root transform (LivingEntityRenderer.submit + setupRotations).
-pub fn base_transform(m: &Mob, alpha: f32, camera: glam::DVec3) -> glam::Mat4 {
+/// Camera-relative entity root translation (`EntityRenderDispatcher.submit`), rounded to `f32`.
+pub fn origin_transform(m: &Mob, alpha: f32, camera: glam::DVec3) -> glam::Mat4 {
     let a = f64::from(alpha);
     let p = glam::DVec3::new(
         m.previous.x + (m.position.x - m.previous.x) * a,
@@ -1180,7 +1180,31 @@ pub fn base_transform(m: &Mob, alpha: f32, camera: glam::DVec3) -> glam::Mat4 {
     ) - camera
         + enderman_render_offset(m, alpha)
         + super::shulker::render_offset(m, alpha);
-    base_transform_at(m, alpha, glam::Mat4::from_translation(p.as_vec3()))
+    glam::Mat4::from_translation(p.as_vec3())
+}
+
+/// Root poses for an invisible illusioner's four mirror images: first rounds the camera-relative
+/// origin to `f32` (`EntityRenderDispatcher.submit`), then applies each mirror's translation to
+/// that float pose (`IllusionerRenderer.submit`).
+pub fn illusioner_mirror_origins(
+    m: &Mob,
+    alpha: f32,
+    camera: glam::DVec3,
+) -> [glam::Mat4; super::illusioner::COPIES] {
+    let origin = origin_transform(m, alpha, camera);
+    super::illusioner::mirror_offsets(m, alpha).map(|off| {
+        origin
+            * glam::Mat4::from_translation(glam::Vec3::new(
+                off[0] as f32,
+                off[1] as f32,
+                off[2] as f32,
+            ))
+    })
+}
+
+/// The mob's root transform (LivingEntityRenderer.submit + setupRotations).
+pub fn base_transform(m: &Mob, alpha: f32, camera: glam::DVec3) -> glam::Mat4 {
+    base_transform_at(m, alpha, origin_transform(m, alpha, camera))
 }
 /// `EndermanRenderer.getRenderOffset`: a creepy (angry) enderman is moved by
 /// a gaussian 0.02 blocks sideways in x and z every frame. Vanilla draws from
@@ -1833,9 +1857,9 @@ pub fn render_with_frame(
     // an illusioner shows its four mirror images instead.
     if m.is_invisible() {
         if m.species() == Species::Illusioner {
-            let bases = super::illusioner::mirror_offsets(m, alpha)
+            let bases = illusioner_mirror_origins(m, alpha, camera)
                 .into_iter()
-                .map(|off| base_transform(m, alpha, camera - glam::DVec3::from_array(off)));
+                .map(|origin| base_transform_at(m, alpha, origin));
             render_visible(
                 m,
                 alpha,
@@ -3328,6 +3352,32 @@ fn item_from_hand(mut t: glam::Mat4, m: &Mob, left: bool) -> glam::Mat4 {
     ));
     t
 }
+/// The transform of one of a mob's model parts at each root pose in `origins`,
+/// posing the body model once (`ModelPart.translateAndRotate` down the tree).
+/// Writes up to `out.len()` transforms and returns the count written (0 if missing).
+pub fn part_transforms_at(
+    m: &Mob,
+    alpha: f32,
+    origins: &[glam::Mat4],
+    data: &dyn RenderDataSource,
+    part: &str,
+    out: &mut [glam::Mat4],
+) -> usize {
+    let Some((model, poses, _)) = posed_body(m, alpha, data) else {
+        return 0;
+    };
+    let mut written = 0;
+    for (&origin, dst) in origins.iter().zip(out.iter_mut()) {
+        let base = base_transform_at(m, alpha, origin);
+        let Some(t) = part_matrix(&model, base, &poses, part, 0.0) else {
+            return 0;
+        };
+        *dst = t;
+        written += 1;
+    }
+    written
+}
+
 /// The transform of one of a mob's model parts, in camera space
 /// (`ModelPart.translateAndRotate` down the tree).
 pub fn part_transform(
@@ -3337,9 +3387,9 @@ pub fn part_transform(
     data: &dyn RenderDataSource,
     part: &str,
 ) -> Option<glam::Mat4> {
-    let base = base_transform(m, alpha, camera);
-    let (model, poses, _) = posed_body(m, alpha, data)?;
-    part_matrix(&model, base, &poses, part, 0.0)
+    let mut out = [glam::Mat4::IDENTITY; 1];
+    let origin = origin_transform(m, alpha, camera);
+    (part_transforms_at(m, alpha, &[origin], data, part, &mut out) == 1).then_some(out[0])
 }
 /// `PlayerItemInHandLayer.renderItemHeldToEye` up to the item: the root and
 /// the head with its pitch clamped to -30 to 90 degrees, `translateToHead`
@@ -3369,10 +3419,10 @@ pub fn held_to_eye_matrix(
 /// `FoxHeldItemLayer`: the item sits at the head's position under the render
 /// state's head roll, yaw and pitch (not the posed head's, which differ while
 /// it sleeps), pushed out to the mouth.
-fn fox_item_transform(
+fn fox_item_transform_at(
     m: &Mob,
     alpha: f32,
-    camera: glam::DVec3,
+    origin: glam::Mat4,
     data: &dyn RenderDataSource,
 ) -> Option<glam::Mat4> {
     use glam::{Mat4, Vec3};
@@ -3381,7 +3431,7 @@ fn fox_item_transform(
     let head = *poses.get("head");
     let fox = super::fox::pose(m, alpha);
     let baby = m.is_baby();
-    let mut t = base_transform(m, alpha, camera)
+    let mut t = base_transform_at(m, alpha, origin)
         * Mat4::from_translation(Vec3::new(head[0], head[1], head[2]) / 16.0);
     if baby {
         t *= Mat4::from_scale(Vec3::splat(0.75));
@@ -3447,6 +3497,169 @@ fn held_item_anchor(m: &Mob) -> HeldItemAnchor {
     }
 }
 
+/// The poses a mob's held item is submitted under (`ItemInHandLayer`) for each root pose in
+/// `origins`, posing the body model once. Writes up to `out.len()` transforms and returns the
+/// count written (0 when the mob shows no held item).
+pub fn held_item_transforms_at(
+    m: &Mob,
+    alpha: f32,
+    origins: &[glam::Mat4],
+    data: &dyn RenderDataSource,
+    left: bool,
+    out: &mut [glam::Mat4],
+) -> usize {
+    let anchor = held_item_anchor(m);
+    // PandaHoldsItemLayer: the main hand's item in its mouth.
+    if anchor == HeldItemAnchor::Panda {
+        let Some(offset) = super::panda::item_offset(m, alpha).filter(|_| !left) else {
+            return 0;
+        };
+        let mut written = 0;
+        for (&origin, dst) in origins.iter().zip(out.iter_mut()) {
+            *dst = base_transform_at(m, alpha, origin) * offset;
+            written += 1;
+        }
+        return written;
+    }
+    // FoxHeldItemLayer: the main hand's item in its mouth.
+    if anchor == HeldItemAnchor::Fox {
+        if left {
+            return 0;
+        }
+        let mut written = 0;
+        for (&origin, dst) in origins.iter().zip(out.iter_mut()) {
+            let Some(t) = fox_item_transform_at(m, alpha, origin, data) else {
+                return 0;
+            };
+            *dst = t;
+            written += 1;
+        }
+        return written;
+    }
+    // DolphinCarryingItemLayer: the main hand's item at the snout, lifted and
+    // pulled in as the dolphin pitches (up or down) toward 60 degrees.
+    if anchor == HeldItemAnchor::Dolphin {
+        if left {
+            return 0;
+        }
+        let pitch = anim::state(m, alpha).drawn_from(m, &data).x_rot;
+        let percent = pitch.abs() / 60.0;
+        let offset = if pitch < 0.0 {
+            glam::Vec3::new(0.0, 1.0 - percent * 0.5, -1.0 + percent * 0.5)
+        } else {
+            glam::Vec3::new(0.0, 1.0 + percent * 0.8, -1.0 + percent * 0.2)
+        };
+        let shift = glam::Mat4::from_translation(offset);
+        let mut written = 0;
+        for (&origin, dst) in origins.iter().zip(out.iter_mut()) {
+            *dst = base_transform_at(m, alpha, origin) * shift;
+            written += 1;
+        }
+        return written;
+    }
+    if !super::illager::shows_item(m) {
+        return 0;
+    }
+    let s = anim::state(m, alpha).drawn_from(m, &data);
+    let Some((model, poses, anchors)) = posed_body(m, alpha, data) else {
+        return 0;
+    };
+    // WitchItemLayer.applyTranslation: a potion is held at the nose, any other
+    // item as CrossedArmsItemLayer holds it; only the main hand's item is drawn.
+    if anchor == HeldItemAnchor::Witch {
+        let Some(item) = m.extra.main_hand_id() else {
+            return 0;
+        };
+        if left != m.main_arm_left() {
+            return 0;
+        }
+        let potion = super::witch::holds_potion(item);
+        let mut written = 0;
+        for (&origin, dst) in origins.iter().zip(out.iter_mut()) {
+            let base = base_transform_at(m, alpha, origin);
+            let t = if potion {
+                let Some(nose) = part_matrix(&model, base, &poses, "nose", 0.0) else {
+                    return 0;
+                };
+                nose * glam::Mat4::from_translation(glam::Vec3::new(0.0625, 0.25, 0.0))
+                    * glam::Mat4::from_rotation_z(180.0f32.to_radians())
+                    * glam::Mat4::from_rotation_x(140.0f32.to_radians())
+                    * glam::Mat4::from_rotation_z(10.0f32.to_radians())
+                    * glam::Mat4::from_rotation_x(180.0f32.to_radians())
+            } else {
+                let Some(t) = crossed_arms_matrix(&model, base, &poses) else {
+                    return 0;
+                };
+                t
+            };
+            *dst = t;
+            written += 1;
+        }
+        return written;
+    }
+    // CrossedArmsItemLayer (villagers and wandering traders): the main hand's
+    // item over the folded arms.
+    if anchor == HeldItemAnchor::CrossedArms {
+        if m.extra.main_hand_id().is_none() || left != m.main_arm_left() {
+            return 0;
+        }
+        let mut written = 0;
+        for (&origin, dst) in origins.iter().zip(out.iter_mut()) {
+            let base = base_transform_at(m, alpha, origin);
+            let Some(t) = crossed_arms_matrix(&model, base, &poses) else {
+                return 0;
+            };
+            *dst = t;
+            written += 1;
+        }
+        return written;
+    }
+    // ItemInHandLayer: a STAB swing of this arm thrusts its item out
+    // (SpearAnimations.thirdPersonAttackItem, the main hand's forward
+    // movement), and a spear in use moves with it (ArmPose.SPEAR's
+    // animateUseItem).
+    let swing_left = m.extra.swing_right_arm.map_or(m.main_arm_left(), |r| !r);
+    let stab = (m.extra.swing_stab && swing_left == left).then(|| {
+        let forward = m
+            .extra
+            .main_hand_id()
+            .and_then(crate::spear::Kinetic::of)
+            .map_or(0.0, |k| k.forward_movement);
+        crate::spear::third_person_attack_item(s.swing, forward)
+    });
+    let off_hand = left != m.main_arm_left();
+    let spear_use = (super::spear_use::is_using_item(m) && m.extra.using_off_hand == off_hand)
+        .then(|| {
+            if off_hand {
+                m.extra.off_hand_id()
+            } else {
+                m.extra.main_hand_id()
+            }
+            .and_then(crate::spear::Kinetic::of)
+        })
+        .flatten()
+        .map(|kinetic| {
+            let time_held = m.extra.using_item as f32 + s.partial;
+            crate::spear::third_person_use_item(&kinetic, time_held, s.swing, 0.0, !left)
+        });
+    let mut written = 0;
+    for (&origin, dst) in origins.iter().zip(out.iter_mut()) {
+        let base = base_transform_at(m, alpha, origin);
+        let Some(mut t) = hand_base(m, &model, base, &poses, &anchors, left) else {
+            return 0;
+        };
+        if let Some(stab) = stab {
+            t *= stab;
+        }
+        if let Some(spear_use) = spear_use {
+            t *= spear_use;
+        }
+        *dst = t;
+        written += 1;
+    }
+    written
+}
+
 /// The pose a mob's held item is submitted under (`ItemInHandLayer`:
 /// `translateToHand`, then the hand offset; the item model adds its own
 /// display transform), or `None` when the mob shows no held items.
@@ -3457,95 +3670,9 @@ pub fn held_item_transform(
     data: &dyn RenderDataSource,
     left: bool,
 ) -> Option<glam::Mat4> {
-    let anchor = held_item_anchor(m);
-    // PandaHoldsItemLayer: the main hand's item in its mouth.
-    if anchor == HeldItemAnchor::Panda {
-        return super::panda::item_offset(m, alpha)
-            .filter(|_| !left)
-            .map(|offset| base_transform(m, alpha, camera) * offset);
-    }
-    // FoxHeldItemLayer: the main hand's item in its mouth.
-    if anchor == HeldItemAnchor::Fox {
-        return (!left)
-            .then(|| fox_item_transform(m, alpha, camera, data))
-            .flatten();
-    }
-    // DolphinCarryingItemLayer: the main hand's item at the snout, lifted and
-    // pulled in as the dolphin pitches (up or down) toward 60 degrees.
-    if anchor == HeldItemAnchor::Dolphin {
-        return (!left).then(|| {
-            let pitch = anim::state(m, alpha).drawn_from(m, &data).x_rot;
-            let percent = pitch.abs() / 60.0;
-            let offset = if pitch < 0.0 {
-                glam::Vec3::new(0.0, 1.0 - percent * 0.5, -1.0 + percent * 0.5)
-            } else {
-                glam::Vec3::new(0.0, 1.0 + percent * 0.8, -1.0 + percent * 0.2)
-            };
-            base_transform(m, alpha, camera) * glam::Mat4::from_translation(offset)
-        });
-    }
-    if !super::illager::shows_item(m) {
-        return None;
-    }
-    let base = base_transform(m, alpha, camera);
-    let s = anim::state(m, alpha).drawn_from(m, &data);
-    let (model, poses, anchors) = posed_body(m, alpha, data)?;
-    // WitchItemLayer.applyTranslation: a potion is held at the nose, any other
-    // item as CrossedArmsItemLayer holds it; only the main hand's item is drawn.
-    if anchor == HeldItemAnchor::Witch {
-        let item = m.extra.main_hand_id()?;
-        if left != m.main_arm_left() {
-            return None;
-        }
-        if super::witch::holds_potion(item) {
-            let nose = part_matrix(&model, base, &poses, "nose", 0.0)?;
-            return Some(
-                nose * glam::Mat4::from_translation(glam::Vec3::new(0.0625, 0.25, 0.0))
-                    * glam::Mat4::from_rotation_z(180.0f32.to_radians())
-                    * glam::Mat4::from_rotation_x(140.0f32.to_radians())
-                    * glam::Mat4::from_rotation_z(10.0f32.to_radians())
-                    * glam::Mat4::from_rotation_x(180.0f32.to_radians()),
-            );
-        }
-        return crossed_arms_matrix(&model, base, &poses);
-    }
-    // CrossedArmsItemLayer (villagers and wandering traders): the main hand's
-    // item over the folded arms.
-    if anchor == HeldItemAnchor::CrossedArms {
-        m.extra.main_hand_id()?;
-        if left != m.main_arm_left() {
-            return None;
-        }
-        return crossed_arms_matrix(&model, base, &poses);
-    }
-    let mut t = hand_base(m, &model, base, &poses, &anchors, left)?;
-    // ItemInHandLayer: a STAB swing of this arm thrusts its item out
-    // (SpearAnimations.thirdPersonAttackItem, the main hand's forward
-    // movement), and a spear in use moves with it (ArmPose.SPEAR's
-    // animateUseItem).
-    let swing_left = m.extra.swing_right_arm.map_or(m.main_arm_left(), |r| !r);
-    if m.extra.swing_stab && swing_left == left {
-        let forward = m
-            .extra
-            .main_hand_id()
-            .and_then(crate::spear::Kinetic::of)
-            .map_or(0.0, |k| k.forward_movement);
-        t *= crate::spear::third_person_attack_item(s.swing, forward);
-    }
-    let off_hand = left != m.main_arm_left();
-    if super::spear_use::is_using_item(m)
-        && m.extra.using_off_hand == off_hand
-        && let Some(kinetic) = (if off_hand {
-            m.extra.off_hand_id()
-        } else {
-            m.extra.main_hand_id()
-        })
-        .and_then(crate::spear::Kinetic::of)
-    {
-        let time_held = m.extra.using_item as f32 + s.partial;
-        t *= crate::spear::third_person_use_item(&kinetic, time_held, s.swing, 0.0, !left);
-    }
-    Some(t)
+    let mut out = [glam::Mat4::IDENTITY; 1];
+    let origin = origin_transform(m, alpha, camera);
+    (held_item_transforms_at(m, alpha, &[origin], data, left, &mut out) == 1).then_some(out[0])
 }
 
 /// `ArmedEntityRenderState.extractArmedEntityRenderState`: each arm's item

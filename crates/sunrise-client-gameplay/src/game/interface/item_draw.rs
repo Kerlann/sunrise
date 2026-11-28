@@ -830,8 +830,19 @@ impl crate::game::ClientGame<'_> {
         light: u32,
         out: &mut Vec<Vertex>,
     ) {
+        self.submit_item_world_poses(state, &[pose], light, out);
+    }
+    /// [`Self::submit_item_world`] across one or more camera-relative poses, resolving
+    /// special-model state once across all poses.
+    pub(in crate::game) fn submit_item_world_poses(
+        &self,
+        state: &ItemRenderState,
+        poses: &[glam::Mat4],
+        light: u32,
+        out: &mut Vec<Vertex>,
+    ) {
         let lights = diffuse_lights(self.nether_lighting());
-        self.submit_item_lit(state, pose, light, lights, out);
+        self.submit_item_lit_poses(state, poses, light, lights, out);
     }
     /// [`Self::submit_item_world`] preserving JOML `Matrix4f` rounding through baked quads.
     pub(in crate::game::client_side) fn submit_item_world_joml(
@@ -867,6 +878,17 @@ impl crate::game::ClientGame<'_> {
         lights: (glam::Vec3, glam::Vec3),
         out: &mut Vec<Vertex>,
     ) {
+        self.submit_item_lit_poses(state, &[pose], light, lights, out);
+    }
+    /// [`Self::submit_item_lit`] across one or more poses, resolving special-model state once.
+    pub(in crate::game::client_side) fn submit_item_lit_poses(
+        &self,
+        state: &ItemRenderState,
+        poses: &[glam::Mat4],
+        light: u32,
+        lights: (glam::Vec3, glam::Vec3),
+        out: &mut Vec<Vertex>,
+    ) {
         let mut sink = WorldSink {
             out,
             light: item_hdr_light(state, light),
@@ -874,11 +896,11 @@ impl crate::game::ClientGame<'_> {
             glint: self.glint(),
             tier: state.hdr_tier,
         };
-        state.submit(
+        state.submit_poses(
             &self.client.client_pack.item_renderer,
             &self.client.gui.atlas.sprites,
             &self.item_host(),
-            pose,
+            poses,
             &mut sink,
         );
     }
@@ -890,6 +912,16 @@ impl crate::game::ClientGame<'_> {
         light: u32,
         out: &mut Vec<Vertex>,
     ) {
+        self.submit_item_unlit_poses(state, &[pose], light, out);
+    }
+    /// [`Self::submit_item_unlit`] across one or more poses, resolving special-model state once.
+    pub fn submit_item_unlit_poses(
+        &self,
+        state: &ItemRenderState,
+        poses: &[glam::Mat4],
+        light: u32,
+        out: &mut Vec<Vertex>,
+    ) {
         let mut sink = WorldSink {
             out,
             light: item_hdr_light(state, light),
@@ -897,11 +929,11 @@ impl crate::game::ClientGame<'_> {
             glint: self.glint(),
             tier: state.hdr_tier,
         };
-        state.submit(
+        state.submit_poses(
             &self.client.client_pack.item_renderer,
             &self.client.gui.atlas.sprites,
             &self.item_host(),
-            pose,
+            poses,
             &mut sink,
         );
     }
@@ -946,18 +978,18 @@ impl crate::game::ClientGame<'_> {
         let renderer = &self.client.client_pack.item_renderer;
         state.submit_skinned(renderer, &self.client.gui.atlas.sprites, pose, sink, skin)
     }
-    /// [`Self::submit_item_world`] of `state` under `pose` on the GPU path, its draws counted
-    /// with an entity's (`skinned`: its mark and bounds, `cull_skinned`'s); false, with
+    /// [`Self::submit_item_world_poses`] of `state` under `poses` on the GPU path, its draws
+    /// counted with an entity's (`skinned`: its mark and bounds, `cull_skinned`'s); false, with
     /// nothing drawn, when the state cannot take it.
     pub(in crate::game::client_side) fn skin_item_into(
         &self,
         state: &ItemRenderState,
-        pose: glam::Mat4,
+        poses: &[glam::Mat4],
         light: u32,
         skinned: &mut super::creatures::Skinned,
     ) -> bool {
         let lights = diffuse_lights(self.nether_lighting());
-        let Some((mark, bounds)) = self.submit_item_skinned(state, &[pose], light, lights) else {
+        let Some((mark, bounds)) = self.submit_item_skinned(state, poses, light, lights) else {
             return false;
         };
         *skinned = Some(match skinned.take() {

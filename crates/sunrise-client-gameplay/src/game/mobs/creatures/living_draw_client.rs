@@ -342,24 +342,13 @@ impl crate::game::ClientGame<'_> {
         if layers {
             if !modded {
                 // Held items join the GPU path's draws, their silhouette too.
-                let mut skin = (skinning && vis.silhouette_on_gpu).then_some(&mut skinned);
-                if vis.illusioner_mirrors {
-                    for off in sunrise_sim::mobs::illusioner::mirror_offsets(mob, alpha as f32) {
-                        let view = MobView {
-                            camera: camera - glam::DVec3::from_array(off),
-                            alpha,
-                            light: packed,
-                        };
-                        self.mob_block_geometry(mob, view, hidden, skin.as_deref_mut(), out);
-                    }
-                } else {
-                    let view = MobView {
-                        camera,
-                        alpha,
-                        light: packed,
-                    };
-                    self.mob_block_geometry(mob, view, hidden, skin, out);
-                }
+                let skin = (skinning && vis.silhouette_on_gpu).then_some(&mut skinned);
+                let view = MobView {
+                    camera,
+                    alpha,
+                    light: packed,
+                };
+                self.mob_block_geometry(mob, view, hidden, skin, out);
             }
             let stock_ctx = super::super::native_entity_layers::StockLayerContext {
                 is_player,
@@ -642,6 +631,22 @@ mod tests {
             let bounds = crate::game::entity_client::mob_render_bounds(&mob, &models, 0.0).unwrap();
             let lo = bounds.min_position();
             let hi = bounds.max_position();
+            let (_, height, _) = mob.awake_dims();
+            let base_vertical = height * 3.0 + 0.5;
+            assert!(
+                ((mob.position.y - lo.y) - (base_vertical + illusioner::VERTICAL_WOBBLE)).abs()
+                    < 1e-12,
+                "scale={scale}: downward bound must only add vertical wobble, not upward scatter"
+            );
+            assert!(
+                ((hi.y - mob.position.y)
+                    - (base_vertical
+                        + illusioner::MAX_VERTICAL_SCATTER
+                        + illusioner::VERTICAL_WOBBLE))
+                    .abs()
+                    < 1e-12,
+                "scale={scale}: upward bound must match exact vertical scatter + wobble"
+            );
             let mut max_dx = 0.0_f64;
             let mut max_dy = 0.0_f64;
             for vertex in &out {
@@ -665,11 +670,9 @@ mod tests {
             if scale == 1.0 {
                 assert!(max_dx > 3.5, "got max_dx={max_dx}");
             } else {
-                let (_, height, _) = mob.awake_dims();
                 assert!(
-                    max_dy > height * 3.0 + 0.5,
-                    "min-scale fixture must exceed unexpanded vertical precheck bound (max_dy={max_dy}, old={})",
-                    height * 3.0 + 0.5
+                    max_dy > base_vertical,
+                    "min-scale fixture must exceed unexpanded vertical precheck bound (max_dy={max_dy}, old={base_vertical})"
                 );
             }
         }
