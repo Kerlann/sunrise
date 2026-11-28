@@ -221,6 +221,20 @@ pub(in crate::game::client_side) fn read_shader_options(
     Some(options)
 }
 
+/// The macros the Shader Options page reads the pick with, in game and on the title screen:
+/// the standard set, then `renderer`'s (`Renderer::define_pack_macros`: its device's feature
+/// answers, such as `IRIS_FEATURE_PER_BUFFER_BLENDING`, among them), as the load reads it. With
+/// no renderer made yet, the standard set alone, so the device's answers are not there.
+pub(in crate::game) fn shader_options_macros(
+    renderer: Option<&sunrise_client::gfx::Renderer>,
+) -> Macros {
+    let mut macros = Macros::standard();
+    if let Some(renderer) = renderer {
+        renderer.define_pack_macros(&mut macros);
+    }
+    macros
+}
+
 /// Saves the values chosen on the Shader Options page; none chosen removes the file.
 /// Writes the chosen options of `options.pack`; whether they were written.
 pub(in crate::game::client_side) fn write_shader_options(options: &ShaderOptions) -> bool {
@@ -1559,10 +1573,7 @@ impl crate::game::ClientGame<'_> {
 
     /// The Shader Options page opened: the picked pack's options, screens and names.
     pub(in crate::game::client_side) fn open_shader_options(&mut self) {
-        let mut macros = Macros::standard();
-        if let Some(renderer) = &self.client.renderer.0 {
-            renderer.define_pack_macros(&mut macros);
-        }
+        let macros = shader_options_macros(self.client.renderer.0.as_deref());
         let name = &self.client.settings.sunrise.shader_pack;
         let mode = self.client.settings.sunrise.iris_compat_of(name);
         self.client.settings.shader_options =

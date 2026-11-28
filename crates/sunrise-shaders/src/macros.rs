@@ -313,9 +313,26 @@ impl Macros {
     /// Whether the device the pack's programs run on draws a `blend.<program>.<buffer>` that
     /// differs from the program's other buffers ([`PER_BUFFER_BLENDING`]): the renderer's
     /// answer, from its device. Defines no macro itself: a pack that lists the flag gets its
-    /// answer from `define_features`.
+    /// answer from `define_features`. A device without it drops the answer these macros held,
+    /// at once.
     pub fn set_per_buffer_blending(&mut self, supported: bool) {
         self.1.per_buffer_blending = supported;
+        if !supported {
+            self.undef(&format!("{FEATURE_MACRO}{PER_BUFFER_BLENDING}"));
+        }
+    }
+
+    /// Drops every answer to a pack's feature flags these macros hold ([`is_feature_answer`]),
+    /// whoever defined it: a set reused for another pack, or after the device changed, holds
+    /// none of the previous answers.
+    pub(crate) fn drop_feature_answers(&mut self) {
+        let answers: Vec<String> = (self.names())
+            .filter(|n| is_feature_answer(n))
+            .map(str::to_owned)
+            .collect();
+        for name in &answers {
+            self.undef(name);
+        }
     }
 
     /// The feature flag `name` is (spec 3.2), in any case, as Sunrise writes it, if Sunrise has
@@ -340,8 +357,11 @@ impl Macros {
     /// that `properties` lists in `iris.features.optional` (spec 3.2) or
     /// `iris.features.required` (decision D-7), a name matching in any case and the macro taking
     /// the name as Sunrise writes it. A flag Sunrise lacks, and one of [`UNANSWERED`], stays
-    /// undefined. Whether any was defined.
+    /// undefined. The answers these macros held before are dropped first
+    /// (`drop_feature_answers`), so the set holds this read's answers alone. Whether any was
+    /// defined.
     pub fn define_features(&mut self, properties: &crate::Properties) -> bool {
+        self.drop_feature_answers();
         let mut defined = false;
         let answered: Vec<&'static str> = (FEATURE_LISTS.iter())
             .flat_map(|key| flags(properties, key))
@@ -503,6 +523,46 @@ mod tests {
             able.for_file().feature_notes(&properties),
             able.feature_notes(&properties)
         );
+    }
+
+    /// The macro set itself holds no stale answer: a device without per-buffer blending drops
+    /// `IRIS_FEATURE_PER_BUFFER_BLENDING` at once, and `define_features` holds only its own
+    /// read's answers, whatever the set held before.
+    #[test]
+    fn a_stale_feature_answer_leaves_the_macro_set() {
+        const PBB: &str = "IRIS_FEATURE_PER_BUFFER_BLENDING";
+        let parse = |text| crate::Properties::parse(text, &Macros::standard());
+        let listing = parse("iris.features.optional = PER_BUFFER_BLENDING SSBO\n");
+        let other = parse("iris.features.optional = CUSTOM_IMAGES\n");
+        let mut m = Macros::standard();
+        m.set_per_buffer_blending(true);
+        assert!(m.define_features(&listing));
+        assert_eq!(m.get(PBB), Some("1"));
+        assert_eq!(m.get("IRIS_FEATURE_SSBO"), Some("1"));
+        // The device answer turned no: the macro goes with it, the other answers stay.
+        m.set_per_buffer_blending(false);
+        assert!(!m.is_defined(PBB));
+        assert_eq!(m.get("IRIS_FEATURE_SSBO"), Some("1"));
+        // Answered again on that device: still undefined.
+        assert!(m.define_features(&listing));
+        assert!(!m.is_defined(PBB));
+        // A read of another pack holds its answers alone.
+        m.set_per_buffer_blending(true);
+        assert!(m.define_features(&listing));
+        assert_eq!(m.get(PBB), Some("1"));
+        assert!(m.define_features(&other));
+        let answers: Vec<&str> = m
+            .names()
+            .filter(|n| n.starts_with("IRIS_FEATURE_"))
+            .collect();
+        assert_eq!(answers, ["IRIS_FEATURE_CUSTOM_IMAGES"]);
+        // One that lists none Sunrise has holds none.
+        assert!(!m.define_features(&parse("iris.features.optional = NOT_A_FEATURE\n")));
+        assert_eq!(m, {
+            let mut able = Macros::standard();
+            able.set_per_buffer_blending(true);
+            able
+        });
     }
 
     #[test]

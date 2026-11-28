@@ -105,13 +105,7 @@ pub fn read_properties(
     macros: &mut crate::Macros,
 ) -> (crate::Properties, Vec<String>) {
     // The answers start from none: a set the caller reuses may hold another pack's.
-    let answers: Vec<String> = (macros.names())
-        .filter(|n| crate::macros::is_feature_answer(n))
-        .map(str::to_owned)
-        .collect();
-    for name in &answers {
-        macros.undef(name);
-    }
+    macros.drop_feature_answers();
     // The file and the options are read once, so both reads see the same pack.
     let text = pack.read_text("shaders.properties").unwrap_or_default();
     let mut options = with_options(pack, macros);

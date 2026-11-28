@@ -231,7 +231,11 @@ the full list.
     `DownlevelFlags::INDEPENDENT_BLEND`; `Macros::set_per_buffer_blending`). There it is answered as the flags of
     `FEATURES` are: listed in either list, in any case, it gets `IRIS_FEATURE_PER_BUFFER_BLENDING`, in the same two
     reads below. On a device without it, and in a read made without the renderer's answer, the macro stays undefined
-    and a required `PER_BUFFER_BLENDING` keeps its note. Before, the macro was never defined.
+    and a required `PER_BUFFER_BLENDING` keeps its note. Before, the macro was never defined. A macro set told its
+    device lacks it drops the answer at once, and each definition of the answers drops the ones the set held before.
+    The Shader Options page, on the title screen as in game, reads with the renderer's macros where a renderer
+    exists, and with the standard set alone before one is made. A pack refused on one device is tried again once a
+    renderer whose device decides other macros is installed.
   - A supported flag Sunrise can't keep on every draw it may take loads without a note but gets no macro:
     `BLOCK_EMISSION_ATTRIBUTE` (`UNANSWERED` in `macros.rs`). Terrain drawn from its vertex attributes alone (when
     neither the arena's pages nor the normal stream fit the pack's vertex stage) has no source block, so
@@ -290,7 +294,7 @@ the full list.
   `options::tests::a_repeated_flag_list_is_noted_as_the_lists_were_settled`,
   `options::tests::a_repeat_the_second_read_cannot_see_is_still_noted`,
   `options::tests::the_settled_lists_keep_their_place_in_the_file`,
-  `options::per_buffer_blending_tests::*`,
+  `options::per_buffer_blending_tests::*`, `macros::tests::a_stale_feature_answer_leaves_the_macro_set`,
   `options::tests::an_undef_in_shaders_properties_hides_the_answer_from_conditionals_only`,
   `options::tests::a_reused_macro_set_carries_no_answer_to_the_next_pack`,
   `options::tests::block_emission_is_supported_but_not_answered`,

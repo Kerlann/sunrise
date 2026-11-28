@@ -268,7 +268,10 @@ impl ClientGame<'_> {
         self.client.mod_gpu.as_ref()
     }
 
+    /// Installs `renderer`. A pack refused on another device is tried again on this one
+    /// (`native_shaders::follow_device`).
     pub fn set_renderer(&mut self, renderer: Box<Renderer>) {
+        client_side::native_shaders::follow_device(&renderer.device_pack_macros());
         let gpu = renderer.mod_gpu();
         if let Some(previous) = &self.client.mod_gpu {
             gpu.continue_ids_from(previous);
