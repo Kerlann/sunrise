@@ -21,6 +21,7 @@ impl ServerGame<'_> {
                         self.common.world.shulkers.remove(&p);
                         self.common.world.chest_openers.remove(&at);
                         self.server.lid_openers.remove(&at);
+                        self.server.lid_opener_entities.remove(&at);
                     }
                     self.server
                         .mod_container_viewers

@@ -131,12 +131,27 @@ impl ServerGame<'_> {
         key: (i32, i32, i32),
         open: bool,
     ) -> (i32, i32) {
+        // `ContainerOpenersCounter` lives on the block entity: a replacement at
+        // the same position opens from zero instead of inheriting the count
+        // (and the first-open sound) of the entity it replaced.
+        if let Some(generation) = self.common.world.block_entities.generation(&key) {
+            if self
+                .server
+                .lid_opener_entities
+                .get(&key)
+                .is_some_and(|known| *known != generation)
+            {
+                self.server.lid_openers.remove(&key);
+            }
+            self.server.lid_opener_entities.insert(key, generation);
+        }
         let count = self.server.lid_openers.entry(key).or_default();
         let before = *count;
         *count = (before + if open { 1 } else { -1 }).max(0);
         let after = *count;
         if after == 0 {
             self.server.lid_openers.remove(&key);
+            self.server.lid_opener_entities.remove(&key);
         }
         // `ContainerOpenersCounter.incrementOpeners`: the first opener
         // schedules the five-tick recheck of who still has the container open
