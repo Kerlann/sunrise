@@ -6,15 +6,17 @@ pub(crate) use sunrise_glsl::macros::lex;
 
 /// The feature flags of `iris.features.*` (spec 3.2) Sunrise has on every device (and
 /// [`PER_BUFFER_BLENDING`] on some). A pack that requires one of them loads; one it lacks is
-/// noted. Sunrise defines no `IRIS_FEATURE_<name>` macro for them
-/// (spec OQ-2, docs/cleanroom/README.md): that macro family names another loader, so packs take
-/// the path they take without it. `BLOCK_EMISSION_ATTRIBUTE`: terrain's
-/// `at_midBlock.w` is the light its block gives. `SEPARATE_HARDWARE_SAMPLERS` (ShaderDoc,
+/// noted. For each of them the pack lists, in either list, its programs and property files see
+/// `IRIS_FEATURE_<NAME>` (spec 1.5.1, 3.2; decision D-7 and OQ-2 in docs/cleanroom/):
+/// `Macros::define_features`, all but [`UNANSWERED`].
+/// `BLOCK_EMISSION_ATTRIBUTE`: terrain's `at_midBlock.w` is the light its block gives, where the
+/// draw reaches the quad's source block. `SEPARATE_HARDWARE_SAMPLERS` (ShaderDoc,
 /// "Separate Hardware Shadow Samplers"): `shadowtex0`/`shadowtex1` stay plain depth samplers when
 /// hardware filtering is on, `shadowtex0HW`/`shadowtex1HW` compare; Sunrise picks a comparison
 /// sampler by the declared type (`sampler2DShadow`), so they always are. `HIGHER_SHADOWCOLOR`:
-/// `shadowcolor2` to `shadowcolor7` beside the first two. `FADE_VARIABLE`: terrain vertex
-/// programs can read the section's visibility transition as `mc_chunkFade`.
+/// `shadowcolor2` to `shadowcolor7` beside the first two. `FADE_VARIABLE`: gbuffers programs read
+/// `mc_chunkFade`, terrain's the section's visibility transition and every other draw's `-1.0`
+/// (spec 5.1, `post::off_terrain_fade`).
 const FEATURES: [&str; 9] = [
     "BLOCK_EMISSION_ATTRIBUTE",
     "COMPUTE_SHADERS",
@@ -27,9 +29,63 @@ const FEATURES: [&str; 9] = [
     "SSBO",
 ];
 
-/// Whether `name` is one of [`FEATURES`], in any case.
-fn is_feature(name: &str) -> bool {
-    FEATURES.iter().any(|f| f.eq_ignore_ascii_case(name))
+/// The flags of [`FEATURES`] a pack requiring them loads with, but that get no
+/// `IRIS_FEATURE_<NAME>`: Sunrise can't keep their promise on every draw it may take.
+/// `BLOCK_EMISSION_ATTRIBUTE`: terrain drawn from its attributes alone
+/// (`TerrainDraws::Attributes`, when neither the arena's pages nor the normal stream fit the
+/// pack's vertex stage) has no source block, and `at_midBlock.w` is `0` there, so a pack's
+/// emission branch would lose every block's light on that path.
+const UNANSWERED: [&str; 1] = ["BLOCK_EMISSION_ATTRIBUTE"];
+
+/// The one of [`FEATURES`] `name` is, in any case.
+fn feature(name: &str) -> Option<&'static str> {
+    FEATURES
+        .iter()
+        .copied()
+        .find(|f| f.eq_ignore_ascii_case(name))
+}
+
+/// The keys that list the feature flags a pack asks for (spec 3.2).
+pub(crate) const FEATURE_LISTS: [&str; 2] = ["iris.features.optional", "iris.features.required"];
+
+/// The prefix of the macros that answer a pack's feature flags.
+const FEATURE_MACRO: &str = "IRIS_FEATURE_";
+
+/// Whether `name` is one of the macros that answer a pack's feature flags. Sunrise alone
+/// answers them (`Macros::define_features`): a pack's line declaring such a name is no option.
+/// It is not found as one (`options`, `switches_on`, `value_options`), so it is never defined for
+/// the pack's property files, never counted as on in `program.*.enabled`, and a saved choice
+/// never rewrites it (`Pack::with_chosen`, `options::apply`). As written, uncommented, it is the
+/// pack's own directive, with a directive's scope (decision D-7): in a program, the rest of the
+/// stage's preprocessed source; in `shaders.properties`, the rest of that file.
+pub(crate) fn is_feature_answer(name: &str) -> bool {
+    name.starts_with(FEATURE_MACRO)
+}
+
+/// Whether `name` is one of the macros Sunrise alone answers: a feature answer
+/// ([`is_feature_answer`]) or an identity macro (`IS_IRIS`, `IRIS_VERSION`, decision D-8). A
+/// pack's line declaring one is no option (`options`, `switches_on`, `value_options`): it is
+/// never defined for the pack's property files, never counted as on in `program.*.enabled`, and
+/// a saved choice never rewrites it, so neither an option nor a profile changes the answer. As
+/// written, uncommented, it is the pack's own directive, with a directive's scope.
+pub(crate) fn is_reserved(name: &str) -> bool {
+    is_feature_answer(name) || crate::identity::NAMES.contains(&name)
+}
+
+/// The flags `properties` gives under `key`, as the pack wrote them.
+fn flags<'a>(properties: &'a crate::Properties, key: &str) -> std::str::SplitWhitespace<'a> {
+    properties.get(key).unwrap_or_default().split_whitespace()
+}
+
+/// The flags of [`FEATURES`] that `properties` lists in either of [`FEATURE_LISTS`], as
+/// `FEATURES` writes them; a name matches in any case.
+pub(crate) fn listed_features(
+    properties: &crate::Properties,
+) -> impl Iterator<Item = &'static str> {
+    FEATURE_LISTS
+        .iter()
+        .flat_map(|key| flags(properties, key))
+        .filter_map(feature)
 }
 
 /// The feature flag of `iris.features.*` (spec 3.2) Sunrise has only on a device that can draw
@@ -191,8 +247,10 @@ impl Macros {
         // default; Iris 1.11.7 defines both too, with or without a resource pack's maps).
         m.define("MC_NORMAL_MAP", "");
         m.define("MC_SPECULAR_MAP", "");
-        // No `IS_IRIS`, `IRIS_VERSION` or `IRIS_HAS_*`: Sunrise is not that loader and does not
-        // claim its identity (spec OQ-2, docs/cleanroom/README.md). Packs take their other path.
+        // No `IS_IRIS`, `IRIS_VERSION` or `IRIS_HAS_*` here (spec OQ-2, docs/cleanroom/README.md):
+        // the identity macros are defined only for a pack whose Iris compatibility is on
+        // (`set_identity`, decision D-8), and the `IRIS_FEATURE_*` answers depend on the pack
+        // (`define_features`).
         // Distant Sunrises' block materials, which Iris defines with or without the mod (packs
         // compare ids with them unguarded: Exposa's `blockID == DH_BLOCK_LEAVES`), numbered as
         // the mod's `EDhApiBlockMaterial` numbers them.
@@ -260,21 +318,31 @@ impl Macros {
     /// Whether Sunrise has feature flag `name` (spec 3.2) with these macros' device, in any
     /// case: one of [`FEATURES`], or [`PER_BUFFER_BLENDING`] on a device that draws it.
     fn supports(&self, name: &str) -> bool {
-        is_feature(name)
+        feature(name).is_some()
             || self.1.per_buffer_blending && PER_BUFFER_BLENDING.eq_ignore_ascii_case(name)
     }
 
     /// A note for each feature `iris.features.required` names that Sunrise lacks with these
-    /// macros' device (`supports`); a name matches in any case. Optional features need nothing:
-    /// no macro is defined for them (see `FEATURES`).
+    /// macros' device (`supports`); a name matches in any case. The pack still loads.
     pub fn feature_notes(&self, properties: &crate::Properties) -> Vec<String> {
-        properties
-            .get("iris.features.required")
-            .unwrap_or_default()
-            .split_whitespace()
+        flags(properties, "iris.features.required")
             .filter(|f| !self.supports(f))
             .map(|f| format!("the pack requires `{f}`, which is not supported yet"))
             .collect()
+    }
+
+    /// Defines `IRIS_FEATURE_<NAME>` as `1` for each of [`FEATURES`] that `properties` lists in
+    /// `iris.features.optional` (spec 3.2) or `iris.features.required` (decision D-7), a name
+    /// matching in any case and the macro taking the name as `FEATURES` writes it. A flag
+    /// Sunrise lacks, and one of [`UNANSWERED`], stays undefined. Whether any was defined.
+    pub fn define_features(&mut self, properties: &crate::Properties) -> bool {
+        let mut defined = false;
+        let answered = listed_features(properties).filter(|f| !UNANSWERED.contains(f));
+        for name in answered {
+            self.define(format!("{FEATURE_MACRO}{name}"), "1");
+            defined = true;
+        }
+        defined
     }
 }
 
@@ -342,9 +410,10 @@ mod tests {
     }
 
     /// A required feature Sunrise has loads without a note, one it lacks gets a note, whatever the
-    /// case it is written in; no `IRIS_FEATURE_*` macro is defined either way (spec OQ-2).
+    /// case it is written in; the standard and renderer sets hold no `IRIS_*` macro (the
+    /// feature answers come from the pack's lists, `define_features`).
     #[test]
-    fn required_features_are_noted_and_never_defined() {
+    fn required_features_are_noted_and_the_standard_set_names_no_feature() {
         let properties = crate::Properties::parse(
             "iris.features.optional = COMPUTE_SHADERS ssbo NOT_A_FEATURE\n\
              iris.features.required = BLOCK_EMISSION_ATTRIBUTE HIGHER_SHADOWCOLOR custom_images \

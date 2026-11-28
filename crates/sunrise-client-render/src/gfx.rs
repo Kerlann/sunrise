@@ -92,6 +92,7 @@ mod renderer_construction;
 mod section_fade;
 mod section_upload;
 mod shader_pack;
+pub use shader_pack::PackPoll;
 mod surface_lifecycle;
 use entity_draw::*;
 #[cfg(test)]
@@ -291,6 +292,8 @@ mod off_page;
 use off_page::move_off_page;
 pub mod submit;
 mod sunrise_fan;
+#[cfg(feature = "test-support")]
+pub mod test_hooks;
 mod timing;
 pub mod translucency;
 pub(crate) mod upload;
@@ -643,6 +646,25 @@ impl Renderer {
     /// frame, empty when the world's sky has none.
     pub fn custom_sky_draws(&mut self) -> &mut Vec<crate::custom_sky::Draw> {
         &mut self.custom_sky_draws
+    }
+    /// The pack's custom lightmaps (`crate::custom_lightmap::load`): a world with one takes its
+    /// light texture from them in place of the default one. A pack without any costs a frame
+    /// nothing.
+    pub fn set_custom_lightmap(
+        &mut self,
+        pack: std::sync::Arc<dyn crate::custom_lightmap::Lightmaps>,
+    ) {
+        self.custom_lightmap = (!pack.is_empty()).then_some(pack);
+        self.lightmap_uploaded = false;
+    }
+    /// Whether the pack has custom lightmaps: only then does the game hand over the weather.
+    pub fn has_custom_lightmap(&self) -> bool {
+        self.custom_lightmap.is_some()
+    }
+    /// The world and weather of the next frame's light texture (custom lightmaps read them). Only
+    /// that frame reads them: a frame the game sets none for has no custom lightmap.
+    pub fn set_lightmap_weather(&mut self, weather: crate::custom_lightmap::Weather) {
+        self.lightmap_weather = Some(weather);
     }
     fn quad_indices(device: &wgpu::Device, quads: u32) -> wgpu::Buffer {
         surface_setup::ray_query::quad_indices(device, quads)
@@ -1036,6 +1058,14 @@ mod sprite_upload_tests;
 #[cfg(test)]
 mod shadow_tests;
 
+/// What a pack's thread builds (`Renderer::load_shader_pack`): the pack or why it is refused,
+/// its block ids, and the mod pipelines' state for its targets.
+type PackBuilt = (
+    std::result::Result<pack_post::PackPost, pack_post::Refused>,
+    Vec<i32>,
+    Option<mod_pipelines::BuiltPackState>,
+);
+
 /// A `shaders/` pack building on its own thread (`Renderer::load_shader_pack`): the dimension it
 /// is for, the thread (a panic in it contained), and what the game named it with and when.
 /// Dropping it (another pack, none, or another dimension) cancels the build: the thread stops at
@@ -1044,16 +1074,7 @@ pub(crate) struct PackLoading {
     dimension: i32,
     /// Held to be dropped with it: that cancels the build.
     _cancel: CancelOnDrop,
-    #[allow(clippy::type_complexity)]
-    thread: std::thread::JoinHandle<
-        std::result::Result<
-            (
-                std::result::Result<pack_post::PackPost, pack_post::Refused>,
-                Vec<i32>,
-            ),
-            String,
-        >,
-    >,
+    thread: std::thread::JoinHandle<std::result::Result<PackBuilt, String>>,
     label: String,
     started: std::time::Instant,
     /// What its terrain and shadow programs will draw from the game's sections, as the built
@@ -1062,6 +1083,9 @@ pub(crate) struct PackLoading {
     draws: PackDraws,
     /// Sunrise's HDR as served to it (`Post::hdr`).
     served: Option<sunrise_shaders::Tonemap>,
+    /// Block ids given while it builds (`Renderer::set_pack_block_ids`), which it runs with in
+    /// place of those it was built with.
+    block_ids: Option<Vec<i32>>,
 }
 
 /// A running `shaders/` pack's block ids (`Renderer::pack_block_ids`).

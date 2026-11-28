@@ -192,6 +192,14 @@ pub struct Renderer {
     /// Custom sky layers (`crate::custom_sky`), and the frame's from the game.
     pub(crate) custom_sky: custom_sky::CustomSky,
     pub(crate) custom_sky_draws: Vec<crate::custom_sky::Draw>,
+    /// The pack's custom lightmaps (`crate::custom_lightmap::load`), and the world and weather
+    /// the next frame's light texture is for.
+    /// None when the pack has none.
+    pub(crate) custom_lightmap: Option<std::sync::Arc<dyn crate::custom_lightmap::Lightmaps>>,
+    /// Set by the game for one frame, taken by the frame's `update_lightmap`.
+    pub(crate) lightmap_weather: Option<crate::custom_lightmap::Weather>,
+    /// What drew the last frame's light texture, for F3's chart while a custom lightmap may.
+    pub(crate) lightmap_drawn: core_lightmap::Drawn,
     /// The glowing entities' outline (`LevelRenderer.entityOutlineTarget`).
     pub(crate) entity_outline: entity_outline::EntityOutline,
     pub(crate) panorama: panorama::Panorama,
@@ -426,12 +434,9 @@ pub struct Renderer {
     pub(crate) keep_timed_frames: bool,
     /// Times Sunrise's own passes on the GPU, as `pass_timing` does (`own_pass_times`).
     pub(crate) own_timing: Option<pack_timing::PassTiming>,
-    /// Tests: whether the last real frame ran Sunrise's tone curve (`sunrise_tone_curve`).
+    /// What tests read from and set on this renderer (`test_hooks`).
     #[cfg(feature = "test-support")]
-    pub(crate) tone_curve_ran: bool,
-    /// Tests: how many shader pack builds `load_shader_pack` started.
-    #[cfg(feature = "test-support")]
-    pub(crate) pack_loads: u64,
+    pub test_hooks: super::test_hooks::TestHooks,
     /// The entity vertices Sunrise draws itself while a shader pack draws the others.
     pub(crate) pack_entity_rest: Vec<Vertex>,
     /// Set 1 of the cloud pipeline, for a shader pack's `gbuffers_clouds`.

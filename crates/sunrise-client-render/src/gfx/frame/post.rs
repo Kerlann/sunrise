@@ -47,6 +47,9 @@ pub(in crate::gfx) struct PostPassArgs<'a> {
     pub(in crate::gfx) serial: u64,
     pub(in crate::gfx) cpu: [usize; 3],
     pub(in crate::gfx) lifts_world: bool,
+    /// The display this frame is shown on, for a shader pack's display uniforms
+    /// (`EffectiveOutput::display` of the output it is drawn for).
+    pub(in crate::gfx) display: sunrise_render_shaderpack::pack_uniforms::Display,
     pub(in crate::gfx) frame_graph: Option<mod_frame_graph::FrameGraphRunner>,
 }
 
@@ -108,6 +111,7 @@ impl Renderer {
             serial,
             cpu,
             lifts_world,
+            display,
             mut frame_graph,
         } = args;
 
@@ -305,6 +309,7 @@ impl Renderer {
                 &view_target,
                 frame,
                 &frame.pack,
+                display,
                 size,
                 [self.config.width, self.config.height],
                 pages,

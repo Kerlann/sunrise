@@ -101,6 +101,11 @@ When a build stops on a package the lock doesn't pin, its error ends with that c
 If compilation fails, look for `Build log:` in the error. It points to the compiler output in
 `work/<mod-id>-<checkout-hash>/build.log` inside the tool's cache.
 
+Use `cargo sunrise-mod build --verbose` (or `-v`) to see compiler stderr live without losing the build log.
+Use `cargo sunrise-mod build --timings` to get the path to Cargo's retained HTML report on stderr after a
+successful Cargo build. It measures Cargo's compile units; the direct Rust routes do not run Cargo and say
+so instead. Both flags are for native mods only.
+
 The template also writes `.github/workflows/sunrise-release.yml`. To publish your mod, see
 [Releasing](../how-to/publish.md#releasing).
 

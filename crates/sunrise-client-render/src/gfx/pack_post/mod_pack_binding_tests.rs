@@ -196,6 +196,7 @@ fn run_frame_and_sample_at(
         &screen,
         &frame,
         &Default::default(),
+        Default::default(),
         SIZE,
         SIZE,
         &[],
@@ -388,6 +389,7 @@ fn pack_owned_feature_stages_draw_only_unbound_prepared_mod_pipelines() {
         &color,
         None,
     ));
+    primitives.pipelines.select_pack(&gpu.device, None);
     primitives.prepare_pack_pass(&gpu.device, post.formats[0], post.rgb & 1 != 0, false);
     primitives.set_bound_mod_slots(post.bound_mod_slots());
     post.fill_mod_draws(|slots, out| primitives.pack_bound_chunks_into(slots, out));

@@ -8,24 +8,35 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use sunrise_client_render::graphics::IrisCompat;
+
+/// What the loader was given of a pack and said of it: the pack's files when it was read
+/// (`fingerprint`), its Iris compatibility switch, and whether it was accepted.
+type Outcome = (Option<u64>, IrisCompat, bool);
+
 thread_local! {
     // Loader outcomes survive renderer replacement; rejected files must not cause a rebuild loop.
-    // The pack's files when it was last read (`fingerprint`), and whether it was accepted.
-    static OUTCOMES: std::cell::RefCell<std::collections::HashMap<PathBuf, (Option<u64>, bool)>> =
+    static OUTCOMES: std::cell::RefCell<std::collections::HashMap<PathBuf, Outcome>> =
         std::cell::RefCell::default();
 }
 
-/// Whether the loader accepted the pack at `path`; `None` before it answered.
-pub(in crate::game) fn outcome(path: &Path) -> Option<bool> {
-    OUTCOMES.with_borrow(|packs| packs.get(path).map(|(_, accepted)| *accepted))
+/// Whether the loader accepted the pack at `path` with the Iris compatibility switch `mode`;
+/// `None` before it answered for that switch.
+pub(in crate::game) fn outcome(path: &Path, mode: IrisCompat) -> Option<bool> {
+    OUTCOMES.with_borrow(|packs| {
+        let (_, was, accepted) = packs.get(path)?;
+        (*was == mode).then_some(*accepted)
+    })
 }
 
-pub(in crate::game) fn remember(path: &Path, stamp: Option<u64>, accepted: bool) {
-    OUTCOMES.with_borrow_mut(|packs| packs.insert(path.to_owned(), (stamp, accepted)));
+pub(in crate::game) fn remember(path: &Path, stamp: Option<u64>, mode: IrisCompat, accepted: bool) {
+    OUTCOMES.with_borrow_mut(|packs| packs.insert(path.to_owned(), (stamp, mode, accepted)));
 }
 
-pub(in crate::game) fn refused(path: &Path, stamp: Option<u64>) -> bool {
-    OUTCOMES.with_borrow(|packs| packs.get(path) == Some(&(stamp, false)))
+/// Whether the loader refused the pack at `path` as it is now (`stamp`), with the switch `mode`:
+/// the same files with another switch are other build inputs, tried again.
+pub(in crate::game) fn refused(path: &Path, stamp: Option<u64>, mode: IrisCompat) -> bool {
+    OUTCOMES.with_borrow(|packs| packs.get(path) == Some(&(stamp, mode, false)))
 }
 
 #[derive(Default)]
@@ -36,9 +47,31 @@ pub(in crate::game) struct NativeShaders {
     pub noted: String,
     /// The pick's `sunrise.hdr` request as last read (`ClientGame::picked_pack_shape`).
     pub pick_hdr: std::cell::RefCell<super::shader_packs::PickHdr>,
-    /// Tests: what the last load of the pick logged about its `shaders.properties`.
-    #[cfg(test)]
-    pub loaded_log: Vec<String>,
+    /// The Iris compatibility switch the pack in the renderer (running or building) was loaded
+    /// with, and whether it ran with the identity macros; `None` before a load.
+    pub identity_build: Option<(IrisCompat, bool)>,
+    /// The pick's identity answer as last read: at its load, and each time its files or options
+    /// are read again for the Shaders page (`Game::refresh_identity`). `None` before either.
+    pub identity_seen: Option<bool>,
+    /// The pack list asked for the pick's answer again while its scan was running: a later frame
+    /// takes it (`identity_seen`) once the scan has landed.
+    pub identity_recheck: bool,
+}
+
+impl NativeShaders {
+    /// Whether the pack in the renderer was loaded from other inputs than the pick's now: another
+    /// switch (`now`), or another identity answer than the last one read (the pack replaced under
+    /// its name). It is to be dropped before it can run (a build started before the player turned
+    /// it off is never installed: `Renderer::poll_shader_pack_unless`), and is forgotten here.
+    pub(super) fn stale_identity(&mut self, now: IrisCompat) -> bool {
+        let stale = self.identity_build.is_some_and(|(mode, answer)| {
+            mode != now || self.identity_seen.is_some_and(|seen| seen != answer)
+        });
+        if stale {
+            self.identity_build = None;
+        }
+        stale
+    }
 }
 
 /// `SUNRISE_HDR_FRAME=float`: the frame is float where the renderer is made with no pack picked,
@@ -77,7 +110,8 @@ pub(in crate::game) fn fingerprint(path: &Path) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{fingerprint, outcome, refused, remember};
+    use super::{IrisCompat, fingerprint, outcome, refused, remember};
+    const ON: IrisCompat = IrisCompat::On;
 
     #[test]
     fn outcomes_and_refusals_survive_renderer_resets() {
@@ -86,17 +120,21 @@ mod tests {
         let file = root.join("post.fsh");
         std::fs::write(&file, "first files").unwrap();
         let stamp = fingerprint(&root);
-        assert_eq!(outcome(&root), None);
-        remember(&root, stamp, true);
-        assert_eq!(outcome(&root), Some(true));
+        assert_eq!(outcome(&root, ON), None);
+        remember(&root, stamp, ON, true);
+        assert_eq!(outcome(&root, ON), Some(true));
         // Policy, SDK and GPU refusals all reach this same outcome before any resource reload.
-        remember(&root, stamp, false);
-        assert_eq!(outcome(&root), Some(false));
-        assert!(refused(&root, fingerprint(&root)));
+        remember(&root, stamp, ON, false);
+        assert_eq!(outcome(&root, ON), Some(false));
+        assert!(refused(&root, fingerprint(&root), ON));
+        // The same files with another Iris compatibility switch are tried again.
+        assert_eq!(outcome(&root, IrisCompat::Off), None);
+        assert!(!refused(&root, fingerprint(&root), IrisCompat::Off));
+        assert!(!refused(&root, fingerprint(&root), IrisCompat::Auto));
         std::fs::write(&file, "repaired files with a different size").unwrap();
-        assert!(!refused(&root, fingerprint(&root)));
-        remember(&root, fingerprint(&root), true);
-        assert_eq!(outcome(&root), Some(true));
+        assert!(!refused(&root, fingerprint(&root), ON));
+        remember(&root, fingerprint(&root), ON, true);
+        assert_eq!(outcome(&root, ON), Some(true));
         std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -124,7 +124,7 @@ pub(crate) mod camera_type_tests {
         .into();
         with_mods(mods, || {
             with_client_game(|game| {
-                game.player = Some(PlayerMotion::new(game.motion, Vec3::ZERO).unwrap());
+                game.player = Some(PlayerMotion::new(game.motion, Vec3::ZERO));
                 game.client.title.0 = None;
                 game.client.spectated_post_effect = Some("minecraft:creeper");
                 let posed = game.test_frame_camera(1.0).unwrap();
@@ -174,7 +174,7 @@ pub(crate) mod camera_type_tests {
             vec![ModEntry::new("edit-x", Box::new(EditX))].into(),
             || {
                 with_client_game(|game| {
-                    game.player = Some(PlayerMotion::new(game.motion, Vec3::ZERO).unwrap());
+                    game.player = Some(PlayerMotion::new(game.motion, Vec3::ZERO));
                     game.previous_position = Vec3::ZERO;
                     game.client.title.0 = None;
                     game.yaw = 180.0;
@@ -235,7 +235,7 @@ pub(crate) mod camera_type_tests {
                     let (client, _server) = sunrise_protocol::connection::Pipe::pair();
                     game.connect_local(client, "CameraPinProbe").unwrap();
                     game.client.remote.as_mut().unwrap().logged_in = true;
-                    game.player = Some(PlayerMotion::new(game.motion, Vec3::ZERO).unwrap());
+                    game.player = Some(PlayerMotion::new(game.motion, Vec3::ZERO));
                     game.client.title.0 = None;
                     let (rendered, _, _, _) = game.test_frame_camera(1.0).unwrap();
                     assert_eq!([rendered.x, rendered.z], [1000.0, 1000.0]);
@@ -300,7 +300,7 @@ pub(crate) mod camera_type_tests {
         ];
         with_mods(mods.into(), || {
             with_client_game(|game| {
-                game.player = Some(PlayerMotion::new(game.motion, Vec3::ZERO).unwrap());
+                game.player = Some(PlayerMotion::new(game.motion, Vec3::ZERO));
                 game.client.title.0 = None;
                 // The failed edit rolls back and the listener stays disabled on the next frame.
                 for _ in 0..2 {

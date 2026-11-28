@@ -9,7 +9,7 @@
 //! - `self-update`: install the newest signed standalone tool without changing any project's SDK pin.
 //! - `internals sync [--repo <path>]`: sync declarations for native mods.
 //! - `internals add <path>… [--kind <kind>]`: declare internals from the prebuilt catalog.
-//! - `build [--update-lock]`: the `.smod` in `target/sunrise-mod/`, with the mod's `assets/`
+//! - `build [--update-lock] [--timings] [--verbose]`: the `.smod` in `target/sunrise-mod/`, with the mod's `assets/`
 //!   and `data/`; a native mod is compiled first (`dev.rs`).
 //! - `release [<version>|patch|minor|major] [--check] [--pull-request]`, `release setup`: prepare or publish a tagged
 //!   release using the registry's shared workflow (`author_release.rs`).
@@ -33,6 +33,7 @@
 //! - `native-discover < plan.json`, `native-lock < plan.json`: a native mod's internals or its pinned game's build data, and its registry lock (the same page).
 //! - `native-layout < plan.json`: a local prebuilt game checked and laid out as an SDK's slices (the same page).
 use sunrise_mod_package::{Content, Manifest, Package, manifest::MANIFEST};
+use sunrise_native_build::{BuildDiagnostics, CompilerStderr, Timings};
 mod author_release;
 mod bounded;
 mod check;
@@ -190,6 +191,7 @@ fn main() -> ExitCode {
 struct BuildArgs<'a> {
     update_lock: bool,
     with: Vec<&'a Path>,
+    diagnostics: BuildDiagnostics,
 }
 
 fn build_args(args: &[String]) -> Result<BuildArgs<'_>, String> {
@@ -200,8 +202,22 @@ fn build_args(args: &[String]) -> Result<BuildArgs<'_>, String> {
         .map(Path::new)
         .collect::<Vec<_>>();
     let update_lock = options.switch("--update-lock");
+    let timings = if options.switch("--timings") {
+        Timings::Html
+    } else {
+        Timings::Off
+    };
+    let stderr = if options.switch("--verbose") | options.switch("-v") {
+        CompilerStderr::Mirror
+    } else {
+        CompilerStderr::LogOnly
+    };
     options.finish()?;
-    Ok(BuildArgs { update_lock, with })
+    Ok(BuildArgs {
+        update_lock,
+        with,
+        diagnostics: BuildDiagnostics { timings, stderr },
+    })
 }
 
 /// Compile once through native-build, then write the source package.
@@ -209,20 +225,32 @@ fn build_command(
     entry: mod_surface::child::ChildEntry,
     args: &[String],
 ) -> Result<PathBuf, String> {
-    let BuildArgs { update_lock, with } = build_args(args)?;
+    let BuildArgs {
+        update_lock,
+        with,
+        diagnostics,
+    } = build_args(args)?;
     let root = Path::new(".");
     let package = Package::read(root)?;
-    if !with.is_empty() && !package.is_native() {
-        return Err("build --with supplies libraries to a native mod".into());
-    }
-    if update_lock && !package.is_native() {
-        return Err(format!(
-            "build --update-lock rewrites a native mod's Cargo.lock; {MANIFEST} has no [native] table"
-        ));
+    let native = package.is_native();
+    if !native {
+        if !with.is_empty() {
+            return Err("build --with supplies libraries to a native mod".into());
+        }
+        if update_lock {
+            return Err(format!(
+                "build --update-lock rewrites a native mod's Cargo.lock; {MANIFEST} has no [native] table"
+            ));
+        }
+        if diagnostics.timings == Timings::Html {
+            return Err("build --timings is only for native mods".into());
+        }
+        if diagnostics.stderr == CompilerStderr::Mirror {
+            return Err("build --verbose/-v is only for native mods".into());
+        }
     }
     let output = PackageOutput::prepare(root, &package.manifest)?;
-    let bundle = package
-        .is_native()
+    let bundle = native
         .then(|| dev::project_bundle(root, &package))
         .transpose()?;
     // The SDK source is refused (`E_SDK_SOURCE`) before any SDK is fetched.
@@ -243,6 +271,7 @@ fn build_command(
                 update_lock,
                 sunrise_native_build::contract::TargetName::Client,
                 false,
+                diagnostics,
             )
         })
         .transpose()?;
@@ -1553,16 +1582,36 @@ mod tests {
             build_args(&[]),
             Ok(BuildArgs {
                 update_lock: false,
-                with: vec![]
+                with: vec![],
+                diagnostics: BuildDiagnostics::default(),
             })
         );
         assert_eq!(
             build_args(&argv("--update-lock --with ../library --with another.smod")),
             Ok(BuildArgs {
                 update_lock: true,
-                with: vec![Path::new("../library"), Path::new("another.smod")]
+                with: vec![Path::new("../library"), Path::new("another.smod")],
+                diagnostics: BuildDiagnostics::default(),
             })
         );
+        for args in [
+            "--timings --verbose",
+            "-v --timings",
+            "-v --verbose --timings",
+        ] {
+            assert_eq!(
+                build_args(&argv(args)).unwrap().diagnostics,
+                BuildDiagnostics {
+                    timings: Timings::Html,
+                    stderr: CompilerStderr::Mirror,
+                },
+            );
+        }
+        assert_eq!(
+            build_args(&argv("--with --verbose")).unwrap().diagnostics,
+            BuildDiagnostics::default(),
+        );
+        assert!(build_args(&argv("-- --timings")).is_err());
         let line = argv("--game g --resources r --jars j --with library -- --with");
         assert_eq!(
             run_args(&line),

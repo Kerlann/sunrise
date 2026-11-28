@@ -883,13 +883,10 @@ pub(crate) mod tests {
         // A player's place: one of three buckets in the hand is exchanged for a filled one; the
         // hand keeps two and the filled one goes to the inventory, and what doesn't fit would be
         // thrown. Aborted, the hand and the inventory are as they were, and nothing was thrown.
-        game.player = Some(
-            super::super::PlayerMotion::new(
-                game.motion,
-                sunrise_core::geometry::Vec3::new(0.5, 65.0, 3.5),
-            )
-            .unwrap(),
-        );
+        game.player = Some(super::super::PlayerMotion::new(
+            game.motion,
+            sunrise_core::geometry::Vec3::new(0.5, 65.0, 3.5),
+        ));
         let bucket = |item: &str, count| ItemStack::new(item, count);
         game.inventory
             .iter_mut()
@@ -1398,13 +1395,10 @@ pub(crate) mod mod_capability_tests {
                 .default_state("minecraft:cauldron")
                 .unwrap();
             game.world.set(pos[0], pos[1], pos[2], empty).unwrap();
-            game.player = Some(
-                super::super::PlayerMotion::new(
-                    game.motion,
-                    sunrise_core::geometry::Vec3::new(0.5, 65.0, 3.5),
-                )
-                .unwrap(),
-            );
+            game.player = Some(super::super::PlayerMotion::new(
+                game.motion,
+                sunrise_core::geometry::Vec3::new(0.5, 65.0, 3.5),
+            ));
             game.selected = 0;
             game.creative = false;
             game.inventory[0] = Some(sunrise_items::items::ItemStack::new(

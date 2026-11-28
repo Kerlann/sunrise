@@ -137,7 +137,7 @@ fn check(
                 },
             )
             .unwrap();
-            game.player = Some(PlayerMotion::new(game.motion, Vec3::ZERO).unwrap());
+            game.player = Some(PlayerMotion::new(game.motion, Vec3::ZERO));
             bind_local_player(game, 7, 7);
             game.set_game_mode(GameMode::Survival);
             let kind = game.res.mob_types().get("minecraft:pig").unwrap().clone();

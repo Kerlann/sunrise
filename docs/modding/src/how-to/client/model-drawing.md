@@ -639,6 +639,12 @@ has unrepresentable metadata; deep local text has no serialization depth cap.
 Kept text retains its glyphs, including obfuscated glyph choices,
 until it is drawn again. Resource reload invalidates kept geometry.
 
+`keep` holds a draw until the block's state, its block entity, its light, the resource packs or
+the font's glyph cache change. A kept draw that goes 100 ticks without being drawn is dropped and
+submitted again when the block is next drawn. A draw that fills the frame's entity quad batch is
+never kept, even one that fits exactly, because it may have been cut short; a later frame with
+room extracts it again.
+
 Spinning parts use the client's animation clock: level-running texture ticks plus an
 animation phase, not the camera's partial tick or the server's day time. Pausing and
 `/tick freeze` hold the animation where it was and resume without a jump; `/tick step`
@@ -672,8 +678,8 @@ To draw a texture of your own (a dynamic texture a mod made), get a render type 
 in the texture's own unit square (0 to 1), not texels of 16. The same texture gives the same render
 type, so keep it. Light and `unlit` apply as for `quad`. Both calls return `true` when they append
 the quad to the current draw; `false` appends nothing. `textured_quad` returns false for an id that
-is not a live dynamic texture, a first-person hand draw, a coordinate that is not finite or a batch
-with no room left. A texture released after the quad was submitted draws the missing texture. Resource-stack
+is not a live dynamic texture, a first-person hand or arm draw (`render_hand`, `render_arm`), a
+coordinate that is not finite or a batch with no room left. A texture released after the quad was submitted draws the missing texture. Resource-stack
 textures are not accepted. Under a shader pack these quads are drawn by the
 pack's entity program (the block entity program in a block entity's draw) with the texture bound
 as the entity texture.

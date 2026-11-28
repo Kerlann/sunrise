@@ -358,6 +358,7 @@ fn render(
         &screen,
         frame,
         &Default::default(),
+        Default::default(),
         size,
         window,
         &[],

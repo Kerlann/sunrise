@@ -863,7 +863,7 @@ mod tests {
             (LandingDamage::Stalagmite, 0.5, "minecraft:stalagmite"),
         ] {
             for (health, bypass) in [(&resources.health, true), (&open, false), (&reloaded, true)] {
-                let mut player = crate::motion::PlayerMotion::new(&resources, Vec3::ZERO).unwrap();
+                let mut player = crate::motion::PlayerMotion::new(&resources, Vec3::ZERO);
                 let key = player.attributes.key("minecraft:armor").unwrap();
                 let armor = player.attributes.get_instance(Some(key)).unwrap().unwrap();
                 player

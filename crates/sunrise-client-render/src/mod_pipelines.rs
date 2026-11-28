@@ -280,7 +280,10 @@ fn reserved_pack_identifier(name: &str) -> Option<&'static str> {
     {
         return Some("built-in shader-pack sampler or image");
     }
-    if sunrise_render_shaderpack::pack_uniforms::NAMES.contains(&name) {
+    // The display uniforms bind only in a pack served Sunrise's HDR extension, after a mod's
+    // registration: a mod keeps the names it could use before them.
+    use sunrise_render_shaderpack::pack_uniforms::{DISPLAY, NAMES};
+    if NAMES.contains(&name) && !DISPLAY.contains(&name) {
         return Some("built-in shader-pack uniform");
     }
     None
@@ -2007,6 +2010,19 @@ mod tests {
         for name in names {
             let binding = mod_api::PackBinding::new().define(name);
             assert!(binding.validate_syntax().is_err(), "{name}");
+        }
+    }
+
+    /// The display uniforms of Sunrise's HDR extension stay names a mod may give its own pack
+    /// uniforms or samplers, as before them; every other built-in stays reserved.
+    #[test]
+    fn a_mod_keeps_the_display_uniforms_names() {
+        use sunrise_render_shaderpack::pack_uniforms::{DISPLAY, NAMES};
+        for name in DISPLAY {
+            assert_eq!(reserved_pack_identifier(name), None, "{name}");
+        }
+        for name in NAMES.iter().filter(|n| !DISPLAY.contains(n)) {
+            assert!(reserved_pack_identifier(name).is_some(), "{name}");
         }
     }
 

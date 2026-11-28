@@ -1054,7 +1054,7 @@ pub struct ServerState {
     /// autosave, counted down a tick at a time.
     pub ticks_until_autosave: i64,
     pub(in crate::game::server_side) applied_modifiers: Vec<(String, String)>,
-    pub(in crate::game::server_side) xp_delay: u32,
+    pub(in crate::game) xp_delay: u32,
     pub ordered: ordered_tick::OrderedTicks,
     pub level_up_sound: sunrise_sim::entities::LevelUpSound,
     /// Swings of uses whose client predicts them (`SwingSource.PREDICTED`):

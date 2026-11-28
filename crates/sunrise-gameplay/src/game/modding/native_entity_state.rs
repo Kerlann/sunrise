@@ -486,14 +486,6 @@ impl crate::game::ServerGame<'_> {
         let target = self.native_entity_target(entity)?;
         Some(self.read_entity_base(target)?.base.no_gravity)
     }
-    /// Returns the entity's frozen ticks (`Entity.getTicksFrozen`).
-    pub(in crate::game) fn entity_ticks_frozen(&self, entity: EntityRef) -> Option<i32> {
-        match self.native_entity_body(entity)? {
-            Body::Player(p) => Some(p.ticks_frozen),
-            Body::Mob(m) => Some(m.ticks_frozen),
-            _ => None,
-        }
-    }
     /// Sets the persistent glowing tag (`Entity.setGlowingTag`), for every kind.
     pub(in crate::game) fn entity_set_glowing(&mut self, entity: EntityRef, glowing: bool) -> bool {
         self.native_entity_target(entity)
@@ -731,7 +723,7 @@ pub mod tests {
         use sunrise_core::geometry::Vec3;
         with_resident_game(|game| {
             game.options.dedicated = Some(Vec::new());
-            game.player = Some(PlayerMotion::new(game.motion, Vec3::ZERO).unwrap());
+            game.player = Some(PlayerMotion::new(game.motion, Vec3::ZERO));
             crate::game::native_entity_refs::tests::bind_local_player(game, 20, 123);
             let player = game.entity(20).unwrap();
             test(game, player);
@@ -920,7 +912,7 @@ pub mod tests {
                 .get("minecraft:zombie")
                 .unwrap()
                 .clone();
-            game.player = Some(PlayerMotion::new(game.motion, Vec3::new(8.5, 65.0, 8.5)).unwrap());
+            game.player = Some(PlayerMotion::new(game.motion, Vec3::new(8.5, 65.0, 8.5)));
             for z in [8, 12] {
                 game.world.set(0, 63, z, stone).unwrap();
             }

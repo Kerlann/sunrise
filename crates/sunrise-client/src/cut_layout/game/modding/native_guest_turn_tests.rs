@@ -1303,7 +1303,7 @@ fn canonical_permissions_preserve_owner_and_fake_player_reads() {
         let _serving =
             sunrise_gameplay::game::server_side::integrated::tests::install_serving(game, false);
         game.level.player_uuid = Some([0, 0, 0, 99]);
-        let mut body = PlayerMotion::new(game.motion, Vec3::new(0.0, 64.0, 0.0)).unwrap();
+        let mut body = PlayerMotion::new(game.motion, Vec3::new(0.0, 64.0, 0.0));
         body.entity_id = 99;
         game.player = Some(body);
         game.set_mode(sunrise_command::args::GameMode::Creative);

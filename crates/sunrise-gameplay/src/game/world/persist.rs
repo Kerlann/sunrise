@@ -831,7 +831,7 @@ impl crate::game::ServerGame<'_> {
             let mut tag = tag;
             let riders = self.take_passengers(&mut tag);
             a.live
-                .retain_supplier(&self.common.motion.attributes, "minecraft:armor_stand");
+                .retain_supplier(self.common.motion.attributes(), "minecraft:armor_stand");
             if let Some(state) = transferred {
                 self.adopt_transferred_entity_state(a.id, state);
             }
@@ -866,7 +866,7 @@ impl crate::game::ServerGame<'_> {
             // EnderDragon's constructor takes its id and its
             // parts' from the entity counter.
             d.live
-                .retain_supplier(&self.common.motion.attributes, "minecraft:ender_dragon");
+                .retain_supplier(self.common.motion.attributes(), "minecraft:ender_dragon");
             d.id = self.server.next_entity + 1;
             self.server.next_entity += 9;
             if let Some(state) = transferred {

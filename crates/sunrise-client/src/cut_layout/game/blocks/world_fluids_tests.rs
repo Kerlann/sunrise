@@ -715,7 +715,7 @@ fn liquid_part_accepts_nonwater_from_bucket_and_predicts_the_same_target() {
     use sunrise_gameplay_common::game::Hit;
     use sunrise_world::{fluid::FluidKind, level::BucketContent};
     with_liquid_part(|game, _, calls| {
-        let mut player = sunrise_sim::motion::PlayerMotion::new(game.motion, Vec3::ZERO).unwrap();
+        let mut player = sunrise_sim::motion::PlayerMotion::new(game.motion, Vec3::ZERO);
         player.entity_id = 77;
         game.player = Some(player);
         let hit = Hit {

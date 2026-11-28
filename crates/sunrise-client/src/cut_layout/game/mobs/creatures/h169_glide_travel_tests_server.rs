@@ -67,7 +67,7 @@ pub(crate) fn with_role_game(
         }
     }
     game.load_ticking_neighbourhood(0, 0);
-    game.player = Some(PlayerMotion::new(game.motion, Vec3::new(2.5, 200.0, 2.5)).unwrap());
+    game.player = Some(PlayerMotion::new(game.motion, Vec3::new(2.5, 200.0, 2.5)));
     game.creative = true;
     assert!(game.run_command("fill 0 199 0 31 199 31 stone"));
     game.world.random.set_seed(169);

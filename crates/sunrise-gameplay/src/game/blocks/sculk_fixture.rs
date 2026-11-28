@@ -437,7 +437,7 @@ impl crate::game::ServerGame<'_> {
             _ => GameMode::Survival,
         };
         self.common.creative = self.common.mode == GameMode::Creative;
-        let mut player = PlayerMotion::new(self.common.motion, Vec3::new(at[0], at[1], at[2]))?;
+        let mut player = PlayerMotion::new(self.common.motion, Vec3::new(at[0], at[1], at[2]));
         player.spectator = self.common.mode == GameMode::Spectator;
         self.common.player = Some(player);
         if s.trace_events {

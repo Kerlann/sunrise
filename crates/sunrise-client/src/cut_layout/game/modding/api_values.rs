@@ -1,17 +1,6 @@
 #[path = "api_values/small_values.rs"]
 pub(crate) mod small_values;
 
-#[cfg(feature = "client")]
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) fn resolve_cached_block_definitions_with_fixture(
-    cached_registry: &'static sunrise_world::registry::BlockRegistry,
-    install_parts_fixture: fn() -> std::result::Result<(), Vec<String>>,
-) -> Result<&'static sunrise_world::registry::BlockRegistry, String> {
-    if !mod_api::__private::parts_installation::parts_installed() {
-        install_parts_fixture().map_err(|errors| errors.join("\n"))?;
-    }
-    sunrise_gameplay_common::game::api_values::resolve_cached_block_definitions(cached_registry)
-}
 #[cfg(test)]
 pub(crate) fn install_test_platform() {
     mod_platform::__private::test_platform::install();

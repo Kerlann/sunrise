@@ -1201,7 +1201,7 @@ fn section_host_and_game_read_the_same_entity_type_defaults() {
         assert_eq!(read(&*game, "minecraft:zombie", "max_health"), None);
         let modded = std::sync::Arc::new(
             game.motion
-                .attributes
+                .attributes()
                 .with_entity_row(
                     "ruby:titan",
                     "minecraft:zombie",

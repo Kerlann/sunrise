@@ -280,7 +280,7 @@ pub(crate) mod tests {
                 cow.entity().leash_holder(game),
                 Some(LeashHolder::Unleashed)
             );
-            let motion = sunrise_sim::motion::PlayerMotion::new(game.motion, Vec3::ZERO).unwrap();
+            let motion = sunrise_sim::motion::PlayerMotion::new(game.motion, Vec3::ZERO);
             game.server
                 .lan
                 .as_mut()

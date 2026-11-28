@@ -1605,7 +1605,7 @@ fn humanoid_arm_pose_mod_reads_mob_state_and_changes_the_model() {
         [*poses.get("right_arm"), *poses.get("left_arm")]
     }
     with_client_game(|game| {
-        game.player = Some(PlayerMotion::new(game.motion, Vec3::ZERO).unwrap());
+        game.player = Some(PlayerMotion::new(game.motion, Vec3::ZERO));
         game.player.as_mut().unwrap().entity_id = 7;
         game.common.inventory[game.common.selected] = Some(ItemStack::new("minecraft:stick", 1));
         game.offhand = Some(ItemStack::new("minecraft:brush", 3));

@@ -205,7 +205,9 @@ fn a_retained_sdk_builds_a_lower_mixin_with_its_signed_tool() {
         used: Vec::new(),
     };
     let script = format!(
-        "#!/bin/sh\n[ \"$1\" = native-build ] || exit 2\nIFS= read -r plan || exit 2\n\
+        "#!/bin/sh\n[ \"$#\" = 1 ] && [ \"$1\" = native-build ] || exit 2\n\
+         [ \"$SUNRISE_NATIVE_CARGO_TIMINGS\" = 1 ] && [ -z \"$SUNRISE_NATIVE_BUILD_VERBOSE\" ] || exit 2\n\
+         IFS= read -r plan || exit 2\n\
          case \"$plan\" in *'\"contract\":2'*'\"registry\":true'*) ;; *) exit 2;; esac\n\
          printf '%s\\n' '{}'\n",
         serde_json::to_string(&result).unwrap(),
@@ -273,14 +275,41 @@ fn a_retained_sdk_builds_a_lower_mixin_with_its_signed_tool() {
     let good = fs::read(&tool).unwrap();
     fs::write(&tool, b"not the signed asset").unwrap();
     let mut events = Events::default();
+    let verbose = BuildDiagnostics {
+        timings: Timings::Html,
+        stderr: sunrise_native_build::CompilerStderr::Mirror,
+    };
+    let error = sdk
+        .compile(std::slice::from_ref(&bundle), &plan, &mut events, verbose)
+        .unwrap_err();
     assert!(
-        sdk.compile(std::slice::from_ref(&bundle), &plan, &mut events)
-            .is_err()
+        error.contains(BUILD) && error.contains("pinned tool") && error.contains("--verbose"),
+        "{error}"
+    );
+    assert!(events.built.is_none());
+
+    let diagnostics = BuildDiagnostics {
+        timings: Timings::Html,
+        stderr: sunrise_native_build::CompilerStderr::LogOnly,
+    };
+    assert!(
+        sdk.compile(
+            std::slice::from_ref(&bundle),
+            &plan,
+            &mut events,
+            diagnostics
+        )
+        .is_err()
     );
     assert!(events.built.is_none());
     fs::write(&tool, good).unwrap();
-    sdk.compile(std::slice::from_ref(&bundle), &plan, &mut events)
-        .unwrap();
+    sdk.compile(
+        std::slice::from_ref(&bundle),
+        &plan,
+        &mut events,
+        diagnostics,
+    )
+    .unwrap();
     assert_eq!(events.built, Some(result));
 
     // An explicitly empty map is still this tool's schema, not an older one. A missing

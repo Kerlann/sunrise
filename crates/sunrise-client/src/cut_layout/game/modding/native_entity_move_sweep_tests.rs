@@ -439,13 +439,10 @@ fn the_off_walk_movers_fire_too() {
                 .as_ref()
                 .is_none_or(|p| p.position.y < 20.0 || p.position.y > 45.0)
             {
-                game.player = Some(
-                    PlayerMotion::new(
-                        game.motion,
-                        sunrise_core::geometry::Vec3::new(5.5, 30.0, 5.5),
-                    )
-                    .unwrap(),
-                );
+                game.player = Some(PlayerMotion::new(
+                    game.motion,
+                    sunrise_core::geometry::Vec3::new(5.5, 30.0, 5.5),
+                ));
             }
             game.player.as_mut().unwrap().velocity =
                 sunrise_core::geometry::Vec3::new(0.5, 0.0, 0.0);

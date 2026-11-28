@@ -136,8 +136,7 @@ pub fn level_uuids(game: &crate::game::ServerGame<'_>) -> Vec<u128> {
 
 /// The host in place, with a body and UUID 99.
 pub fn place_host(game: &mut crate::game::ServerGame<'_>) {
-    let mut body =
-        sunrise_sim::motion::PlayerMotion::new(game.motion, Vec3::new(0.0, 64.0, 0.0)).unwrap();
+    let mut body = sunrise_sim::motion::PlayerMotion::new(game.motion, Vec3::new(0.0, 64.0, 0.0));
     body.entity_id = 99;
     game.player = Some(body);
     game.level.player_uuid = Some([0, 0, 0, 99]);

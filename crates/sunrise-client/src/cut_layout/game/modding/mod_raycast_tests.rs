@@ -115,7 +115,7 @@ fn mod_raycasts_hit_loaded_blocks_only_with_far_terrain_on_or_off() {
     // Looking straight down at the stone under the player.
     game.pitch = 90.0;
     let at = |game: &mut ClientGame<'_>, x: f64| {
-        game.player = Some(PlayerMotion::new(game.motion, Vec3::new(x, 100.0, 0.5)).unwrap());
+        game.player = Some(PlayerMotion::new(game.motion, Vec3::new(x, 100.0, 0.5)));
     };
     at(&mut game, 0.5);
     let without = game.view_hit().expect("the stone below");

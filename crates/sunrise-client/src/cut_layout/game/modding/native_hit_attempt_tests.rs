@@ -84,7 +84,7 @@ fn base_allow_does_not_override_worn_immunity() {
 
 #[cfg(any())]
 fn fresh_player(game: &mut sunrise_gameplay::game::ServerGame<'_>, mode: GameMode) {
-    game.player = Some(PlayerMotion::new(game.motion, Vec3::ZERO).unwrap());
+    game.player = Some(PlayerMotion::new(game.motion, Vec3::ZERO));
     bind_local_player(game, 7, 7);
     // A replacement player starts with survival abilities even when Game was
     // already creative; force the mode transition to apply them to the new body.

@@ -868,7 +868,7 @@ pub trait NativeLivingBodyGameExt6<'__sg>: crate::game::SideGame<'__sg> {
         };
         Ok(self
             .motion
-            .attributes
+            .attributes()
             .attribute_names_for(entity)
             .try_for_each(visit))
     }
@@ -880,7 +880,7 @@ pub trait NativeLivingBodyGameExt6<'__sg>: crate::game::SideGame<'__sg> {
         id: &str,
         visit: &mut dyn FnMut(AttributeModifierView<'_>) -> ControlFlow<()>,
     ) -> Result<ControlFlow<()>, EntityReadError> {
-        let catalog = &self.motion.attributes;
+        let catalog = self.motion.attributes();
         let modifiers = match self.native_living_visit_target(living)? {
             Target::Player => self
                 .player
@@ -939,7 +939,7 @@ pub trait NativeLivingBodyGameExt6<'__sg>: crate::game::SideGame<'__sg> {
     ) -> Option<f64> {
         body_attribute(
             self.native_living_body(target)?,
-            &self.motion.attributes,
+            self.motion.attributes(),
             name,
             kind,
         )
