@@ -9,6 +9,44 @@ use sunrise_gameplay_common::game::test_fixtures::{
     fixture_facts_mut, fixture_root, resolve_parts,
 };
 
+/// Resource-loading fixtures publish process-wide palette and save namespace
+/// state. Keep the fixture serialized and put both globals back when it ends.
+struct ScopedFixtureGlobals {
+    previous_namespaces: Option<Vec<String>>,
+    palette: Option<sunrise_level::chunk::test_support::BlockStatePaletteScope>,
+    lock: Option<std::sync::MutexGuard<'static, ()>>,
+}
+
+static FIXTURE_GLOBALS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+impl ScopedFixtureGlobals {
+    fn new() -> Self {
+        let lock = FIXTURE_GLOBALS.lock().unwrap_or_else(|e| e.into_inner());
+        let palette = sunrise_level::chunk::test_support::BlockStatePaletteScope::new();
+        let previous_namespaces = sunrise_sim::save::level_mods::block_namespaces();
+        Self {
+            previous_namespaces,
+            palette: Some(palette),
+            lock: Some(lock),
+        }
+    }
+}
+
+impl Drop for ScopedFixtureGlobals {
+    fn drop(&mut self) {
+        sunrise_sim::save::level_mods::set_block_namespaces(self.previous_namespaces.take());
+        self.palette.take();
+        self.lock.take();
+    }
+}
+
+/// Runs a resource-loading fixture while its process-wide globals are scoped.
+#[doc(hidden)]
+pub fn with_scoped_fixture_globals<T>(test: impl FnOnce() -> T) -> T {
+    let _globals = ScopedFixtureGlobals::new();
+    test()
+}
+
 #[cfg(test)]
 fn prepare_game_boot_with_test_platform(root: &std::path::Path) {
     sunrise_gameplay_common::game::test_fixtures::prepare_game_boot(
@@ -169,6 +207,7 @@ fn with_game_role_and_facts_with(
     use mod_api::Authority;
     use sunrise_gameplay_common::game::{Options, Progress};
 
+    let _globals = ScopedFixtureGlobals::new();
     prepare_game_boot(&root);
     let saves = tempfile::tempdir().unwrap();
     let settings = Settings::default();
@@ -256,6 +295,7 @@ fn with_game_role_and_facts_with_client(
     use sunrise_gameplay_common::game::execution_role::ExecutionRole;
     use sunrise_gameplay_common::game::{Options, Progress};
 
+    let _globals = ScopedFixtureGlobals::new();
     assert_eq!(role, ExecutionRole::Client);
     sunrise_gameplay_common::game::test_fixtures::prepare_game_boot(
         &root,
@@ -331,4 +371,39 @@ fn with_game_role_and_facts_with_client(
     // test that saves leaves the checkout clean and parallel tests don't share files.
 
     test(&mut game);
+}
+
+#[cfg(all(test, feature = "client"))]
+#[test]
+fn fixture_globals_restore_the_previous_palette_and_namespaces() {
+    let palette = (
+        sunrise_level::assets::block_palette_bits(),
+        sunrise_level::assets::block_states_count(),
+        sunrise_level::assets::block_states_generation(),
+    );
+    let namespaces = sunrise_sim::save::level_mods::block_namespaces();
+
+    {
+        let _globals = ScopedFixtureGlobals::new();
+        sunrise_level::chunk::set_block_states(131_072);
+        sunrise_sim::save::level_mods::set_block_namespaces(Some(vec!["fixture_test".into()]));
+        assert_eq!(sunrise_level::assets::block_states_count(), 131_072);
+        assert_eq!(
+            sunrise_sim::save::level_mods::block_namespaces(),
+            Some(vec!["fixture_test".into()])
+        );
+    }
+
+    assert_eq!(
+        (
+            sunrise_level::assets::block_palette_bits(),
+            sunrise_level::assets::block_states_count(),
+            sunrise_level::assets::block_states_generation(),
+        ),
+        palette
+    );
+    assert_eq!(
+        sunrise_sim::save::level_mods::block_namespaces(),
+        namespaces
+    );
 }

@@ -28,7 +28,11 @@ pub(crate) mod native_entity_refs {
 }
 
 pub(crate) mod native_guest_turn_tests {
-    pub(crate) use sunrise_gameplay::game::native_guest_turn_tests::with_guests;
+    pub(crate) fn with_guests(test: impl FnOnce(&mut sunrise_gameplay::game::ServerGame<'_>)) {
+        sunrise_client::native_item_places_test_support::with_scoped_fixture_globals(|| {
+            sunrise_gameplay::game::native_guest_turn_tests::with_guests(test);
+        });
+    }
 }
 
 pub(crate) mod native_item_places;

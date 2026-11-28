@@ -117,6 +117,7 @@ test-support = [
     "sunrise-client-gameplay?/test-support",
     "sunrise-gameplay/test-support",
     "sunrise-gameplay-common/test-support",
+    "sunrise-level/test-support",
     "dep:tempfile",
 ]
 # Per-level-tick state digest for determinism checks (game/world/state_digest.rs).
@@ -158,6 +159,8 @@ workspace = true
 
 [dev-dependencies]
 sunrise-gameplay-common = { path = "../sunrise-gameplay-common", features = ["test-support"] }
+# Resource fixtures temporarily publish process-wide palette state.
+sunrise-level = { path = "../sunrise-level", features = ["test-support"] }
 # The integration target uses the same client-side fixtures as the lib tests.
 sunrise-client = { path = ".", default-features = false, features = ["test-support"] }
 sunrise-gameplay = { path = "../sunrise-gameplay", features = ["test-support"] }

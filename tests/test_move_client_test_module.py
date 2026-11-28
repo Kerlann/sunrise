@@ -128,8 +128,13 @@ class MoveClientTestModuleTests(unittest.TestCase):
                 self.assertEqual(paths[key].read_bytes(), contents, key)
             self.assertFalse(paths["destination"].exists())
 
-    def test_cfg_test_on_file_backed_module_fails_before_any_file_changes(self):
-        for cfg_attribute in ("#[cfg(test)]", "#[cfg(\n    test\n)]"):
+    def test_preceding_outer_attributes_fail_before_any_file_changes(self):
+        for cfg_attribute in (
+            "#[cfg(test)]",
+            "#[cfg(\n    test\n)]",
+            '#[cfg(all(test, feature = "client"))]',
+            '#[cfg(\n    all(\n        test,\n        feature = "client"\n    )\n)]',
+        ):
             with self.subTest(cfg_attribute=cfg_attribute), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 paths = self.make_repo(root)
@@ -148,7 +153,7 @@ class MoveClientTestModuleTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(
                     move_client_test_module.ExtractionError,
-                    r"preceding #\[cfg\(test\)\]",
+                    r"preceding unsupported outer attribute",
                 ):
                     self.run_extraction(root, paths)
 
