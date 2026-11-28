@@ -510,11 +510,13 @@ impl Button {
             atlas,
             [self.x, self.y, self.w, 20.0],
             &Text::literal(&self.label),
-            room,
-            self.trailing.map(|(_, size)| size),
-            None,
-            now_ms,
-            color,
+            crate::ui::ButtonLabelLayout {
+                room,
+                trailing_width: self.trailing.map(|(_, size)| size),
+                offset: None,
+                now_ms,
+                color,
+            },
         );
     }
 }

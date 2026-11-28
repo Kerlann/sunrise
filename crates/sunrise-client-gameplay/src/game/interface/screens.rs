@@ -462,9 +462,10 @@ impl crate::game::ClientGame<'_> {
                     hovered: hover,
                     focused: is_focused,
                 },
-                None,
-                Some(ui::ButtonIcon::Centered { sprite, size: 15.0 }),
-                None,
+                ui::ButtonStyle {
+                    icon: Some(ui::ButtonIcon::Centered { sprite, size: 15.0 }),
+                    ..ui::ButtonStyle::default()
+                },
                 |r| {
                     let t = |key: &str| Text::translate(key, &[]).plain();
                     if i == FRIENDS_ICON {

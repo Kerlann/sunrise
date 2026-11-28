@@ -891,9 +891,10 @@ pub fn action_button(
             hovered: hover,
             focused: false,
         },
-        Some(action),
-        None,
-        None,
+        ButtonStyle {
+            action: Some(action),
+            ..ButtonStyle::default()
+        },
         |rect| crate::widgets::Narratable::button(label.plain(), rect, active).hovered(hover),
     );
 }
@@ -941,22 +942,27 @@ pub enum ButtonIcon {
     Trailing { sprite: &'static str, size: f32 },
 }
 
+/// Parameters for [`button_label_at`].
+#[derive(Clone, Copy, Debug)]
+pub struct ButtonLabelLayout {
+    pub room: f32,
+    pub trailing_width: Option<f32>,
+    pub offset: Option<[f32; 2]>,
+    pub now_ms: i64,
+    pub color: u32,
+}
+
 /// Button label placement at `now_ms`, shared between [`button`] and icon-bearing buttons
 /// (`SpriteIconButton.TextAndIcon`).
-#[allow(clippy::too_many_arguments)]
 pub fn button_label_at(
     batch: &mut HudBatch,
     atlas: &HudAtlas,
     [x, y, w, h]: [f32; 4],
     label: &Text,
-    room: f32,
-    trailing_width: Option<f32>,
-    offset: Option<[f32; 2]>,
-    now_ms: i64,
-    color: u32,
+    layout: ButtonLabelLayout,
 ) {
     let left = x + 2.0;
-    let (center_x, right) = match trailing_width {
+    let (center_x, right) = match layout.trailing_width {
         Some(size) => (x + (w / 2.0).floor(), x + w - size - 4.0),
         None => {
             let right = x + w - 2.0;
@@ -971,11 +977,11 @@ pub fn button_label_at(
         label,
         LabelPlacement {
             center_x,
-            clip: [left + room, y, right, y + h],
-            offset,
+            clip: [left + layout.room, y, right, y + h],
+            offset: layout.offset,
         },
-        now_ms,
-        color,
+        layout.now_ms,
+        layout.color,
     );
 }
 
@@ -989,6 +995,8 @@ pub struct ButtonStyle<'a> {
     pub override_render_highlighted_sprite: Option<bool>,
     pub tab_order_group: i32,
     pub tooltip_narration: Option<&'a str>,
+    pub action: Option<crate::widgets::Action>,
+    pub icon: Option<ButtonIcon>,
 }
 
 impl Default for ButtonStyle<'_> {
@@ -1000,6 +1008,8 @@ impl Default for ButtonStyle<'_> {
             override_render_highlighted_sprite: None,
             tab_order_group: 0,
             tooltip_narration: None,
+            action: None,
+            icon: None,
         }
     }
 }
@@ -1015,52 +1025,31 @@ pub fn button_mounted(
     style: ButtonStyle<'_>,
     narration: impl FnOnce([f32; 4]) -> crate::widgets::Narratable,
 ) {
-    button_draw_resolved(
-        batch,
-        atlas,
-        rect,
-        label,
-        state,
-        None,
-        None,
-        style,
-        |rect| {
-            let mut n = narration(rect)
-                .hovered(state.hovered || state.focused)
-                .order(style.tab_order_group);
-            if let Some(hint) = style.tooltip_narration {
-                n = n.hint(hint);
-            }
-            n
-        },
-    );
+    button_draw_resolved(batch, atlas, rect, label, state, style, |rect| {
+        let mut n = narration(rect)
+            .hovered(state.hovered || state.focused)
+            .order(style.tab_order_group);
+        if let Some(hint) = style.tooltip_narration {
+            n = n.hint(hint);
+        }
+        n
+    });
 }
 
 /// A button with optional action declaration, icon decoration, custom art, and narration.
 /// Focus highlights its sprite while pointer hover alone drives cursor and hover narration.
-#[allow(clippy::too_many_arguments)]
 pub fn button_decorated(
     batch: &mut HudBatch,
     atlas: &HudAtlas,
     rect: [f32; 4],
     label: &Text,
     state: ButtonVisualState,
-    action: Option<crate::widgets::Action>,
-    icon: Option<ButtonIcon>,
-    sprites: Option<&ButtonSprites>,
+    style: ButtonStyle<'_>,
     narration: impl FnOnce([f32; 4]) -> crate::widgets::Narratable,
 ) {
-    button_core(
-        batch,
-        atlas,
-        rect,
-        label,
-        state,
-        action,
-        icon,
-        sprites,
-        |rect| narration(rect).hovered(state.hovered),
-    );
+    button_core(batch, atlas, rect, label, state, style, |rect| {
+        narration(rect).hovered(state.hovered)
+    });
 }
 
 /// A button whose focus highlights its art but whose cursor depends only on pointer hover.
@@ -1087,9 +1076,10 @@ pub fn button_focused_as(
             hovered,
             focused,
         },
-        None,
-        None,
-        sprites,
+        ButtonStyle {
+            sprites,
+            ..ButtonStyle::default()
+        },
         |rect| narration(rect).hovered(hovered || focused),
     );
 }
@@ -1116,9 +1106,10 @@ pub(crate) fn focused_button(
             hovered: hover,
             focused,
         },
-        action,
-        None,
-        None,
+        ButtonStyle {
+            action,
+            ..ButtonStyle::default()
+        },
         |rect| {
             crate::widgets::Narratable::button(label.plain(), rect, active)
                 .hovered(hover || focused)
@@ -1126,16 +1117,13 @@ pub(crate) fn focused_button(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 fn button_core(
     batch: &mut HudBatch,
     atlas: &HudAtlas,
     rect: [f32; 4],
     label: &Text,
     state: ButtonVisualState,
-    action: Option<crate::widgets::Action>,
-    icon: Option<ButtonIcon>,
-    sprites: Option<&ButtonSprites>,
+    style: ButtonStyle<'_>,
     narration: impl FnOnce([f32; 4]) -> crate::widgets::Narratable,
 ) {
     let resolved = crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
@@ -1146,25 +1134,12 @@ fn button_core(
         active: state.active,
         hovered: state.hovered,
         focused: state.focused,
-        tab_order_group: 0,
+        tab_order_group: style.tab_order_group,
     });
     match resolved {
         crate::widgets::ResolvedEngineWidget::Skip => {}
         crate::widgets::ResolvedEngineWidget::Unchanged => {
-            button_draw_resolved(
-                batch,
-                atlas,
-                rect,
-                label,
-                state,
-                action,
-                icon,
-                ButtonStyle {
-                    sprites,
-                    ..ButtonStyle::default()
-                },
-                narration,
-            );
+            button_draw_resolved(batch, atlas, rect, label, state, style, narration);
         }
         crate::widgets::ResolvedEngineWidget::Draw(props) => {
             let props_active = props.active;
@@ -1178,13 +1153,16 @@ fn button_core(
             let override_msg_plain = props.message.as_ref().map(Text::plain);
             let tab_order_group = props.tab_order_group;
             let tooltip_hint = props.tooltip_narration.clone();
-            let style = ButtonStyle {
+            let clear_tooltip_hint = props.clear_tooltip_narration;
+            let effective_style = ButtonStyle {
                 alpha: props.alpha,
                 label_text_color: props.label_text_color,
-                sprites: props.sprites.as_ref().or(sprites),
+                sprites: props.sprites.as_ref().or(style.sprites),
                 override_render_highlighted_sprite: props.override_render_highlighted_sprite,
                 tab_order_group,
                 tooltip_narration: props.tooltip_narration.as_deref(),
+                action: style.action,
+                icon: style.icon,
             };
             button_draw_resolved(
                 batch,
@@ -1192,9 +1170,7 @@ fn button_core(
                 props.rect,
                 effective_label,
                 effective_state,
-                action,
-                icon,
-                style,
+                effective_style,
                 move |r| {
                     let mut n = narration(r);
                     crate::widgets::apply_narration_overrides(
@@ -1206,6 +1182,9 @@ fn button_core(
                         tab_order_group,
                         tooltip_hint,
                     );
+                    if clear_tooltip_hint {
+                        n.hint = None;
+                    }
                     n
                 },
             );
@@ -1213,7 +1192,6 @@ fn button_core(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn button_draw_resolved(
     batch: &mut HudBatch,
     atlas: &HudAtlas,
@@ -1224,12 +1202,10 @@ fn button_draw_resolved(
         hovered,
         focused,
     }: ButtonVisualState,
-    action: Option<crate::widgets::Action>,
-    icon: Option<ButtonIcon>,
     style: ButtonStyle<'_>,
     narration: impl FnOnce([f32; 4]) -> crate::widgets::Narratable,
 ) {
-    let room = if let Some(action) = action {
+    let room = if let Some(action) = style.action {
         crate::widgets::declare_action(action, [x, y, w, h], active);
         if active {
             crate::widgets::action_glyph_room()
@@ -1281,7 +1257,7 @@ fn button_draw_resolved(
         nine_slice(batch, atlas, vanilla, x, y, w, h, sprite_tint);
     }
     let color = crate::widgets::label_abgr_color(active, style.label_text_color, style.alpha);
-    if let Some(ButtonIcon::Centered { sprite, size }) = icon {
+    if let Some(ButtonIcon::Centered { sprite, size }) = style.icon {
         // CenteredIcon divides the button and sprite sizes separately:
         // a 15px icon in a 20px button starts at 10 - 7 = 3, not 2.
         batch.sprite_scaled(
@@ -1295,7 +1271,7 @@ fn button_draw_resolved(
         );
         return;
     }
-    let trailing_width = match icon {
+    let trailing_width = match style.icon {
         Some(ButtonIcon::Trailing { size, .. }) => Some(size),
         _ => None,
     };
@@ -1310,14 +1286,16 @@ fn button_draw_resolved(
             atlas,
             [x, y, w, h],
             label,
-            room,
-            trailing_width,
-            offset,
-            crate::hud_overlays::now_ms(),
-            color,
+            ButtonLabelLayout {
+                room,
+                trailing_width,
+                offset,
+                now_ms: crate::hud_overlays::now_ms(),
+                color,
+            },
         );
     }
-    if let Some(ButtonIcon::Trailing { sprite, size }) = icon {
+    if let Some(ButtonIcon::Trailing { sprite, size }) = style.icon {
         // TextAndIcon: `x + width - spriteWidth - 2`, centred in the height.
         batch.sprite_scaled(
             atlas,
@@ -1739,7 +1717,7 @@ pub fn tooltip_menu_styled(
         rect.map(|v| v as i32),
         (w.ceil() as i32, h.ceil() as i32),
     );
-    tooltip_box_styled(batch, atlas, lines, style, x as f32, y as f32, w, h);
+    tooltip_box_styled(batch, atlas, lines, style, [x as f32, y as f32, w, h]);
 }
 /// `BelowOrAboveWidgetTooltipPositioner.positionTooltip`: a keyboard-focused widget's tooltip.
 pub fn tooltip_focused(batch: &mut HudBatch, atlas: &HudAtlas, lines: &[Text], rect: [f32; 4]) {
@@ -1762,7 +1740,7 @@ pub fn tooltip_focused_styled(
         rect.map(|v| v as i32),
         (w.ceil() as i32, h.ceil() as i32),
     );
-    tooltip_box_styled(batch, atlas, lines, style, x as f32, y as f32, w, h);
+    tooltip_box_styled(batch, atlas, lines, style, [x as f32, y as f32, w, h]);
 }
 
 /// `BelowOrAboveWidgetTooltipPositioner.positionTooltip`: below, or above when it does not fit.
@@ -1904,18 +1882,14 @@ fn tooltip_box(
     w: f32,
     h: f32,
 ) {
-    tooltip_box_styled(batch, atlas, lines, None, x, y, w, h);
+    tooltip_box_styled(batch, atlas, lines, None, [x, y, w, h]);
 }
-#[allow(clippy::too_many_arguments)]
 fn tooltip_box_styled(
     batch: &mut HudBatch,
     atlas: &HudAtlas,
     lines: &[Text],
     style: Option<(&str, &str)>,
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
+    [x, y, w, h]: [f32; 4],
 ) {
     crate::widgets::frame_tooltip(lines);
     let custom = style.map(|(ns, path)| tooltip_style_sprites(ns, path));
@@ -2203,6 +2177,26 @@ impl std::ops::DerefMut for EditBox {
         &mut self.edit
     }
 }
+/// Per-draw visual and narration parameters for [`EditBox::draw_mounted_at`].
+#[derive(Clone, Copy, Debug)]
+pub struct EditBoxDrawStyle<'a> {
+    pub active: bool,
+    pub alpha: f32,
+    pub tab_order_group: i32,
+    pub tooltip_hint: Option<&'a str>,
+}
+
+impl Default for EditBoxDrawStyle<'_> {
+    fn default() -> Self {
+        Self {
+            active: true,
+            alpha: 1.0,
+            tab_order_group: 0,
+            tooltip_hint: None,
+        }
+    }
+}
+
 impl EditBox {
     pub fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
         Self {
@@ -2454,29 +2448,15 @@ impl EditBox {
         self.draw_skinned_caret(batch, atlas, format, caret, skin);
     }
     /// Draw a mounted mod `TextField` with explicit opacity, tab order group, and tooltip hint.
-    #[allow(clippy::too_many_arguments)]
     pub fn draw_mounted_at(
         &mut self,
         batch: &mut HudBatch,
         atlas: &HudAtlas,
         now: Instant,
-        active: bool,
-        alpha: f32,
-        tab_order_group: i32,
-        tooltip_hint: Option<&str>,
+        style: EditBoxDrawStyle<'_>,
     ) {
-        let caret = active && self.cursor_visible_at(now);
-        self.draw_resolved(
-            batch,
-            atlas,
-            None,
-            caret,
-            None,
-            active,
-            alpha,
-            tab_order_group,
-            tooltip_hint,
-        );
+        let caret = style.active && self.cursor_visible_at(now);
+        self.draw_resolved(batch, atlas, None, caret, None, style);
     }
     fn draw_skinned_caret(
         &mut self,
@@ -2501,7 +2481,14 @@ impl EditBox {
         match resolved {
             crate::widgets::ResolvedEngineWidget::Skip => {}
             crate::widgets::ResolvedEngineWidget::Unchanged => {
-                self.draw_resolved(batch, atlas, format, caret, skin, true, 1.0, 0, None);
+                self.draw_resolved(
+                    batch,
+                    atlas,
+                    format,
+                    caret,
+                    skin,
+                    EditBoxDrawStyle::default(),
+                );
             }
             crate::widgets::ResolvedEngineWidget::Draw(props) => {
                 [self.x, self.y, self.width, self.height] = props.rect;
@@ -2515,10 +2502,12 @@ impl EditBox {
                     format,
                     caret && props.active,
                     skin,
-                    props.active,
-                    props.alpha,
-                    props.tab_order_group,
-                    props.tooltip_narration.as_deref(),
+                    EditBoxDrawStyle {
+                        active: props.active,
+                        alpha: props.alpha,
+                        tab_order_group: props.tab_order_group,
+                        tooltip_hint: props.tooltip_narration.as_deref(),
+                    },
                 );
                 if let Some(prev) = prev_message {
                     self.message = prev;
@@ -2527,7 +2516,6 @@ impl EditBox {
             }
         }
     }
-    #[allow(clippy::too_many_arguments)]
     fn draw_resolved(
         &mut self,
         batch: &mut HudBatch,
@@ -2535,10 +2523,12 @@ impl EditBox {
         format: Option<&Text>,
         caret: bool,
         skin: Option<&str>,
-        active: bool,
-        alpha: f32,
-        tab_order_group: i32,
-        tooltip_hint: Option<&str>,
+        EditBoxDrawStyle {
+            active,
+            alpha,
+            tab_order_group,
+            tooltip_hint,
+        }: EditBoxDrawStyle<'_>,
     ) {
         self.layout(atlas);
         if active {

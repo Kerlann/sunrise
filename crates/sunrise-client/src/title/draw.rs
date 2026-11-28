@@ -934,9 +934,11 @@ impl Title {
                     hovered: inside,
                     focused: self.focused_button == Some(b.id),
                 },
-                b.action.filter(|_| !self.preparing),
-                icon,
-                None,
+                crate::ui::ButtonStyle {
+                    action: b.action.filter(|_| !self.preparing),
+                    icon,
+                    ..crate::ui::ButtonStyle::default()
+                },
                 |_| self.button_narration(&b),
             );
         }

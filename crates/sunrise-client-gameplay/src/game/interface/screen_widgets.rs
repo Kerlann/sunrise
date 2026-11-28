@@ -2186,6 +2186,7 @@ impl crate::game::ClientGame<'_> {
                                         .override_render_highlighted_sprite,
                                     tab_order_group: state.tab_order_group,
                                     tooltip_narration: tooltip_hint,
+                                    ..ui::ButtonStyle::default()
                                 },
                                 |rect| match custom_narration {
                                     Some(title) => Narratable::named(title, rect, state.active),
@@ -2231,10 +2232,12 @@ impl crate::game::ClientGame<'_> {
                                 batch,
                                 &self.client.gui.atlas,
                                 now,
-                                *active,
-                                *alpha,
-                                *tab_order_group,
-                                tooltip_hint,
+                                ui::EditBoxDrawStyle {
+                                    active: *active,
+                                    alpha: *alpha,
+                                    tab_order_group: *tab_order_group,
+                                    tooltip_hint,
+                                },
                             );
                             widgets::mark_mounted(mark, entry.id.raw(), true);
                             if let Some(hint) = hint
