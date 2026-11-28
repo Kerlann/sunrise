@@ -103,7 +103,7 @@ mod issue_6825_tests {
         let resources = motion_resources();
         let mut g = crate::game::native_player_death::tests::new_guest(1, 123);
         g.position = [0.0, 0.0, 0.0];
-        let mut motion = sunrise_sim::motion::PlayerMotion::new(&resources, Vec3::ZERO).unwrap();
+        let mut motion = sunrise_sim::motion::PlayerMotion::new(&resources, Vec3::ZERO);
         motion.dimensions = Pose::Standing.dimensions(1.0);
         g.motion = Some(Box::new(motion));
         let set_range = |g: &mut sunrise_sim::lan::guest::Guest, amount: f64, present: bool| {
