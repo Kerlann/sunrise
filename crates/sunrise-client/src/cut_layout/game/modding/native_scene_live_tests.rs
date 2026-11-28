@@ -82,6 +82,14 @@ fn the_caps_and_mod_input_are_refused_whole_and_named() {
     assert_eq!(check(nan_rect, &ok, view()), Err(SceneError::BadView));
     let turned = SceneView::new([0.0; 3], f32::INFINITY, 0.0, 20.0);
     assert_eq!(check(RECT, &ok, turned), Err(SceneError::BadView));
+    for scale in [0.0, -0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        let bad_scale = SceneView::new([0.5, 0.5, 0.5], 30.0, 25.0, scale);
+        assert_eq!(
+            check(RECT, &ok, bad_scale),
+            Err(SceneError::BadView),
+            "scale {scale}"
+        );
+    }
     let mut far = ok.clone();
     far.entities.push(cow([3.0e7 + 1.0, 0.0, 0.0]));
     assert_eq!(

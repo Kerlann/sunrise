@@ -6,7 +6,7 @@
 //! prepared for drawing only as `DrawContext::entity` prepares them. Nothing of it reaches
 //! the client's level, its particle engine or its sounds. A scene of blocks alone never
 //! comes here.
-use super::native_scene::{SceneBlock, SceneQuad, face_shade, shaded};
+use super::native_scene::{SceneBlock, SceneQuad, face_shade, shaded, valid_scale};
 use glam::{DVec3, Quat, Vec3};
 use mod_api::{
     GuiEntity, GuiEntityError, SCENE_ANIMATE_PICKS, SCENE_CATCH_UP, SCENE_MAX_ANIMATING,
@@ -101,6 +101,122 @@ impl LiveScenes {
         self.animating.push((owner, id));
         true
     }
+
+    /// Runs one living-scene draw against this cache: validates `rect`, `scene` and `view`
+    /// (including `view.scale`), converts added particles, and validates/prepares
+    /// `GuiEntity::Existing` actors before checking the frame's animating budget. Past the
+    /// budget it draws the fallback blocks/last state and returns `TooManyScenes` without
+    /// preparing `Kind` entities; within the budget a fresh scene reuses the prepared `Existing`
+    /// actors and prepares each remaining entity once.
+    #[allow(clippy::too_many_arguments)]
+    fn drive(
+        &mut self,
+        frame: u64,
+        owner: &'static str,
+        rect: [f32; 4],
+        blocks: &[SceneBlock<'_>],
+        scene: &Scene,
+        view: SceneView,
+        mut prepare_entity: impl FnMut(&GuiEntity) -> Result<Mob, GuiEntityError>,
+        make_live: impl FnOnce(SceneClock, u64, Vec<Mob>) -> Live,
+        advance: impl FnOnce(&mut Live, SceneClock, &[(ParticleOptions, [f64; 3], [f64; 3])]),
+        draw: impl FnOnce(Option<&mut Live>, SceneClock) -> Result<(), SceneError>,
+    ) -> Result<(), SceneError> {
+        let clock = check(rect, scene, view)?;
+        // Checked whole before anything is kept; an empty list allocates nothing.
+        let added = scene
+            .particles
+            .iter()
+            .zip(0u32..)
+            .map(|(p, index)| {
+                p.options
+                    .try_into_engine(&())
+                    .map(|o| (o, p.pos, p.velocity))
+                    .map_err(|_| SceneError::BadParticle { index })
+            })
+            .collect::<Result<Vec<(ParticleOptions, _, _)>, _>>()?;
+        // The client's `Existing` entities as they are this frame, refused before anything is
+        // budgeted or kept.
+        let mut existing = Vec::new();
+        for (index, e) in (0u32..).zip(&scene.entities) {
+            if let GuiEntity::Existing(_) = e.entity {
+                let mob =
+                    prepare_entity(&e.entity).map_err(|error| entity_refusal(error, index))?;
+                existing.push((index as usize, mob));
+            }
+        }
+        let key = scene_key(blocks);
+        let at = self
+            .live
+            .iter()
+            .position(|l| l.owner == owner && l.id == clock.id);
+        let same = |l: &Live| {
+            l.key == key
+                && l.entities.len() == scene.entities.len()
+                && l.entities
+                    .iter()
+                    .zip(&scene.entities)
+                    .all(|(a, b)| *a == b.entity)
+        };
+        if !self.admit(frame, owner, clock.id) {
+            // Past the budget: the blocks, and the scene's last state when it is this one's.
+            let last = at.filter(|&i| same(&self.live[i]));
+            match last {
+                Some(i) => {
+                    let l = &mut self.live[i];
+                    l.frame = frame;
+                    draw(Some(l), clock)?;
+                }
+                None => draw(None, clock)?,
+            }
+            return Err(SceneError::TooManyScenes);
+        }
+        let fresh = at.is_none_or(|i| !same(&self.live[i]) || clock.tick < self.live[i].tick);
+        let i = if fresh {
+            let mut prepared_existing = existing.into_iter().peekable();
+            let mut mobs = Vec::with_capacity(scene.entities.len());
+            for (index, e) in (0u32..).zip(&scene.entities) {
+                let mob = if let Some((_, mob)) =
+                    prepared_existing.next_if(|&(slot, _)| slot == index as usize)
+                {
+                    mob
+                } else {
+                    prepare_entity(&e.entity).map_err(|error| entity_refusal(error, index))?
+                };
+                mobs.push(mob);
+            }
+            let made = make_live(clock, key, mobs);
+            match at {
+                Some(i) => {
+                    self.live[i] = made;
+                    i
+                }
+                None => {
+                    if self.live.len() == KEPT
+                        && let Some(oldest) = (0..KEPT).min_by_key(|&i| self.live[i].frame)
+                    {
+                        self.live.swap_remove(oldest);
+                    }
+                    self.live.push(made);
+                    self.live.len() - 1
+                }
+            }
+        } else {
+            let slot = at.unwrap_or_default();
+            let l = &mut self.live[slot];
+            for (index, mob) in existing {
+                l.mobs[index] = mob;
+            }
+            slot
+        };
+        let l = &mut self.live[i];
+        l.frame = frame;
+        advance(l, clock, &added);
+        for (mob, e) in l.mobs.iter_mut().zip(&scene.entities) {
+            pose(mob, e, clock);
+        }
+        draw(Some(l), clock)
+    }
 }
 
 /// The blocks' hash: a scene whose blocks change starts over.
@@ -151,12 +267,14 @@ pub fn lives(scene: &Scene) -> bool {
         || scene.clock.is_some_and(|c| c.animate_blocks)
 }
 
-/// A living scene's input, checked before anything is kept or drawn: its clock.
+/// A living scene's structural input, checked before anything is budgeted, kept or drawn:
+/// box, view (including positive finite `scale`), entity/particle caps, clock, and entity/particle
+/// placements and angles. Entity handles/types/data and particle options are validated next.
 pub fn check(rect: [f32; 4], scene: &Scene, view: SceneView) -> Result<SceneClock, SceneError> {
     let finite = rect.iter().chain(&view.center).all(|v| v.is_finite())
         && view.yaw.is_finite()
         && view.pitch.is_finite();
-    if !finite {
+    if !finite || !valid_scale(view.scale) {
         return Err(SceneError::BadView);
     }
     if scene.entities.len() > SCENE_MAX_ENTITIES {
@@ -200,11 +318,14 @@ fn entity_refusal(error: GuiEntityError, index: u32) -> SceneError {
 impl crate::game::ClientGame<'_> {
     /// `DrawContext::draw_scene`: `blocks` (`scene.blocks`, prepared) into `rect` seen as
     /// `view` says. A scene of blocks alone takes the block-only path before any state
-    /// work: no clock read, nothing kept. A living one is drawn with its entities and the
-    /// particles its clock ticks. Refused whole, nothing drawn and nothing kept, for input
-    /// that fails `check`, an entity `DrawContext::entity` refuses or a particle; past the
-    /// frame's animating budget the blocks and the scene's last state are drawn, its clock
-    /// does not advance, and the call returns `TooManyScenes`.
+    /// work: nothing kept (if `scene.clock` has a finite partial, it still supplies block
+    /// animation time). A living one is drawn with its entities and the particles its clock
+    /// ticks. Refused whole, nothing drawn, budgeted or kept, for input that fails `check`,
+    /// an unknown particle or an invalid `GuiEntity::Existing`; past the frame's animating
+    /// budget the blocks and the scene's last state are drawn, its clock does not advance,
+    /// and the call returns `TooManyScenes`; within the budget a fresh scene prepares its
+    /// remaining entities once (reusing the already-prepared `Existing` actors) and refuses
+    /// if one fails.
     pub fn native_draw_scene(
         &self,
         batch: &mut HudBatch,
@@ -223,29 +344,6 @@ impl crate::game::ClientGame<'_> {
             });
             return self.draw_scene_quads(batch, rect, blocks, view, scene_clock, |_, _| {});
         }
-        let clock = check(rect, scene, view)?;
-        // Checked whole before anything is kept; an empty list allocates nothing.
-        let added = scene
-            .particles
-            .iter()
-            .zip(0u32..)
-            .map(|(p, index)| {
-                p.options
-                    .try_into_engine(&())
-                    .map(|o| (o, p.pos, p.velocity))
-                    .map_err(|_| SceneError::BadParticle { index })
-            })
-            .collect::<Result<Vec<(ParticleOptions, _, _)>, _>>()?;
-        // The client's entities as they are this frame, refused before anything is kept.
-        let mut existing = Vec::new();
-        for (index, e) in (0u32..).zip(&scene.entities) {
-            if let GuiEntity::Existing(_) = e.entity {
-                let mob = self
-                    .prepare_gui_entity(&e.entity)
-                    .map_err(|error| entity_refusal(error, index))?;
-                existing.push((index as usize, mob));
-            }
-        }
         let owner = mod_api::content::crash::current_native_mod().unwrap_or("");
         let mut scenes = self
             .client
@@ -253,29 +351,18 @@ impl crate::game::ClientGame<'_> {
             .0
             .try_borrow_mut()
             .map_err(|_| SceneError::Unavailable)?;
-        let key = scene_key(blocks);
-        let at = scenes
-            .live
-            .iter()
-            .position(|l| l.owner == owner && l.id == clock.id);
-        let same = |l: &Live| {
-            l.key == key
-                && l.entities.len() == scene.entities.len()
-                && l.entities
-                    .iter()
-                    .zip(&scene.entities)
-                    .all(|(a, b)| *a == b.entity)
-        };
-        let frame = self.client.frames;
-        if !scenes.admit(frame, owner, clock.id) {
-            // Past the budget: the blocks, and the scene's last state when it is this one's.
-            let last = at.filter(|&i| same(&scenes.live[i]));
-            match last {
-                Some(i) => {
-                    let l = &mut scenes.live[i];
-                    l.frame = frame;
-                    self.draw_live(batch, rect, blocks, view, l, clock.partial)?;
-                }
+        scenes.drive(
+            self.client.frames,
+            owner,
+            rect,
+            blocks,
+            scene,
+            view,
+            |entity| self.prepare_gui_entity(entity),
+            |clock, key, mobs| self.live_scene(blocks, scene, owner, clock, key, mobs),
+            |l, clock, added| self.advance_live_scene(l, clock, added),
+            |live, clock| match live {
+                Some(l) => self.draw_live(batch, rect, blocks, view, l, clock.partial),
                 None => {
                     let tick = clock.tick as i64;
                     let scene_clock = (
@@ -283,42 +370,10 @@ impl crate::game::ClientGame<'_> {
                         clock.partial,
                         clock.tick as f64 + f64::from(clock.partial),
                     );
-                    self.draw_scene_quads(batch, rect, blocks, view, Some(scene_clock), |_, _| {})?
+                    self.draw_scene_quads(batch, rect, blocks, view, Some(scene_clock), |_, _| {})
                 }
-            }
-            return Err(SceneError::TooManyScenes);
-        }
-        let fresh = at.is_none_or(|i| !same(&scenes.live[i]) || clock.tick < scenes.live[i].tick);
-        let i = if fresh {
-            let made = self.live_scene(blocks, scene, owner, clock, key)?;
-            match at {
-                Some(i) => {
-                    scenes.live[i] = made;
-                    i
-                }
-                None => {
-                    if scenes.live.len() == KEPT
-                        && let Some(oldest) = (0..KEPT).min_by_key(|&i| scenes.live[i].frame)
-                    {
-                        scenes.live.swap_remove(oldest);
-                    }
-                    scenes.live.push(made);
-                    scenes.live.len() - 1
-                }
-            }
-        } else {
-            at.unwrap_or_default()
-        };
-        let l = &mut scenes.live[i];
-        l.frame = frame;
-        for (index, mob) in existing {
-            l.mobs[index] = mob;
-        }
-        self.advance_live_scene(l, clock, &added);
-        for (mob, e) in l.mobs.iter_mut().zip(&scene.entities) {
-            pose(mob, e, clock);
-        }
-        self.draw_live(batch, rect, blocks, view, l, clock.partial)
+            },
+        )
     }
 
     /// `l`'s blocks, entities and particles as they are, `partial` into the next tick.
@@ -375,8 +430,8 @@ impl crate::game::ClientGame<'_> {
     }
 
     /// A new kept scene: a level of `blocks`, an empty particle engine on the GUI atlas
-    /// held to `SCENE_MAX_PARTICLES`, and `scene`'s entities prepared as
-    /// `DrawContext::entity` prepares them (made for drawing only, nothing joins a level).
+    /// held to `SCENE_MAX_PARTICLES`, and `scene`'s already-prepared `mobs` (made for
+    /// drawing only, nothing joins a level).
     fn live_scene(
         &self,
         blocks: &[SceneBlock<'_>],
@@ -384,14 +439,8 @@ impl crate::game::ClientGame<'_> {
         owner: &'static str,
         clock: SceneClock,
         key: u64,
-    ) -> Result<Live, SceneError> {
-        let mut mobs = Vec::with_capacity(scene.entities.len());
-        for (index, e) in (0u32..).zip(&scene.entities) {
-            let mob = self
-                .prepare_gui_entity(&e.entity)
-                .map_err(|error| entity_refusal(error, index))?;
-            mobs.push(mob);
-        }
+        mobs: Vec<Mob>,
+    ) -> Live {
         let mut world = World::new(self.common.res.facts().air, 0);
         let mut picks = Vec::new();
         let near = |v: i32| f64::from(v).abs() <= FAR;
@@ -427,7 +476,7 @@ impl crate::game::ClientGame<'_> {
             });
             engine.camera = sum.map(|v| v / n + 0.5);
         }
-        Ok(Live {
+        Live {
             owner,
             id: clock.id,
             key,
@@ -439,7 +488,7 @@ impl crate::game::ClientGame<'_> {
             engine,
             mobs,
             verts: Vec::new(),
-        })
+        }
     }
 
     /// Runs `l`'s ticks up to `clock.tick` as the client's tick runs them: the blocks'
@@ -571,5 +620,490 @@ impl crate::game::ClientGame<'_> {
             .iter()
             .find(|l| l.owner == owner && l.id == id)
             .map(|l| l.tick)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mod_api::{EntityRef, SceneEntity, WorldEpoch};
+    use std::collections::{HashMap, HashSet};
+    use sunrise_assets::resource_source::ResourceSource;
+    use sunrise_core::nbt::Tag;
+    use sunrise_items::blocks::BlockFacts;
+    use sunrise_level::particle_options::ParticleType;
+    use sunrise_world::{
+        DATA_VERSION,
+        block_collision::BlockCollisionRegistry,
+        collision::CachedCollisionRegistry,
+        registry::{BlockRegistry, BlockStateId},
+    };
+
+    const RECT: [f32; 4] = [10.0, 10.0, 110.0, 90.0];
+    const INVALID_SCALES: [f32; 6] = [0.0, -0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY];
+
+    fn view_with_scale(scale: f32) -> SceneView {
+        SceneView::new([0.5, 0.5, 0.5], 30.0, 25.0, scale)
+    }
+
+    fn good_view() -> SceneView {
+        view_with_scale(20.0)
+    }
+
+    fn cow(pos: [f64; 3]) -> SceneEntity {
+        SceneEntity::new(GuiEntity::kind("minecraft:cow"), pos)
+    }
+
+    fn mob_with_id(id: u32) -> Mob {
+        Mob::new_remote(
+            id,
+            sunrise_sim::mobs::sensor_scan_tests::kind(),
+            Position::ZERO,
+            0.0,
+        )
+    }
+
+    fn make_live(
+        owner: &'static str,
+        scene: &Scene,
+        clock: SceneClock,
+        key: u64,
+        frame: u64,
+        mobs: Vec<Mob>,
+    ) -> Live {
+        let mut engine = ParticleEngine::new(
+            &ResourceSource::indexed(Default::default()),
+            &HashMap::new(),
+            &HashSet::new(),
+        );
+        engine.live_limit = Some(SCENE_MAX_PARTICLES);
+        Live {
+            owner,
+            id: clock.id,
+            key,
+            entities: scene.entities.iter().map(|e| e.entity.clone()).collect(),
+            tick: clock.tick,
+            frame,
+            world: World::new(BlockStateId(0), 0),
+            picks: Vec::new(),
+            engine,
+            mobs,
+            verts: Vec::new(),
+        }
+    }
+
+    fn with_empty_particle_env(test: impl FnOnce(&BlockFacts, &BlockCollisionRegistry<'_>)) {
+        let states = || Tag::List(vec![Tag::String("minecraft:air".into())]);
+        let registry = BlockRegistry::from_nbt(&Tag::compound([
+            ("DataVersion", Tag::Int(DATA_VERSION)),
+            ("states", states()),
+            ("defaults", Tag::compound([("minecraft:air", Tag::Int(0))])),
+        ]))
+        .unwrap();
+        let cached = CachedCollisionRegistry::from_nbt(
+            &Tag::compound([
+                ("DataVersion", Tag::Int(DATA_VERSION)),
+                ("states", states()),
+                ("shapes", Tag::List(vec![])),
+                ("cached_shapes", Tag::IntArray(vec![-1])),
+            ]),
+            &registry,
+        )
+        .unwrap();
+        let collision = BlockCollisionRegistry::new(Arc::new(cached)).unwrap();
+        let facts = BlockFacts {
+            states: vec![],
+            air: BlockStateId(0),
+            woods: HashMap::new(),
+            sign_texts: HashMap::new(),
+        };
+        test(&facts, &collision);
+    }
+
+    fn advance_with_particles(
+        l: &mut Live,
+        clock: SceneClock,
+        facts: &BlockFacts,
+        collision: &BlockCollisionRegistry<'_>,
+    ) {
+        let Some((restart, first, last)) = ticks_to_run(l.tick, clock.tick) else {
+            return;
+        };
+        if restart {
+            l.engine.clear();
+        }
+        let level = ParticleLevel::new(&l.world, facts, collision);
+        let flame = ParticleOptions::simple(ParticleType::Flame);
+        for tick in first..=last {
+            let seed = tick_seed(clock.id, tick);
+            l.engine
+                .seed_randoms(seed, seed.rotate_left(21), seed.rotate_left(42));
+            l.engine.seed_particle_randoms(seed.rotate_left(53));
+            l.engine.add_with(
+                Some(&level),
+                &flame,
+                [0.5, 1.5, 0.5],
+                [0.0, 0.05, 0.0],
+                false,
+                false,
+            );
+            l.engine.tick(&level);
+            l.engine.sounds.clear();
+        }
+        l.tick = clock.tick;
+    }
+
+    fn particle_snapshot(engine: &ParticleEngine) -> Vec<([u64; 3], [u64; 3], i32)> {
+        engine
+            .live()
+            .map(|p| {
+                (
+                    p.position.map(f64::to_bits),
+                    p.previous.map(f64::to_bits),
+                    p.age,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn invalid_scale_on_first_and_active_living_scenes_keeps_state_particles_and_budget_unchanged()
+    {
+        with_empty_particle_env(|facts, collision| {
+            // 1) First call with invalid scale: refuses before preparing, keeping, or budgeting.
+            let mut empty = LiveScenes::default();
+            let first = Scene::new(Vec::new())
+                .with_clock(SceneClock::new(1, 5, 0.25))
+                .with_entities(vec![cow([0.5, 0.0, 0.5])]);
+            for scale in INVALID_SCALES {
+                let res = empty.drive(
+                    10,
+                    "guide",
+                    RECT,
+                    &[],
+                    &first,
+                    view_with_scale(scale),
+                    |_| panic!("invalid scale must refuse before preparing entities"),
+                    |_, _, _| panic!("invalid scale must refuse before making Live"),
+                    |_, _, _| panic!("invalid scale must refuse before advancing"),
+                    |_, _| panic!("invalid scale must refuse before drawing"),
+                );
+                assert_eq!(res, Err(SceneError::BadView), "scale {scale}");
+                assert!(empty.is_empty());
+                assert!(empty.animating.is_empty());
+            }
+
+            // 2) Already-active scene with live particles: invalid scale leaves frame, tick,
+            // particles (exact bits), and next frame's animating budget untouched.
+            let mut scenes = LiveScenes::default();
+            let blocks = [SceneBlock {
+                pos: [0, 0, 0],
+                state: BlockStateId(1),
+                entity: None,
+            }];
+            let base_scene = |tick| {
+                Scene::new(Vec::new())
+                    .with_clock(SceneClock::new(7, tick, 0.0))
+                    .with_entities(vec![cow([0.5, 0.0, 0.5])])
+            };
+            for tick in [0, 5] {
+                let s = base_scene(tick);
+                assert_eq!(
+                    scenes.drive(
+                        10,
+                        "guide",
+                        RECT,
+                        &blocks,
+                        &s,
+                        good_view(),
+                        |_| Ok(mob_with_id(7)),
+                        |clock, key, mobs| make_live("guide", &s, clock, key, 10, mobs),
+                        |l, clock, _| advance_with_particles(l, clock, facts, collision),
+                        |_, _| Ok(()),
+                    ),
+                    Ok(())
+                );
+            }
+
+            let before_particles = particle_snapshot(&scenes.live[0].engine);
+            assert!(!before_particles.is_empty());
+
+            let next_scene = base_scene(8);
+            for scale in [0.0, -1.0, f32::NAN] {
+                let res = scenes.drive(
+                    11,
+                    "guide",
+                    RECT,
+                    &blocks,
+                    &next_scene,
+                    view_with_scale(scale),
+                    |_| panic!("invalid scale must refuse before preparing entities"),
+                    |_, _, _| panic!("invalid scale must refuse before replacing Live"),
+                    |_, _, _| panic!("invalid scale must refuse before advancing"),
+                    |_, _| panic!("invalid scale must refuse before drawing"),
+                );
+                assert_eq!(res, Err(SceneError::BadView), "scale {scale}");
+                assert_eq!(scenes.live.len(), 1);
+                assert_eq!(scenes.live[0].frame, 10);
+                assert_eq!(scenes.live[0].tick, 5);
+                assert_eq!(
+                    particle_snapshot(&scenes.live[0].engine),
+                    before_particles,
+                    "particles unchanged for scale {scale}"
+                );
+                assert_eq!(scenes.frame, 10);
+                assert_eq!(scenes.animating, vec![("guide", 7)]);
+            }
+
+            // Full frame-11 animating budget remains available for valid scenes.
+            for id in 100..(100 + SCENE_MAX_ANIMATING as u32) {
+                let other = Scene::new(Vec::new()).with_clock(SceneClock::new(id, 1, 0.0));
+                assert_eq!(
+                    scenes.drive(
+                        11,
+                        "guide",
+                        RECT,
+                        &blocks,
+                        &other,
+                        good_view(),
+                        |_| Ok(mob_with_id(id)),
+                        |clock, key, mobs| make_live("guide", &other, clock, key, 11, mobs),
+                        |_, _, _| {},
+                        |_, _| Ok(()),
+                    ),
+                    Ok(())
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn fresh_living_scene_prepares_each_existing_actor_once_and_preserves_slot_order() {
+        let mut scenes = LiveScenes::default();
+        let ref_a = EntityRef::new(WorldEpoch::new(1), 10);
+        let ref_b = EntityRef::new(WorldEpoch::new(1), 20);
+        let entities = vec![
+            SceneEntity::new(GuiEntity::kind("minecraft:cow"), [0.0, 0.0, 0.0]),
+            SceneEntity::new(GuiEntity::existing(ref_a), [1.0, 0.0, 0.0]),
+            SceneEntity::new(GuiEntity::kind("minecraft:pig"), [2.0, 0.0, 0.0]),
+            SceneEntity::new(GuiEntity::existing(ref_b), [3.0, 0.0, 0.0]),
+        ];
+        let make_scene = |tick| {
+            Scene::new(Vec::new())
+                .with_clock(SceneClock::new(3, tick, 0.0).animate_blocks(false))
+                .with_entities(entities.clone())
+        };
+        let mob_ids = |s: &LiveScenes| s.live[0].mobs.iter().map(|m| m.id).collect::<Vec<_>>();
+
+        // 1) Fresh scene: Existing actors are prepared once up front, then remaining entities once
+        // when building Live, landing in their original slot order.
+        let mut prepared = Vec::new();
+        let s0 = make_scene(10);
+        let res = scenes.drive(
+            1,
+            "guide",
+            RECT,
+            &[],
+            &s0,
+            good_view(),
+            |entity| {
+                prepared.push(entity.clone());
+                let id = match entity {
+                    GuiEntity::Kind { kind, .. } if kind == "minecraft:cow" => 100,
+                    GuiEntity::Kind { kind, .. } if kind == "minecraft:pig" => 102,
+                    GuiEntity::Existing(r) if *r == ref_a => 201,
+                    GuiEntity::Existing(r) if *r == ref_b => 203,
+                    _ => return Err(GuiEntityError::UnknownType),
+                };
+                Ok(mob_with_id(id))
+            },
+            |clock, key, mobs| make_live("guide", &s0, clock, key, 1, mobs),
+            |l, clock, _| l.tick = clock.tick,
+            |_, _| Ok(()),
+        );
+        assert_eq!(res, Ok(()));
+        assert_eq!(
+            prepared,
+            vec![
+                GuiEntity::existing(ref_a),
+                GuiEntity::existing(ref_b),
+                GuiEntity::kind("minecraft:cow"),
+                GuiEntity::kind("minecraft:pig"),
+            ],
+            "fresh scene must prepare each Existing actor once and each Kind once"
+        );
+        assert_eq!(mob_ids(&scenes), vec![100, 201, 102, 203]);
+
+        // 2) Kept scene reuse: refreshes only Existing actors once each in place.
+        prepared.clear();
+        let s1 = make_scene(11);
+        let res = scenes.drive(
+            2,
+            "guide",
+            RECT,
+            &[],
+            &s1,
+            good_view(),
+            |entity| {
+                prepared.push(entity.clone());
+                let id = match entity {
+                    GuiEntity::Existing(r) if *r == ref_a => 301,
+                    GuiEntity::Existing(r) if *r == ref_b => 303,
+                    _ => panic!("kept scene must not re-prepare non-Existing entity: {entity:?}"),
+                };
+                Ok(mob_with_id(id))
+            },
+            |_, _, _| panic!("kept scene must not be reconstructed"),
+            |l, clock, _| l.tick = clock.tick,
+            |_, _| Ok(()),
+        );
+        assert_eq!(res, Ok(()));
+        assert_eq!(
+            prepared,
+            vec![GuiEntity::existing(ref_a), GuiEntity::existing(ref_b)]
+        );
+        assert_eq!(mob_ids(&scenes), vec![100, 301, 102, 303]);
+    }
+
+    #[test]
+    fn budget_exhaustion_draws_fallback_and_preserves_existing_first_error_priority() {
+        let ref_ok = EntityRef::new(WorldEpoch::new(1), 10);
+        let ref_gone = EntityRef::new(WorldEpoch::new(1), u32::MAX);
+        let arrow = SceneEntity::new(GuiEntity::kind("minecraft:arrow"), [0.0; 3]);
+        let existing_ok = SceneEntity::new(GuiEntity::existing(ref_ok), [0.0; 3]);
+        let existing_gone = SceneEntity::new(GuiEntity::existing(ref_gone), [0.0; 3]);
+
+        let prepare = |entity: &GuiEntity| match entity {
+            GuiEntity::Kind { kind, .. } if kind == "minecraft:cow" => Ok(mob_with_id(1)),
+            GuiEntity::Kind { kind, .. } if kind == "minecraft:arrow" => {
+                Err(GuiEntityError::UnknownType)
+            }
+            GuiEntity::Existing(r) if *r == ref_ok => Ok(mob_with_id(2)),
+            GuiEntity::Existing(_) => Err(GuiEntityError::NoEntity),
+            _ => Err(GuiEntityError::UnknownType),
+        };
+
+        // 1) Mixed [unknown Kind, missing Existing]: Existing is checked first, preserving
+        // upstream's NoEntity { index: 1 } priority without spending budget or preparing Kind.
+        let mut scenes = LiveScenes::default();
+        let mixed = Scene::new(Vec::new())
+            .with_clock(SceneClock::new(5, 1, 0.0).animate_blocks(false))
+            .with_entities(vec![arrow.clone(), existing_gone.clone()]);
+        let mut calls = Vec::new();
+        let res = scenes.drive(
+            10,
+            "guide",
+            RECT,
+            &[],
+            &mixed,
+            good_view(),
+            |e| {
+                calls.push(e.clone());
+                prepare(e)
+            },
+            |_, _, _| panic!("must not build Live"),
+            |_, _, _| panic!("must not advance"),
+            |_, _| panic!("must not draw"),
+        );
+        assert_eq!(res, Err(SceneError::NoEntity { index: 1 }));
+        assert_eq!(calls, vec![GuiEntity::existing(ref_gone)]);
+        assert!(scenes.is_empty());
+        assert!(scenes.animating.is_empty());
+
+        // 2) Fill the frame's animating budget (SCENE_MAX_ANIMATING scenes).
+        for id in 0..SCENE_MAX_ANIMATING as u32 {
+            let valid = Scene::new(Vec::new()).with_clock(SceneClock::new(id, 1, 0.0));
+            assert_eq!(
+                scenes.drive(
+                    10,
+                    "guide",
+                    RECT,
+                    &[],
+                    &valid,
+                    good_view(),
+                    |_| Ok(mob_with_id(id)),
+                    |clock, key, mobs| make_live("guide", &valid, clock, key, 10, mobs),
+                    |_, _, _| {},
+                    |_, _| Ok(()),
+                ),
+                Ok(())
+            );
+        }
+
+        // 3) Past the budget: a new scene with Kind (valid or invalid) draws fallback blocks and
+        // returns TooManyScenes without preparing Kind entities.
+        for entity in [arrow.clone(), cow([0.0; 3])] {
+            let over = Scene::new(Vec::new())
+                .with_clock(SceneClock::new(99, 1, 0.0).animate_blocks(false))
+                .with_entities(vec![entity]);
+            let mut drew_fallback_blocks = false;
+            let res = scenes.drive(
+                10,
+                "guide",
+                RECT,
+                &[],
+                &over,
+                good_view(),
+                |e| panic!("over-budget Kind scene must not prepare entity: {e:?}"),
+                |_, _, _| panic!("over-budget scene must not build Live"),
+                |_, _, _| panic!("over-budget scene must not advance"),
+                |live, _| {
+                    assert!(live.is_none(), "new over-budget scene draws blocks only");
+                    drew_fallback_blocks = true;
+                    Ok(())
+                },
+            );
+            assert_eq!(res, Err(SceneError::TooManyScenes));
+            assert!(drew_fallback_blocks);
+        }
+
+        // 4) Past the budget with an invalid Existing handle: Existing validation still runs
+        // before the fallback draw and returns NoEntity.
+        let over_bad_existing = Scene::new(Vec::new())
+            .with_clock(SceneClock::new(100, 1, 0.0).animate_blocks(false))
+            .with_entities(vec![existing_gone]);
+        let res = scenes.drive(
+            10,
+            "guide",
+            RECT,
+            &[],
+            &over_bad_existing,
+            good_view(),
+            prepare,
+            |_, _, _| panic!("must not build Live"),
+            |_, _, _| panic!("must not advance"),
+            |_, _| panic!("invalid Existing must refuse before fallback draw"),
+        );
+        assert_eq!(res, Err(SceneError::NoEntity { index: 0 }));
+
+        // 5) Within budget on next frame, [valid Existing, unknown Kind] prepares each once and
+        // returns UnknownType { index: 1 }.
+        calls.clear();
+        let bad_kind = Scene::new(Vec::new())
+            .with_clock(SceneClock::new(101, 1, 0.0).animate_blocks(false))
+            .with_entities(vec![existing_ok, arrow]);
+        let res = scenes.drive(
+            11,
+            "guide",
+            RECT,
+            &[],
+            &bad_kind,
+            good_view(),
+            |e| {
+                calls.push(e.clone());
+                prepare(e)
+            },
+            |_, _, _| panic!("must not build Live"),
+            |_, _, _| panic!("must not advance"),
+            |_, _| panic!("must not draw"),
+        );
+        assert_eq!(res, Err(SceneError::UnknownType { index: 1 }));
+        assert_eq!(
+            calls,
+            vec![
+                GuiEntity::existing(ref_ok),
+                GuiEntity::kind("minecraft:arrow"),
+            ]
+        );
     }
 }
