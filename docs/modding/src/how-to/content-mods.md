@@ -1186,6 +1186,7 @@ pub const GASES: mod_api::RegistryKey<Gas> = mod_api::RegistryKey::new("chemlib:
 
 // In Hooks::register:
 r.declare_registry(GASES, mod_api::RegistryOptions::new().default_key("chemlib:empty").sync(true));
+r.register_entry(GASES, "chemlib:empty", Gas { color: 0 });
 let oxygen = r.register_entry(GASES, "chemlib:oxygen", Gas { color: 0xAA_DD_FF });
 
 // Later in any hook with a Host (import `mod_api::HostRegistries`):

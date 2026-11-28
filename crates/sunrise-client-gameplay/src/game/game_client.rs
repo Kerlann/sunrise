@@ -4577,6 +4577,7 @@ impl crate::game::ClientGame<'_> {
         // The pack is chosen before entity geometry, so a pack that starts this frame
         // keeps block-entity models in the CPU stream instead of dropping them.
         let mut pack_inputs = if title {
+            self.shader_pack_title_frame();
             Default::default()
         } else {
             self.shader_pack_inputs(camera, eye.map_or(camera, |e| e.0), alpha as f32, &sky)

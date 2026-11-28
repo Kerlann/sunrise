@@ -712,6 +712,10 @@ pub(in crate::game) mod shader_pack_hdr_tests;
 #[path = "interface/shader_pack_switch_tests.rs"]
 pub(in crate::game) mod shader_pack_switch_tests;
 #[cfg(feature = "client")]
+#[cfg(test)]
+#[path = "interface/shader_pack_teardown_tests.rs"]
+mod shader_pack_teardown_tests;
+#[cfg(feature = "client")]
 #[path = "interface/shader_packs.rs"]
 pub mod shader_packs;
 #[cfg(feature = "client")]

@@ -82,8 +82,8 @@ ln -sfn "$state/parity-runner" .local/parity-runner && ln -sfn "$state/parity-ta
 }
 ROOT_RUST = {"Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rustfmt.toml", "clippy.toml"}
 # Standalone workspaces under crates/ that the root Cargo.toml excludes: the main workspace never builds them
-# (the registry has its own steps below; the telemetry server is tested by its own workflow).
-SEPARATE_WORKSPACES = ("crates/sunrise-mod-registry/", "crates/sunrise-telemetry-server/")
+# (the telemetry server is tested by its own workflow).
+SEPARATE_WORKSPACES = ("crates/sunrise-telemetry-server/",)
 
 
 # Build-script inputs outside the crates: catalog-only edits still need to build and test their consumers.

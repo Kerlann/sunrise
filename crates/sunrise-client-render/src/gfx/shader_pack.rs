@@ -368,10 +368,22 @@ impl Renderer {
             // The ids and the mod pipelines' state come back with it, for `install_shader_pack`.
             (post, block_ids, mod_pack_state)
         };
+        #[cfg(feature = "test-support")]
+        let (watch, running) = {
+            let watch = self.retired_pack_builds.watch.clone();
+            let running = watch.started();
+            (watch, running)
+        };
         // A pack is not the game's code: a panic building it turns the pack off (#3525).
         let thread = std::thread::Builder::new()
             .name("Shader pack".into())
-            .spawn(move || crate::crash::contain(build));
+            .spawn(move || {
+                #[cfg(feature = "test-support")]
+                let _running = running;
+                #[cfg(feature = "test-support")]
+                watch.wait_gate();
+                crate::crash::contain(build)
+            });
         match thread {
             Ok(thread) => {
                 // The last pack doesn't draw this dimension meanwhile.
@@ -382,10 +394,12 @@ impl Renderer {
                 }
                 self.pack_loading = Some(PackLoading {
                     dimension,
-                    thread,
+                    cancel,
+                    thread: Some(thread),
+                    retired: self.retired_pack_builds.clone(),
+                    origin: self.pack_build_origin(),
                     label,
                     started,
-                    _cancel: CancelOnDrop(cancel),
                     draws: draws_sections,
                     served,
                     block_ids: None,
@@ -401,7 +415,8 @@ impl Renderer {
     pub fn shader_pack_built(&self) -> bool {
         self.pack_loading
             .as_ref()
-            .is_some_and(|l| l.thread.is_finished())
+            .and_then(|l| l.thread.as_ref())
+            .is_some_and(|t| t.is_finished())
     }
     /// `poll_shader_pack`, unless the pack in the renderer is `stale`: loaded, or still
     /// building, from inputs the game no longer wants (another Iris compatibility). Then it is
@@ -435,11 +450,15 @@ impl Renderer {
     /// `set_shader_pack` would run it. Its dimension, label, start and what `set_shader_pack`
     /// returns.
     pub fn poll_shader_pack(&mut self) -> Option<PackPoll> {
-        if !self.pack_loading.as_ref()?.thread.is_finished() {
+        // Builds cancelled earlier that have ended since: their packs go now, also while no
+        // pack is wanted.
+        self.retired_pack_builds.reap();
+        if !self.pack_loading.as_ref()?.thread.as_ref()?.is_finished() {
             return None;
         }
-        let loading = self.pack_loading.take()?;
-        let (built, block_ids, mod_pack_state) = match loading.thread.join() {
+        let mut loading = self.pack_loading.take()?;
+        let thread = loading.thread.take()?;
+        let (built, block_ids, mod_pack_state) = match thread.join() {
             Ok(Ok(built)) => built,
             // A pack that doesn't run keeps no ids.
             Ok(Err(panic)) => (
@@ -464,6 +483,7 @@ impl Renderer {
         // where they differ.
         let given = loading
             .block_ids
+            .take()
             .filter(|ids| built.is_ok() && *ids != block_ids);
         let rewrite = given.is_some();
         let block_ids = given.unwrap_or(block_ids);
@@ -476,7 +496,8 @@ impl Renderer {
         if rewrite {
             self.write_pack_terrain_ids();
         }
-        Some((loading.dimension, loading.label, loading.started, report))
+        let label = std::mem::take(&mut loading.label);
+        Some((loading.dimension, label, loading.started, report))
     }
     /// Drops the pack still building for another served answer of Sunrise's HDR than `served`
     /// (`Post::hdr`): whatever it ends in, success or refusal, is for a load nobody wants any
@@ -494,6 +515,33 @@ impl Renderer {
         self.pack_loading = None;
         self.pack_changed();
         true
+    }
+    /// What this renderer's pack builds run on (`BuildOrigin`).
+    fn pack_build_origin(&self) -> BuildOrigin {
+        BuildOrigin {
+            device_lost: self.device_lost.clone(),
+            #[cfg(feature = "test-support")]
+            watch: self.retired_pack_builds.watch.clone(),
+        }
+    }
+    /// Joins the cancelled pack builds that have ended, as every `poll_shader_pack` does: for the
+    /// frames that don't poll (the title screen's).
+    pub fn reap_pack_builds(&self) {
+        self.retired_pack_builds.reap();
+    }
+    /// The pack builds still running, for the renderer that replaces this one
+    /// (`adopt_pack_builds`): the one loading is cancelled first. This renderer then drops
+    /// without waiting for any (a renderer swap must not wait on the driver).
+    pub fn take_pack_builds(&mut self) -> PackBuilds {
+        self.pack_loading = None;
+        PackBuilds(self.retired_pack_builds.take())
+    }
+    /// Keeps the pack builds another renderer handed over (`take_pack_builds`): joined as they
+    /// end, and before this renderer drops unless their own device is lost.
+    pub fn adopt_pack_builds(&mut self, builds: PackBuilds) {
+        for build in builds.0 {
+            self.retired_pack_builds.retire(build);
+        }
     }
     /// Drops the running shader pack.
     pub fn drop_shader_packs(&mut self) {

@@ -697,7 +697,7 @@ class PrReadyTests(unittest.TestCase):
         self.assertIn("no workspace crate owns crates/alpha/b.rs, crates/zeta/a.rs:", str(caught.exception))
 
     def test_separate_workspaces_are_not_built_by_the_main_workspace(self):
-        for path in ("crates/sunrise-mod-registry/src/main.rs", "crates/sunrise-telemetry-server/src/main.rs"):
+        for path in ("crates/sunrise-telemetry-server/src/main.rs",):
             with self.subTest(path=path):
                 self.assertFalse(pr_ready.workspace_rust(path))
                 by_name = self.selected_steps({path}, PACKAGES, DEPENDENCIES)
@@ -712,7 +712,7 @@ class PrReadyTests(unittest.TestCase):
 
     def test_full_runs_the_workspace_whatever_changed(self):
         for changed in ({"crates/sunrise-client/src/game/a.rs"}, {"README.md"}, {"crates/unknown/src/lib.rs"},
-                        {"crates/sunrise-mod-registry/src/main.rs"}):
+                        {"crates/sunrise-telemetry-server/src/main.rs"}):
             with self.subTest(changed=changed):
                 by_name = self.selected_steps(changed, full=True)
                 self.assertEqual(by_name["clippy"].command, CLIPPY)

@@ -1015,6 +1015,32 @@ fn pack_tags<'a>(
 }
 
 impl crate::game::ClientGame<'_> {
+    /// Drops the running or building pack when the pick changed to `picked`.
+    fn apply_shader_pack_pick(&mut self, picked: &str) {
+        if self.client.native_shaders.picked != picked {
+            picked.clone_into(&mut self.client.native_shaders.picked);
+            self.client.native_shaders.identity_build = None;
+            self.client.native_shaders.identity_seen = None;
+            self.client.native_shaders.identity_recheck = false;
+            self.set_translucent_layers(Vec::new());
+            self.client.pack_ids = None;
+            if let Some(renderer) = &mut self.client.renderer.0 {
+                renderer.drop_shader_packs();
+            }
+        }
+    }
+    /// A title screen frame, which loads no pack and resolves no pack path: shaders turned off in
+    /// the settings still drop the pack now, and the cancelled builds that have ended are joined,
+    /// as `shader_pack_inputs` does in a world, so neither keeps its GPU objects until a world
+    /// draws.
+    pub(in crate::game::client_side) fn shader_pack_title_frame(&mut self) {
+        if picked_pack(&self.client.settings).is_empty() {
+            self.apply_shader_pack_pick("");
+        }
+        if let Some(renderer) = &self.client.renderer.0 {
+            renderer.reap_pack_builds();
+        }
+    }
     /// Resolves the loaded pack's ids again when the world's tags its `%tag` entries (4.1) were
     /// resolved against were replaced (a server's tags, `/reload`, another world), and hands
     /// the renderer the terrain's. Nothing for a pack whose entries name no tag.
@@ -1103,17 +1129,7 @@ impl crate::game::ClientGame<'_> {
         } else {
             path.to_string_lossy().into_owned()
         };
-        if self.client.native_shaders.picked != picked {
-            self.client.native_shaders.picked = picked.clone();
-            self.client.native_shaders.identity_build = None;
-            self.client.native_shaders.identity_seen = None;
-            self.client.native_shaders.identity_recheck = false;
-            self.set_translucent_layers(Vec::new());
-            self.client.pack_ids = None;
-            if let Some(renderer) = &mut self.client.renderer.0 {
-                renderer.drop_shader_packs();
-            }
-        }
+        self.apply_shader_pack_pick(&picked);
         let dimension = match self.common.dim {
             Dim::Overworld | Dim::Extra(_) => 0,
             Dim::Nether => -1,
