@@ -1542,6 +1542,12 @@ impl crate::game::ServerGame<'_> {
                 .creatures
                 .projectiles
                 .retire_extracted(arrow.id, arrow.join);
+            crate::game::record_departure!(
+                self.common.dim,
+                arrow.id,
+                arrow.entity_type(),
+                Some("discarded")
+            );
         }
         Ok(())
     }
@@ -4550,13 +4556,7 @@ impl crate::game::ServerGame<'_> {
                 self.finish_mob_removal(id);
             }
             if let Some(index) = self.common.mobs.locate(join) {
-                let _gone = self.common.mobs.remove(index);
-                crate::game::record_departure!(
-                    self.common.dim,
-                    _gone.id,
-                    crate::game::native_hooks::mob_kind(&_gone),
-                    if !_gone.alive() { Some("killed") } else { None }
-                );
+                self.common.mobs.remove(index);
             }
             self.server.last_hurt_by_player.remove(&id);
         }
@@ -6351,12 +6351,6 @@ impl crate::game::ServerGame<'_> {
             if round.canceled(projectiles[i].id) {
                 continue;
             }
-            crate::game::record_turn!(
-                self.common.dim,
-                projectiles[i].id,
-                projectiles[i].entity_type(),
-                None
-            );
             ticked.insert(projectiles[i].id);
             let section_from = projectiles[i].position;
             let skip_wind = matches!(
@@ -6387,6 +6381,8 @@ impl crate::game::ServerGame<'_> {
             }
             {
                 let host_dead = self.player_view().is_some_and(|p| !p.alive);
+                #[cfg(feature = "state-digest")]
+                let dim = self.common.dim;
                 projectiles.update(i, |p| {
                     if vanish
                         && matches!(p.kind, ProjectileKind::EnderPearl)
@@ -6404,6 +6400,7 @@ impl crate::game::ServerGame<'_> {
                         keep_flags[i] = false;
                         return;
                     }
+                    crate::game::record_turn!(dim, p.id, p.entity_type(), None);
                     // The projectile as it was, to fly on if a mod cancels its impact.
                     let before = (hear && !p.stuck).then(|| p.clone());
                     let wind_before = vehicle_winds.before(p);
@@ -6618,15 +6615,20 @@ impl crate::game::ServerGame<'_> {
             }
         }
         #[cfg(feature = "state-digest")]
-        let dim = self.common.dim;
-        let mut flags = keep_flags.into_iter();
-        projectiles.retain(|_p| {
-            let keep = flags.next().unwrap();
-            if !keep {
-                crate::game::record_departure!(dim, _p.id, _p.entity_type(), Some("discarded"));
+        if crate::game::state_transcript::is_recording() {
+            for (p, &keep) in projectiles.iter().zip(keep_flags.iter()) {
+                if !keep {
+                    crate::game::state_transcript::record_departure(
+                        self.common.dim,
+                        p.id,
+                        p.entity_type(),
+                        Some("discarded"),
+                    );
+                }
             }
-            keep
-        });
+        }
+        let mut flags = keep_flags.into_iter();
+        projectiles.retain(|_| flags.next().unwrap());
         for i in 0..projectiles.len() {
             let id = projectiles[i].id;
             if !ticked.contains(&id)
@@ -8199,7 +8201,6 @@ impl crate::game::ServerGame<'_> {
                 continue;
             };
             let pid = p.id;
-            crate::game::record_turn!(self.common.dim, pid, p.entity_type(), None);
             if vanish
                 && matches!(p.kind, ProjectileKind::EnderPearl)
                 && p.owner == Some(Who::Player)
@@ -8225,6 +8226,7 @@ impl crate::game::ServerGame<'_> {
                 );
                 continue;
             }
+            crate::game::record_turn!(self.common.dim, pid, p.entity_type(), None);
             let section_from = p.position;
             let before = (self.native_hears_impacts() && !p.stuck).then(|| p.clone());
             let mob_shot = !matches!(p.owner, Some(Who::Player));
@@ -8920,6 +8922,12 @@ impl crate::game::ServerGame<'_> {
                 .creatures
                 .projectiles
                 .retire_extracted(arrow.id, arrow.join);
+            crate::game::record_departure!(
+                self.common.dim,
+                arrow.id,
+                arrow.entity_type(),
+                Some("discarded")
+            );
         }
     }
 
