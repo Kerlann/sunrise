@@ -387,7 +387,7 @@ impl crate::game::ServerGame<'_> {
                 .mobs
                 .iter()
                 .find(|m| m.id == id)
-                .map(|m| m.species()),
+                .map(|m| sunrise_sim::mobs::species::vanilla_id(m.species())),
             _ => None,
         };
         let source = Damage {
@@ -2219,7 +2219,9 @@ impl crate::game::ServerGame<'_> {
                                 kind: DamageKind::SonicBoom,
                                 attacker: Some(Who::Mob(attacker)),
                                 from: Some(from),
-                                attacker_species: Some(Species::Warden),
+                                attacker_species: Some(sunrise_sim::mobs::species::vanilla_id(
+                                    Species::Warden,
+                                )),
                                 direct: None,
                             };
                             let hurt = self.mob_hits_mob(id, 10.0, source);
@@ -4731,7 +4733,7 @@ impl crate::game::ServerGame<'_> {
                 .mobs
                 .iter()
                 .find(|m| m.id == id)
-                .map(|m| m.species());
+                .map(|m| sunrise_sim::mobs::species::vanilla_id(m.species()));
         }
         let mut killed = false;
         let mut settle = false;
@@ -5165,7 +5167,7 @@ impl crate::game::ServerGame<'_> {
                 .mobs
                 .iter()
                 .find(|m| m.id == id)
-                .map(|m| m.species()),
+                .map(|m| sunrise_sim::mobs::species::vanilla_id(m.species())),
             _ => None,
         };
         let source = Damage {

@@ -709,6 +709,7 @@ use server_state::ServerState;
 pub(in crate::game) struct WrappedServerInit {
     player_autosaves: server_side::ServerOnly<sunrise_sim::lan::playerdata::Autosaves>,
     session_lock: server_side::ServerShared<Option<sunrise_sim::save::SessionLock>>,
+    /// The hit a mob's tick paused, typed for the closure that resumes it.
     paused_mob_hurt: server_side::ServerOnly<Option<Box<sunrise_sim::mobs::PausedMobHurt>>>,
     raiding: server_side::ServerOnly<raids::Raiding>,
     world_tables: server_side::ServerShared<Option<WorldTables>>,

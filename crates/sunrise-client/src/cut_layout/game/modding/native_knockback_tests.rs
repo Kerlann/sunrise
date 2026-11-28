@@ -154,14 +154,17 @@ fn the_bridge_names_the_attacker_and_what_it_holds() {
             mob
         };
         let by_player = Damage {
+            direct: None,
             attacker: Some(Who::Player),
             ..Damage::of(DamageKind::Generic)
         };
         let by_mob = Damage {
+            direct: None,
             attacker: Some(Who::Mob(3)),
             ..by_player
         };
         let by_nobody = Damage {
+            direct: None,
             attacker: None,
             ..by_player
         };

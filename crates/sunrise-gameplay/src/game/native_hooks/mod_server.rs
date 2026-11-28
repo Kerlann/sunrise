@@ -257,7 +257,10 @@ impl crate::game::ServerGame<'_> {
                 equipment: acting_equipment!(self.common),
                 attachments: None,
             });
-            (Some(body), lend_mob.and_then(HitLend::mob).or_else(parked))
+            (
+                Some(body),
+                lend_mob.and_then(|mob| HitLend::mob(mob)).or_else(parked),
+            )
         } else {
             let lend = match lend_mob {
                 Some(mob) => HitLend::mob(mob),
