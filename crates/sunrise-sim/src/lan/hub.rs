@@ -213,6 +213,8 @@ pub struct TickCtx<'a> {
 
 /// Destination placement and viewed-level handoff after the command-tree send.
 pub struct LevelChange {
+    /// A direct teleport keeps its prior velocity instead of sending a stop.
+    pub keep_motion: bool,
     at: [f64; 3],
     yaw: f32,
     pitch: Option<f32>,

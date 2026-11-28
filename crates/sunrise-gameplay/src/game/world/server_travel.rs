@@ -237,6 +237,7 @@ pub struct LevelTeleport {
     pub dim: Dim,
     pub at: [f64; 3],
     pub rotation: Option<[f32; 2]>,
+    pub motion: crate::teleport_transition::TeleportMotion,
     /// `TeleportTransition.asPassenger`: the vehicle already moved with its tree.
     pub vehicle: Option<u32>,
 }
@@ -1266,6 +1267,7 @@ impl crate::game::ServerGame<'_> {
                                 at: [found.at.x, found.at.y, found.at.z],
                                 rotation: (!legacy_personal_point)
                                     .then_some([found.yaw, found.pitch]),
+                                motion: crate::teleport_transition::TeleportMotion::Stop,
                                 vehicle: None,
                             },
                             LevelTeleportKind::EndExit {
@@ -1657,9 +1659,10 @@ impl crate::game::ServerGame<'_> {
         let [yaw, pitch] = t.rotation.unwrap_or([guest.yaw, guest.pitch]);
         let origin = guest.position;
         let cooldown = host.play.get(&t.conn).map_or(0, |p| p.portal.cooldown);
-        let change = host
+        let mut change = host
             .hub
             .begin_level_change(i, t.at, yaw, Some(pitch), cooldown, &ctx);
+        change.keep_motion = matches!(t.motion, crate::teleport_transition::TeleportMotion::Keep);
         self.send_player_command_tree(t.conn);
         let ctx = server_ctx!(self);
         if let Some(host) = self.server.lan.as_mut() {

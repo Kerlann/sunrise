@@ -372,6 +372,7 @@ impl Hub {
         }));
         self.send_permission_level(i);
         LevelChange {
+            keep_motion: false,
             at,
             yaw,
             pitch,
@@ -388,6 +389,7 @@ impl Hub {
         ctx: &TickCtx,
     ) {
         let LevelChange {
+            keep_motion,
             at,
             yaw,
             pitch,
@@ -423,8 +425,15 @@ impl Hub {
                 g.teleport_counter = (g.teleport_counter + 1) & 0x7FFF_FFFF;
             });
         } else {
-            self.guests.update(i, |g| g.first_good = at);
-            self.resend_teleport(i, None);
+            let velocity = self.guests.update(i, |g| {
+                g.first_good = at;
+                let body = g.motion.as_mut()?;
+                if !keep_motion {
+                    body.velocity = sunrise_core::geometry::Vec3::ZERO;
+                }
+                Some(body.velocity.components())
+            });
+            self.send_position_correction(i, None, 0, [0.0; 3], velocity);
         }
         let g = &self.guests[i];
         g.send(&g.abilities_packet());

@@ -324,6 +324,65 @@ fn overworld_to_nether() -> Vec<(String, String)> {
 
 #[test]
 #[ignore = "daily"]
+fn cross_level_command_stops_and_native_teleport_keeps_the_motion_on_both_sides() {
+    use sunrise_protocol::{buf::Reader, packets::play::Clientbound};
+    use sunrise_sim::lan::Out;
+    let role = ExecutionRole::DedicatedServer;
+    let entered = Vec3::new(0.25, 0.125, -0.5);
+    for keep in [false, true] {
+        with_server(role, |game| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            game.server
+                .lan
+                .as_mut()
+                .unwrap()
+                .hub
+                .update_guest(CONN, |g| {
+                    g.sender = PlayerSender::new(tx, Arc::default());
+                    g.motion.as_mut().unwrap().velocity = entered;
+                })
+                .unwrap();
+            if keep {
+                let entity = game.entity(CONN).unwrap();
+                assert!(game.entity_teleport_to_level(
+                    entity,
+                    Dim::Nether.id(),
+                    [8.5, 70.0, 8.5],
+                    None
+                ));
+                game.run_level_teleports();
+            } else {
+                run_as_player(
+                    game,
+                    role,
+                    "execute in minecraft:the_nether run tp @s 8.5 70 8.5",
+                );
+            }
+            let guest = game.server.lan.as_ref().unwrap().hub.guest(CONN).unwrap();
+            assert_eq!(guest.dimension, Dim::Nether.id());
+            let expected = if keep { entered } else { Vec3::ZERO };
+            assert_eq!(guest.motion.as_deref().unwrap().velocity, expected);
+            let correction = rx
+                .try_iter()
+                .filter_map(|out| {
+                    let Out::Packet(bytes) = out else { return None };
+                    let mut reader = Reader::new(&bytes);
+                    let id = reader.varint().unwrap();
+                    match Clientbound::decode(id, reader.rest()) {
+                        Ok(Clientbound::PlayerPosition(packet)) => Some(packet),
+                        _ => None,
+                    }
+                })
+                .last()
+                .expect("cross-level correction");
+            assert_eq!(correction.relatives, 0);
+            assert_eq!(correction.delta, expected.components());
+        });
+    }
+}
+
+#[test]
+#[ignore = "daily"]
 fn a_cross_level_teleport_returns_both_cursors_before_arrival() {
     use sunrise_items::items::ItemStack;
 
@@ -348,6 +407,7 @@ fn a_cross_level_teleport_returns_both_cursors_before_arrival() {
                 dim: Dim::Nether,
                 at: [8.5, 70.0, 8.5],
                 rotation: None,
+                motion: sunrise_gameplay::teleport_transition::TeleportMotion::Stop,
                 vehicle: None,
             },
         );
