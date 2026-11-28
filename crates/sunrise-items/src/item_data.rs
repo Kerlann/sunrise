@@ -1731,10 +1731,10 @@ fn levels_tag(levels: &Levels) -> Tag {
     Tag::compound(levels.iter().map(|(id, l)| (&**id, Tag::Int(*l as i32))))
 }
 /// `ExtraCodecs.UNSIGNED_BYTE`: any numeric tag narrows to a byte first, then
-/// reads as unsigned (`-56b` and `-56` are 200, `256` is 0). Shared with the
+/// reads as unsigned (`-56b` and `-56` are 200, `256` is 0, `-1.75d` is 255). Shared with the
 /// brewing colour/tooltip path so both read a custom amplifier the same way.
 pub fn unsigned_byte(t: &Tag) -> Option<i32> {
-    int(t).map(|v| i32::from(v as u8))
+    sunrise_world::datafix::dynamic::as_number(t).map(|n| i32::from(n.byte_value() as u8))
 }
 
 fn int(t: &Tag) -> Option<i64> {
@@ -4102,6 +4102,16 @@ mod tests {
         assert_eq!(
             decode(Tag::Int(200)),
             [("minecraft:speed".to_owned(), 100, 200)]
+        );
+        // `Number.byteValue` of a float or double truncates to an int first:
+        // 1.75 is 1 and -1.75 is -1, which reads as 255.
+        assert_eq!(
+            decode(Tag::Float(1.75f32.to_bits())),
+            [("minecraft:speed".to_owned(), 100, 1)]
+        );
+        assert_eq!(
+            decode(Tag::Double((-1.75f64).to_bits())),
+            [("minecraft:speed".to_owned(), 100, 255)]
         );
     }
 

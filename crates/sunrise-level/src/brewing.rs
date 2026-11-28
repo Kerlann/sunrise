@@ -1074,13 +1074,7 @@ mod tests {
                 Tag::compound([("id", Tag::String("minecraft:poison".into()))]),
             ]),
         )];
-        assert_eq!(
-            contents_color(&stack),
-            0xFF00_0000
-                | sunrise_game_data::potions::effects_color(
-                    [("minecraft:speed", 200), ("minecraft:poison", 0)].into_iter()
-                )
-        );
+        assert_eq!(contents_color(&stack), 0xFF33_EAFE);
         stack
             .data_mut()
             .potion_extra
