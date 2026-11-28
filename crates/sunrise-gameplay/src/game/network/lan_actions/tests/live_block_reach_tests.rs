@@ -46,8 +46,7 @@ fn issue_6828_menus_follow_the_live_block_range() {
     game.world
         .set(table.0, table.1, table.2, table_state)
         .unwrap();
-    let motion =
-        sunrise_sim::motion::PlayerMotion::new(game.motion, Vec3::new(0.5, 64.0, 0.5)).unwrap();
+    let motion = sunrise_sim::motion::PlayerMotion::new(game.motion, Vec3::new(0.5, 64.0, 0.5));
     game.server.lan.as_mut().unwrap().hub.guests.update(0, |g| {
         g.dimension = "minecraft:overworld".into();
         g.position = [0.5, 64.0, 0.5];
@@ -170,7 +169,7 @@ fn issue_6828_pick_accepts_the_strict_boundary() {
     // distance is 7 - one ulp, strictly inside a total reach of 7.
     let eye_x = f64::from_bits(7.0f64.to_bits() - 1);
     let mut motion =
-        sunrise_sim::motion::PlayerMotion::new(game.motion, Vec3::new(eye_x, 64.0, 0.5)).unwrap();
+        sunrise_sim::motion::PlayerMotion::new(game.motion, Vec3::new(eye_x, 64.0, 0.5));
     // The live range is 6.0; handlePickItemFromBlock adds its 1.0 buffer.
     let base = motion
         .attribute("minecraft:block_interaction_range")
