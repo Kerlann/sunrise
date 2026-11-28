@@ -318,7 +318,10 @@ mod issue_6335_tests {
                     // Both entity-event paths accept the live entity and keep the bits.
                     assert!(game.entity_broadcast_event(entity, 2));
                     assert!(game.broadcast_entity_event_immediate(entity, 2));
-                    assert_eq!(game.server.lan_entity_events, vec![(wire, 2), (wire, 2)]);
+                    assert_eq!(
+                        game.server.lan_queues.entity_events,
+                        vec![(wire, 2), (wire, 2)]
+                    );
                     assert_eq!(entity_id_bits(wire), id);
                 });
             });
