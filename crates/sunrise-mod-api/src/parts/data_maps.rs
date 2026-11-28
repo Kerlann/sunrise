@@ -174,6 +174,19 @@ impl PartRegistrar {
                     map.registry()
                 ));
             }
+            if let Some(custom) = self
+                .custom_registries
+                .iter()
+                .find(|declared| declared.id == *map.registry_id())
+                && !custom.options.is_synced()
+            {
+                self.refused.push(format!(
+                    "mod {} cannot register synced data map {} for custom registry {} that is not synced",
+                    map.owner_mod(),
+                    map.id_str(),
+                    map.registry()
+                ));
+            }
         }
     }
 }
@@ -421,6 +434,88 @@ mod tests {
             err.iter()
                 .any(|msg| msg.contains("bad_reload_sync") && msg.contains("minecraft:recipe")),
             "expected refusal for reloadable datapack registry, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn synced_data_map_on_unsynced_custom_static_registry_is_refused() {
+        use crate::{CustomRegistryEntry, EntryKey, RegistryKey, RegistryOptions};
+
+        struct UnsyncedGas;
+        const UNSYNCED_GASES: RegistryKey<UnsyncedGas> = RegistryKey::new("unsynced_mod:gas");
+        impl CustomRegistryEntry for UnsyncedGas {
+            const REGISTRY: RegistryKey<Self> = UNSYNCED_GASES;
+        }
+
+        struct UnsyncedGasHeat(DataMapSync);
+        impl DataMap for UnsyncedGasHeat {
+            type Entry = EntryKey<UnsyncedGas>;
+            type Value = i32;
+            fn id(&self) -> &str {
+                "unsynced_mod:gas_heat"
+            }
+            fn decode(&self, value: &Tag) -> Option<i32> {
+                match value {
+                    Tag::Int(n) => Some(*n),
+                    _ => None,
+                }
+            }
+            fn sync(&self) -> DataMapSync {
+                self.0
+            }
+        }
+
+        struct UnsyncedRegistryMod {
+            registry_synced: bool,
+            map_sync: DataMapSync,
+        }
+        impl Hooks for UnsyncedRegistryMod {
+            fn subscribed(&self) -> &'static [Option<HookId>] {
+                &[]
+            }
+            fn register(&self, r: &mut dyn Registrar, _: &RegistrationContext) {
+                r.declare_registry(
+                    UNSYNCED_GASES,
+                    RegistryOptions::new().sync(self.registry_synced),
+                );
+                r.register_data_map(UnsyncedGasHeat(self.map_sync));
+            }
+        }
+
+        let err = install_with(vec![ModEntry::new(
+            "unsynced_mod",
+            Box::new(UnsyncedRegistryMod {
+                registry_synced: false,
+                map_sync: DataMapSync::Optional,
+            }),
+        )])
+        .unwrap_err();
+        assert!(
+            err.iter().any(|msg| msg.contains("unsynced_mod")
+                && msg.contains("unsynced_mod:gas")
+                && msg.contains("unsynced_mod:gas_heat")),
+            "expected refusal for synced map on unsynced custom registry, got: {err:?}"
+        );
+
+        assert!(
+            install_with(vec![ModEntry::new(
+                "unsynced_mod",
+                Box::new(UnsyncedRegistryMod {
+                    registry_synced: false,
+                    map_sync: DataMapSync::ServerOnly,
+                }),
+            )])
+            .is_ok()
+        );
+        assert!(
+            install_with(vec![ModEntry::new(
+                "unsynced_mod",
+                Box::new(UnsyncedRegistryMod {
+                    registry_synced: true,
+                    map_sync: DataMapSync::Optional,
+                }),
+            )])
+            .is_ok()
         );
     }
 
