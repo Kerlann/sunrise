@@ -445,9 +445,10 @@ mod tests {
         let original_cap = grid.cells.values().next().unwrap().capacity();
         assert!(original_cap >= 80);
 
-        // Rebuild into a different column: the drained vector is reused and
-        // `answering_as` overrides are cleared to match a fresh `SeenGrid::new`.
-        let shifted: Vec<Aabb> = (0..80)
+        // Rebuild into a different, smaller column: the drained vector is reused (a fresh one
+        // for five boxes would be far smaller) and `answering_as` overrides are cleared to
+        // match a fresh `SeenGrid::new`.
+        let shifted: Vec<Aabb> = (0..5)
             .map(|i| boxed(40.5 + (i % 4) as f64 * 0.1, 64.0, 40.5, 0.8))
             .collect();
         grid.rebuild(shifted.iter().copied());
