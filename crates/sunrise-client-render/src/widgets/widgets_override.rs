@@ -248,7 +248,7 @@ pub(super) fn cover_override_frame() {
 /// tables. Live frame tables, cursor, narration flag, and any enclosing override pass are saved
 /// and restored unconditionally (including on panic).
 pub fn with_widget_collector<R>(f: impl FnOnce() -> R) -> (R, Vec<CollectedWidget>) {
-    struct Guard {
+    struct Guard<'a> {
         saved: Option<super::Saved>,
         prev_cursor: Cursor,
         prev_narrating: bool,
@@ -256,12 +256,12 @@ pub fn with_widget_collector<R>(f: impl FnOnce() -> R) -> (R, Vec<CollectedWidge
         prev_has_overrides: bool,
         prev_bypass: bool,
         prev_collector: Option<CollectorState>,
-        restored_collector: bool,
+        out: &'a mut Vec<CollectedWidget>,
     }
-    impl Drop for Guard {
+    impl Drop for Guard<'_> {
         fn drop(&mut self) {
-            if !self.restored_collector {
-                let _ = COLLECTOR.replace(self.prev_collector.take());
+            if let Some(finished) = COLLECTOR.replace(self.prev_collector.take()) {
+                *self.out = finished.widgets;
             }
             COLLECTING.set(self.prev_collecting);
             HAS_OVERRIDES.set(self.prev_has_overrides);
@@ -273,25 +273,23 @@ pub fn with_widget_collector<R>(f: impl FnOnce() -> R) -> (R, Vec<CollectedWidge
             }
         }
     }
-    let mut guard = Guard {
-        saved: Some(super::take()),
-        prev_cursor: CURSOR.replace(Cursor::Arrow),
-        prev_narrating: NARRATING.replace(false),
-        prev_collecting: COLLECTING.replace(true),
-        prev_has_overrides: HAS_OVERRIDES.replace(false),
-        prev_bypass: BYPASS_OVERRIDES.replace(false),
-        prev_collector: COLLECTOR.replace(Some(CollectorState {
-            widgets: Vec::new(),
-            counts: HashMap::new(),
-        })),
-        restored_collector: false,
+    let mut collected = Vec::new();
+    let result = {
+        let _guard = Guard {
+            saved: Some(super::take()),
+            prev_cursor: CURSOR.replace(Cursor::Arrow),
+            prev_narrating: NARRATING.replace(false),
+            prev_collecting: COLLECTING.replace(true),
+            prev_has_overrides: HAS_OVERRIDES.replace(false),
+            prev_bypass: BYPASS_OVERRIDES.replace(false),
+            prev_collector: COLLECTOR.replace(Some(CollectorState {
+                widgets: Vec::new(),
+                counts: HashMap::new(),
+            })),
+            out: &mut collected,
+        };
+        f()
     };
-    let result = f();
-    let collected = COLLECTOR
-        .replace(guard.prev_collector.take())
-        .map_or_else(Vec::new, |s| s.widgets);
-    guard.restored_collector = true;
-    drop(guard);
     (result, collected)
 }
 
@@ -922,6 +920,71 @@ mod tests {
         let pending = out1.pending_tooltip.expect("tooltip elapsed after delay");
         assert_eq!(pending.tooltip.message.plain(), "Tip");
         assert_eq!(pending.rect, [50.0, 60.0, 120.0, 20.0]);
+    }
+
+    #[test]
+    fn nested_widget_collector_preserves_outer_collector_state() {
+        let outer_before = Text::literal("OuterBefore");
+        let inner_label = Text::literal("Inner");
+        let outer_after = Text::literal("OuterAfter");
+        let (inner_collected, outer_collected) = with_widget_collector(|| {
+            assert!(matches!(
+                resolve_engine_widget(EngineWidgetInput {
+                    bucket: WidgetBucket::Button,
+                    rect: [0.0, 0.0, 40.0, 20.0],
+                    label: Some(&outer_before),
+                    explicit_key: None,
+                    active: true,
+                    hovered: false,
+                    focused: false,
+                    tab_order_group: 0,
+                }),
+                ResolvedEngineWidget::Skip
+            ));
+            let ((), inner) = with_widget_collector(|| {
+                assert!(matches!(
+                    resolve_engine_widget(EngineWidgetInput {
+                        bucket: WidgetBucket::Button,
+                        rect: [0.0, 24.0, 40.0, 20.0],
+                        label: Some(&inner_label),
+                        explicit_key: None,
+                        active: true,
+                        hovered: false,
+                        focused: false,
+                        tab_order_group: 0,
+                    }),
+                    ResolvedEngineWidget::Skip
+                ));
+            });
+            assert!(matches!(
+                resolve_engine_widget(EngineWidgetInput {
+                    bucket: WidgetBucket::Button,
+                    rect: [0.0, 48.0, 40.0, 20.0],
+                    label: Some(&outer_after),
+                    explicit_key: None,
+                    active: true,
+                    hovered: false,
+                    focused: false,
+                    tab_order_group: 0,
+                }),
+                ResolvedEngineWidget::Skip
+            ));
+            inner
+        });
+        assert_eq!(
+            inner_collected
+                .iter()
+                .map(|w| w.key.key.as_str())
+                .collect::<Vec<_>>(),
+            ["Inner"]
+        );
+        assert_eq!(
+            outer_collected
+                .iter()
+                .map(|w| w.key.key.as_str())
+                .collect::<Vec<_>>(),
+            ["OuterBefore", "OuterAfter"]
+        );
     }
 
     #[test]
