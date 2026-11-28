@@ -6,7 +6,7 @@ pub(crate) use sunrise_client_gameplay::game::client_side::test_resource_cache::
 mod tests {
     use crate::game::resource_load::{load_resources, load_resources_uncached};
     use crate::settings::Settings;
-    use std::{process::Command, sync::Arc, time::Instant};
+    use std::{sync::Arc, time::Instant};
     use sunrise_assets::resource_source::ResourceRoot;
     use sunrise_client_gameplay::game::client_side::{
         resource_loader::Loaded, test_resource_cache,
@@ -39,21 +39,6 @@ mod tests {
     #[ignore = "daily"]
     fn repeated_and_concurrent_loads_share_resources_while_uncached_and_mutating_hooks_stay_private()
      {
-        const CHILD: &str = "SUNRISE_RESOURCE_CACHE_TEST_CHILD";
-        if std::env::var_os(CHILD).is_none() {
-            const TEST: &str = "cut_layout::game::resource_load::test_cache::tests::repeated_and_concurrent_loads_share_resources_while_uncached_and_mutating_hooks_stay_private";
-            let status = Command::new(std::env::current_exe().unwrap())
-                .args(["--ignored", "--exact", TEST])
-                .env(CHILD, "1")
-                .status()
-                .unwrap();
-            assert!(
-                status.success(),
-                "isolated resource-cache regression failed"
-            );
-            return;
-        }
-
         let first = load_for(ExecutionRole::IntegratedServer);
         let second = load_for(ExecutionRole::IntegratedServer);
         assert!(first.resources.living_type_keys().player.is_some());

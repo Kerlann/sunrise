@@ -10,7 +10,6 @@ pub(crate) mod native_entity_refs {
         pub(crate) fn with_game(test: impl FnOnce(&mut sunrise_gameplay::game::ServerGame<'_>)) {
             sunrise_client::native_item_places_test_support::with_game_with_registration(
                 super::super::prepare_game_boot_with_platform,
-                || mod_platform::__private::part_tests::install_parts_fixture(&[]),
                 test,
             );
         }
@@ -20,7 +19,6 @@ pub(crate) mod native_entity_refs {
         ) {
             sunrise_client::native_item_places_test_support::with_resident_game_with_registration(
                 super::super::prepare_game_boot_with_platform,
-                || mod_platform::__private::part_tests::install_parts_fixture(&[]),
                 test,
             );
         }

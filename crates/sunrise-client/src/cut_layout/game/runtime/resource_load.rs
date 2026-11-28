@@ -1,4 +1,4 @@
-#![cfg(any(test, feature = "test-support"))]
+#![cfg(test)]
 use crate::settings::Settings;
 use std::sync::Arc;
 use std::time::Instant;
@@ -8,14 +8,9 @@ use sunrise_client_gameplay::game::packs;
 use sunrise_game_data::Result;
 use sunrise_gameplay_common::game::mods;
 use sunrise_gameplay_common::game::resource_load::Progress;
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 #[path = "resource_load/test_cache.rs"]
 pub(crate) mod test_cache;
-
-#[cfg(test)]
-fn install_empty_parts_fixture() -> std::result::Result<(), Vec<String>> {
-    mod_platform::__private::part_tests::install_parts_fixture(&[])
-}
 
 /// Fixture helper for tests without a launch mod state.
 #[allow(clippy::too_many_arguments)]
@@ -32,40 +27,7 @@ pub(crate) fn load_resources(
     progress: &Progress,
     publish: &mut dyn FnMut(UiPublishArg, &std::path::Path),
 ) -> Result<Loaded> {
-    load_resources_with_fixture(
-        roots,
-        additional_data,
-        launch_world,
-        vanilla_root,
-        settings,
-        started,
-        menu,
-        role,
-        progress,
-        install_empty_parts_fixture,
-        publish,
-    )
-}
-
-/// Loads a fixture using the caller's platform-specific empty-parts installer.
-#[allow(clippy::too_many_arguments)]
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) fn load_resources_with_fixture(
-    roots: impl Into<packs::PackRoots>,
-    additional_data: Vec<Arc<sunrise_level::datapack::DataPack>>,
-    launch_world: Option<&str>,
-    vanilla_root: &std::path::Path,
-    settings: &Settings,
-    started: Instant,
-    menu: bool,
-    role: impl Into<mods::LoadRole>,
-    progress: &Progress,
-    install_parts_fixture: fn() -> std::result::Result<(), Vec<String>>,
-    publish: &mut dyn FnMut(UiPublishArg, &std::path::Path),
-) -> Result<Loaded> {
-    if !mod_api::__private::parts_installation::parts_installed() {
-        install_parts_fixture().map_err(|errors| std::io::Error::other(errors.join("\n")))?;
-    }
+    mod_platform::__private::test_platform::install();
     test_cache::load(
         test_cache::LoadArgs {
             roots: roots.into(),
@@ -97,9 +59,7 @@ pub(crate) fn load_resources_skip_lang(
     progress: &Progress,
     publish: &mut dyn FnMut(UiPublishArg, &std::path::Path),
 ) -> Result<Loaded> {
-    if !mod_api::__private::parts_installation::parts_installed() {
-        install_empty_parts_fixture().map_err(|errors| std::io::Error::other(errors.join("\n")))?;
-    }
+    mod_platform::__private::test_platform::install();
     test_cache::load(
         test_cache::LoadArgs {
             roots: roots.into(),
@@ -119,7 +79,7 @@ pub(crate) fn load_resources_skip_lang(
 
 /// Private, uncached [`load_resources`] for tests that mutate `Resources` or test distinct loads.
 #[allow(clippy::too_many_arguments)]
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(crate) fn load_resources_uncached(
     roots: impl Into<packs::PackRoots>,
     additional_data: Vec<Arc<sunrise_level::datapack::DataPack>>,
@@ -132,6 +92,7 @@ pub(crate) fn load_resources_uncached(
     progress: &Progress,
     publish: &mut dyn FnMut(UiPublishArg, &std::path::Path),
 ) -> Result<Loaded> {
+    mod_platform::__private::test_platform::install();
     test_cache::load_uncached(
         test_cache::LoadArgs {
             roots: roots.into(),

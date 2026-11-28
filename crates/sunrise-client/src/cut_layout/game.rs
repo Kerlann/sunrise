@@ -3,10 +3,8 @@ pub use crate::game_facade::*;
 pub(crate) use resource_load::load_resources;
 #[cfg(test)]
 pub(crate) use resource_load::load_resources_skip_lang;
-#[cfg(any(test, all(feature = "client", feature = "test-support")))]
+#[cfg(test)]
 pub(crate) use resource_load::load_resources_uncached;
-#[cfg(all(feature = "client", feature = "test-support"))]
-pub(crate) use resource_load::load_resources_with_fixture;
 #[cfg(all(test, feature = "client"))]
 pub(crate) use sunrise_client_gameplay::game::client_side::test_key_codes::{
     drop_held_behind_dialog, gameplay_has_keyboard, glfw_button, glfw_modifiers, keyboard_button,
@@ -884,7 +882,7 @@ pub(crate) use server_side::{
 #[doc(hidden)]
 pub mod transactions;
 
-#[cfg(all(feature = "client", any(test, feature = "test-support")))]
+#[cfg(all(test, feature = "client"))]
 #[path = "game/runtime/resource_load.rs"]
 #[doc(hidden)]
 pub mod resource_load;
