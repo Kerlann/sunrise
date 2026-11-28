@@ -265,7 +265,7 @@ pub fn offsets(m: &Mob, partial: f32) -> [[f64; 3]; COPIES] {
     if il.ticks <= 0 {
         return il.offsets[1];
     }
-    let scale = (f64::from(il.ticks as f32 - partial) / 3.0).powf(0.25);
+    let scale = sunrise_core::jmath::pow(f64::from((il.ticks as f32 - partial) / 3.0), 0.25);
     let mut out = [[0.0; 3]; COPIES];
     for (i, o) in out.iter_mut().enumerate() {
         for k in 0..3 {
@@ -275,14 +275,25 @@ pub fn offsets(m: &Mob, partial: f32) -> [[f64; 3]; COPIES] {
     out
 }
 
-/// The wobble `IllusionerRenderer.submit` adds to each image.
+/// The wobble `IllusionerRenderer.submit` adds to each image (`Mth.cos` quantized table).
 pub fn wobble(i: usize, age: f32) -> [f64; 3] {
     let i = i as f32;
     [
-        f64::from((i + age * 0.5).cos()) * 0.025,
-        f64::from((i + age * 0.75).cos()) * 0.0125,
-        f64::from((i + age * 0.7).cos()) * 0.025,
+        f64::from(sunrise_core::geometry::trig::cos(f64::from(i + age * 0.5))) * 0.025,
+        f64::from(sunrise_core::geometry::trig::cos(f64::from(i + age * 0.75))) * 0.0125,
+        f64::from(sunrise_core::geometry::trig::cos(f64::from(i + age * 0.7))) * 0.025,
     ]
+}
+
+/// Total mirror-image offsets (`Illusioner.getIllusionOffsets` plus `IllusionerRenderer.submit`
+/// wobble), shared between the body model and held/head item passes.
+pub fn mirror_offsets(m: &Mob, partial: f32) -> [[f64; 3]; COPIES] {
+    let age = m.age as f32 + partial;
+    let base = offsets(m, partial);
+    std::array::from_fn(|i| {
+        let w = wobble(i, age);
+        [base[i][0] + w[0], base[i][1] + w[1], base[i][2] + w[2]]
+    })
 }
 
 #[cfg(test)]
@@ -301,6 +312,103 @@ mod tests {
     #[test]
     fn wobble_is_small() {
         assert!(wobble(1, 10.0).iter().all(|c| c.abs() <= 0.025));
+    }
+
+    /// Independent 26.3 bytecode expectations: `IllusionerRenderer.submit` uses quantized
+    /// `Mth.cos(double)` for wobble and `Illusioner.getIllusionOffsets` divides `(ticks - partial)`
+    /// by `3.0f` in `f32` before widening to `f64` for `Math.pow(..., 0.25)`.
+    #[test]
+    fn wobble_and_offsets_match_vanilla_26_3_math() {
+        let want_wobble: [[u64; 3]; COPIES] = [
+            [
+                0x3f98_1e83_cccc_cccd,
+                0xbf86_4f29_4ccc_cccd,
+                0xbf99_5028_0000_0000,
+            ],
+            [
+                0x3f77_3fda_1999_999a,
+                0xbf47_c8bf_e666_6667,
+                0xbf90_e43c_b333_3333,
+            ],
+            [
+                0xbf91_d6f9_9999_999a,
+                0x3f84_b39b_e666_6667,
+                0x3f7c_3cc8_3333_3334,
+            ],
+            [
+                0xbf99_16b9_4ccc_cccd,
+                0x3f87_db6c_b333_3334,
+                0x3f98_8536_1999_999a,
+            ],
+        ];
+        for (i, want_bits) in want_wobble.into_iter().enumerate() {
+            let got = wobble(i, 13.25);
+            assert_eq!(got.map(f64::to_bits), want_bits, "wobble copy {i}");
+        }
+        // Regression guard against libm `f32::cos`: copy 0 at age 13.25 differs visibly.
+        let libm_x = f64::from((13.25_f32 * 0.5_f32).cos()) * 0.025;
+        assert_ne!(wobble(0, 13.25)[0].to_bits(), libm_x.to_bits());
+
+        let mob_type = std::sync::Arc::new(crate::mobs::MobType {
+            type_key: Default::default(),
+            id: "minecraft:illusioner".into(),
+            species: crate::mobs::Species::Illusioner,
+            width: 0.6,
+            height: 1.95,
+            eye_height: 1.62,
+            category: "monster".into(),
+            max_health: 32.0,
+            speed: 0.5,
+            flying_speed: 0.0,
+            attack_damage: 0.0,
+            attack_knockback: 0.0,
+            follow_range: 18.0,
+            step_height: 0.6,
+            armor: 0.0,
+            armor_toughness: 0.0,
+            knockback_resistance: 0.0,
+            jump_strength: 0.42,
+            attributes: std::sync::Arc::default(),
+            item_stack_limits: std::sync::Arc::default(),
+            attribute_bounds: Default::default(),
+            gravity: 0.08,
+            safe_fall_distance: 3.0,
+            fall_damage_multiplier: 1.0,
+            water_efficiency: 0.0,
+            water_slowdown: 0.8,
+            air_speed: 0.02,
+            baby_scale: 0.5,
+            head_rot_speed: 10.0,
+            max_head_x_rot: 40.0,
+            max_head_y_rot: 75.0,
+            ambient_interval: 120,
+            flags: crate::mobs::Flags::default(),
+            brain: crate::mobs::Brain::Passive,
+            anim: crate::mobs::Anim::Illager,
+            sounds: [""; 3],
+            sound_overrides: Default::default(),
+            food: Default::default(),
+            tempt: Default::default(),
+            passenger_attachments: Vec::new(),
+        });
+        let mut mob = Mob::new(1, mob_type, sunrise_core::geometry::Vec3::ZERO, 0.0);
+        mob.age = 13;
+        mob.extra.illusions = Some(Illusions {
+            ticks: 2,
+            offsets: [[[1.0, 0.0, 0.0]; COPIES], [[0.0, 0.0, 0.0]; COPIES]],
+        });
+        let scale_bits = offsets(&mob, 0.35)[0][0].to_bits();
+        assert_eq!(scale_bits, 0x3feb_8ebb_cced_4ae9);
+        let combined = mirror_offsets(&mob, 0.25);
+        for (i, want_bits) in want_wobble.into_iter().enumerate() {
+            let base = offsets(&mob, 0.25)[i];
+            let w = want_bits.map(f64::from_bits);
+            assert_eq!(
+                combined[i],
+                [base[0] + w[0], base[1] + w[1], base[2] + w[2]],
+                "mirror_offsets copy {i}"
+            );
+        }
     }
 
     /// `SpellcasterIllager.customServerAiStep` counts a cast down once a

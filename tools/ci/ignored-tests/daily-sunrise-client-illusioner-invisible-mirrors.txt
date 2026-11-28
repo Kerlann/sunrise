@@ -1,0 +1,2 @@
+# Invisible illusioner mirror-image rendering through ClientGame::mob_geometry (#6915).
+sunrise-client cut_layout::game::creatures::spectator_view_tests::an_invisible_illusioner_draws_four_mirrors_for_an_ordinary_player lib daily resources

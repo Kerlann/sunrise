@@ -1833,16 +1833,9 @@ pub fn render_with_frame(
     // an illusioner shows its four mirror images instead.
     if m.is_invisible() {
         if m.species() == Species::Illusioner {
-            let age = m.age as f32 + alpha;
-            let bases = super::illusioner::offsets(m, alpha)
+            let bases = super::illusioner::mirror_offsets(m, alpha)
                 .into_iter()
-                .enumerate()
-                .map(|(i, off)| {
-                    let w = super::illusioner::wobble(i, age);
-                    let shifted =
-                        camera - glam::DVec3::new(off[0] + w[0], off[1] + w[1], off[2] + w[2]);
-                    base_transform(m, alpha, shifted)
-                });
+                .map(|off| base_transform(m, alpha, camera - glam::DVec3::from_array(off)));
             render_visible(
                 m,
                 alpha,

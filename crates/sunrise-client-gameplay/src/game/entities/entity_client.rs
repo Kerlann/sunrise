@@ -61,8 +61,14 @@ pub(in crate::game) fn mob_render_bounds(
         ));
     }
 
-    let horizontal = (width * 2.0).max(height * 1.5).max(3.5);
-    let vertical = height * 3.0 + 0.5;
+    let mut horizontal = (width * 2.0).max(height * 1.5).max(3.5);
+    let mut vertical = height * 3.0 + 0.5;
+    if mob.species() == Species::Illusioner && mob.is_invisible() {
+        // Mirror images offset up to 3 blocks in X/Z (+ 0.025 wobble) and up to 1 block
+        // in +Y (+ 0.0125 wobble), independent of `minecraft:scale`.
+        horizontal += 3.05;
+        vertical += 1.05;
+    }
     Some(Aabb::new(
         at.subtract(Vec3::new(horizontal, vertical, horizontal)),
         at.add_vector(Vec3::new(horizontal, vertical, horizontal)),
