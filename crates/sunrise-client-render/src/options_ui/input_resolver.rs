@@ -7,6 +7,9 @@ use super::*;
 pub(super) struct ActivePointerTarget {
     pub(super) page_key: u64,
     pub(super) key: crate::widgets::EngineWidgetKey,
+    pub(super) original_rect: [f32; 4],
+    pub(super) default_active: bool,
+    pub(super) size: (f32, f32),
     pub(super) right: bool,
 }
 
@@ -89,16 +92,16 @@ impl OptionsUi {
         collected
     }
 
-    /// Single fresh lookup shared by click, drag, and release: collects the current page's live
-    /// widgets and partitions them into eligible `(key, original_rect, resolved_rect)` entries and
-    /// blocked original hitboxes.
+    /// Single fresh lookup shared by press, resize-fallback drag, and release: collects the current
+    /// page's live widgets and partitions them into eligible
+    /// `(key, original_rect, resolved_rect, default_active)` entries and blocked original hitboxes.
     fn resolve_page_widgets(
         &mut self,
         s: &Settings,
         atlas: &HudAtlas,
         size: (f32, f32),
     ) -> (
-        Vec<(crate::widgets::EngineWidgetKey, [f32; 4], [f32; 4])>,
+        Vec<(crate::widgets::EngineWidgetKey, [f32; 4], [f32; 4], bool)>,
         Vec<[f32; 4]>,
     ) {
         let collected = self.collect_page_widgets(s, atlas, size);
@@ -110,7 +113,7 @@ impl OptionsUi {
                     if resolved != item.rect {
                         blocked_originals.push(item.rect);
                     }
-                    eligible.push((item.key, item.rect, resolved));
+                    eligible.push((item.key, item.rect, resolved, item.active));
                 }
                 None => {
                     blocked_originals.push(item.rect);
@@ -134,8 +137,8 @@ impl OptionsUi {
         let (eligible, _) = self.resolve_page_widgets(s, atlas, size);
         eligible
             .into_iter()
-            .find(|(key, _, _)| *key == target.key)
-            .map(|(_, orig, res)| (orig, res))
+            .find(|(key, _, _, _)| *key == target.key)
+            .map(|(_, orig, res, _)| (orig, res))
     }
 
     /// Resolve a pointer press at `(x, y)` against the current page's live layout and overrides.
@@ -153,16 +156,16 @@ impl OptionsUi {
         let hit = eligible
             .iter()
             .rev()
-            .find(|(_, orig, res)| {
+            .find(|(_, orig, res, _)| {
                 res != orig && ui::hovered((x, y), res[0], res[1], res[2], res[3])
             })
             .or_else(|| {
                 eligible
                     .iter()
                     .rev()
-                    .find(|(_, _, res)| ui::hovered((x, y), res[0], res[1], res[2], res[3]))
+                    .find(|(_, _, res, _)| ui::hovered((x, y), res[0], res[1], res[2], res[3]))
             });
-        if let Some((key, original_rect, resolved_rect)) = hit {
+        if let Some((key, original_rect, resolved_rect, default_active)) = hit {
             let mapped = if resolved_rect != original_rect {
                 map_rect_point((x, y), *resolved_rect, *original_rect)
             } else {
@@ -172,6 +175,9 @@ impl OptionsUi {
                 target: ActivePointerTarget {
                     page_key: self.sub_page_key(),
                     key: key.clone(),
+                    original_rect: *original_rect,
+                    default_active: *default_active,
+                    size,
                     right,
                 },
                 mapped,
@@ -220,13 +226,20 @@ impl OptionsUi {
             return None;
         }
         let target = self.active_pointer.clone()?;
-        if target.right != right {
+        if target.right != right || target.page_key != self.sub_page_key() {
             self.cancel_active_drag();
             return Some((false, Vec::new()));
         }
-        let Some((original_rect, resolved_rect)) =
+        let geom = if target.size == size {
+            crate::widgets::resolve_captured_engine_key_drag(
+                &target.key,
+                target.original_rect,
+                target.default_active,
+            )
+        } else {
             self.lookup_active_pointer(s, atlas, size, &target)
-        else {
+        };
+        let Some((original_rect, resolved_rect)) = geom else {
             self.cancel_active_drag();
             return Some((false, Vec::new()));
         };

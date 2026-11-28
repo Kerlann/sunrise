@@ -237,7 +237,7 @@ impl crate::game::ClientGame<'_> {
             return true;
         }
         if self.is_redirecting_engine_click() {
-            return self.station_click(right);
+            return self.station_widget_click(right);
         }
         let (slot, outside) = self.inventory_target();
         // mouseClicked: `lastClickSlot = slot` for every press that reaches

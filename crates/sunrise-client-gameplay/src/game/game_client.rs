@@ -5214,7 +5214,8 @@ impl crate::game::ClientGame<'_> {
                 self.sign_edit_click(size)
             });
         }
-        if matches!(self.client.screen, Screen::Inventory | Screen::Creative)
+        if !self.is_redirecting_engine_click()
+            && matches!(self.client.screen, Screen::Inventory | Screen::Creative)
             && let Some(key) = self
                 .client
                 .settings
@@ -5227,7 +5228,7 @@ impl crate::game::ClientGame<'_> {
             // Neither edge of a bound button is an ordinary slot click.
             return Ok(true);
         }
-        if pressed && self.sort_mouse_press(button) {
+        if !self.is_redirecting_engine_click() && pressed && self.sort_mouse_press(button) {
             return Ok(true);
         }
         // AbstractContainerScreen.mouseClicked (also Creative's fallback) handles

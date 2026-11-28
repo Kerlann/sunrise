@@ -102,7 +102,7 @@ impl crate::game::ClientGame<'_> {
     /// `KeyboardHandler`'s F3+F6: closes the screen if it is open, else opens
     /// it over whatever screen yields (`canInterruptScreen`), closing that
     /// screen first.
-    pub(in crate::game::client_side) fn toggle_debug_options(&mut self) {
+    pub fn toggle_debug_options(&mut self) {
         if self.client.screen == Screen::DebugOptions {
             self.close_debug_options();
             return;
@@ -146,7 +146,7 @@ impl crate::game::ClientGame<'_> {
         }
     }
     /// `Screen.onClose`: back to the title when no level is open, otherwise the game.
-    pub(in crate::game::client_side) fn close_debug_options(&mut self) {
+    pub fn close_debug_options(&mut self) {
         self.client.debug_options = None;
         self.set_screen(Screen::Playing);
         self.capture(self.client.title.0.is_none());
@@ -387,24 +387,33 @@ impl crate::game::ClientGame<'_> {
         let rows = rows(&self.client.registered_debug_entries.0, &s.search.value);
         let left = row_left(w);
         // A press on the scrollbar holds it and clicks nothing else.
-        if s.scroll.press(
-            self.client.cursor,
-            left + ROW_WIDTH + 8.0,
-            top,
-            bottom,
-            content_height(rows.len()),
-        ) {
+        if !sunrise_client::widgets::has_selected_engine_widget()
+            && s.scroll.press(
+                self.client.cursor,
+                left + ROW_WIDTH + 8.0,
+                top,
+                bottom,
+                content_height(rows.len()),
+            )
+        {
             self.client.debug_options = Some(s);
             return true;
         }
         let shift = self.has_shift_down();
-        s.search.focused = ui::hovered(
-            self.client.cursor,
-            s.search.x,
-            s.search.y,
-            s.search.width,
-            s.search.height,
+        let search_allowed = sunrise_client::widgets::matches_selected_engine_widget(
+            sunrise_client::widgets::WidgetBucket::Field,
+            None,
+            None,
+            0,
         );
+        s.search.focused = search_allowed
+            && ui::hovered(
+                self.client.cursor,
+                s.search.x,
+                s.search.y,
+                s.search.width,
+                s.search.height,
+            );
         if s.search.focused {
             s.search
                 .click(&self.client.gui.atlas, self.client.cursor.0, shift, false);
@@ -412,12 +421,30 @@ impl crate::game::ClientGame<'_> {
         let inside = self.client.cursor.1 >= top && self.client.cursor.1 < bottom;
         let mut clicked = None;
         if inside {
+            let mut occ = [0u32; 3];
             for (i, row) in rows.iter().enumerate() {
+                let y = top + 2.0 - s.scroll.amount.trunc() + i as f32 * ITEM;
+                if y + ITEM < top || y > bottom {
+                    continue;
+                }
                 let Row::Option(entry) = row else { continue };
-                let cy = top + 2.0 - s.scroll.amount.trunc() + i as f32 * ITEM + 2.0;
+                let cy = y + 2.0;
                 let status = self.client.debug_entries.0.status(entry.path);
-                for ((status_of, _, _), x) in BUTTONS.into_iter().zip(button_xs(left + 2.0)) {
-                    if status != status_of && ui::hovered(self.client.cursor, x, cy, BUTTON, 16.0) {
+                for (b, ((status_of, key, _), x)) in
+                    BUTTONS.into_iter().zip(button_xs(left + 2.0)).enumerate()
+                {
+                    let cur_occ = occ[b];
+                    occ[b] += 1;
+                    let label = Text::translate(key, &[]);
+                    if status != status_of
+                        && ui::hovered(self.client.cursor, x, cy, BUTTON, 16.0)
+                        && sunrise_client::widgets::matches_selected_engine_widget(
+                            sunrise_client::widgets::WidgetBucket::Button,
+                            Some(&label),
+                            None,
+                            cur_occ,
+                        )
+                    {
                         clicked = Some((entry.path.to_owned(), status_of));
                     }
                 }
@@ -432,9 +459,21 @@ impl crate::game::ClientGame<'_> {
             return true;
         }
         let (xs, fy) = footer(w, h);
-        let Some(i) =
-            (0..4).find(|&i| ui::hovered(self.client.cursor, xs[i], fy, FOOTER_BUTTONS[i], 20.0))
-        else {
+        let footer_labels = [
+            Text::translate(Profile::Default.translation_key(), &[]),
+            Text::translate(Profile::Performance.translation_key(), &[]),
+            self.debug_gui_scale_label(),
+            Text::translate("gui.done", &[]),
+        ];
+        let Some(i) = (0..4).find(|&i| {
+            ui::hovered(self.client.cursor, xs[i], fy, FOOTER_BUTTONS[i], 20.0)
+                && sunrise_client::widgets::matches_selected_engine_widget(
+                    sunrise_client::widgets::WidgetBucket::Button,
+                    Some(&footer_labels[i]),
+                    None,
+                    0,
+                )
+        }) else {
             return search;
         };
         match i {

@@ -3706,6 +3706,119 @@ fn press_id_and_mutating_widgets_from_screen_input_hooks_and_lazy_discovery() {
                 "press(id) must return false when the click does not reach the Inventory widget"
             );
 
+            // `press(id)` on a station screen (Crafting Table) must also return false when no
+            // station widget takes the click (never true from station_click's slot-miss fallback).
+            game.open_station_client(
+                sunrise_gameplay_common::game::stations_common::Station::new_kind(
+                    sunrise_gameplay_common::game::stations_common::Kind::Crafting,
+                    [0, 64, 0],
+                ),
+            );
+            game.common.level.recipe_book.open = [true; 4];
+            game.observe_screen();
+            let station_filter_id = {
+                let widgets = game.screen_widgets().unwrap();
+                widgets
+                    .children()
+                    .iter()
+                    .find(|c| {
+                        c.message.as_ref() == Some(&filter_all)
+                            || c.message.as_ref() == Some(&filter_craftable)
+                    })
+                    .expect("Crafting station exposes open RecipeBookComponent filter button")
+                    .id
+            };
+            game.common.level.recipe_book.open = [false; 4];
+            assert!(
+                !game.screen_widgets().unwrap().press(station_filter_id),
+                "press(id) on a station must return false when no widget takes the click"
+            );
+
+            // Non-Options route: moving a widget on DebugOptions over Done routes clicks
+            // exclusively to the moved widget, and a mismatched-button release does not steal
+            // the captured target's ownership.
+            game.toggle_debug_options();
+            game.observe_screen();
+            assert_eq!(game.client.screen, Screen::DebugOptions);
+            let perf_msg = ApiText::translate("debug.options.profile.performance", vec![]);
+            let default_msg = ApiText::translate("debug.options.profile.default", vec![]);
+            let done_msg = ApiText::translate("gui.done", vec![]);
+            let (perf_id, default_id, done_rect) = {
+                let widgets = game.screen_widgets().unwrap();
+                let children = widgets.children();
+                let perf = children
+                    .iter()
+                    .find(|c| c.message.as_ref() == Some(&perf_msg))
+                    .expect("DebugOptions exposes Performance profile button")
+                    .id;
+                let default_btn = children
+                    .iter()
+                    .find(|c| c.message.as_ref() == Some(&default_msg))
+                    .expect("DebugOptions exposes Default profile button")
+                    .id;
+                let done = children
+                    .iter()
+                    .find(|c| c.message.as_ref() == Some(&done_msg))
+                    .expect("DebugOptions exposes Done button")
+                    .rect;
+                (perf, default_btn, done)
+            };
+            assert!(
+                game.screen_widgets()
+                    .unwrap()
+                    .set_bounds(perf_id, done_rect)
+            );
+            let _ = game.hud_layers([640, 480]);
+            sunrise_client::widgets::end_frame(52_006);
+            assert!(
+                !game
+                    .client
+                    .debug_entries
+                    .0
+                    .is_using_profile(sunrise_client::debug_entries::Profile::Performance)
+            );
+            move_mouse(
+                game,
+                win_id,
+                f64::from(done_rect[0] + done_rect[2] * 0.5),
+                f64::from(done_rect[1] + done_rect[3] * 0.5),
+            );
+            send_mouse_button(game, win_id, MouseButton::Left, true);
+            assert!(
+                game.client
+                    .debug_entries
+                    .0
+                    .is_using_profile(sunrise_client::debug_entries::Profile::Performance),
+                "moved Performance button over Done must receive the press"
+            );
+            assert_eq!(
+                game.client.screen,
+                Screen::DebugOptions,
+                "Done button underneath moved widget on DebugOptions must not close the screen"
+            );
+            // A mismatched-button release must not take or clear Left's active captured target.
+            assert_eq!(
+                game.client.screen_state.0.widgets.active_redirect_button(),
+                Some(0),
+                "Left press must keep active_redirect owned by button 0"
+            );
+            send_mouse_button(game, win_id, MouseButton::Right, false);
+            assert_eq!(
+                game.client.screen_state.0.widgets.active_redirect_button(),
+                Some(0),
+                "Right release must not take Left's captured target"
+            );
+            send_mouse_button(game, win_id, MouseButton::Left, false);
+            assert_eq!(
+                game.client.screen_state.0.widgets.active_redirect_button(),
+                None,
+                "Left release must release Left's captured target"
+            );
+            // Restore Default profile via press(default_id) before moving on to Options.
+            assert!(game.screen_widgets().unwrap().press(default_id));
+            game.close_debug_options();
+            game.observe_screen();
+
             // Moving an engine slider over another engine button routes press, drag, and release
             // exclusively to the moved slider; the button underneath receives none.
             game.open_options(false);
@@ -3736,7 +3849,7 @@ fn press_id_and_mutating_widgets_from_screen_input_hooks_and_lazy_discovery() {
                     .set_bounds(fov_id, online_rect)
             );
             let _ = game.hud_layers([640, 480]);
-            sunrise_client::widgets::end_frame(52_006);
+            sunrise_client::widgets::end_frame(52_007);
             game.client.settings.fov = 70.0;
             move_mouse(
                 game,

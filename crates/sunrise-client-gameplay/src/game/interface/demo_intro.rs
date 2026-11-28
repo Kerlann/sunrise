@@ -193,15 +193,26 @@ impl crate::game::ClientGame<'_> {
         };
         let (w, h) = self.gui_size();
         let layout = intro.layout(&self.client.gui.atlas, w, h);
-        let Some(button) = layout.button_x.into_iter().position(|x| {
-            ui::hovered(
-                self.client.cursor,
-                x,
-                layout.button_y,
-                BUTTON_WIDTH,
-                BUTTON_HEIGHT,
-            )
-        }) else {
+        let Some(button) =
+            layout
+                .button_x
+                .into_iter()
+                .zip(&intro.buttons)
+                .position(|(x, label)| {
+                    ui::hovered(
+                        self.client.cursor,
+                        x,
+                        layout.button_y,
+                        BUTTON_WIDTH,
+                        BUTTON_HEIGHT,
+                    ) && sunrise_client::widgets::matches_selected_engine_widget(
+                        sunrise_client::widgets::WidgetBucket::Button,
+                        Some(label),
+                        None,
+                        0,
+                    )
+                })
+        else {
             return false;
         };
         self.play_audio_button_click();

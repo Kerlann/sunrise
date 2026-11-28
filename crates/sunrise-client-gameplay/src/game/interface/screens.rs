@@ -992,7 +992,9 @@ impl crate::game::ClientGame<'_> {
         }
         // DeathScreen.mouseClicked first looks for a click event on the
         // cause line: an open_url link goes through the chat link flow.
-        if let Some(cause) = &self.client.chat_ui.death_text {
+        if !sunrise_client::widgets::has_selected_engine_widget()
+            && let Some(cause) = &self.client.chat_ui.death_text
+        {
             let atlas = &self.client.gui.atlas;
             let mid = self.gui_size().0;
             if let Some(text::Style {
@@ -1017,7 +1019,15 @@ impl crate::game::ClientGame<'_> {
         let b = HudBatch::new(size, self.client.settings.gui_scale_inputs());
         let hit = death_buttons(b.width, b.height, self.common.level.hardcore)
             .into_iter()
-            .find(|d| ui::hovered(self.client.cursor, d.0, d.1, 200.0, 20.0))
+            .find(|d| {
+                ui::hovered(self.client.cursor, d.0, d.1, 200.0, 20.0)
+                    && sunrise_client::widgets::matches_selected_engine_widget(
+                        sunrise_client::widgets::WidgetBucket::Button,
+                        Some(&Text::translate(d.2, &[])),
+                        None,
+                        0,
+                    )
+            })
             .map(|d| d.3);
         if let Some(id) = hit {
             self.client.death_focus = Some(id);

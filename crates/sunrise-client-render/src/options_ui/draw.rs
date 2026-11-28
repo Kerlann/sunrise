@@ -122,13 +122,12 @@ impl OptionsUi {
                 let draws = if page == Page::Mods {
                     if let Some(screen) = self
                         .mods_screen
-                        .as_mut()
+                        .as_ref()
                         .filter(|p| p.width == iw && p.height == ih)
                     {
                         screen.draw(&m, mouse, blink, crate::hud_overlays::now_ms())
                     } else {
-                        let mut screen =
-                            crate::mods_screen::ModsScreen::new(iw, ih, in_world, &s.mods);
+                        let screen = crate::mods_screen::ModsScreen::new(iw, ih, in_world, &s.mods);
                         screen.draw(&m, mouse, blink, crate::hud_overlays::now_ms())
                     }
                 } else if let Some(screen) = self
@@ -206,7 +205,7 @@ impl OptionsUi {
                 let m = crate::screen_draw::Measure(&atlas.font);
                 let mouse = (cursor.0.floor() as i32, cursor.1.floor() as i32);
                 let draws = if matches!(kind, FrameDraw::Mods) {
-                    let screen = self.mods_page(s, size);
+                    let screen = self.mods_page(s, atlas, size);
                     let mut draws = screen.draw(&m, mouse, blink, crate::hud_overlays::now_ms());
                     screen.bind_icons(&mut draws, atlas, &mut batch.patches);
                     draws

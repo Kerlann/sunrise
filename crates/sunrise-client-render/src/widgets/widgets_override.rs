@@ -191,6 +191,7 @@ thread_local! {
     static COLLECTOR: RefCell<Option<CollectorState>> = const { RefCell::new(None) };
     static ACTIVE_OVERRIDES: RefCell<Option<ActiveOverridePass>> = const { RefCell::new(None) };
     static INPUT_OVERRIDES: RefCell<Option<EngineOverrideMaps>> = const { RefCell::new(None) };
+    static INPUT_HITS: RefCell<Option<Vec<EngineHitEntry>>> = const { RefCell::new(None) };
     static SELECTED_ENGINE_WIDGET: RefCell<Option<EngineWidgetKey>> = const { RefCell::new(None) };
     static LAST_TARGET_META: RefCell<Option<(EngineWidgetKey, i32)>> = const { RefCell::new(None) };
 }
@@ -263,9 +264,71 @@ pub fn with_input_overrides<R>(maps: &mut EngineOverrideMaps, f: impl FnOnce() -
     f()
 }
 
+/// Run `f` with `maps` and reconciled `hits` exposed for input override resolution and captured
+/// drag geometry lookup, unconditionally restoring both on normal return or unwind.
+pub fn with_input_overrides_and_hits<R>(
+    maps: &mut EngineOverrideMaps,
+    hits: &mut Vec<EngineHitEntry>,
+    f: impl FnOnce() -> R,
+) -> R {
+    struct Guard<'a> {
+        dest_maps: &'a mut EngineOverrideMaps,
+        dest_hits: &'a mut Vec<EngineHitEntry>,
+        prev_has: bool,
+        prev_maps: Option<EngineOverrideMaps>,
+        prev_hits: Option<Vec<EngineHitEntry>>,
+    }
+    impl Drop for Guard<'_> {
+        fn drop(&mut self) {
+            HAS_INPUT_OVERRIDES.set(self.prev_has);
+            if let Some(current) = INPUT_OVERRIDES.replace(self.prev_maps.take()) {
+                *self.dest_maps = current;
+            }
+            if let Some(current) = INPUT_HITS.replace(self.prev_hits.take()) {
+                *self.dest_hits = current;
+            }
+        }
+    }
+    let taken_maps = std::mem::take(maps);
+    let taken_hits = std::mem::take(hits);
+    let _guard = Guard {
+        dest_maps: maps,
+        dest_hits: hits,
+        prev_has: HAS_INPUT_OVERRIDES.replace(true),
+        prev_maps: INPUT_OVERRIDES.replace(Some(taken_maps)),
+        prev_hits: INPUT_HITS.replace(Some(taken_hits)),
+    };
+    f()
+}
+
 /// Whether input overrides (`with_input_overrides`) are active on this thread.
 pub fn has_input_overrides() -> bool {
     HAS_INPUT_OVERRIDES.get()
+}
+
+/// Whether a single engine widget is currently selected for exclusive input delivery via
+/// [`with_selected_engine_widget`].
+pub fn has_selected_engine_widget() -> bool {
+    SELECTED_ENGINE_WIDGET.with_borrow(Option::is_some)
+}
+
+/// Resolve a captured drag target's `(original_rect, resolved_rect)` directly from the active
+/// screen's reconciled [`EngineHitEntry`] table (when installed by gameplay) and live
+/// `INPUT_OVERRIDES`, without re-collecting or redrawing the screen.
+pub fn resolve_captured_engine_key_drag(
+    key: &EngineWidgetKey,
+    fallback_rect: [f32; 4],
+    fallback_active: bool,
+) -> Option<([f32; 4], [f32; 4])> {
+    let original_rect = INPUT_HITS.with_borrow(|slot| match slot.as_ref() {
+        Some(hits) if !hits.is_empty() => hits
+            .iter()
+            .find(|hit| &hit.key == key)
+            .map(|hit| hit.original_rect),
+        _ => Some(fallback_rect),
+    })?;
+    let resolved_rect = resolve_engine_key_input(key, original_rect, fallback_active)?;
+    Some((original_rect, resolved_rect))
 }
 
 /// Restrict engine widget input dispatch within `f` to the single widget identified by `key`,

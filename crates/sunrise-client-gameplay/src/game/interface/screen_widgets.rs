@@ -63,6 +63,7 @@ pub(in crate::game) enum EngineClickRoute {
 #[derive(Clone, Debug)]
 pub(in crate::game) struct ActiveEngineTarget {
     pub(in crate::game) key: widgets::EngineWidgetKey,
+    pub(in crate::game) button: i32,
     pub(in crate::game) redirect: Option<([f32; 4], [f32; 4])>,
 }
 
@@ -162,6 +163,15 @@ impl MountedScreenWidgets {
     #[cfg(any(test, feature = "test-support"))]
     pub fn dragging(&self) -> Option<(usize, i32)> {
         self.inner.borrow().dragging
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn active_redirect_button(&self) -> Option<i32> {
+        self.inner
+            .borrow()
+            .active_redirect
+            .as_ref()
+            .map(|t| t.button)
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -1484,22 +1494,38 @@ impl crate::game::ClientGame<'_> {
         EngineClickRoute::PassThrough
     }
 
-    /// Run an input handler with a snapshot of the active screen's `EngineOverrideMaps` exposed
-    /// via `widgets::resolve_engine_input`.
+    /// Run an input handler with the active screen's `EngineOverrideMaps` and reconciled
+    /// `engine_hits` exposed via `widgets::with_input_overrides_and_hits` without cloning either.
     pub(in crate::game) fn with_screen_input_overrides<R>(
         &mut self,
         f: impl FnOnce(&mut Self) -> R,
     ) -> R {
-        let maps = {
-            let inner = self.client.screen_state.0.widgets.inner.borrow();
-            inner
-                .overrides_active
-                .then(|| inner.engine_overrides.clone())
-        };
-        let Some(mut maps) = maps else {
+        let active = self
+            .client
+            .screen_state
+            .0
+            .widgets
+            .inner
+            .borrow()
+            .overrides_active;
+        if !active || widgets::has_input_overrides() {
             return f(self);
+        }
+        let generation = self.client.screen_state.0.widgets.generation();
+        let (mut maps, mut hits) = {
+            let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+            (
+                std::mem::take(&mut inner.engine_overrides),
+                std::mem::take(&mut inner.engine_hits),
+            )
         };
-        widgets::with_input_overrides(&mut maps, || f(self))
+        let result = widgets::with_input_overrides_and_hits(&mut maps, &mut hits, || f(self));
+        if self.client.screen_state.0.widgets.generation() == generation {
+            let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+            inner.engine_overrides = maps;
+            inner.engine_hits = hits;
+        }
+        result
     }
 
     fn map_redirect_cursor(
@@ -1548,23 +1574,57 @@ impl crate::game::ClientGame<'_> {
                 game.screen_drag_response(overlay, button, framebuffer, gui)
             });
         }
-        let target = self
-            .client
-            .screen_state
-            .0
-            .widgets
-            .inner
-            .borrow()
-            .active_redirect
-            .clone();
-        if let Some(target) = target {
-            self.dispatch_selected_engine_target(&target, |game| {
+        let code = crate::game::client_side::key_codes::glfw_button(button);
+        let direct_override_screen = self.title_input_active()
+            || (self.observed_overlay_now().is_none()
+                && self.client.screen == super::Screen::Paused
+                && self.client.pause_menu);
+        enum DragTarget {
+            None,
+            WrongButton,
+            Ineligible,
+            Ready(ActiveEngineTarget),
+        }
+        let drag_target = {
+            let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+            match inner.active_redirect.as_ref() {
+                None => DragTarget::None,
+                Some(t) if t.button != code => DragTarget::WrongButton,
+                Some(t) => {
+                    if !inner.overrides_active {
+                        DragTarget::Ready(t.clone())
+                    } else if inner.engine_overrides.suppress_all {
+                        inner.active_redirect = None;
+                        DragTarget::Ineligible
+                    } else if let Some(hit) = inner.engine_hits.iter().find(|h| h.key == t.key) {
+                        if !hit.interactive {
+                            inner.active_redirect = None;
+                            DragTarget::Ineligible
+                        } else {
+                            let redirect = (!direct_override_screen
+                                && hit.resolved_rect != hit.original_rect)
+                                .then_some((hit.resolved_rect, hit.original_rect));
+                            DragTarget::Ready(ActiveEngineTarget {
+                                key: t.key.clone(),
+                                button: t.button,
+                                redirect,
+                            })
+                        }
+                    } else {
+                        inner.active_redirect = None;
+                        DragTarget::Ineligible
+                    }
+                }
+            }
+        };
+        match drag_target {
+            DragTarget::WrongButton | DragTarget::Ineligible => Ok(false),
+            DragTarget::Ready(target) => self.dispatch_selected_engine_target(&target, |game| {
                 game.screen_drag_response(overlay, button, framebuffer, gui)
-            })
-        } else {
-            self.with_screen_input_overrides(|game| {
+            }),
+            DragTarget::None => self.with_screen_input_overrides(|game| {
                 game.screen_drag_response(overlay, button, framebuffer, gui)
-            })
+            }),
         }
     }
 
@@ -1598,15 +1658,18 @@ impl crate::game::ClientGame<'_> {
             return res;
         }
         if !pressed {
-            let target = self
-                .client
-                .screen_state
-                .0
-                .widgets
-                .inner
-                .borrow_mut()
-                .active_redirect
-                .take();
+            let target = {
+                let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
+                if inner
+                    .active_redirect
+                    .as_ref()
+                    .is_some_and(|t| t.button == code)
+                {
+                    inner.active_redirect.take()
+                } else {
+                    None
+                }
+            };
             if let Some(target) = target {
                 return self.dispatch_selected_engine_target(&target, |game| {
                     game.route_screen_button(button, code, false, double_click)
@@ -1682,7 +1745,11 @@ impl crate::game::ClientGame<'_> {
             } => {
                 let redirect = (!direct_override_screen && resolved != original)
                     .then_some((resolved, original));
-                let target = ActiveEngineTarget { key, redirect };
+                let target = ActiveEngineTarget {
+                    key,
+                    button: code,
+                    redirect,
+                };
                 self.client
                     .screen_state
                     .0

@@ -396,7 +396,9 @@ impl crate::game::ClientGame<'_> {
         key: KeyCode,
         text: Option<&str>,
     ) -> Result<bool> {
-        self.with_screen_input_overrides(|game| game.options_key_inner(key, text))
+        let handled = self.with_screen_input_overrides(|game| game.options_key_inner(key, text))?;
+        self.refresh_screen_widgets();
+        Ok(handled)
     }
     fn options_key_inner(&mut self, key: KeyCode, text: Option<&str>) -> Result<bool> {
         let size = self.gui_size();
@@ -417,7 +419,6 @@ impl crate::game::ClientGame<'_> {
         );
         self.client.chat_ui.options = ui;
         self.handle_option_events(events)?;
-        self.refresh_screen_widgets();
         Ok(handled)
     }
     pub(in crate::game::client_side) fn options_key_released(

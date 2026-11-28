@@ -3064,7 +3064,12 @@ impl OptionsUi {
             }
         }
         match self.page() {
-            Page::Mods => return (self.mods_page(s, size).drag(f64::from(y)), Vec::new()),
+            Page::Mods => {
+                return (
+                    self.mods_page(s, atlas, size).drag(f64::from(y)),
+                    Vec::new(),
+                );
+            }
             Page::Packs => return (self.packs(atlas, size).drag(f64::from(y)), Vec::new()),
             _ => {}
         }
@@ -3166,7 +3171,7 @@ impl OptionsUi {
                 return (events, false);
             }
             let m = crate::screen_draw::Measure(&atlas.font);
-            let screen = self.mods_page(s, size);
+            let screen = self.mods_page(s, atlas, size);
             let before = screen.search_focused();
             let (action, sound, handled) = screen.click_with_outcome(&m, x as f64, y as f64);
             if !before && screen.search_focused() {
@@ -3762,14 +3767,22 @@ impl OptionsUi {
         vec![Event::Changed]
     }
     /// The Mods screen at this GUI size, made on first use from the installed mods.
-    fn mods_page(&mut self, s: &Settings, size: (f32, f32)) -> &mut crate::mods_screen::ModsScreen {
+    fn mods_page(
+        &mut self,
+        s: &Settings,
+        atlas: &HudAtlas,
+        size: (f32, f32),
+    ) -> &mut crate::mods_screen::ModsScreen {
+        let m = crate::screen_draw::Measure(&atlas.font);
         let (w, h) = (size.0 as i32, size.1 as i32);
         let in_world = self.in_world;
-        let screen = self
-            .mods_screen
-            .get_or_insert_with(|| crate::mods_screen::ModsScreen::new(w, h, in_world, &s.mods));
+        let screen = self.mods_screen.get_or_insert_with(|| {
+            let mut screen = crate::mods_screen::ModsScreen::new(w, h, in_world, &s.mods);
+            screen.update_panel_metrics(&m);
+            screen
+        });
         if screen.width != w || screen.height != h {
-            screen.resize(w, h);
+            screen.resize(&m, w, h);
         }
         screen
     }
@@ -4166,11 +4179,11 @@ impl OptionsUi {
                     return (true, Vec::new());
                 }
                 K::ArrowUp => {
-                    p.step(-1);
+                    p.step(&m, -1);
                     return (true, Vec::new());
                 }
                 K::ArrowDown => {
-                    p.step(1);
+                    p.step(&m, 1);
                     return (true, Vec::new());
                 }
                 _ => {}
@@ -9001,6 +9014,29 @@ mod tests {
             "mods discovery must collect widgets"
         );
         assert!(mods_ui.mods_screen.is_none());
+
+        // 3. Initialized Mods panel: discovery must leave panel metrics and scroll untouched.
+        let size = (batch.width, batch.height);
+        let m = crate::screen_draw::Measure(&atlas.font);
+        let mods_panel = mods_ui.mods_page(&s, &atlas, size);
+        mods_panel.step(&m, 1);
+        let mods_state_before = mods_panel.panel_state();
+        assert!(
+            mods_state_before.0 > 0,
+            "initialized Mods panel must compute metrics during selection update"
+        );
+        let ((), mods_init_collected) = crate::widgets::with_widget_collector(|| {
+            mods_ui.draw_contents(&s, &mut batch, &atlas, (0.0, 0.0));
+        });
+        assert!(
+            !mods_init_collected.is_empty(),
+            "initialized Mods discovery must collect widgets"
+        );
+        assert_eq!(
+            mods_ui.mods_screen.as_ref().unwrap().panel_state(),
+            mods_state_before,
+            "discovery on an initialized Mods panel must not mutate panel metrics or scroll"
+        );
     }
 
     #[test]

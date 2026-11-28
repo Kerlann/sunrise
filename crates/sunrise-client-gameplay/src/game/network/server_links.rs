@@ -313,9 +313,21 @@ impl crate::game::ClientGame<'_> {
         let top = list_top(h, links.len()) - self.client.links_ui.scroll.trunc();
         let inside = self.client.cursor.1 >= HEADER && self.client.cursor.1 < h - FOOTER;
         if inside
-            && let Some(i) = link_buttons(w, top, links.len())
+            && let Some(i) = links
                 .iter()
-                .position(|(x, y)| ui::hovered(self.client.cursor, *x, *y, LINK_WIDTH, 20.0))
+                .zip(link_buttons(w, top, links.len()))
+                .enumerate()
+                .find_map(|(i, (link, (x, y)))| {
+                    let label = link_label(link);
+                    (ui::hovered(self.client.cursor, x, y, LINK_WIDTH, 20.0)
+                        && sunrise_client::widgets::matches_selected_engine_widget(
+                            sunrise_client::widgets::WidgetBucket::Button,
+                            Some(&label),
+                            None,
+                            0,
+                        ))
+                    .then_some(i)
+                })
         {
             self.play_audio_button_click();
             self.click_link(&links[i].link);
@@ -324,13 +336,29 @@ impl crate::game::ClientGame<'_> {
         let title = Text::translate("menu.server_links.title", &[]);
         let tw = self.client.gui.atlas.font.width_text(&title);
         let (wx, wy) = warning_button(w, h, tw);
-        if ui::hovered(self.client.cursor, wx, wy, WARNING_BUTTON, WARNING_BUTTON) {
+        let warn_label = Text::translate("menu.custom_screen_info.button_narration", &[]);
+        if ui::hovered(self.client.cursor, wx, wy, WARNING_BUTTON, WARNING_BUTTON)
+            && sunrise_client::widgets::matches_selected_engine_widget(
+                sunrise_client::widgets::WidgetBucket::Button,
+                Some(&warn_label),
+                Some("menu.custom_screen_info.button_narration"),
+                0,
+            )
+        {
             self.play_audio_button_click();
             self.set_screen(Screen::DialogWarning);
             return Ok(true);
         }
         let (bx, by) = back_button(w, h);
-        if ui::hovered(self.client.cursor, bx, by, 200.0, 20.0) {
+        let back_label = Text::translate("gui.back", &[]);
+        if ui::hovered(self.client.cursor, bx, by, 200.0, 20.0)
+            && sunrise_client::widgets::matches_selected_engine_widget(
+                sunrise_client::widgets::WidgetBucket::Button,
+                Some(&back_label),
+                None,
+                0,
+            )
+        {
             self.play_audio_button_click();
             self.set_screen(Screen::Paused);
             return Ok(true);
@@ -458,8 +486,16 @@ impl crate::game::ClientGame<'_> {
             &url,
             self.client.links_ui.trusted,
         );
-        for (i, (x, y)) in layout.buttons.iter().enumerate() {
-            if !ui::hovered(self.client.cursor, *x, *y, 100.0, 20.0) {
+        let labels = confirm_link_labels(self.client.links_ui.trusted);
+        for (i, ((x, y), key)) in layout.buttons.iter().zip(labels).enumerate() {
+            if !ui::hovered(self.client.cursor, *x, *y, 100.0, 20.0)
+                || !sunrise_client::widgets::matches_selected_engine_widget(
+                    sunrise_client::widgets::WidgetBucket::Button,
+                    Some(&Text::translate(key, &[])),
+                    None,
+                    0,
+                )
+            {
                 continue;
             }
             self.play_audio_button_click();
@@ -525,8 +561,20 @@ impl crate::game::ClientGame<'_> {
     pub(in crate::game::client_side) fn dialog_warning_click(&mut self) -> Result<bool> {
         let (w, h) = self.gui_size();
         let layout = dialog_warning_layout(&self.client.gui.atlas, (w, h));
-        for (i, (x, y)) in layout.buttons.iter().enumerate() {
-            if !ui::hovered(self.client.cursor, *x, *y, 150.0, 20.0) {
+        let quit = if self.external_server() {
+            "menu.disconnect"
+        } else {
+            "menu.returnToMenu"
+        };
+        for (i, ((x, y), key)) in layout.buttons.iter().zip([quit, "gui.back"]).enumerate() {
+            if !ui::hovered(self.client.cursor, *x, *y, 150.0, 20.0)
+                || !sunrise_client::widgets::matches_selected_engine_widget(
+                    sunrise_client::widgets::WidgetBucket::Button,
+                    Some(&Text::translate(key, &[])),
+                    None,
+                    0,
+                )
+            {
                 continue;
             }
             self.play_audio_button_click();
