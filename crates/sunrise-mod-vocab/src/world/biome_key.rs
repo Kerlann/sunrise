@@ -59,12 +59,12 @@ impl BiomeKey {
         self.0
     }
 
-    /// Resolve this biome key in the host's installed world-data generation as a scoped
-    /// [`BiomeView`].
+    /// Resolve this biome key in the host's installed world-data generation (server) or synced
+    /// biome registry (client) as a scoped [`BiomeView`].
     ///
-    /// Returns [`BiomeKeyError::Unavailable`] without a server world biome registry (or in a
-    /// load phase that forbids world-data lookups) and [`BiomeKeyError::UnknownBiome`] if this
-    /// biome is not present in the installed generation.
+    /// Returns [`BiomeKeyError::Unavailable`] without an installed world or synced client biome
+    /// registry (or in a load phase that forbids world-data lookups) and
+    /// [`BiomeKeyError::UnknownBiome`] if this biome is not present in the installed generation.
     pub fn view<'a>(&self, host: &'a dyn Host) -> Result<BiomeView<'a>, BiomeKeyError> {
         crate::backend_of(host)
             .ok_or(BiomeKeyError::Unavailable)?
@@ -170,8 +170,8 @@ pub enum BiomeKeyError {
     UnknownBiome,
     /// The scoped view belongs to another world or world-data generation.
     WrongGeneration,
-    /// No server world biome registry is installed on this host, or the current phase forbids
-    /// world-data lookups.
+    /// No world or synced client biome registry is installed on this host, or the current phase
+    /// forbids world-data lookups.
     Unavailable,
 }
 

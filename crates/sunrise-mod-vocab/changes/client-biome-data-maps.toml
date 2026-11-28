@@ -1,0 +1,17 @@
+ids = [
+    "method:prelude::KeysHost::biome",
+    "handle:BiomeKey::view",
+    "handle:BiomeKey::data",
+    "handle:BiomeView::data",
+]
+why = """
+Allow synced clients to resolve biomes and read synced biome data maps through `Host::biome`,
+`BiomeKey::view`, `BiomeKey::data`, and `BiomeView::data` by enabling `KeysHost::biome`,
+`KeysBackend::biome_view`, and `KeysBackend::biome_view_id` on both server and client sides.
+Before a client receives its synchronized biome registry, these reads continue to return
+`BiomeKeyError::Unavailable` / `DataMapError::Unavailable`. Additive; no hook version bump.
+"""
+migrate = """
+No migration required; server-side behaviour is unchanged and synced clients can now resolve
+biomes and read synced biome data maps using the same typed API.
+"""

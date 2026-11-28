@@ -2854,6 +2854,21 @@ borrow = "shared"
 kind = "shared_trait"
 owner = "::sunrise_gameplay_common::game::tables::WorldTablesExt<'_>"
 
+[host.client."KeysBackend::biome_view"]
+borrow = "shared"
+kind = "shared_trait"
+owner = "::sunrise_gameplay_common::game::tables::WorldTablesExt<'_>"
+
+[host.client."KeysBackend::biome_view_id"]
+borrow = "shared"
+kind = "shared_trait"
+owner = "::sunrise_gameplay_common::game::tables::WorldTablesExt<'_>"
+
+[host.client."KeysHost::biome"]
+borrow = "shared"
+kind = "shared_trait"
+owner = "::sunrise_gameplay_common::game::tables::WorldTablesExt<'_>"
+
 [host.client."ScreensClientHost::open_context_menu"]
 borrow = "mutable"
 kind = "local"
