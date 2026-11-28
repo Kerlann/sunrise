@@ -156,6 +156,20 @@ impl ServerGame<'_> {
     }
     /// Load terrain until the player stands in lit chunks.
     fn harness_settle(&mut self, deadline: Instant, required: Option<&Value>) -> Result<()> {
+        let required_chunks = match required.and_then(Value::as_array) {
+            Some(chunks) => {
+                let mut parsed = Vec::with_capacity(chunks.len());
+                for chunk in chunks {
+                    let (x, z) = chunk[0]
+                        .as_i64()
+                        .zip(chunk[1].as_i64())
+                        .ok_or("command harness: malformed chunk coordinate in required_chunks")?;
+                    parsed.push((x as i32, z as i32));
+                }
+                Some(parsed)
+            }
+            None => None,
+        };
         loop {
             self.server_update_world();
             // The oracle's settle takes its tickets at once (getChunk runs the
@@ -171,24 +185,30 @@ impl ServerGame<'_> {
                 // timing cannot change which command positions are loaded.
                 if (std::env::var_os("SUNRISE_HARNESS_TERRAIN_ONLY").is_some()
                     || !self.server.streaming.busy())
-                    && required.and_then(Value::as_array).map_or_else(
-                        || {
-                            (-1..=1).all(|dz| {
-                                (-1..=1).all(|dx| self.server.streaming.is_lit(cx + dx, cz + dz))
-                            })
-                        },
-                        |chunks| {
-                            chunks.iter().all(|chunk| {
-                                chunk[0]
-                                    .as_i64()
-                                    .zip(chunk[1].as_i64())
-                                    .is_some_and(|(x, z)| {
-                                        self.server.streaming.is_lit(x as i32, z as i32)
-                                    })
-                            })
-                        },
-                    )
+                    && match required_chunks.as_deref() {
+                        None => (-1..=1).all(|dz| {
+                            (-1..=1).all(|dx| self.server.streaming.is_lit(cx + dx, cz + dz))
+                        }),
+                        Some(chunks) => chunks.iter().all(|&(x, z)| {
+                            self.server.streaming.is_lit(x, z)
+                                && self.common.world.chunks.contains_key(&(x, z))
+                        }),
+                    }
                 {
+                    if let Some(chunks) = required_chunks.as_deref() {
+                        let levels = self.server.tickets.0.levels();
+                        let not_ticking: Vec<(i32, i32)> = chunks
+                            .iter()
+                            .copied()
+                            .filter(|&(x, z)| !levels.entity_ticking(x, z))
+                            .collect();
+                        if !not_ticking.is_empty() {
+                            return Err(format!(
+                                "command harness: required chunks are not entity-ticking: {not_ticking:?}"
+                            )
+                            .into());
+                        }
+                    }
                     // The oracle's settle also waits for the entities saved
                     // in those chunks (areEntitiesActuallyLoadedAndTicking):
                     // after a dimension change they come back from the save.

@@ -421,10 +421,17 @@ impl crate::game::ServerGame<'_> {
         // window's render distance is (Sunrise's options go to 64).
         let view_distance = self.server.settings.render_distance.max(2);
         #[cfg(feature = "state-digest")]
-        if let Ok(raw) = std::env::var("SUNRISE_STATE_TRANSCRIPT_SIMULATION_DISTANCE")
-            && let Ok(parsed) = raw.parse::<i32>()
-        {
-            self.server.settings.simulation_distance = parsed.max(2);
+        if let Ok(raw) = std::env::var("SUNRISE_STATE_TRANSCRIPT_SIMULATION_DISTANCE") {
+            let parsed = raw
+                .parse::<i32>()
+                .ok()
+                .filter(|&d| (2..=32).contains(&d))
+                .ok_or_else(|| {
+                    format!(
+                        "invalid SUNRISE_STATE_TRANSCRIPT_SIMULATION_DISTANCE: {raw:?} (expected integer 2..=32)"
+                    )
+                })?;
+            self.server.settings.simulation_distance = parsed;
         }
         let config = HubConfig {
             allow_flight: true,
