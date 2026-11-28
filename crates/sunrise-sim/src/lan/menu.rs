@@ -241,23 +241,24 @@ impl Menu {
         })
     }
 
+    /// `PlayerEnderChestContainer.stillValid`: a menu on an ender-chest block
+    /// needs the same block entity it opened on. A blockless ender chest and
+    /// other menu types have no active chest to check.
+    pub fn active_chest_valid(&self, world: &World) -> bool {
+        match (self.slots, self.pos) {
+            (Slots::Ender, Some(pos)) => self.active_chest.is_some_and(|generation| {
+                world.block_entities.generation(&pos) == Some(generation)
+            }),
+            _ => true,
+        }
+    }
+
     /// `AbstractContainerMenu.stillValid` of this menu for the guest: its
     /// slots' own answer (`Slots::still_valid`), which the parts on its mod
     /// menu type may change (`menu_still_valid`). A mod menu with no backing
     /// block passes `None` even if its opener supplied a screen position.
     /// Vanilla menu types, vehicles and menus without an answering part are
     /// not asked. A menu whose backing block entities are gone closes without asking.
-    /// `PlayerEnderChestContainer.stillValid`: a menu on an ender-chest block
-    /// needs the same block entity still at `pos`; a blockless one stays valid.
-    pub fn active_chest_valid(&self, world: &World) -> bool {
-        match (self.slots, self.pos, self.active_chest) {
-            (Slots::Ender, Some(pos), Some(generation)) => {
-                world.block_entities.generation(&pos) == Some(generation)
-            }
-            _ => true,
-        }
-    }
-
     pub fn still_valid(&self, context: &LoopContext, world: &World, guest: &Guest) -> bool {
         if !self.active_chest_valid(world) {
             return false;
@@ -4519,11 +4520,13 @@ pub(crate) mod tests {
             .block_entities
             .insert(k, BlockEntity::Chest(vec![None; 27]));
         assert!(!menu.still_valid(context, &world, &g));
-        // A blockless ender chest stays valid without a block entity.
-        let mut blockless = menu.clone();
-        blockless.pos = None;
-        blockless.active_chest = None;
-        assert!(blockless.still_valid(context, &world, &g));
+        let mut no_identity = menu.clone();
+        no_identity.active_chest = None;
+        // An ender-chest block position alone does not identify its block entity.
+        assert!(!no_identity.still_valid(context, &world, &g));
+        // A blockless ender chest does not require a captured identity.
+        no_identity.pos = None;
+        assert!(no_identity.still_valid(context, &world, &g));
     }
 }
 
