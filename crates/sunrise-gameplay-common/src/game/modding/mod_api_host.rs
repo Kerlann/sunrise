@@ -1310,6 +1310,36 @@ impl<
         self.level
             .native_schedule_fluid_tick(&mut self.ticks, pos, fluid, delay)
     }
+    fn schedule_block_tick_with_priority(
+        &mut self,
+        pos: [i32; 3],
+        block: mod_api::BlockKey,
+        delay: i32,
+        priority: mod_api::TickPriority,
+    ) -> bool {
+        self.level.native_schedule_block_tick_with_priority(
+            &mut self.ticks,
+            pos,
+            block,
+            delay,
+            priority,
+        )
+    }
+    fn schedule_fluid_tick_with_priority(
+        &mut self,
+        pos: [i32; 3],
+        fluid: &str,
+        delay: i32,
+        priority: mod_api::TickPriority,
+    ) -> bool {
+        self.level.native_schedule_fluid_tick_with_priority(
+            &mut self.ticks,
+            pos,
+            fluid,
+            delay,
+            priority,
+        )
+    }
 }
 
 impl<
