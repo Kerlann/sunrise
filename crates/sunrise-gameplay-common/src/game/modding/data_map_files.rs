@@ -363,8 +363,10 @@ fn default_policy<T: Clone, I: IntoIterator<Item: AsRef<str>>>(
         supports_tags: true,
         tags,
         known,
-        merge: |_, _, incoming: &T| Ok(incoming.clone()),
-        remove_partial: |_, _, _| Err("data map does not support partial removers".into()),
+        merge: |_: &str, _: &T, incoming: &T| Ok(incoming.clone()),
+        remove_partial: |_: &str, _: &T, _: &()| {
+            Err("data map does not support partial removers".into())
+        },
     }
 }
 
@@ -652,10 +654,10 @@ mod condition_tests {
                             Vec::new()
                         }
                     },
-                    known: |_| true,
+                    known: |_: &str| true,
                     // Non-commutative: existing * 10 + incoming.
-                    merge: |_, existing, incoming| Ok(existing * 10 + incoming),
-                    remove_partial: |_, _, _| Err("unsupported".into()),
+                    merge: |_: &str, existing: &i64, incoming: &i64| Ok(existing * 10 + incoming),
+                    remove_partial: |_: &str, _: &i64, _: &()| Err("unsupported".into()),
                 },
             )
         };

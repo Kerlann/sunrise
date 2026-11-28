@@ -312,15 +312,17 @@ pub fn load_maps<V: Clone, R>(
             registry,
             overlay,
             data_map_files::LayerCodecs {
-                decode_value: |raw| decode_entry_wrapper(raw, &|v| decode_value(map_id, v)),
-                decode_remover: |rem| decode_remover(map_id, rem),
+                decode_value: |raw: &Value| decode_entry_wrapper(raw, &|v| decode_value(map_id, v)),
+                decode_remover: |rem: &Value| decode_remover(map_id, rem),
             },
             data_map_files::LayerPolicy {
                 supports_tags: reg.supports_tags(),
-                tags: |tag| registries.tag(registry, tag),
-                known: |entry| registries.contains(registry, entry),
-                merge: |entry, existing, incoming| merge(reg, entry, existing, incoming),
-                remove_partial: |entry, existing, remover| {
+                tags: |tag: &str| registries.tag(registry, tag),
+                known: |entry: &str| registries.contains(registry, entry),
+                merge: |entry: &str, existing: &V, incoming: &V| {
+                    merge(reg, entry, existing, incoming)
+                },
+                remove_partial: |entry: &str, existing: &V, remover: &R| {
                     remove_partial(reg, entry, existing, remover)
                 },
             },
