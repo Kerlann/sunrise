@@ -262,6 +262,8 @@ impl crate::game::ServerGame<'_> {
         &mut self,
         mut retired: impl FnMut(&ItemEntity),
     ) {
+        #[cfg(feature = "state-digest")]
+        let dim = self.common.dim;
         let dropped = &mut self.common.dropped;
         self.common.persist.removals.retain(|target| {
             let Target::Item(id) = *target else {
@@ -269,6 +271,7 @@ impl crate::game::ServerGame<'_> {
             };
             if let Some(i) = dropped.iter().position(|item| item.id == id) {
                 retired(&dropped.remove(i));
+                crate::game::record_departure!(dim, id, "minecraft:item", Some("discarded"));
             }
             false
         });
@@ -289,6 +292,17 @@ impl crate::game::ServerGame<'_> {
                 // before any callback in the sweep can resolve them again.
                 Target::Projectile(id) => self.remove_projectile(id),
                 Target::Trident(id) => {
+                    #[cfg(feature = "state-digest")]
+                    if crate::game::state_transcript::is_recording()
+                        && self.common.tridents.iter().any(|t| t.id == id)
+                    {
+                        crate::game::state_transcript::record_departure(
+                            self.common.dim,
+                            id,
+                            "minecraft:trident",
+                            Some("discarded"),
+                        );
+                    }
                     self.common.tridents.retain(|t| t.id != id);
                     self.forget_entity(id);
                 }
@@ -303,9 +317,28 @@ impl crate::game::ServerGame<'_> {
         for t in pending {
             match t {
                 Target::Projectile(_) | Target::Trident(_) => {}
-                Target::Crystal(id) => self.common.crystals.retain(|c| c.id != id),
+                Target::Crystal(id) => {
+                    #[cfg(feature = "state-digest")]
+                    if crate::game::state_transcript::is_recording()
+                        && self.common.crystals.iter().any(|c| c.id == id)
+                    {
+                        crate::game::state_transcript::record_departure(
+                            self.common.dim,
+                            id,
+                            "minecraft:end_crystal",
+                            Some("discarded"),
+                        );
+                    }
+                    self.common.crystals.retain(|c| c.id != id);
+                }
                 Target::Dragon(id) => {
                     if self.common.dragon.as_ref().is_some_and(|d| d.id == id) {
+                        crate::game::record_departure!(
+                            self.common.dim,
+                            id,
+                            "minecraft:ender_dragon",
+                            Some("discarded")
+                        );
                         self.discard_resident_dragon();
                     }
                 }
@@ -330,7 +363,21 @@ impl crate::game::ServerGame<'_> {
                 Target::General(id) => {
                     let rows = &mut self.common.resident_entities.general.rows;
                     if let Some(index) = rows.iter().position(|row| row.id == id) {
+                        #[cfg(feature = "state-digest")]
+                        let kind = crate::game::state_transcript::is_recording().then(|| {
+                            sunrise_gameplay_common::game::entity::Entity::native_type(&rows[index])
+                                .into_owned()
+                        });
                         rows.remove(index);
+                        #[cfg(feature = "state-digest")]
+                        if let Some(kind) = kind {
+                            crate::game::state_transcript::record_departure(
+                                self.common.dim,
+                                id,
+                                kind,
+                                Some("discarded"),
+                            );
+                        }
                         self.forget_entity(id);
                     }
                 }

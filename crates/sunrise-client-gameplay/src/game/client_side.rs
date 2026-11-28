@@ -1860,7 +1860,7 @@ pub struct ClientState {
     pub client_tasks: ClientOnly<sunrise_client::net::ClientTasks>,
     pub(in crate::game::client_side) pending_client_tasks:
         ClientOnly<std::collections::VecDeque<sunrise_client::net::ClientTask>>,
-    pub(in crate::game::client_side) world_options: ClientOnly<Option<lan_screen::WorldOptions>>,
+    pub(in crate::game) world_options: ClientOnly<Option<lan_screen::WorldOptions>>,
     pub(in crate::game::client_side) command_block_screen:
         ClientOnly<Option<command_blocks::CommandBlockScreen>>,
     pub(in crate::game::client_side) block_editor:

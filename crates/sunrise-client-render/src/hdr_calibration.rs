@@ -325,22 +325,62 @@ impl Calibration {
             self.set(ui::slider_value(x, sw, cursor.0) as f32);
             return Outcome::Changed;
         }
-        if over(cursor, l.slider) {
+        let slider_label = self.label();
+        if over(cursor, l.slider)
+            && crate::widgets::matches_selected_engine_widget(
+                crate::widgets::WidgetBucket::Slider,
+                Some(&slider_label),
+                None,
+                0,
+            )
+        {
             self.dragging = true;
             self.set(ui::slider_value(x, sw, cursor.0) as f32);
             return Outcome::Changed;
         }
-        if over(cursor, l.cancel) {
+        let cancel_label = Text::literal(lang::get_or("gui.cancel", "Cancel"));
+        if over(cursor, l.cancel)
+            && crate::widgets::matches_selected_engine_widget(
+                crate::widgets::WidgetBucket::Button,
+                Some(&cancel_label),
+                None,
+                0,
+            )
+        {
             return Outcome::Cancel;
         }
-        if over(cursor, l.back) && self.step > 0 {
+        let back_label = Text::literal(lang::get_or("gui.back", "Back"));
+        if over(cursor, l.back)
+            && self.step > 0
+            && crate::widgets::matches_selected_engine_widget(
+                crate::widgets::WidgetBucket::Button,
+                Some(&back_label),
+                None,
+                0,
+            )
+        {
             self.step -= 1;
             return Outcome::Click;
         }
-        if over(cursor, l.next) {
+        let next_label = self.next_button_label();
+        if over(cursor, l.next)
+            && crate::widgets::matches_selected_engine_widget(
+                crate::widgets::WidgetBucket::Button,
+                Some(&next_label),
+                None,
+                0,
+            )
+        {
             return self.next();
         }
         Outcome::Nothing
+    }
+    fn next_button_label(&self) -> Text {
+        if self.step + 1 == STEPS.len() {
+            Text::literal(lang::get_or("selectWorld.edit.save", "Save"))
+        } else {
+            Text::literal(lang::get("Next"))
+        }
     }
     fn next(&mut self) -> Outcome {
         if self.step + 1 == STEPS.len() {
@@ -364,7 +404,22 @@ impl Calibration {
                 self.step_by(1.0);
                 Outcome::Changed
             }
-            KeyCode::Enter | KeyCode::NumpadEnter => self.next(),
+            KeyCode::Enter | KeyCode::NumpadEnter => {
+                let label = self.next_button_label();
+                if crate::widgets::resolve_engine_input(
+                    crate::widgets::WidgetBucket::Button,
+                    Some(&label),
+                    None,
+                    0,
+                    [0.0, 0.0, 1.0, 1.0],
+                    true,
+                )
+                .is_none()
+                {
+                    return Outcome::Nothing;
+                }
+                self.next()
+            }
             KeyCode::Escape => Outcome::Cancel,
             _ => Outcome::Nothing,
         }

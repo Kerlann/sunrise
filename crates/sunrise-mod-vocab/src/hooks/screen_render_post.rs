@@ -6,8 +6,9 @@ pub trait Hooks {
     /// `native_fill`, `native_sprite` and `native_text`, `screen.rect` being
     /// its container panel (or the whole window) and `screen.id` the screen
     /// it is. Once a frame on the window, never while playing with no screen;
-    /// `&self`, so it reads and draws only. The Win and Options screens call
-    /// it on their own path, after their drawing.
+    /// `&dyn ClientHost` reads and draws only while the screen reads the widget override table
+    /// (change widgets from a tick, input or widget callback; the effect shows on the next frame).
+    /// The Win and Options screens call it on their own path, after their drawing.
     ///
     /// It does not fire for the screens drawn over gameplay after it (a
     /// server dialog, the server pack, link and code-of-conduct prompts, a

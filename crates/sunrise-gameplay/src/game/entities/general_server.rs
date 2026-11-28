@@ -248,6 +248,8 @@ impl crate::game::ServerGame<'_> {
         self.native_leaves_flush();
         // The only failing step: if the destination cannot open, every row
         // returns to the source, at its place and with its join identity.
+        #[cfg(feature = "state-digest")]
+        let source_dim = self.common.dim;
         if let Err(error) = self.enter_level(destination) {
             for (index, row, transient) in extracted {
                 if transient {
@@ -260,6 +262,17 @@ impl crate::game::ServerGame<'_> {
                     .insert(index, row);
             }
             return Err(format!("{error}"));
+        }
+        #[cfg(feature = "state-digest")]
+        if crate::game::state_transcript::is_recording() {
+            for (_, row, _) in &extracted {
+                crate::game::state_transcript::record_departure(
+                    source_dim,
+                    row.id,
+                    sunrise_gameplay_common::game::entity::Entity::native_type(row).as_ref(),
+                    Some("changed_dimension"),
+                );
+            }
         }
         // The tree joins the destination: identities unchanged, join
         // identity new (a fresh admission — no source handle reaches it).

@@ -411,15 +411,33 @@ impl crate::game::ClientGame<'_> {
     }
 
     /// The targets the keyboard reaches: no slots, no inventory tabs.
-    fn key_targets(&self) -> Vec<Target> {
-        // Advancements' tabs aren't widgets either: vanilla clicks them by hand. Statistics'
-        // stay out too until a parity check settles where its tab bar sits in the order.
+    fn key_targets_with_meta(&self) -> Vec<(Target, widgets::TargetMeta)> {
         let inventory = self.client.title.0.is_none()
             && matches!(
                 self.client.screen,
                 Screen::Inventory | Screen::Creative | Screen::Advancements | Screen::Stats
             );
-        key_focus::keyboard_targets(self.pad_visible_targets(), inventory)
+        let mut entries = self.pad_all_targets_with_meta();
+        if let Some(batch) = self.gui_batch() {
+            let (w, h) = (batch.width + 0.5, batch.height + 0.5);
+            entries.retain(|(t, _)| {
+                let [x, y, tw, th] = t.rect;
+                x >= -0.5 && y >= -0.5 && x + tw <= w && y + th <= h
+            });
+        }
+        entries.retain(|(t, _)| match t.kind {
+            Kind::Slot => false,
+            Kind::Tab(_) => !inventory,
+            _ => true,
+        });
+        entries
+    }
+
+    fn key_targets(&self) -> Vec<Target> {
+        self.key_targets_with_meta()
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect()
     }
 
     fn pad_visible_targets(&self) -> Vec<Target> {
@@ -447,8 +465,19 @@ impl crate::game::ClientGame<'_> {
     }
 
     fn pad_all_targets(&self) -> Vec<Target> {
-        let mut targets = key_focus::drawn_targets();
-        targets.extend(self.mounted_widget_targets());
+        self.pad_all_targets_with_meta()
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect()
+    }
+
+    fn pad_all_targets_with_meta(&self) -> Vec<(Target, widgets::TargetMeta)> {
+        let mut targets = key_focus::drawn_targets_with_meta();
+        targets.extend(
+            self.mounted_widget_targets()
+                .into_iter()
+                .map(|t| (t, widgets::TargetMeta::default())),
+        );
         if self.client.title.0.is_some()
             || self.client.sign_edit.is_some()
             || self.client.book.is_some()
@@ -459,23 +488,37 @@ impl crate::game::ClientGame<'_> {
         let Some(batch) = self.gui_batch() else {
             return targets;
         };
-        let slot = |x: f32, y: f32| Target {
-            rect: [x, y, 16.0, 16.0],
-            kind: Kind::Slot,
+        let slot = |x: f32, y: f32| {
+            (
+                Target {
+                    rect: [x, y, 16.0, 16.0],
+                    kind: Kind::Slot,
+                },
+                widgets::TargetMeta::default(),
+            )
         };
         match self.client.screen {
             Screen::Inventory => {
                 let (ox, oy) = self.inventory_origin(&batch);
-                targets.extend(self.pad_slot_targets(&batch));
                 targets.extend(
-                    self.station_targets()
+                    self.pad_slot_targets(&batch)
                         .into_iter()
-                        .map(|[x, y, w, h]| Target {
+                        .map(|t| (t, widgets::TargetMeta::default())),
+                );
+                targets.extend(self.station_targets().into_iter().map(|[x, y, w, h]| {
+                    (
+                        Target {
                             rect: [ox + x, oy + y, w, h],
                             kind: Kind::Button,
-                        }),
+                        },
+                        widgets::TargetMeta::default(),
+                    )
+                }));
+                targets.extend(
+                    self.recipe_book_targets()
+                        .into_iter()
+                        .map(|t| (t, widgets::TargetMeta::default())),
                 );
-                targets.extend(self.recipe_book_targets());
             }
             Screen::Creative => {
                 let (ox, oy) = Self::creative_origin(&batch);
@@ -503,10 +546,13 @@ impl crate::game::ClientGame<'_> {
                         continue;
                     }
                     let (x, y) = Creative::tab_position(t);
-                    targets.push(Target {
-                        rect: [ox + x, oy + y, 26.0, 32.0],
-                        kind: Kind::Tab(i == self.client.creative_screen.0.selected_index()),
-                    });
+                    targets.push((
+                        Target {
+                            rect: [ox + x, oy + y, 26.0, 32.0],
+                            kind: Kind::Tab(i == self.client.creative_screen.0.selected_index()),
+                        },
+                        widgets::TargetMeta::default(),
+                    ));
                 }
             }
             _ => {}
@@ -2573,15 +2619,15 @@ impl crate::game::ClientGame<'_> {
             return None;
         }
         let dialog = self.observed_overlay_now() == Some("dialog");
-        let mut targets = self.key_targets();
-        if targets.is_empty() {
+        let mut entries = self.key_targets_with_meta();
+        if entries.is_empty() {
             return None;
         }
         if dialog
             && matches!(nav, Nav::Tab { .. })
             && let Some(order) = self.dialog_navigation_order()
         {
-            targets.sort_by_key(|target| {
+            entries.sort_by_key(|(target, _)| {
                 if matches!(target.kind, Kind::Mounted { .. }) {
                     order.len() + 1
                 } else {
@@ -2592,6 +2638,7 @@ impl crate::game::ClientGame<'_> {
                 }
             });
         }
+        let targets: Vec<Target> = entries.iter().map(|(t, _)| *t).collect();
         let mounted = self
             .client
             .screen_state
@@ -2647,10 +2694,15 @@ impl crate::game::ClientGame<'_> {
                 .is_some_and(|t| t.list_focused()),
             gui: self.gui_size(),
         };
-        let act = if dialog && matches!(nav, Nav::Tab { .. }) {
-            let warning = self.dialog_warning_icon();
-            key_focus::act_with_tab_groups(nav, focus, &targets, ctx, |target| {
-                if !matches!(target.kind, Kind::Mounted { .. }) && Some(target.rect) == warning {
+        let act = if matches!(nav, Nav::Tab { .. }) {
+            let warning = dialog.then(|| self.dialog_warning_icon()).flatten();
+            key_focus::act_with_tab_groups(nav, focus, &targets, ctx, |idx, target| {
+                let group = self.tab_order_group_for_target(*target, &entries[idx].1);
+                if group != 0 {
+                    group
+                } else if !matches!(target.kind, Kind::Mounted { .. })
+                    && Some(target.rect) == warning
+                {
                     -10
                 } else {
                     0
@@ -2853,43 +2905,26 @@ impl crate::game::ClientGame<'_> {
         if !widgets::last_input_screen_is(self.key_screen()) {
             return None;
         }
+        if self.engine_overrides_suppress_all() {
+            return None;
+        }
         let inventory = self.observed_overlay_now().is_none()
             && matches!(self.client.screen, Screen::Inventory | Screen::Creative);
-        // The built-in children a mod removed at `ScreenEvent.Init.Post`: last frame may still
-        // have drawn them, and a replacement at their bounds takes their presses.
-        let removed: Vec<[f32; 4]> = match self.client.title.0.as_ref() {
-            _ if self.observed_overlay_now().is_some() => Vec::new(),
-            _ if self.client.screen == Screen::Paused => self
-                .pause_init_children()
-                .into_iter()
-                .filter(|(action, _, _)| self.pause_child_removed(*action))
-                .map(|(_, rect, _)| rect)
-                .collect(),
-            Some(title)
-                if self.client.screen == Screen::Playing && title.has_removed_children() =>
-            {
-                let [w, h] = self.gui_frame_now().1.size.map(|axis| axis as f32);
-                title
-                    .init_children(&self.client.gui.atlas, w, h)
-                    .into_iter()
-                    .filter(|(id, _, _)| title.child_removed(*id))
-                    .map(|(_, rect, _)| rect)
-                    .collect()
-            }
-            _ => Vec::new(),
-        };
         let (cx, cy) = self.client.cursor;
-        key_focus::keyboard_targets(key_focus::drawn_targets(), inventory)
+        key_focus::drawn_targets_with_meta()
             .into_iter()
+            .filter(|(t, meta)| {
+                !matches!(t.kind, Kind::Mounted { .. })
+                    && !(inventory && matches!(t.kind, Kind::Slot))
+                    && meta
+                        .key
+                        .as_ref()
+                        .is_none_or(|k| !self.engine_key_blocked(k))
+            })
+            .map(|(t, _)| t)
             .find(|t| {
                 let [x, y, w, h] = t.rect;
-                cx >= x
-                    && cy >= y
-                    && cx < x + w
-                    && cy < y + h
-                    && !removed
-                        .iter()
-                        .any(|r| r.iter().zip(t.rect).all(|(a, b)| (a - b).abs() < 0.5))
+                cx >= x && cy >= y && cx < x + w && cy < y + h
             })
     }
 

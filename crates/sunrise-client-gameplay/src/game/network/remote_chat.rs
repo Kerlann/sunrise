@@ -626,6 +626,15 @@ impl crate::game::ClientGame<'_> {
         false
     }
 
+    pub(in crate::game) fn command_prompt_press_child(&mut self, tag: u64) -> bool {
+        if self.client.command_prompt.0.is_none() || tag > 1 {
+            return false;
+        }
+        self.play_audio_button_click();
+        self.answer_command_prompt(tag == 0);
+        true
+    }
+
     pub(in crate::game::client_side) fn command_prompt_click(&mut self) -> bool {
         let Some(prompt) = &self.client.command_prompt.0 else {
             return false;

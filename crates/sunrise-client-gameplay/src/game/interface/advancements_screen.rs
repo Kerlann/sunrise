@@ -541,7 +541,8 @@ impl crate::game::ClientGame<'_> {
         let view = self.adv_view();
         let (left, top) = window(w, h);
         let (ix, iy) = (left + 9.0, top + 18.0);
-        // Centre each tab the first time it is drawn.
+        // Centre each tab the first time it is drawn (`AdvancementTab.extractContents`,
+        // `AdvancementTab.java:125-129`); idempotent once centred.
         let (sx, sy) = self
             .client
             .adv_ui
@@ -552,7 +553,6 @@ impl crate::game::ClientGame<'_> {
                 *tab.scroll.get_or_insert_with(|| bounds.center())
             });
         let (sx, sy) = (sx.floor() as i32, sy.floor() as i32);
-        self.adv_tick_hover(&view, sx, sy, left, top);
         let atlas = &self.client.gui.atlas;
         ui::menu_background(batch, atlas, 0.0, 0.0, w, h, true);
         let tree = self.common.adv.tree.clone();
@@ -752,18 +752,20 @@ impl crate::game::ClientGame<'_> {
         let atlas = &self.client.gui.atlas;
         let (bx, by) = ((w / 2.0 - 100.0).floor(), h - FOOTER + 6.0);
         let hover = ui::hovered(self.client.cursor, bx, by, 200.0, 20.0);
-        ui::action_button(
-            batch,
-            atlas,
-            sunrise_client::widgets::Action::Done,
-            bx,
-            by,
-            200.0,
-            20.0,
-            &Text::translate("gui.done", &[]),
-            true,
-            hover,
-        );
+        sunrise_client::widgets::with_native_action(0, || {
+            ui::action_button(
+                batch,
+                atlas,
+                sunrise_client::widgets::Action::Done,
+                bx,
+                by,
+                200.0,
+                20.0,
+                &Text::translate("gui.done", &[]),
+                true,
+                hover,
+            );
+        });
         self.draw_screen_phase(batch, sunrise_client::screen_draw::RenderPhase::Foreground);
         // Tooltips.
         if let Some(state) = self.client.adv_ui.0.tab_state() {
@@ -794,7 +796,29 @@ impl crate::game::ClientGame<'_> {
             }
         }
     }
-    /// `AdvancementTab.tick`, run per frame at the tick rate's pace.
+    /// `AdvancementsScreen.tick` (`AdvancementsScreen.java:103-110`): updates the selected tab's
+    /// hovered advancement and fade once a client tick rather than inside `draw_advancements`.
+    pub fn tick_advancements(&mut self) {
+        if self.client.screen != Screen::Advancements {
+            return;
+        }
+        let size = self.gui_size();
+        self.tick_advancements_for_size(size);
+    }
+    /// Runs `AdvancementsScreen.tick` for an explicit GUI viewport size.
+    pub fn tick_advancements_for_size(&mut self, (w, h): (f32, f32)) {
+        if self.client.screen != Screen::Advancements {
+            return;
+        }
+        let view = self.adv_view();
+        let (left, top) = window(w, h);
+        let (sx, sy) = self.client.adv_ui.0.tab_state().map_or((0.0, 0.0), |tab| {
+            tab.scroll.unwrap_or_else(|| tab.bounds.center())
+        });
+        let (sx, sy) = (sx.floor() as i32, sy.floor() as i32);
+        self.adv_tick_hover(&view, sx, sy, left, top);
+    }
+    /// `AdvancementTab.tick` (`AdvancementTab.java:86-109`).
     pub fn adv_tick_hover(&mut self, view: &View, sx: i32, sy: i32, left: f32, top: f32) {
         let now = Instant::now();
         let ticks = self
@@ -1030,6 +1054,14 @@ impl crate::game::ClientGame<'_> {
             ix + f(x.wrapping_add(8)),
             iy + f(y.wrapping_add(5)),
         );
+    }
+    pub(in crate::game) fn advancements_press_child(&mut self, tag: u64) -> bool {
+        if tag != 0 {
+            return false;
+        }
+        self.play_audio("minecraft:ui.button.click", None, 0.25, 1.0);
+        self.close_advancements();
+        true
     }
     /// A left button press or release. Returns whether the screen itself
     /// handled the click (`AdvancementsScreen.mouseClicked` / `mouseReleased`:

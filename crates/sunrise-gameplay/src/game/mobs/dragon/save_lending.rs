@@ -16,6 +16,12 @@ impl crate::game::ServerGame<'_> {
                 // remove, then gameEvent(ENTITY_DIE), before the fight hears of it.
                 self.dragon_died_event(d.id, d.position, d.alive());
                 self.common.dragon.retire_extracted(d.id, d.join);
+                crate::game::record_departure!(
+                    self.common.dim,
+                    d.id,
+                    "minecraft:ender_dragon",
+                    Some("killed")
+                );
             }
             if fight {
                 self.dragon_killed();

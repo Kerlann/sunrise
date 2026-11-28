@@ -1208,6 +1208,13 @@ impl Guest {
     pub fn spectator(&self) -> bool {
         self.game_mode == SPECTATOR
     }
+    /// Whether `EntityGetter.isUnobstructed` counts this player: not a spectator
+    /// (`EntitySelector.NO_SPECTATORS`) and not removed. A dead player stays in
+    /// the level, and blocks building, until `LivingEntity.tickDeath` removes it
+    /// at its twentieth death tick ([`Self::body_present`]).
+    pub fn blocks_building(&self) -> bool {
+        self.body_present() && !self.spectator()
+    }
     /// Its client's `minecraft:brand` is Sunrise's: it reads the protocol's
     /// extensions, such as a native mod's particle (`Particle::sunrise_only`).
     pub fn is_sunrise(&self) -> bool {
@@ -1529,6 +1536,23 @@ mod tests {
         assert!(g.client_loaded());
         g.dead = true;
         assert!(!g.client_loaded());
+    }
+
+    #[test]
+    fn a_dead_player_blocks_building_until_its_body_is_removed() {
+        let mut g = guest_at([0.5, 64.0, 0.5]);
+        assert!(g.blocks_building());
+        g.health = 0.0;
+        g.dead = true;
+        for tick in 1..20 {
+            assert!(!g.tick_death(), "tick {tick}");
+            assert!(g.blocks_building(), "tick {tick}");
+        }
+        assert!(g.tick_death());
+        assert!(!g.blocks_building());
+        g.health = 20.0;
+        g.change_game_mode(SPECTATOR);
+        assert!(!g.blocks_building());
     }
 
     #[test]

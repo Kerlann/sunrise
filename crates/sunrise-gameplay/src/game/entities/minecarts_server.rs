@@ -1647,6 +1647,7 @@ impl crate::game::ServerGame<'_> {
         let v = sunrise_world::living_air::input_vector(input, 1.0, self.common.yaw);
         let intent = [v.x, v.z];
         let id = self.common.carts[i].id;
+        crate::game::record_turn!(self.common.dim, id, self.common.carts[i].kind.id(), None);
         let result =
             self.with_entity_held_out(id, |game| section_steps::tick_riding(game, id, i, intent));
         // A contact hurt lands on the stored row, not the ticked copy; a
@@ -1710,6 +1711,7 @@ impl crate::game::ServerGame<'_> {
             let Some(i) = self.cart_in_world(id, i, &round, kind) else {
                 continue;
             };
+            crate::game::record_turn!(self.common.dim, id, kind, None);
             // The ticked copy takes the loot roll instead of copying it: only
             // opening the cart, a command or a save reads it, never a tick, and
             // a mineshaft's chest cart carries its whole roll as NBT. The

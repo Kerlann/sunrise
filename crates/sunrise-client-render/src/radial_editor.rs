@@ -386,12 +386,16 @@ pub(crate) struct NameEntry {
 }
 
 impl NameEntry {
-    fn new(page: usize, name: &str) -> Self {
+    pub(crate) fn new(page: usize, name: &str) -> Self {
         let mut field = ui::EditBox::new(0.0, 0.0, NAME_W, BUTTON_H);
         field.max_length = radial::NAME_MAX;
         field.set_value(name);
         field.focused = true;
         Self { page, field }
+    }
+    #[cfg(test)]
+    pub(crate) fn value(&self) -> &str {
+        &self.field.value
     }
 
     /// Done and Cancel, under the field.
@@ -407,10 +411,30 @@ impl NameEntry {
         atlas: &HudAtlas,
         cursor: (f32, f32),
     ) {
+        let mut field = self.field.clone();
+        Self::draw_contents_with_field(&mut field, batch, atlas, cursor);
+        self.field = field;
+    }
+
+    pub(crate) fn collect_widgets(
+        &self,
+        batch: &mut HudBatch,
+        atlas: &HudAtlas,
+        cursor: (f32, f32),
+    ) {
+        let mut field = self.field.clone();
+        Self::draw_contents_with_field(&mut field, batch, atlas, cursor);
+    }
+
+    fn draw_contents_with_field(
+        field: &mut ui::EditBox,
+        batch: &mut HudBatch,
+        atlas: &HudAtlas,
+        cursor: (f32, f32),
+    ) {
         let (w, h) = (batch.width.ceil(), batch.height.ceil());
         let title = Text::literal(lang::get("sunrise.radial.name_title"));
         style::title(batch, atlas, &title);
-        let field = &mut self.field;
         let (x, top) = ((w / 2.0).floor() - NAME_W / 2.0, name_top(h));
         (field.x, field.y, field.width, field.height) = (x, top, NAME_W, BUTTON_H);
         field.draw(batch, atlas, None);
@@ -434,12 +458,31 @@ impl NameEntry {
     ) -> Named {
         let hit = Self::buttons(w, h)
             .into_iter()
-            .find(|([bx, by, bw, bh], _)| ui::hovered((x, y), *bx, *by, *bw, *bh));
+            .find(|([bx, by, bw, bh], named)| {
+                let label = match named {
+                    Named::Done => Text::literal(lang::get("gui.done")),
+                    _ => Text::literal(lang::get("gui.cancel")),
+                };
+                ui::hovered((x, y), *bx, *by, *bw, *bh)
+                    && crate::widgets::matches_selected_engine_widget(
+                        crate::widgets::WidgetBucket::Button,
+                        Some(&label),
+                        None,
+                        0,
+                    )
+            });
         if let Some((_, named)) = hit {
             return named;
         }
         let field = &mut self.field;
-        field.focused = ui::hovered((x, y), field.x, field.y, field.width, field.height);
+        let msg = (!field.message.is_empty()).then(|| Text::literal(&field.message));
+        field.focused = ui::hovered((x, y), field.x, field.y, field.width, field.height)
+            && crate::widgets::matches_selected_engine_widget(
+                crate::widgets::WidgetBucket::Field,
+                msg.as_ref(),
+                None,
+                0,
+            );
         if field.focused {
             field.click(atlas, x, false, false);
         }
@@ -457,12 +500,26 @@ impl NameEntry {
         }
     }
 
-    /// A key: Enter is Done, Escape is Cancel, the rest the field's.
+    /// A key: Enter is Done (when Done is eligible), Escape is Cancel, the rest the field's.
     pub(crate) fn key(&mut self, key: winit::keyboard::KeyCode, text: Option<&str>) -> Named {
         use winit::keyboard::KeyCode as K;
         match key {
             K::Escape => return Named::Back,
-            K::Enter | K::NumpadEnter => return Named::Done,
+            K::Enter | K::NumpadEnter => {
+                let done_label = Text::literal(lang::get("gui.done"));
+                if crate::widgets::resolve_engine_input(
+                    crate::widgets::WidgetBucket::Button,
+                    Some(&done_label),
+                    None,
+                    0,
+                    [0.0, 0.0, 1.0, 1.0],
+                    true,
+                )
+                .is_some()
+                {
+                    return Named::Done;
+                }
+            }
             _ if self.field.focused => {
                 if !self.field.key(key, false, false)
                     && let Some(t) = text

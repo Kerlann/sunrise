@@ -9,7 +9,9 @@ use crate::mesher::Vertex;
 /// team that sees friendly invisibles, so the body it cannot show as visible
 /// draws `forceTransparent`: `RenderTypes.entityTranslucentCull` at `baseColor`
 /// 654311423, `ARGB.multiply`ed with `getModelTint` (`body_color`), and its
-/// layers draw as they would for a visible body.
+/// layers draw as they would for a visible body. Exception: an invisible
+/// illusioner (`IllusionerRenderer.isBodyVisible` is always true) draws its
+/// four mirror images in the normal opaque render type via [`render_with_frame`].
 #[allow(clippy::too_many_arguments)]
 pub fn render_seen_invisible(
     m: &Mob,

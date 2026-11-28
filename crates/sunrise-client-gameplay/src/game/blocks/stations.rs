@@ -735,6 +735,52 @@ impl crate::game::ClientGame<'_> {
             _ => Vec::new(),
         }
     }
+    /// Dispatch a click to the open station's own widgets (merchant trades, loom patterns,
+    /// beacon buttons, enchanting buttons, stonecutter grid/scroller, anvil name field),
+    /// returning `true` only when a station widget actually accepted the click.
+    pub(in crate::game::client_side) fn station_widget_click(&mut self, right: bool) -> bool {
+        let Some(kind) = self.common.station.as_ref().map(|s| s.kind) else {
+            return false;
+        };
+        let Some(size) = self
+            .client
+            .renderer
+            .0
+            .as_ref()
+            .map(|r| [r.config.width, r.config.height])
+        else {
+            return false;
+        };
+        let batch = HudBatch::new(size, self.client.settings.gui_scale_inputs());
+        let (ox, oy) = self.inventory_origin(&batch);
+        let local = (self.client.cursor.0 - ox, self.client.cursor.1 - oy);
+        if kind == Kind::Merchant && !right && self.merchant_click(local) {
+            return true;
+        }
+        if kind == Kind::Loom && !right && self.loom_click(local) {
+            return true;
+        }
+        if kind == Kind::Beacon && !right && self.beacon_click(local) {
+            return true;
+        }
+        if kind == Kind::Enchanting && !right {
+            for i in 0..3 {
+                let (x, y, w, h) = enchant_button(i);
+                if inside(local, x, y, w, h) {
+                    self.click_enchant(i);
+                    return true;
+                }
+            }
+        }
+        if kind == Kind::Stonecutter && self.stonecutter_click(local) {
+            return true;
+        }
+        if kind == Kind::Anvil && !right && self.anvil_name_click(ox, oy) {
+            return true;
+        }
+        false
+    }
+
     pub(in crate::game::client_side) fn station_click(&mut self, right: bool) -> bool {
         // A server's brewing stand: its slots are the server's.
         if self.common.station.is_none() && (!self.brewing_open() || self.client.remote.is_some()) {
@@ -749,40 +795,21 @@ impl crate::game::ClientGame<'_> {
         else {
             return true;
         };
-        let batch = HudBatch::new(size, self.client.settings.gui_scale_inputs());
-        let (ox, oy) = self.inventory_origin(&batch);
-        let local = (self.client.cursor.0 - ox, self.client.cursor.1 - oy);
-        let shift = self.has_shift_down();
-        if let Some(kind) = self.common.station.as_ref().map(|s| s.kind) {
-            if kind == Kind::Merchant && !right && self.merchant_click(local) {
-                return true;
-            }
-            if kind == Kind::Merchant && self.client.remote.is_some() {
-                // A server's trading window: its slots are the server's.
-                return false;
-            }
-            if kind == Kind::Loom && !right && self.loom_click(local) {
-                return true;
-            }
-            if kind == Kind::Beacon && !right && self.beacon_click(local) {
-                return true;
-            }
-            if kind == Kind::Enchanting && !right {
-                for i in 0..3 {
-                    let (x, y, w, h) = enchant_button(i);
-                    if inside(local, x, y, w, h) {
-                        self.click_enchant(i);
-                        return true;
-                    }
-                }
-            }
-            if kind == Kind::Stonecutter && self.stonecutter_click(local) {
-                return true;
-            }
-            if kind == Kind::Anvil && !right && self.anvil_name_click(ox, oy) {
-                return true;
-            }
+        if self.station_widget_click(right) {
+            return true;
         }
+        if self
+            .common
+            .station
+            .as_ref()
+            .is_some_and(|s| s.kind == Kind::Merchant)
+            && self.client.remote.is_some()
+        {
+            // A server's trading window: its slots are the server's.
+            return false;
+        }
+        let batch = HudBatch::new(size, self.client.settings.gui_scale_inputs());
+        let shift = self.has_shift_down();
         let Some(slot) = self.slot_at(&batch, self.client.cursor.0, self.client.cursor.1) else {
             return true;
         };
@@ -1110,10 +1137,12 @@ impl crate::game::ClientGame<'_> {
         batch: &mut HudBatch,
         ox: f32,
         oy: f32,
+        has_input: bool,
     ) {
         if self.common.station.is_none() {
             return;
         }
+        let message = self.translate_with_fallback("container.repair", "Repair & Name");
         let Some(ui) = self.client.station_ui.as_mut() else {
             debug_assert!(false, "open client station missing StationUi");
             return;
@@ -1124,7 +1153,9 @@ impl crate::game::ClientGame<'_> {
         edit.width = 103.0;
         edit.height = 12.0;
         edit.bordered = false;
-        edit.focused = true;
+        edit.editable = has_input;
+        edit.focused = has_input;
+        edit.message = message;
         edit.text_color = u32::MAX;
         edit.max_length = anvil::NAME_CHARS;
         edit.draw(batch, &self.client.gui.atlas, None);

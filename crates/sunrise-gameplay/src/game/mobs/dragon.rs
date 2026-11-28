@@ -1344,6 +1344,12 @@ impl crate::game::ServerGame<'_> {
             })
             .flatten();
         for i in 0..self.common.crystals.len() {
+            crate::game::record_turn!(
+                self.common.dim,
+                self.common.crystals[i].id,
+                "minecraft:end_crystal",
+                None
+            );
             self.common.crystals[i].previous = self.common.crystals[i].position;
             self.common.crystals[i].time += 1;
             self.crystal_block_effects(i);
@@ -1373,6 +1379,12 @@ impl crate::game::ServerGame<'_> {
             return;
         }
         let c = self.common.crystals.remove(index);
+        crate::game::record_departure!(
+            self.common.dim,
+            c.id,
+            "minecraft:end_crystal",
+            Some("killed")
+        );
         // Read before the blast, which can take other respawn crystals.
         let respawn_crystal = self.server.fight.respawn.is_some()
             && self
@@ -3233,6 +3245,8 @@ impl crate::game::ServerGame<'_> {
         let mut clouds = self.common.breath_clouds.lift();
         #[cfg(any(test, feature = "test-support"))]
         crate::game::server_side::entity_server::taken_pass_tests::after_take(self);
+        #[cfg(feature = "state-digest")]
+        let dim = self.common.dim;
         clouds.retain_mut(|c| {
             // Lingering potions' clouds tick with the potions.
             if c.potion.is_some() {
@@ -3241,10 +3255,20 @@ impl crate::game::ServerGame<'_> {
             if c.id > through || !ticking(c.at[0].floor() as i32, c.at[2].floor() as i32) {
                 return true;
             }
+            crate::game::record_turn!(dim, c.id, "minecraft:area_effect_cloud", None);
             self.cloud_fluid_step(c);
             c.age += 1;
             if breath_expired(c.age, c.duration) {
-                return self.forget_expired_cloud(c.id);
+                let keep = self.forget_expired_cloud(c.id);
+                if !keep {
+                    crate::game::record_departure!(
+                        dim,
+                        c.id,
+                        "minecraft:area_effect_cloud",
+                        Some("discarded")
+                    );
+                }
+                return keep;
             }
             if !c.from_dragon && c.age >= BREATH_WAIT {
                 // DragonFireball's cloud: radius per tick (7 - 3) / duration.
@@ -3748,6 +3772,15 @@ impl crate::game::ServerGame<'_> {
                     .iter()
                     .any(|p| p.distance_squared(c.position) < 0.01);
             self.crystal_destroyed(i, &c, None, respawn);
+            #[cfg(feature = "state-digest")]
+            if self.common.crystals.iter().any(|crystal| crystal.id == id) {
+                crate::game::record_departure!(
+                    self.common.dim,
+                    id,
+                    "minecraft:end_crystal",
+                    Some("killed")
+                );
+            }
             self.common.crystals.retain(|crystal| crystal.id != id);
             self.entity_killed_event([c.position.x, c.position.y, c.position.z], false);
         }
@@ -4115,6 +4148,12 @@ impl crate::game::ServerGame<'_> {
                 self.server.fight.dragon_uuid = Some(self.uuid_for(id));
                 self.server.fight.killed = false;
                 if !active {
+                    crate::game::record_departure!(
+                        self.common.dim,
+                        id,
+                        "minecraft:ender_dragon",
+                        Some("discarded")
+                    );
                     self.discard_resident_dragon();
                     self.server.fight.dragon_uuid = None;
                 }
@@ -4155,6 +4194,12 @@ impl crate::game::ServerGame<'_> {
                 .position(|c| c.position.distance_squared(p) < 0.01)
             {
                 let c = self.common.crystals.remove(i);
+                crate::game::record_departure!(
+                    self.common.dim,
+                    c.id,
+                    "minecraft:end_crystal",
+                    Some("killed")
+                );
                 self.common.world.modified.insert((
                     c.position.x.floor() as i32 >> 4,
                     c.position.z.floor() as i32 >> 4,

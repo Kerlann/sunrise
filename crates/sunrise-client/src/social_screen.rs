@@ -181,6 +181,27 @@ pub fn click_kind(size: (f32, f32), cursor: (f32, f32), view: &SocialView) -> Op
     }
     click(size, cursor, view).map(Click::Action)
 }
+/// Resolve a bound child native action tag directly without coordinate hit-testing.
+pub fn click_for_tag(tag: u64, view: &SocialView) -> Option<Click> {
+    match tag {
+        0 => Some(Click::Action(Action::Page(Page::All))),
+        1 => Some(Click::Action(Action::Page(Page::Hidden))),
+        2 => Some(Click::Action(Action::Page(Page::Blocked))),
+        t if t == (1u64 << 32) => Some(Click::Search),
+        t if (t >> 32) == 2 => {
+            let idx = (t & 0xffff_ffff) as usize;
+            view.entries.get(idx).filter(|e| !e.local).map(|e| {
+                Click::Action(if e.hidden {
+                    Action::Show(e.id)
+                } else {
+                    Action::Hide(e.id)
+                })
+            })
+        }
+        t if t == (4u64 << 32) => Some(Click::Action(Action::Done)),
+        _ => None,
+    }
+}
 /// Done's rectangle (`HeaderAndFooterLayout`'s footer).
 fn done(w: f32, h: f32) -> [f32; 4] {
     [(w / 2.0).floor() - 100.0, h - 27.0, 200.0, 20.0]
@@ -333,17 +354,24 @@ pub fn draw_contents(
         true,
     );
     for (x, page) in tabs(w) {
-        ui::button(
-            batch,
-            atlas,
-            x,
-            45.0,
-            (ROW_WIDTH / 3.0).floor(),
-            20.0,
-            &tab_label(page, view.page == page),
-            true,
-            ui::hovered(cursor, x, 45.0, (ROW_WIDTH / 3.0).floor(), 20.0),
-        );
+        let tag = match page {
+            Page::All => 0,
+            Page::Hidden => 1,
+            Page::Blocked => 2,
+        };
+        crate::widgets::with_native_action(tag, || {
+            ui::button(
+                batch,
+                atlas,
+                x,
+                45.0,
+                (ROW_WIDTH / 3.0).floor(),
+                20.0,
+                &tab_label(page, view.page == page),
+                true,
+                ui::hovered(cursor, x, 45.0, (ROW_WIDTH / 3.0).floor(), 20.0),
+            );
+        });
         crate::widgets::target_as(
             [x, 45.0, (ROW_WIDTH / 3.0).floor(), 20.0],
             crate::widgets::Kind::Tab(view.page == page),
@@ -356,7 +384,9 @@ pub fn draw_contents(
     search.max_length = 16;
     search.text_color = WHITE;
     search.focused = true;
-    search.draw(batch, atlas, None);
+    crate::widgets::with_native_action(1u64 << 32, || {
+        search.draw(batch, atlas, None);
+    });
     // The rows, clipped to the list; a focus step still walks them.
     let max = max_scroll(h, view.entries.len());
     if max > 0.0 {
@@ -422,35 +452,104 @@ pub fn draw_contents(
             } else {
                 "mute_button"
             };
-            // The button's narration (`PlayerEntry`: `narration.hide` / `narration.show`).
-            let key = if e.hidden {
+            // Vanilla `PlayerEntry` constructs the mute/unmute `ImageButton` with `HIDE_TEXT` / `SHOW_TEXT`
+            // as `getMessage()` and narrates with `gui.socialInteractions.narration.{hide,show}`.
+            let narration_key = if e.hidden {
                 "gui.socialInteractions.narration.show"
             } else {
                 "gui.socialInteractions.narration.hide"
             };
-            crate::widgets::record(
-                &Text::translate(key, &[Text::literal(e.name.clone())]).plain(),
-                [hide[0], hide[1], 20.0, 20.0],
-                true,
-            );
-            batch.sprite_scaled(
-                atlas,
-                &sprite(base, hovered(hide)),
-                hide[0],
-                hide[1],
-                20.0,
-                20.0,
-                WHITE,
-            );
-            batch.sprite_scaled(
-                atlas,
-                "social_interactions/report_button_disabled",
-                report[0],
-                report[1],
-                20.0,
-                20.0,
-                WHITE,
-            );
+            let msg_key = if e.hidden {
+                "gui.socialInteractions.show"
+            } else {
+                "gui.socialInteractions.hide"
+            };
+            let hide_rect = [hide[0], hide[1], 20.0, 20.0];
+            let narration_label = Text::translate(narration_key, &[Text::literal(e.name.clone())]);
+            let hide_label = Text::translate(msg_key, &[]);
+            let hide_hover = hovered(hide);
+            match crate::widgets::with_native_action((2u64 << 32) | (i as u64), || {
+                crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
+                    bucket: crate::widgets::WidgetBucket::Button,
+                    rect: hide_rect,
+                    label: Some(&hide_label),
+                    explicit_key: Some("gui.socialInteractions.toggle_hide"),
+                    active: true,
+                    hovered: hide_hover,
+                    focused: false,
+                    tab_order_group: 0,
+                })
+            }) {
+                crate::widgets::ResolvedEngineWidget::Skip => {}
+                crate::widgets::ResolvedEngineWidget::Unchanged => {
+                    crate::widgets::record(&narration_label.plain(), hide_rect, true);
+                    batch.sprite_scaled(
+                        atlas,
+                        &sprite(base, hide_hover),
+                        hide[0],
+                        hide[1],
+                        20.0,
+                        20.0,
+                        WHITE,
+                    );
+                }
+                crate::widgets::ResolvedEngineWidget::Draw(props) => {
+                    let draw_label = props.message.as_ref().unwrap_or(&narration_label);
+                    crate::widgets::record(&draw_label.plain(), props.rect, props.active);
+                    let lit = props
+                        .override_render_highlighted_sprite
+                        .unwrap_or(props.active && props.hovered);
+                    let tint = crate::widgets::scale_abgr_alpha(WHITE, props.alpha);
+                    batch.sprite_scaled(
+                        atlas,
+                        &sprite(base, lit),
+                        props.rect[0],
+                        props.rect[1],
+                        props.rect[2],
+                        props.rect[3],
+                        tint,
+                    );
+                }
+            }
+            let report_rect = [report[0], report[1], 20.0, 20.0];
+            let report_label = Text::translate("gui.socialInteractions.report", &[]);
+            match crate::widgets::with_native_action((3u64 << 32) | (i as u64), || {
+                crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
+                    bucket: crate::widgets::WidgetBucket::Button,
+                    rect: report_rect,
+                    label: Some(&report_label),
+                    explicit_key: Some("gui.socialInteractions.report"),
+                    active: false,
+                    hovered: hovered(report),
+                    focused: false,
+                    tab_order_group: 0,
+                })
+            }) {
+                crate::widgets::ResolvedEngineWidget::Skip => {}
+                crate::widgets::ResolvedEngineWidget::Unchanged => {
+                    batch.sprite_scaled(
+                        atlas,
+                        "social_interactions/report_button_disabled",
+                        report[0],
+                        report[1],
+                        20.0,
+                        20.0,
+                        WHITE,
+                    );
+                }
+                crate::widgets::ResolvedEngineWidget::Draw(props) => {
+                    let tint = crate::widgets::scale_abgr_alpha(WHITE, props.alpha);
+                    batch.sprite_scaled(
+                        atlas,
+                        "social_interactions/report_button_disabled",
+                        props.rect[0],
+                        props.rect[1],
+                        props.rect[2],
+                        props.rect[3],
+                        tint,
+                    );
+                }
+            }
         }
     }
     hud_layout::paint(batch, atlas, &faces);
@@ -472,18 +571,20 @@ pub fn draw_contents(
     }
     // `Done`.
     let [dx, dy, dw, dh] = done(w, h);
-    ui::action_button(
-        batch,
-        atlas,
-        crate::widgets::Action::Done,
-        dx,
-        dy,
-        dw,
-        dh,
-        &Text::translate("gui.done", &[]),
-        true,
-        ui::hovered(cursor, dx, dy, dw, dh),
-    );
+    crate::widgets::with_native_action(4u64 << 32, || {
+        ui::action_button(
+            batch,
+            atlas,
+            crate::widgets::Action::Done,
+            dx,
+            dy,
+            dw,
+            dh,
+            &Text::translate("gui.done", &[]),
+            true,
+            ui::hovered(cursor, dx, dy, dw, dh),
+        );
+    });
     // The empty page's note, in place of the list.
     if view.entries.is_empty() {
         let key = if !view.search.is_empty() {

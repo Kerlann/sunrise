@@ -97,6 +97,17 @@ up to the fluid's height, a full block under the same fluid. `has_collisions(hos
 whether any block collision shape is in a box, with `visit_block_collisions`'s walk and
 without building the list; entities and the world border are not part of it.
 
+`is_unobstructed(host, pos, state)` is `CollisionGetter.isUnobstructed(state, pos, CollisionContext.empty())`:
+whether no entity that blocks building (`Entity.blocksBuilding`: a player who is not a spectator, a
+mob, a minecart, a boat, an armor stand that is not a marker, an end crystal, primed TNT, a falling
+block) is in the state's collision shape at `pos`, for a mod that writes a block from its own
+placement code and must not place a cable or a machine inside a mob. It is the empty-context form
+of the test `BlockItem.canPlace` makes: `canPlace` passes `CollisionContext.placementContext(player)`,
+and a player context is not exposed, so a shape that depends on the entity context is its
+empty-context shape. The state need not be the block at `pos`, and no entity is excepted
+(`EntityGetter.isUnobstructed(null, shape)`). A server read of open levels, active or parked;
+`Err(Unavailable)` when the shape cannot be evaluated.
+
 Use `ray_trace_nearest_entity(host, from, to, margin, exclude, &mut accept)` if you
 only need one hit. Matching `ProjectileUtil.getEntityHitResult`, it passes each
 non-excluded candidate `EntityRef` in `visit_entities_in` order to `accept` before

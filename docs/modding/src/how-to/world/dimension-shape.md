@@ -151,14 +151,18 @@ ground first, or place one.
 
 ## Sea level
 
-`level.sea_level(host)` reads `Level.getSeaLevel`: 63 in the Overworld, 32 in the Nether, 0 in the End. For a level of
-the noise generator it is the `sea_level` of its noise settings, a data pack's too when it replaces them. A level
-of a chunk generator the mod wrote has no noise settings to read: set `DimensionSettings::sea_level` to give it one
-(a level of the noise generator keeps its noise settings'), else it is 63 (-63 for a superflat generator). It is the sea
-level the game uses for the level: mob spawning and behaviour (drowned, turtles, phantoms), rain and snow, and maps.
-Terrain and aquifers are built with the generator's own sea level, which for a noise level is the noise settings' and
-which `DimensionSettings::sea_level` never changes: it only gives `level.sea_level(host)` a value for a generator that has
-none, so it does not move where the water is.
+`level.sea_level(host)` reads `Level.getSeaLevel`: 63 in the Overworld, 32 in the Nether, 0 in the End. The winning
+generator decides it. For a level of the noise generator it is the `sea_level` of its noise settings, a data pack's
+too when it replaces them. A superflat generator's sea level is -63 (`FlatLevelSource.getSeaLevel`), whatever noise
+settings the stem names or a pack replaces: those do not apply to a flat stem. A level of a chunk generator the mod
+wrote has no noise settings to read: set `DimensionSettings::sea_level` to give it one (a level of the noise
+generator keeps its noise settings'), else it is 63. `DimensionSettings::sea_level` also wins for a superflat level,
+where it changes the value the level reports; the flat generator still fills its configured layers.
+
+The reported value is the one the game uses for the level: mob spawning and behaviour (drowned, turtles, phantoms),
+rain and snow, and maps. Terrain and aquifers are built with the generator's own sea level: the noise settings' for a
+noise level, and -63 for superflat even when `DimensionSettings::sea_level` reports another value, so it does not move
+where the water is.
 
 ## Day clocks
 

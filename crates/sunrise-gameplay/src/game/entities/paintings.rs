@@ -224,6 +224,7 @@ impl crate::game::ServerGame<'_> {
         // Found again by id after the listener: gone, nothing is removed.
         let index = self.common.paintings.iter().position(|p| p.id == id)?;
         let p = self.common.paintings.remove(index);
+        crate::game::record_departure!(self.common.dim, p.id, "minecraft:painting", None);
         let (lo, hi) = p.bounds();
         let at = [
             (lo[0] + hi[0]) / 2.0,
@@ -290,6 +291,7 @@ impl crate::game::ServerGame<'_> {
                 i = now;
             }
             told = Some(id);
+            crate::game::record_turn!(self.common.dim, id, "minecraft:painting", None);
             // `Entity.tickCount` is raised before the rest of the tick, and is not saved.
             self.common.paintings[i].ticks = self.common.paintings[i].ticks.saturating_add(1);
             self.common.paintings[i].check_interval += 1;

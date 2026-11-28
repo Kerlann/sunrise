@@ -40,6 +40,8 @@ pub(crate) use sunrise_level::chunk;
 #[cfg(all(test, not(feature = "client")))]
 pub(crate) use sunrise_sim::{datapack_net, entities, motion, raw_payloads};
 pub use sunrise_sim::{lan, orb_limits, save};
+#[cfg(all(test, feature = "client"))]
+mod fresh_process;
 #[cfg(test)]
 mod test_game_dir;
 

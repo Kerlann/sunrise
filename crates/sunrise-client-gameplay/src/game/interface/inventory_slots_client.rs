@@ -322,10 +322,12 @@ impl crate::game::ClientGame<'_> {
         count_text: Option<&str>,
     ) {
         self.draw_vanilla_item_decorations(batch, stack, x, y, count_text);
-        let hook = mod_api::HookId::ItemDecorations;
-        if mod_api::__private::has_part_hook(hook) || mod_api::__private::listened(hook) {
-            // The ordinary inventory, hotbar and tooltip paths draw in screen GUI units.
-            self.draw_item_decorator(batch, stack, x, y);
+        if !sunrise_client::widgets::is_collecting_widgets() {
+            let hook = mod_api::HookId::ItemDecorations;
+            if mod_api::__private::has_part_hook(hook) || mod_api::__private::listened(hook) {
+                // The ordinary inventory, hotbar and tooltip paths draw in screen GUI units.
+                self.draw_item_decorator(batch, stack, x, y);
+            }
         }
     }
 
@@ -348,7 +350,9 @@ impl crate::game::ClientGame<'_> {
         let mut bar = sunrise_items::properties::stack_bar(items, stack, info)
             .map(|bar| (bar.width, bar.color));
         // Client-only: a mod may replace or hide the bar vanilla just chose.
-        self.native_item_bar(stack, &mut bar);
+        if !sunrise_client::widgets::is_collecting_widgets() {
+            self.native_item_bar(stack, &mut bar);
+        }
         let decorations = hud_overlays::ItemDecorations {
             count: stack.count,
             count_text,

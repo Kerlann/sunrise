@@ -52,6 +52,29 @@ pub enum Action {
     Done,
 }
 
+impl Action {
+    pub(in crate::game::client_side) fn tag(self) -> u64 {
+        match self {
+            Self::Share => 0,
+            Self::Copy => 1,
+            Self::Stop => 2,
+            Self::Help => 3,
+            Self::Done => 4,
+        }
+    }
+
+    pub(in crate::game::client_side) fn from_tag(tag: u64) -> Option<Self> {
+        match tag {
+            0 => Some(Self::Share),
+            1 => Some(Self::Copy),
+            2 => Some(Self::Stop),
+            3 => Some(Self::Help),
+            4 => Some(Self::Done),
+            _ => None,
+        }
+    }
+}
+
 fn grey() -> u32 {
     rgba(160, 160, 160, 255)
 }
@@ -253,19 +276,33 @@ pub(in crate::game::client_side) fn draw(
                 b.active,
             );
         }
-        ui::button(
-            batch,
-            atlas,
-            b.x,
-            b.y,
-            b.w,
-            20.0,
-            &label(&b.label),
-            b.active,
-            hover,
-        );
+        sunrise_client::widgets::with_native_action(b.action.tag(), || {
+            ui::button(
+                batch,
+                atlas,
+                b.x,
+                b.y,
+                b.w,
+                20.0,
+                &label(&b.label),
+                b.active,
+                hover,
+            );
+        });
     }
     phases(sunrise_client::screen_draw::RenderPhase::Foreground, batch);
+}
+/// Whether `action` is currently shown and active in the Friends screen layout.
+pub(in crate::game::client_side) fn has_active_action(
+    atlas: &HudAtlas,
+    size: (f32, f32),
+    view: &FriendsView,
+    action: Action,
+) -> bool {
+    layout(atlas, size, view)
+        .1
+        .into_iter()
+        .any(|b| b.action == action && b.active)
 }
 /// The button under a click, if it is active.
 pub(in crate::game::client_side) fn click(

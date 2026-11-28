@@ -184,6 +184,9 @@ impl ServerGame<'_> {
         if !general_row_live(self, index, mount) {
             return None;
         }
+        if ticks {
+            crate::game::record_turn!(self.common.dim, id, kind, mount);
+        }
         if ticks || mount.is_some() {
             self.begin_general_row_tick(index, mount, pass.epoch);
             // `Entity.checkBelowWorld` discarded it: no tick for a removed row.

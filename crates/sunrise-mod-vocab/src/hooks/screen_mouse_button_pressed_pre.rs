@@ -18,14 +18,13 @@ pub trait Hooks {
     /// gamepad's or keyboard focus's synthesized click.
     #[hook(
         target = "sunrise_client_gameplay::game::native_hooks::base::ClientGame<'_>::native_screen_mouse_button_pressed_pre",
-        receiver = "read",
         dispatch = "flat",
         side = "client",
         contract = "cancel",
         out = "canceled",
         neoforge = "ScreenEvent.MouseButtonPressed.Pre",
         cancellable = true,
-        version = 3
+        version = 4
     )]
     fn screen_mouse_button_pressed_pre(
         screen: &ScreenView<'_>,

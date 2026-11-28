@@ -48,6 +48,12 @@ impl crate::game::ServerGame<'_> {
                     .position(|x| x.id == c.id && x.join == c.join)
                 {
                     let removed = game.carts.remove(i);
+                    crate::game::record_departure!(
+                        game.common.dim,
+                        removed.id,
+                        removed.kind.id(),
+                        Some("killed")
+                    );
                     game.retain_removed_vehicle(
                         c.id,
                         sunrise_gameplay_common::game::entity_memory::RemovedVehicle::Cart(removed),

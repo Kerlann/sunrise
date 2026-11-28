@@ -11,6 +11,9 @@ use sunrise_gameplay_common::game::test_fixtures::{
 
 /// Resource-loading fixtures publish process-wide palette and save namespace
 /// state. Keep the fixture serialized and put both globals back when it ends.
+/// A fixture nested in another on the same thread (the integrated pair opens
+/// its server game inside its client game) shares the outer scope: only the
+/// outermost one locks, scopes and restores.
 struct ScopedFixtureGlobals {
     previous_namespaces: Option<Vec<String>>,
     palette: Option<sunrise_level::chunk::test_support::BlockStatePaletteScope>,
@@ -19,16 +22,23 @@ struct ScopedFixtureGlobals {
 
 static FIXTURE_GLOBALS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+thread_local! {
+    static FIXTURE_GLOBALS_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 impl ScopedFixtureGlobals {
-    fn new() -> Self {
+    fn new() -> Option<Self> {
+        if FIXTURE_GLOBALS_HELD.with(|held| held.replace(true)) {
+            return None;
+        }
         let lock = FIXTURE_GLOBALS.lock().unwrap_or_else(|e| e.into_inner());
         let palette = sunrise_level::chunk::test_support::BlockStatePaletteScope::new();
         let previous_namespaces = sunrise_sim::save::level_mods::block_namespaces();
-        Self {
+        Some(Self {
             previous_namespaces,
             palette: Some(palette),
             lock: Some(lock),
-        }
+        })
     }
 }
 
@@ -37,6 +47,7 @@ impl Drop for ScopedFixtureGlobals {
         sunrise_sim::save::level_mods::set_block_namespaces(self.previous_namespaces.take());
         self.palette.take();
         self.lock.take();
+        FIXTURE_GLOBALS_HELD.with(|held| held.set(false));
     }
 }
 

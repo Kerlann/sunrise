@@ -23,8 +23,9 @@ impl crate::game::ClientGame<'_> {
         let (ox, oy) = Self::creative_origin(&batch);
         let (cx, cy) = self.client.cursor;
         // NeoForge's page buttons, when mods add tabs.
-        if let Some(step) =
-            Self::creative_page_button(ox, oy, (cx, cy), self.client.creative_screen.0.pages())
+        if !sunrise_client::widgets::is_blocking_engine_widget_click()
+            && let Some(step) =
+                Self::creative_page_button(ox, oy, (cx, cy), self.client.creative_screen.0.pages())
         {
             // Page buttons are outside the inventory panel; their release must
             // not throw a carried stack, including when the button is disabled.
@@ -83,8 +84,14 @@ impl crate::game::ClientGame<'_> {
             }
             return false;
         }
-        if !right && self.creative_search_click(ox, oy) {
+        if !right
+            && !sunrise_client::widgets::is_blocking_engine_widget_click()
+            && self.creative_search_click(ox, oy)
+        {
             return true;
+        }
+        if self.is_redirecting_engine_click() {
+            return false;
         }
         // Holding the scrollbar scrolls as the mouse moves (mouseDragged).
         if !right
@@ -319,18 +326,30 @@ impl crate::game::ClientGame<'_> {
         }
         if tab.search {
             // CreativeModeInventoryScreen: an unbordered EditBox of 50 at (82, 6).
-            let search = &mut self.client.creative_screen.0.search;
-            search.x = ox + 82.0;
-            search.y = oy + 6.0;
-            search.width = 80.0;
-            search.bordered = false;
-            search.focused = true;
-            search.text_color = u32::MAX;
-            search.max_length = clipboard::CREATIVE_SEARCH_CHARS;
-            if sunrise_client::widgets::narrating() {
-                search.message = screen_info::tr("itemGroup.search", &[]);
+            if sunrise_client::widgets::is_collecting_widgets() {
+                let mut search = self.client.creative_screen.0.search.clone();
+                search.x = ox + 82.0;
+                search.y = oy + 6.0;
+                search.width = 80.0;
+                search.bordered = false;
+                search.focused = true;
+                search.text_color = u32::MAX;
+                search.max_length = clipboard::CREATIVE_SEARCH_CHARS;
+                search.draw(batch, atlas, None);
+            } else {
+                let search = &mut self.client.creative_screen.0.search;
+                search.x = ox + 82.0;
+                search.y = oy + 6.0;
+                search.width = 80.0;
+                search.bordered = false;
+                search.focused = true;
+                search.text_color = u32::MAX;
+                search.max_length = clipboard::CREATIVE_SEARCH_CHARS;
+                if sunrise_client::widgets::narrating() {
+                    search.message = screen_info::tr("itemGroup.search", &[]);
+                }
+                search.draw(batch, atlas, None);
             }
-            search.draw(batch, atlas, None);
         }
         // The hovered stack, and whether it is a grid slot (`CustomCreativeSlot`).
         let mut hovered: Option<(ItemStack, bool)> = None;
@@ -475,25 +494,15 @@ impl crate::game::ClientGame<'_> {
             return;
         }
         let atlas = &self.client.gui.atlas;
-        let y = oy - 50.0;
-        for (x, label, step) in [(ox, "<", -1), (ox + Creative::WIDTH - 20.0, ">", 1)] {
-            let hover = Self::creative_page_button(ox, oy, self.client.cursor, pages) == Some(step);
-            let page = self.client.creative_screen.0.page as i64 + step;
-            let active = (0..pages as i64).contains(&page);
-            let sprite = match (active, hover) {
-                (false, _) => "widget/button_disabled",
-                (true, true) => "widget/button_highlighted",
-                (true, false) => "widget/button",
-            };
-            sunrise_client::ui::nine_slice(batch, atlas, sprite, x, y, 20.0, 20.0, u32::MAX);
-            let color = if active {
-                u32::MAX
-            } else {
-                rgba(160, 160, 160, 255)
-            };
-            let w = HudBatch::text_width(atlas, label);
-            batch.text(atlas, label, x + (20.0 - w) / 2.0, y + 6.0, color, true);
-        }
+        draw_creative_page_buttons(
+            batch,
+            atlas,
+            ox,
+            oy,
+            self.client.cursor,
+            self.client.creative_screen.0.page,
+            pages,
+        );
         let text = format!("{} / {}", self.client.creative_screen.0.page + 1, pages);
         let w = HudBatch::text_width(atlas, &text);
         batch.text(
@@ -517,4 +526,130 @@ impl crate::game::ClientGame<'_> {
     }
 }
 
+fn draw_creative_page_buttons(
+    batch: &mut HudBatch,
+    atlas: &sunrise_client::hud::HudAtlas,
+    ox: f32,
+    oy: f32,
+    cursor: (f32, f32),
+    current_page: u32,
+    pages: u32,
+) {
+    let y = oy - 50.0;
+    for (x, label, step) in [(ox, "<", -1), (ox + Creative::WIDTH - 20.0, ">", 1)] {
+        let hover =
+            crate::game::ClientGame::creative_page_button(ox, oy, cursor, pages) == Some(step);
+        let page = current_page as i64 + step;
+        let active = (0..pages as i64).contains(&page);
+        sunrise_client::ui::button(
+            batch,
+            atlas,
+            x,
+            y,
+            20.0,
+            20.0,
+            &sunrise_game_data::text::Text::literal(label),
+            active,
+            hover,
+        );
+    }
+}
+
 use sunrise_gameplay_common::game::held_items::HeldItemsGameExt1 as _;
+
+#[cfg(test)]
+mod page_button_tests {
+    use super::*;
+    use sunrise_client::{
+        hud::{GuiSprite, HudAtlas, Rect},
+        widgets::{self, Cursor, ScreenInfo},
+    };
+
+    #[test]
+    fn creative_page_buttons_record_highlight_and_narrate() {
+        let mut atlas =
+            HudAtlas::build(&sunrise_assets::resource_source::ResourceSource::directory(
+                "/nonexistent/sunrise-test-assets".into(),
+            ))
+            .unwrap();
+        for (n, name) in [
+            "widget/button",
+            "widget/button_highlighted",
+            "widget/button_disabled",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            atlas.gui.insert(
+                name.into(),
+                GuiSprite::Present {
+                    rect: Rect {
+                        u0: n as f32 / 4.0,
+                        v0: 0.0,
+                        u1: (n as f32 + 0.5) / 4.0,
+                        v1: 0.25,
+                        w: 16,
+                        h: 16,
+                    },
+                    scaling: None,
+                },
+            );
+        }
+        let saved = widgets::take();
+        widgets::set_narrating(true);
+        let (ox, oy) = (100.0, 100.0);
+        // Page 0 of 2: "<" is disabled, ">" is active. Hovering ">" highlights it and requests hand.
+        widgets::end_frame(720);
+        widgets::begin_screen(|| ScreenInfo::new("creative", ""));
+        let _ = widgets::take_cursor();
+        let mut batch = HudBatch::scratch([400, 300]);
+        draw_creative_page_buttons(
+            &mut batch,
+            &atlas,
+            ox,
+            oy,
+            (ox + Creative::WIDTH - 10.0, oy - 40.0),
+            0,
+            2,
+        );
+        assert_eq!(widgets::take_cursor(), Cursor::PointingHand);
+        let sprite_u0s: Vec<f32> = batch
+            .vertices
+            .as_chunks::<6>()
+            .0
+            .iter()
+            .filter(|q| q[0].text == 0)
+            .map(|q| q[0].uv[0])
+            .collect();
+        assert_eq!(sprite_u0s, [0.5, 0.25]);
+        widgets::end_frame(721);
+        let recorded = widgets::last();
+        assert_eq!(recorded.len(), 2);
+        assert_eq!(
+            (recorded[0].label.as_str(), recorded[0].enabled),
+            ("<", false)
+        );
+        assert_eq!(
+            (recorded[1].label.as_str(), recorded[1].enabled),
+            (">", true)
+        );
+        let narration = widgets::take_last_narration();
+        assert_eq!(narration.items.len(), 2);
+        assert_eq!(narration.items[0].hovered, Some(false));
+        assert_eq!(narration.items[1].hovered, Some(true));
+
+        // Hovering disabled "<" requests NotAllowed cursor and keeps disabled sprite.
+        widgets::begin_screen(|| ScreenInfo::new("creative", ""));
+        let _ = widgets::take_cursor();
+        let mut batch = HudBatch::scratch([400, 300]);
+        draw_creative_page_buttons(&mut batch, &atlas, ox, oy, (ox + 10.0, oy - 40.0), 0, 2);
+        assert_eq!(widgets::take_cursor(), Cursor::NotAllowed);
+        widgets::end_frame(722);
+        let narration = widgets::take_last_narration();
+        assert_eq!(narration.items[0].hovered, Some(true));
+        assert_eq!(narration.items[1].hovered, Some(false));
+
+        widgets::set_narrating(false);
+        widgets::put(saved);
+    }
+}
