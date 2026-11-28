@@ -697,6 +697,10 @@ impl SaveDir {
             .collect();
         self.queue(Folder::Region, records, false)
     }
+    /// Whether an earlier entity read for `(x, z)` failed, leaving the entity chunk pending.
+    pub fn is_entity_read_failed(&self, x: i32, z: i32) -> bool {
+        self.failed_entity_reads.lock().unwrap().contains(&(x, z))
+    }
     /// `EntityStorage.loadEntities`: read `entities/` separately from the terrain.
     /// An absent record is empty; a failed read leaves the entity chunk pending until the level closes.
     pub fn load_entities(&self, x: i32, z: i32) -> Result<Vec<Tag>> {
@@ -847,9 +851,16 @@ impl SaveDir {
     pub fn save_entities(&self, chunks: Vec<((i32, i32), Vec<Tag>)>) -> Result<()> {
         self.queue(Folder::Entities, self.entity_records(chunks, None), true)
     }
-    /// `save_entities` on the writer thread.
-    pub fn save_entities_later(&self, chunks: Vec<((i32, i32), Vec<Tag>)>) -> Result<()> {
-        self.queue(Folder::Entities, self.entity_records(chunks, None), false)
+    /// `save_entities` on the writer thread. Returns the entity chunk keys
+    /// actually queued (excluding any whose earlier read failed).
+    pub fn save_entities_later(
+        &self,
+        chunks: Vec<((i32, i32), Vec<Tag>)>,
+    ) -> Result<HashSet<(i32, i32)>> {
+        let records = self.entity_records(chunks, None);
+        let queued = records.iter().map(|(key, _)| *key).collect();
+        self.queue(Folder::Entities, records, false)?;
+        Ok(queued)
     }
     /// `PersistentEntitySectionManager.storeChunkSections`: never store a pending entity chunk.
     fn entity_records(
