@@ -553,6 +553,9 @@ impl crate::game::ClientGame<'_> {
             .map(|(i, page)| (page.title(), ADDED_PAGES + i as u8))
     }
     pub fn pause_click(&mut self) -> Result<bool> {
+        self.with_screen_input_overrides(|game| game.pause_click_inner())
+    }
+    fn pause_click_inner(&mut self) -> Result<bool> {
         let (w, h) = {
             let size = self
                 .client
