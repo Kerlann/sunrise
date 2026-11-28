@@ -7,14 +7,14 @@ use mod_api::{Form, ItemKey, Registrar};
 fn pair(form: Form, material: &str) -> (String, String) {
     (
         form.id(material)
-            .expect("the page's materials are snake_case"),
+            .expect("the page's materials are legal resource paths"),
         form.tag(material)
-            .expect("the page's materials are snake_case"),
+            .expect("the page's materials are legal resource paths"),
     )
 }
 
 // ANCHOR: family
-/// Every id and tag the steel family declares, in the order a GT mod registers them.
+/// Every id and tag the steel family suggests, in the order a GT mod registers them.
 pub fn steel_family() -> Vec<(String, String)> {
     Form::ALL
         .iter()
@@ -25,24 +25,28 @@ pub fn steel_family() -> Vec<(String, String)> {
 // ANCHOR_END: family
 
 // ANCHOR: declare
-/// Request the steel items; the blocks go through `block_key` the same way.
+/// Request the steel items; the ore and storage block go through `block_key` the same way.
 pub fn declare_steel_items(registrar: &mut dyn Registrar, namespace: &str) -> Vec<ItemKey> {
     Form::ALL
         .iter()
         .copied()
         .filter(|form| !form.is_block())
         .map(|form| {
-            let id = form.id("steel").expect("steel is a snake_case material");
+            let id = form.id("steel").expect("steel is a legal resource path");
             registrar.item_key(&format!("{namespace}:{id}"))
         })
         .collect()
 }
 // ANCHOR_END: declare
 
-// ANCHOR: legacy
-/// Read a 1.7.10 ore-dictionary name as the declaration a port writes.
-pub fn ported_declaration(ore_name: &str) -> Option<(String, String)> {
-    let ore = mod_api::parse_ore_name(ore_name)?;
-    Some((ore.id(), ore.tag()))
+// ANCHOR: explicit
+/// A gem whose id is not the suggestion: vanilla's gem is `amethyst_shard`, not `amethyst`, but it
+/// still joins `c:gems/amethyst`, so the convention tag is independent of the id the mod picks.
+pub fn amethyst_gem(registrar: &mut dyn Registrar, namespace: &str) -> (ItemKey, String) {
+    let id = registrar.item_key(&format!("{namespace}:amethyst_shard"));
+    let tag = Form::Gem
+        .tag("amethyst")
+        .expect("amethyst is a legal resource path");
+    (id, tag)
 }
-// ANCHOR_END: legacy
+// ANCHOR_END: explicit

@@ -39,7 +39,6 @@
 - [Config files and settings](how-to/mod-settings.md)
 - [Publishing your mod](how-to/publish.md)
 - [Levels, dimensions and blocks](how-to/world.md)
-- [Materials and their forms](how-to/materials.md)
 - [Items, recipes and loot](how-to/items.md)
 - [Entities, players and commands](how-to/entities.md)
 - [Client, rendering and sound](how-to/client.md)

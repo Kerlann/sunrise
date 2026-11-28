@@ -4,35 +4,42 @@
 //! ingot, a nugget, a dust, a rod, an ore and a storage block. In 1.7.10 those names lived in the ore
 //! dictionary (`ingotSteel`, `dustSteel`, `blockSteel`, `oreSteel`); in Sunrise every variant is a
 //! normal registry id, and a `c:` convention tag holds the family together. [`Form`] names the shapes
-//! both sides share and derives the id and the tag for a material, and [`parse_ore_name`] reads a
-//! legacy ore-dictionary name back into the form and material a port declares.
+//! both sides share and derives the id and the tag for a material.
 //!
 //! The ids follow vanilla's shape: `steel_ingot`, `steel_nugget`, `steel_dust`, `steel_rod`,
-//! `steel_ore`, `steel_block`, `raw_steel`; a gem is the material's own id (`ruby`). Every form in
-//! [`Form::ALL`] has a tag Sunrise already ships under [`tags::c`](crate::tags::c), so a mod declares
-//! membership instead of inventing the name. A shape without a shipped tag (GT's plates and gears,
-//! for instance) is the mod's own tag, not a [`Form`].
+//! `steel_ore`, `steel_block`, `raw_steel`; a gem is the material's own id (`ruby`). They are
+//! suggestions for new content, not a rule vanilla follows: vanilla's gem is `amethyst_shard`, and a
+//! suggestion that collides with another form's gets an explicit id from the mod. Every form in
+//! [`Form::ALL`] has a **parent** tag Sunrise already ships under [`tags::c`](crate::tags::c); the
+//! **child** tag `c:ingots/steel` is the mod's to define. A shape without a shipped tag (GT's plates
+//! and gears, for instance) is the mod's own tag, not a [`Form`].
 
 use std::fmt;
 
 /// The shape a material takes when a mod registers it as an item or a block.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+///
+/// These are exactly the shapes Sunrise ships a `c:` parent tag for. The enum is non-exhaustive so a
+/// later form can join without breaking a caller; [`Self::ALL`] lists today's forms.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, sunrise_mod_api_macros::Wire,
+)]
+#[non_exhaustive]
 pub enum Form {
-    /// A smelted bar: `steel_ingot`, convention tag `c:ingots`.
+    /// A smelted bar: suggested id `steel_ingot`, parent tag `c:ingots`.
     Ingot,
-    /// A small piece: `steel_nugget`, convention tag `c:nuggets`.
+    /// A small piece: suggested id `steel_nugget`, parent tag `c:nuggets`.
     Nugget,
-    /// A ground pile: `steel_dust`, convention tag `c:dusts`.
+    /// A ground pile: suggested id `steel_dust`, parent tag `c:dusts`.
     Dust,
-    /// A cut gem, registered under the material's own id: `ruby`, convention tag `c:gems`.
+    /// A cut gem, suggested under the material's own id: `ruby`, parent tag `c:gems`.
     Gem,
-    /// A thin bar: `steel_rod`, convention tag `c:rods`.
+    /// A thin bar: suggested id `steel_rod`, parent tag `c:rods`.
     Rod,
-    /// An unmelted piece: `raw_steel`, convention tag `c:raw_materials`.
+    /// An unmelted piece: suggested id `raw_steel`, parent tag `c:raw_materials`.
     RawMaterial,
-    /// An ore block: `steel_ore`, convention tag `c:ores`.
+    /// An ore block: suggested id `steel_ore`, parent tag `c:ores`.
     Ore,
-    /// A storage block: `steel_block`, convention tag `c:storage_blocks`.
+    /// A storage block: suggested id `steel_block`, parent tag `c:storage_blocks`.
     StorageBlock,
 }
 
@@ -49,17 +56,24 @@ impl Form {
         Self::StorageBlock,
     ];
 
-    /// Whether the form registers a block rather than an item, so its tag is a block tag.
+    /// Whether the form registers a block rather than an item, so its id names a block and its
+    /// convention tag is a block tag.
     pub fn is_block(self) -> bool {
         matches!(self, Self::Ore | Self::StorageBlock)
     }
 
-    /// The directory under `data/<namespace>/tags/` that holds the form's convention tag.
+    /// The directory under `data/<namespace>/tags/` that holds the form's convention tag: `block`
+    /// for an ore or storage block, `item` for every other form.
     pub fn tag_folder(self) -> &'static str {
         if self.is_block() { "block" } else { "item" }
     }
 
-    /// The `c:` convention tag every variant of the form joins: `c:ingots` for every ingot.
+    /// The parent `c:` convention tag every variant of the form joins: `c:ingots` for every ingot.
+    ///
+    /// The parent is a tag Sunrise ships. A mod adds a child (`c:ingots/steel`) and, when recipes
+    /// should see the new material through the parent too, appends that child to the parent's value
+    /// list. A block form's parent is a block tag; the shipped `c:ores` and `c:storage_blocks` also
+    /// exist in the item registry, for the block's item.
     pub fn convention_tag(self) -> &'static str {
         match self {
             Self::Ingot => "c:ingots",
@@ -73,24 +87,35 @@ impl Form {
         }
     }
 
-    /// The form's id for `material`, without a namespace: `steel_ingot`, `raw_steel`, or `ruby` for
-    /// a gem. Give it to `Registrar::item_key` or `Registrar::block_key` with the mod's namespace.
+    /// The id the form suggests for `material`, without a namespace: `steel_ingot`, `raw_steel`, or
+    /// `steel` for a gem. Give it to `Registrar::item_key` or `Registrar::block_key` with the mod's
+    /// namespace, or register an explicit id when the suggestion is not what the mod wants.
     ///
-    /// `material` is snake_case, because it is the half of the id the mod chooses once and every
-    /// form reuses it: `wrought_iron`, never `WroughtIron`.
+    /// The suggestion is a naming convention, not a registry rule: `material` may be any legal
+    /// resource path, including `1steel` and `steel-ingot`. New content is conventionally snake_case
+    /// (`wrought_iron`, never `WroughtIron`), which [`is_snake_case`] reports without enforcing.
+    ///
+    /// A suggestion can collide, because two forms and two materials can spell the same id: an ingot
+    /// of `raw_steel` and a raw form of `steel_ingot` both read `raw_steel_ingot`, and a gem of
+    /// `steel_ingot` reads `steel_ingot`. A caller in that position registers its own id and keeps
+    /// [`Self::tag`] for the convention tag, so the material stays in its family.
     pub fn id(self, material: &str) -> Result<String, MaterialError> {
         check_material(material)?;
         Ok(self.material_id(material))
     }
 
-    /// The form's convention tag for `material`: `c:ingots/steel`. An ingot and a dust of the same
+    /// The child convention tag for `material`: `c:ingots/steel`. An ingot and a dust of the same
     /// material share `c:ingots`/`c:dusts` but not this name, so a recipe can ask for either.
+    ///
+    /// The child is the mod's to define under [`Self::tag_folder`]. A block form's tag is a block
+    /// tag; the block's item joins the same name in the item registry when recipes should see the
+    /// item, which is where the shipped item parents `c:ores` and `c:storage_blocks` live.
     pub fn tag(self, material: &str) -> Result<String, MaterialError> {
         check_material(material)?;
         Ok(self.material_tag(material))
     }
 
-    /// [`Self::id`] for a material already checked by [`parse_ore_name`].
+    /// [`Self::id`] for a material already checked.
     fn material_id(self, material: &str) -> String {
         match self {
             // A gem is the material itself: `ruby`, `sapphire`, `diamond`.
@@ -106,141 +131,63 @@ impl Form {
         }
     }
 
-    /// [`Self::tag`] for a material already checked by [`parse_ore_name`].
+    /// [`Self::tag`] for a material already checked.
     fn material_tag(self, material: &str) -> String {
         let form = self.convention_tag().trim_start_matches("c:");
         format!("c:{form}/{material}")
     }
 }
 
-/// A legacy 1.7.10 ore-dictionary name, read as the form and material a port declares.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OreName {
-    /// The shape the name spells.
-    pub form: Form,
-    /// The material in snake_case, as [`Form::id`] and [`Form::tag`] take it.
-    pub material: String,
-}
-
-impl OreName {
-    /// The id the port declares for this name: `steel_ingot`.
-    pub fn id(&self) -> String {
-        self.form.material_id(&self.material)
-    }
-
-    /// The convention tag the port adds the id to: `c:ingots/steel`.
-    pub fn tag(&self) -> String {
-        self.form.material_tag(&self.material)
-    }
+/// Whether `name` is lower-case snake_case: `wrought_iron`, `plutonium244`.
+///
+/// This is the convention [`Form::id`] suggests for new content, not a registry rule: [`Form::id`]
+/// and [`Form::tag`] accept every legal resource path, including `1steel` and `steel-ingot`. Report
+/// a name with this when a mod wants its own content to read like the rest of the family, without
+/// refusing a legal path a port already uses.
+pub fn is_snake_case(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with(|c: char| c.is_ascii_digit())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
 /// Why a material name was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// no wire: a registration-time diagnostic the caller renders, not a transported value.
 #[non_exhaustive]
 pub enum MaterialError {
     /// The name is empty.
     Empty,
-    /// The name is not lower-case snake_case: `Steel`, `steel ingot`, `steel-ingot`, `1steel`.
-    NotSnakeCase,
+    /// The name is not a legal resource path: it has a character outside `a-z`, `0-9`, `_`, `-` and
+    /// `.`, or a path separator such as `/` or `:`.
+    NotResourcePath,
 }
 
 impl fmt::Display for MaterialError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Empty => "a material name is empty",
-            Self::NotSnakeCase => "a material name is not lower-case snake_case",
+            Self::NotResourcePath => "a material name is not a legal resource path",
         })
     }
 }
 
 impl std::error::Error for MaterialError {}
 
-/// Read a 1.7.10 ore-dictionary name as the form and material it spells: `ingotSteel` is an
-/// [`Form::Ingot`] of `steel`, and `blockWroughtIron` a [`Form::StorageBlock`] of `wrought_iron`.
-///
-/// The prefix is the name's leading lower-case run, matched whole. A shape with no shipped form is
-/// `None` rather than a guess: `plateSteel` and `gearSteel` keep their prefix and are refused, and a
-/// size or state word between the form and the material (`dustSmallIron`, `dustTinyIron`,
-/// `ingotHotSteel`) is refused too instead of being read as a material that starts with `Small`,
-/// `Tiny` or `Hot`. A prefix without a material (`ingot`) or a material with characters outside
-/// `A-Za-z0-9` (`dustNaquadah-Enriched`) is `None` as well.
-pub fn parse_ore_name(name: &str) -> Option<OreName> {
-    // The prefix is the leading lower-case run; the material starts at the first other character.
-    let split = name.find(|c: char| !c.is_ascii_lowercase())?;
-    let (prefix, rest) = name.split_at(split);
-    let form = match prefix {
-        "ingot" => Form::Ingot,
-        "nugget" => Form::Nugget,
-        "dust" => Form::Dust,
-        "gem" => Form::Gem,
-        "rod" => Form::Rod,
-        "raw" => Form::RawMaterial,
-        "ore" => Form::Ore,
-        "block" => Form::StorageBlock,
-        _ => return None,
-    };
-    // A qualifier says the material is not the rest of the name, so this is not a `<form><Material>`
-    // name at all: refuse it instead of declaring `small_iron` or `hot_steel`.
-    const QUALIFIERS: [&str; 5] = ["Small", "Tiny", "Hot", "Dense", "Double"];
-    if QUALIFIERS
-        .iter()
-        .any(|qualifier| rest.starts_with(qualifier))
-    {
-        return None;
-    }
-    let material = material_name(rest)?;
-    check_material(&material).ok()?;
-    Some(OreName { form, material })
-}
-
-/// The snake_case material a CamelCase legacy name spells: `WroughtIron` is `wrought_iron`,
-/// `UUMatter` is `uu_matter`. `None` for a name with a character outside `A-Za-z0-9`, or one with no
-/// letter at all.
-///
-/// This is the conversion [`parse_ore_name`] applies to the material half; call it directly for a
-/// material a legacy mod names outside the ore dictionary.
-pub fn material_name(name: &str) -> Option<String> {
-    let mut out = String::with_capacity(name.len() + 4);
-    let mut after_lower = false;
-    for (index, c) in name.char_indices() {
-        if c.is_ascii_uppercase() {
-            let next_lower = name[index + 1..]
-                .chars()
-                .next()
-                .is_some_and(|next| next.is_ascii_lowercase());
-            // `Steel` opens the name, `aB` starts a word, and `UUMatter` starts one before the `M`.
-            if index > 0 && (after_lower || next_lower) {
-                out.push('_');
-            }
-            out.push(c.to_ascii_lowercase());
-            after_lower = false;
-        } else if c.is_ascii_lowercase() || c.is_ascii_digit() {
-            out.push(c);
-            after_lower = true;
-        } else {
-            return None;
-        }
-    }
-    (!out.is_empty() && out.chars().any(|c| c.is_ascii_alphabetic())).then_some(out)
-}
-
-/// Refuse a material that is not snake_case, so an id cannot smuggle in a namespace or a space.
+/// Refuse a material that is not one legal resource path, so an id cannot smuggle in a namespace or
+/// a space. The narrower snake_case convention is [`is_snake_case`] and never gates this.
 fn check_material(material: &str) -> Result<(), MaterialError> {
     if material.is_empty() {
         return Err(MaterialError::Empty);
     }
-    let mut chars = material.chars();
-    match chars.next() {
-        Some(first) if first.is_ascii_lowercase() => {}
-        _ => return Err(MaterialError::NotSnakeCase),
-    }
     if material
         .chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '-' | '.'))
     {
         Ok(())
     } else {
-        Err(MaterialError::NotSnakeCase)
+        Err(MaterialError::NotResourcePath)
     }
 }
 
@@ -259,6 +206,8 @@ mod tests {
         // A raw piece reads before the material, and a gem is the material's own id.
         assert_eq!(Form::RawMaterial.id("steel").unwrap(), "raw_steel");
         assert_eq!(Form::Gem.id("ruby").unwrap(), "ruby");
+        // The suggestion is not vanilla's exact name: vanilla's gem is `amethyst_shard`.
+        assert_eq!(Form::Gem.id("amethyst").unwrap(), "amethyst");
         assert_eq!(
             Form::ALL.map(|form| form.tag("steel").unwrap()),
             [
@@ -275,82 +224,70 @@ mod tests {
     }
 
     #[test]
-    fn a_legacy_ore_name_reads_back_to_the_same_declaration() {
-        for (legacy, form, material) in [
-            ("ingotSteel", Form::Ingot, "steel"),
-            ("nuggetSteel", Form::Nugget, "steel"),
-            ("dustNaquadahEnriched", Form::Dust, "naquadah_enriched"),
-            ("gemRuby", Form::Gem, "ruby"),
-            ("rodSteel", Form::Rod, "steel"),
-            ("blockWroughtIron", Form::StorageBlock, "wrought_iron"),
-            ("oreIron", Form::Ore, "iron"),
-        ] {
-            let ore = parse_ore_name(legacy).expect(legacy);
-            assert_eq!(ore.form, form, "{legacy}");
-            assert_eq!(ore.material, material, "{legacy}");
-            assert_eq!(ore.id(), form.id(material).unwrap(), "{legacy}");
-            assert_eq!(ore.tag(), form.tag(material).unwrap(), "{legacy}");
-        }
-        // The same declaration the mod writes directly, so a port and a new mod agree on the id.
+    fn a_suggested_id_can_collide_so_the_mod_names_its_own() {
+        // An ingot of `raw_steel` and a raw form of `steel_ingot` spell the same suggested id.
+        assert_eq!(Form::Ingot.id("raw_steel").unwrap(), "raw_steel_ingot");
         assert_eq!(
-            parse_ore_name("ingotSteel").unwrap().id(),
-            Form::Ingot.id("steel").unwrap()
+            Form::RawMaterial.id("steel_ingot").unwrap(),
+            "raw_steel_ingot"
+        );
+        // A gem of `steel_ingot` spells the same suggested id as an ingot of `steel`.
+        assert_eq!(Form::Gem.id("steel_ingot").unwrap(), "steel_ingot");
+        assert_eq!(Form::Ingot.id("steel").unwrap(), "steel_ingot");
+        // The convention tags stay distinct, so the material keeps its family with an explicit id.
+        assert_eq!(Form::Ingot.tag("raw_steel").unwrap(), "c:ingots/raw_steel");
+        assert_eq!(
+            Form::RawMaterial.tag("steel_ingot").unwrap(),
+            "c:raw_materials/steel_ingot"
         );
     }
 
     #[test]
-    fn refuses_a_name_that_is_not_a_shipped_form() {
-        // Shapes with no shipped convention tag, and a name with no material.
-        assert_eq!(parse_ore_name("plateSteel"), None);
-        assert_eq!(parse_ore_name("gearSteel"), None);
-        assert_eq!(parse_ore_name("dustSmallIron"), None);
-        assert_eq!(parse_ore_name("dustTinyIron"), None);
-        assert_eq!(parse_ore_name("ingotHotSteel"), None);
-        assert_eq!(parse_ore_name("stickWood"), None);
-        assert_eq!(parse_ore_name("ingot"), None);
-        assert_eq!(parse_ore_name("Steel"), None);
-        assert_eq!(parse_ore_name("dustNaquadah-Enriched"), None);
-        // The empty prefix is not a form, so a bare material is refused rather than half-read.
-        assert_eq!(parse_ore_name(""), None);
+    fn accepts_every_legal_resource_path() {
+        // `1steel` and `steel-ingot` are legal registry paths, so the helper builds them.
+        assert_eq!(Form::Ingot.id("1steel").unwrap(), "1steel_ingot");
+        assert_eq!(Form::Ingot.id("steel-ingot").unwrap(), "steel-ingot_ingot");
+        assert_eq!(Form::Ingot.id("steel.ingot").unwrap(), "steel.ingot_ingot");
+        assert_eq!(Form::Ingot.id("steel_2").unwrap(), "steel_2_ingot");
+        assert_eq!(Form::Gem.tag("1steel").unwrap(), "c:gems/1steel");
+        assert_eq!(Form::Ore.tag("steel-ingot").unwrap(), "c:ores/steel-ingot");
     }
 
     #[test]
-    fn camel_case_splits_acronyms_and_digits() {
-        assert_eq!(material_name("Steel").unwrap(), "steel");
-        assert_eq!(material_name("WroughtIron").unwrap(), "wrought_iron");
-        assert_eq!(
-            material_name("NaquadahEnriched").unwrap(),
-            "naquadah_enriched"
-        );
-        assert_eq!(material_name("UUMatter").unwrap(), "uu_matter");
-        assert_eq!(material_name("Plutonium244").unwrap(), "plutonium244");
-        assert_eq!(material_name("").as_deref(), None);
-        assert_eq!(material_name("244").as_deref(), None);
-        assert_eq!(material_name("Steel_Ingot").as_deref(), None);
-    }
-
-    #[test]
-    fn refuses_a_material_that_is_not_snake_case() {
+    fn refuses_a_material_that_is_not_a_resource_path() {
         assert_eq!(Form::Ingot.id(""), Err(MaterialError::Empty));
         for name in [
             "Steel",
             "steel ingot",
-            "steel-ingot",
-            "1steel",
             "steel:ingot",
             "my/steel",
+            "steel#tag",
+            "steel\u{e9}",
         ] {
             assert_eq!(
                 Form::Ingot.id(name),
-                Err(MaterialError::NotSnakeCase),
+                Err(MaterialError::NotResourcePath),
                 "{name}"
             );
             assert_eq!(
                 Form::Ingot.tag(name),
-                Err(MaterialError::NotSnakeCase),
+                Err(MaterialError::NotResourcePath),
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn snake_case_is_a_convention_not_a_registry_rule() {
+        assert!(is_snake_case("wrought_iron"));
+        assert!(is_snake_case("plutonium244"));
+        assert!(!is_snake_case("1steel"));
+        assert!(!is_snake_case("steel-ingot"));
+        assert!(!is_snake_case("Steel"));
+        assert!(!is_snake_case(""));
+        // A name outside the convention still builds; the two checks serve different purposes.
+        assert!(Form::Ingot.id("1steel").is_ok());
+        assert!(!is_snake_case("1steel"));
     }
 
     #[test]
@@ -367,13 +304,14 @@ mod tests {
         tags.sort();
         tags.dedup();
         assert_eq!(tags.len(), Form::ALL.len());
-        // Ores and storage blocks are blocks, so their tags are block tags.
+        // Ores and storage blocks are blocks, so their ids and tags are block-registry names.
+        assert_eq!(Form::Ore.tag_folder(), "block");
+        assert_eq!(Form::StorageBlock.tag_folder(), "block");
         assert!(
             Form::ALL
                 .iter()
-                .all(|form| form.tag_folder() == "block" || form.tag_folder() == "item")
+                .all(|form| form.is_block() == matches!(form, Form::Ore | Form::StorageBlock))
         );
-        assert_eq!(Form::Ore.tag_folder(), "block");
         assert_eq!(Form::Ingot.tag_folder(), "item");
     }
 }
