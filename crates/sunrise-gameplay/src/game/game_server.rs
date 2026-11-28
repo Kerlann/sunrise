@@ -454,13 +454,12 @@ impl crate::game::ServerGame<'_> {
         }
         self.close_ender_chest();
     }
-    #[allow(dead_code)]
-    #[inline(always)]
     pub fn finish_close_world_server(&mut self) {
         self.clear_world_parts();
         self.server.server_loot.0.set(None);
         self.common.server_items = None;
         self.server.world_tables.0 = None;
+        sunrise_sim::data_map_net::serve(None);
         self.server.session_lock.0 = None;
         self.server.world_adopted = false;
         self.server.startup_ticket_restore_pending = false;

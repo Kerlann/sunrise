@@ -227,6 +227,7 @@ fn with_fixture_game(
     use mod_api::Authority;
     use sunrise_gameplay_common::game::Options;
     use sunrise_level::sim_settings::SimSettings;
+    let _data_map_publication = sunrise_sim::data_map_net::isolate_server_publication();
 
     #[cfg(test)]
     mod_platform::__private::test_platform::install();

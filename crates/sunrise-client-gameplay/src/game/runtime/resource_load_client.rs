@@ -331,7 +331,7 @@ pub fn load_resources_for_mods_with_limit(
     let conditions = sunrise_gameplay_common::game::load_conditions::conditions_for_mods(
         mod_sources,
         &inventory,
-    )?;
+    );
     // The generation's settings, captured once before its reload listeners register: they and
     // the item data read this capture, never the files again.
     let captured = mods::item_data_load::capture_load_settings(&root, role, load_role.owning)?;

@@ -1,7 +1,7 @@
 use super::ingress_state::ListenerTurn;
-pub(in crate::game::client_side) use super::ingress_state::PacketError;
 use super::ingress_state::local_transfer_notice;
 use super::ingress_state::packet_error_notice;
+pub(in crate::game::client_side) use super::ingress_state::{DetailedPacketError, PacketError};
 use super::*;
 
 #[cfg(feature = "client")]
@@ -433,6 +433,9 @@ impl crate::game::ClientGame<'_> {
                 if let Some(remote) = &mut self.client.remote {
                     remote.datapacks = Default::default();
                     remote.custom_registries = Default::default();
+                    remote.client_data_maps = Default::default();
+                    remote.client_data_maps_received = false;
+                    remote.biome_keys = None;
                     remote.datapack_vanilla_values = None;
                     remote.has_logical_player = false;
                     remote.viewed.clear();
@@ -488,6 +491,8 @@ impl crate::game::ClientGame<'_> {
                 self.clear_waypoints();
                 if let Some(r) = self.client.remote.as_mut() {
                     r.datapacks = Default::default();
+                    r.client_data_maps = Default::default();
+                    r.client_data_maps_received = false;
                     r.datapack_vanilla_values = None;
                     r.clear_attachments();
                     r.players.clear();
@@ -555,6 +560,16 @@ impl crate::game::ClientGame<'_> {
                     Err(e) if e.is::<PacketError>() => {
                         log::warn!("Sunrise: disconnected: {e}");
                         self.record_packet_error(turn, packet_error_notice);
+                    }
+                    Err(e) if e.is::<DetailedPacketError>() => {
+                        let reason = e.to_string();
+                        log::warn!("Sunrise: disconnected: {reason}");
+                        self.record_packet_error(turn, || Event::Disconnected {
+                            reason,
+                            key: None,
+                            from_server: false,
+                            after_login: true,
+                        });
                     }
                     other => other?,
                 },
