@@ -1569,137 +1569,90 @@ impl crate::game::ClientGame<'_> {
 
     /// Dispatch a press directly to the selected engine child's native action bound on its
     /// reconciled widget record, without re-entering whole-screen coordinate hit-testing.
-    /// Returns `Ok(Some(handled))` when the active screen owns bound child dispatch, or `Ok(None)`
-    /// for screens that still use specialized routing (`Options`, `Title`, `Paused`, containers).
     fn dispatch_selected_child_press(
         &mut self,
         tag: u64,
         button: MouseButton,
         mapped_cursor: (f32, f32),
         original_rect: [f32; 4],
-    ) -> Result<Option<bool>> {
+    ) -> Result<bool> {
         let left = button == MouseButton::Left;
         if self.client.command_prompt.0.is_some() {
-            return Ok(Some(left && self.command_prompt_press_child(tag)));
+            return Ok(left && self.command_prompt_press_child(tag));
         }
         if self.client.link_prompt.is_some() {
-            return Ok(Some(left && self.link_prompt_press_child(tag)));
+            return Ok(left && self.link_prompt_press_child(tag));
         }
         if self.client.code_of_conduct.is_some() {
-            return Ok(Some(if left {
+            return Ok(if left {
                 self.code_of_conduct_press_child(tag)?
             } else {
                 false
-            }));
+            });
         }
         if self.client.server_packs.0.prompt.is_some() {
-            return Ok(Some(if left {
+            return Ok(if left {
                 self.pack_prompt_press_child(tag)?
             } else {
                 false
-            }));
+            });
         }
         if self.dialog_open() {
-            return Ok(Some(if left {
+            return Ok(if left {
                 self.dialog_press_child(tag, mapped_cursor, original_rect)?
             } else {
                 false
-            }));
+            });
         }
         if self.remote_loading() {
-            return Ok(Some(if left {
+            return Ok(if left {
                 self.connect_screen_press_child(tag)?
             } else {
                 false
-            }));
+            });
         }
         if self.client.book.is_some() {
-            return Ok(Some(left && self.book_press_child(tag, mapped_cursor)));
+            return Ok(left && self.book_press_child(tag, mapped_cursor));
         }
         if self.client.sign_edit.is_some() {
-            return Ok(Some(left && self.sign_edit_press_child(tag)));
+            return Ok(left && self.sign_edit_press_child(tag));
         }
         match self.client.screen {
-            super::Screen::BlockEditor => Ok(Some(
-                left && self.block_editor_press_child(tag, mapped_cursor, original_rect),
-            )),
-            super::Screen::Stats => Ok(Some(left && self.stats_press_child(tag))),
-            super::Screen::DebugOptions => Ok(Some(
-                left && self.debug_options_press_child(tag, mapped_cursor),
-            )),
-            super::Screen::DemoIntro => Ok(Some(left && self.demo_intro_press_child(tag))),
-            super::Screen::Dead => Ok(Some(if left {
+            super::Screen::BlockEditor => {
+                Ok(left && self.block_editor_press_child(tag, mapped_cursor, original_rect))
+            }
+            super::Screen::Stats => Ok(left && self.stats_press_child(tag)),
+            super::Screen::DebugOptions => {
+                Ok(left && self.debug_options_press_child(tag, mapped_cursor))
+            }
+            super::Screen::DemoIntro => Ok(left && self.demo_intro_press_child(tag)),
+            super::Screen::Dead => Ok(if left {
                 self.death_press_child(tag)?
             } else {
                 false
-            })),
-            super::Screen::ServerLinks => Ok(Some(if left {
+            }),
+            super::Screen::ServerLinks => Ok(if left {
                 self.server_links_press_child(tag)?
             } else {
                 false
-            })),
-            super::Screen::ConfirmLink => Ok(Some(left && self.confirm_link_press_child(tag))),
-            super::Screen::DialogWarning => Ok(Some(if left {
+            }),
+            super::Screen::ConfirmLink => Ok(left && self.confirm_link_press_child(tag)),
+            super::Screen::DialogWarning => Ok(if left {
                 self.dialog_warning_press_child(tag)?
             } else {
                 false
-            })),
-            super::Screen::CommandBlock => Ok(Some(
-                left && self.command_block_press_child(tag, mapped_cursor),
-            )),
-            super::Screen::Advancements => Ok(Some(left && self.advancements_press_child(tag))),
-            super::Screen::WorldOptions => Ok(Some(
-                left && self.world_options_press_child(tag, mapped_cursor),
-            )),
-            super::Screen::Friends => Ok(Some(left && self.friends_screen_press_child(tag))),
-            super::Screen::Social => Ok(Some(left && self.social_press_child(tag, mapped_cursor))),
-            super::Screen::Chat => Ok(Some(left && self.chat_press_child(tag, mapped_cursor))),
-            _ => Ok(None),
-        }
-    }
-
-    /// Whether the active screen/overlay owns bound selected-child dispatch for every discovered
-    /// input-bearing engine widget (everything outside the specialized `Options`, `Title`,
-    /// `Paused`, and container screens).
-    fn uses_bound_child_dispatch(&self) -> bool {
-        self.client.command_prompt.0.is_some()
-            || self.client.link_prompt.is_some()
-            || self.client.code_of_conduct.is_some()
-            || self.client.server_packs.0.prompt.is_some()
-            || self.dialog_open()
-            || self.remote_loading()
-            || self.client.book.is_some()
-            || self.client.sign_edit.is_some()
-            || matches!(
-                self.client.screen,
-                super::Screen::BlockEditor
-                    | super::Screen::Stats
-                    | super::Screen::DebugOptions
-                    | super::Screen::DemoIntro
-                    | super::Screen::Dead
-                    | super::Screen::ServerLinks
-                    | super::Screen::ConfirmLink
-                    | super::Screen::DialogWarning
-                    | super::Screen::CommandBlock
-                    | super::Screen::Advancements
-                    | super::Screen::WorldOptions
-                    | super::Screen::Friends
-                    | super::Screen::Social
-                    | super::Screen::Chat
-            )
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn test_clear_engine_widget_native_action(&mut self, id: ScreenWidgetId) {
-        let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
-        if let Some(slot) = inner.engine_children.iter_mut().find(|s| s.id == id) {
-            slot.native_action = None;
-            let key = slot.key.clone();
-            for hit in &mut inner.engine_hits {
-                if hit.key == key {
-                    hit.native_action = None;
-                }
+            }),
+            super::Screen::CommandBlock => {
+                Ok(left && self.command_block_press_child(tag, mapped_cursor))
             }
+            super::Screen::Advancements => Ok(left && self.advancements_press_child(tag)),
+            super::Screen::WorldOptions => {
+                Ok(left && self.world_options_press_child(tag, mapped_cursor))
+            }
+            super::Screen::Friends => Ok(left && self.friends_screen_press_child(tag)),
+            super::Screen::Social => Ok(left && self.social_press_child(tag, mapped_cursor)),
+            super::Screen::Chat => Ok(left && self.chat_press_child(tag, mapped_cursor)),
+            _ => Ok(false),
         }
     }
 
@@ -1994,17 +1947,7 @@ impl crate::game::ClientGame<'_> {
                     self.client.cursor
                 };
                 let res = if let Some(tag) = native_action {
-                    match self.dispatch_selected_child_press(tag, button, mapped_cursor, original) {
-                        Ok(Some(handled)) => Ok(handled),
-                        Ok(None) => self.dispatch_selected_engine_target(&target, |game| {
-                            game.route_screen_button(button, code, true, double_click)
-                        }),
-                        Err(err) => Err(err),
-                    }
-                } else if self.uses_bound_child_dispatch() {
-                    // A discovered widget on a bound-dispatch screen without a native action
-                    // fails visibly (returns false) with no silent coordinate fallback.
-                    Ok(false)
+                    self.dispatch_selected_child_press(tag, button, mapped_cursor, original)
                 } else {
                     self.dispatch_selected_engine_target(&target, |game| {
                         game.route_screen_button(button, code, true, double_click)
@@ -3824,29 +3767,8 @@ impl ScreenWidgets for crate::game::ClientGame<'_> {
                 }
                 let center = (ox + ow * 0.5, oy + oh * 0.5);
                 let handled = if let Some(tag) = native_action {
-                    match self.dispatch_selected_child_press(tag, MouseButton::Left, center, rect) {
-                        Ok(Some(direct)) => direct,
-                        Ok(None) => {
-                            let prev_cursor = self.client.cursor;
-                            self.client.cursor = center;
-                            let handled = widgets::with_selected_engine_widget(&key, || {
-                                self.with_redirecting_engine_click(|game| {
-                                    game.with_screen_input_overrides(|game| {
-                                        game.route_screen_button(MouseButton::Left, 0, true, false)
-                                    })
-                                })
-                            })
-                            .unwrap_or(false);
-                            self.client.cursor = prev_cursor;
-                            handled
-                        }
-                        // A bound action's error is terminal: return false with no coordinate fallback.
-                        Err(_) => false,
-                    }
-                } else if self.uses_bound_child_dispatch() {
-                    // Missing native_action on a bound-dispatch screen fails visibly without
-                    // falling back to whole-screen coordinate hit-testing.
-                    false
+                    self.dispatch_selected_child_press(tag, MouseButton::Left, center, rect)
+                        .unwrap_or(false)
                 } else {
                     let prev_cursor = self.client.cursor;
                     self.client.cursor = center;
