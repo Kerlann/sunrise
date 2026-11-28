@@ -905,10 +905,11 @@ pub fn main() -> sunrise_client::Result<()> {
     let registry = assets.registry;
     let facts = BlockFacts::load(root, registry)?;
     let motion = sunrise_client::motion::MotionResources::load(root, &assets)?;
-    let data = MobData::load(
+    let mut data = MobData::load(
         &sunrise_assets::resource_source::ResourceRoot::directory(root.to_path_buf()),
         facts.states.len(),
     )?;
+    data.populate_adjacent_flags(&facts);
     let types = MobTypes::load(root)?;
     // The types a bee leaving its hive is loaded with (EntityType.loadEntityRecursive).
     let arc_types: HashMap<String, Arc<MobType>> = types
