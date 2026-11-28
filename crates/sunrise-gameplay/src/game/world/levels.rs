@@ -2888,12 +2888,19 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn end_state_swap_level_exchanges_real_locators_and_keeps_siblings() {
-        use crate::game::native_entity_refs::tests::with_game;
+        use crate::game::native_entity_refs::tests::{run_fresh_cases, with_game};
         use sunrise_core::{geometry::Vec3, position::BlockPos};
         use sunrise_gameplay_common::game::end_state::{
             Arriving, EndFlash, EndLevelState, EndState, EyeOfEnder, GatewayArrival, GatewayJob,
         };
 
+        if run_fresh_cases(
+            "game::server_side::levels::tests::end_state_swap_level_exchanges_real_locators_and_keeps_siblings",
+            "SUNRISE_END_STATE_SWAP_CHILD",
+            &["swap"],
+        ) {
+            return;
+        }
         with_game(|game| {
             let terrain_a = make_flat_terrain(game, 12345);
             let terrain_b = make_flat_terrain(game, 67890);
@@ -2998,7 +3005,7 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn production_level_swap_exchanges_all_six_subsystems_and_keeps_siblings() {
-        use crate::game::native_entity_refs::tests::with_game;
+        use crate::game::native_entity_refs::tests::{run_fresh_cases, with_game};
         use std::rc::Rc;
         use sunrise_core::{geometry::Vec3, position::BlockPos};
         use sunrise_gameplay_common::game::end_state::{
@@ -3020,6 +3027,13 @@ mod tests {
         };
         use sunrise_world::registry::BlockStateId;
 
+        if run_fresh_cases(
+            "game::server_side::levels::tests::production_level_swap_exchanges_all_six_subsystems_and_keeps_siblings",
+            "SUNRISE_LEVEL_SWAP_CHILD",
+            &["swap"],
+        ) {
+            return;
+        }
         mod_platform::testing::with_mods(Vec::new().into(), || {
             with_game(|game| {
                 let root = tempfile::tempdir().unwrap();

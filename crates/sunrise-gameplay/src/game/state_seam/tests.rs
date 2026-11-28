@@ -1,7 +1,8 @@
 use super::*;
 use crate::game::advancements::block_use_recording::{Recording, SEEN};
 use crate::game::native_entity_refs::tests::{
-    fixture_root, prepare_entity_ticking_neighborhood, run_with_game_stack, with_game_role,
+    fixture_root, prepare_entity_ticking_neighborhood, run_fresh_cases, run_with_game_stack,
+    with_game_role,
 };
 use crate::game::native_guest_turn_tests::open_fixture_hub;
 use mod_api::{
@@ -511,6 +512,13 @@ fn spectator_arrival(role: ExecutionRole, mode: Travel) {
 #[test]
 #[ignore = "daily"]
 fn spectator_use_packet_opens_and_lands_in_the_end() {
+    if run_fresh_cases(
+        "game::state_seam::tests::spectator_use_packet_opens_and_lands_in_the_end",
+        "SUNRISE_SEAM_SPECTATOR_CHILD",
+        &["travel"],
+    ) {
+        return;
+    }
     run_with_game_stack(|| {
         for role in [
             ExecutionRole::IntegratedServer,
@@ -650,6 +658,13 @@ impl Hooks for BlockListener {
 #[test]
 #[ignore = "daily"]
 fn placement_packet_restores_actor_and_source_and_corrects_prediction() {
+    if run_fresh_cases(
+        "game::state_seam::tests::placement_packet_restores_actor_and_source_and_corrects_prediction",
+        "SUNRISE_SEAM_PLACEMENT_CHILD",
+        &["placement"],
+    ) {
+        return;
+    }
     run_with_game_stack(|| {
         let (events, suppress) = (
             Arc::new(Mutex::new(Vec::new())),
