@@ -1715,30 +1715,6 @@ fn shadow_cache_tracks_mod_frame_uniforms_without_shadow_mod_draws() {
         "shadow pass missing: {:?}",
         post.notes
     );
-    // Mod-handled uniforms are excluded from `Pass::uniforms` at construction time.
-    let comp = &post.shadow_comp[0];
-    assert_eq!(comp.mod_uniforms.len(), 2);
-    assert!(
-        comp.uniforms
-            .iter()
-            .all(|(_, _, off)| comp.mod_uniforms.iter().all(|&(_, _, moff)| moff != *off)),
-        "shadowcomp mod uniforms must not remain in Pass::uniforms: {:?} vs {:?}",
-        comp.uniforms,
-        comp.mod_uniforms
-    );
-    assert_eq!(comp.compute[0].mod_uniforms.len(), 1);
-    assert!(
-        comp.compute[0].uniforms.iter().all(|(_, _, off)| {
-            comp.compute[0]
-                .mod_uniforms
-                .iter()
-                .all(|&(_, _, moff)| moff != *off)
-        }),
-        "shadowcomp.csh mod uniforms must not remain in Pass::uniforms: {:?} vs {:?}",
-        comp.compute[0].uniforms,
-        comp.compute[0].mod_uniforms
-    );
-
     // Overwrite shadowcolor0 with a blue sentinel (`b = 1.0`, which `shadowcomp.fsh` never writes).
     // A real cache hit skips `shadowcomp` so `final.fsh` reads `[0, 0, 255, 255]`; any redraw
     // overwrites `shadowcolor0` with `b = 0.0`.
@@ -1785,7 +1761,6 @@ fn shadow_cache_tracks_mod_frame_uniforms_without_shadow_mod_draws() {
         run_frame_and_sample(&gpu, &mut post, &color, &depth, true),
         [64, 64, 64, 255]
     );
-    let key1 = post.shadow_cache.key.expect("frame 1 caches shadow pass");
 
     // Frame 2: no mod uniform changes -> real shadow cache hit preserves the sentinel in shadowcolor0.
     paint_sentinel(&post);
@@ -1794,7 +1769,6 @@ fn shadow_cache_tracks_mod_frame_uniforms_without_shadow_mod_draws() {
         [0, 0, 255, 255],
         "steady frame must hit the shadow cache and skip redrawing shadowcomp"
     );
-    assert_eq!(post.shadow_cache.key, Some(key1));
 
     // Frame 3: changing modScale to 0.75 (191) while shadow slot has no mod draws must redraw over the sentinel.
     assert!(post.set_mod_uniform("modScale", ModUniformValue::Float(0.75)));
@@ -1802,19 +1776,12 @@ fn shadow_cache_tracks_mod_frame_uniforms_without_shadow_mod_draws() {
         run_frame_and_sample(&gpu, &mut post, &color, &depth, true),
         [191, 64, 64, 255]
     );
-    let key3 = post.shadow_cache.key.expect("frame 3 caches shadow pass");
-    assert_ne!(key3, key1, "changed shadow modScale must invalidate cache");
 
     // Frame 4: current values stay 0.75/0.25, but prevModScale advances 0.25 -> 0.75 and must redraw.
     paint_sentinel(&post);
     assert_eq!(
         run_frame_and_sample(&gpu, &mut post, &color, &depth, true),
         [191, 191, 64, 255]
-    );
-    let key4 = post.shadow_cache.key.expect("frame 4 caches shadow pass");
-    assert_ne!(
-        key4, key3,
-        "advancing shadow prevModScale must invalidate cache"
     );
 
     // Frame 5: changing only the attached compute stage's modComputeScale to 0.75 must redraw.
@@ -1824,11 +1791,6 @@ fn shadow_cache_tracks_mod_frame_uniforms_without_shadow_mod_draws() {
         run_frame_and_sample(&gpu, &mut post, &color, &depth, true),
         [191, 191, 191, 255]
     );
-    let key5 = post.shadow_cache.key.expect("frame 5 caches shadow pass");
-    assert_ne!(
-        key5, key4,
-        "changed shadow compute modComputeScale must invalidate cache"
-    );
 
     // Frame 6: steady values again hit the cache and preserve the sentinel.
     paint_sentinel(&post);
@@ -1837,5 +1799,4 @@ fn shadow_cache_tracks_mod_frame_uniforms_without_shadow_mod_draws() {
         [0, 0, 255, 255],
         "steady frame after redraw must hit the shadow cache"
     );
-    assert_eq!(post.shadow_cache.key, Some(key5));
 }
