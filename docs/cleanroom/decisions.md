@@ -226,6 +226,12 @@ the full list.
     `iris.features.required`. A flag matches in any case, and the macro takes the name as `FEATURES` writes it
     (`ssbo` listed gives `IRIS_FEATURE_SSBO`, not `IRIS_FEATURE_ssbo`). A flag Sunrise lacks, and a flag the pack
     doesn't list, stay undefined. A required flag Sunrise lacks keeps its note, and the pack still loads, as before.
+  - *Added 2026-11-28 ([#6921](https://github.com/sunrise-org/sunrise/issues/6921)):* `PER_BUFFER_BLENDING` is
+    supported only on a device that draws colour targets differing in blend (wgpu's
+    `DownlevelFlags::INDEPENDENT_BLEND`; `Macros::set_per_buffer_blending`). There it is answered as the flags of
+    `FEATURES` are: listed in either list, in any case, it gets `IRIS_FEATURE_PER_BUFFER_BLENDING`, in the same two
+    reads below. On a device without it, and in a read made without the renderer's answer, the macro stays undefined
+    and a required `PER_BUFFER_BLENDING` keeps its note. Before, the macro was never defined.
   - A supported flag Sunrise can't keep on every draw it may take loads without a note but gets no macro:
     `BLOCK_EMISSION_ATTRIBUTE` (`UNANSWERED` in `macros.rs`). Terrain drawn from its vertex attributes alone (when
     neither the arena's pages nor the normal stream fit the pack's vertex stage) has no source block, so
@@ -284,6 +290,7 @@ the full list.
   `options::tests::a_repeated_flag_list_is_noted_as_the_lists_were_settled`,
   `options::tests::a_repeat_the_second_read_cannot_see_is_still_noted`,
   `options::tests::the_settled_lists_keep_their_place_in_the_file`,
+  `options::per_buffer_blending_tests::*`,
   `options::tests::an_undef_in_shaders_properties_hides_the_answer_from_conditionals_only`,
   `options::tests::a_reused_macro_set_carries_no_answer_to_the_next_pack`,
   `options::tests::block_emission_is_supported_but_not_answered`,
