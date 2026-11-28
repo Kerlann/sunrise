@@ -161,6 +161,7 @@ fn observed_screen_view_carries_mod_screen_owner() {
         menu: None,
         menu_generation: None,
         dialog_key: None,
+        sub_page: 0,
         title: None,
         rect: [0.0, 0.0, 320.0, 240.0],
         screen_size: [320.0, 240.0],
@@ -174,6 +175,10 @@ fn observed_screen_view_carries_mod_screen_owner() {
     assert_eq!(view.mod_screen, Some("mod_a"));
     let other = screen_view_for_mod(&view, "mod_b");
     assert_eq!(other.mod_screen, Some("mod_b"));
+    let mut sub_page_changed = observed.clone();
+    assert!(observed.same_receiver(&sub_page_changed));
+    sub_page_changed.sub_page = 1;
+    assert!(!observed.same_receiver(&sub_page_changed));
 }
 
 // ---------------------------------------------------------------------------

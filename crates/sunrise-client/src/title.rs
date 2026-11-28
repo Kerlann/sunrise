@@ -41,7 +41,7 @@ pub use buffet::State as BuffetEditor;
 pub use create_world::{DIFFICULTIES, WorldOptions};
 pub use flat::{FlatLayer, FlatSettings, State as FlatEditor};
 pub use onboarding::Onboarding;
-use preset_buttons::{ADDED_IDS, CREDITS_ID, credits_notice};
+use preset_buttons::{ADDED_IDS, CREDITS_KEY, credits_notice};
 use preset_editors::PresetEditorFactories;
 use world_toast::WorldToast;
 
@@ -390,9 +390,6 @@ pub struct Title {
     warning_check: Cell<[f32; 4]>,
     /// The bottom notice's `PlainTextButton` as last drawn: x, y, width, height.
     credits_button: Cell<[f32; 4]>,
-    /// The main menu's own widgets a mod removed at `ScreenEvent.Init.Post`, by id
-    /// ([`Title::init_children`]): neither drawn, pressed nor focused until the next init.
-    removed_children: Vec<u8>,
     /// `Minecraft.allowsMultiplayer()` once the account's attributes are known.
     pub allows_multiplayer: bool,
     /// The packages in the mods folder (the Mods screen's rows): the main menu's added buttons
@@ -466,6 +463,9 @@ pub(crate) struct Button {
     y: f32,
     w: f32,
     label: String,
+    /// Structured label when the button comes from a translation key, preserving
+    /// translation identity for the widget collector and override table.
+    text: Option<Text>,
     enabled: bool,
     id: u8,
     icon: Option<(&'static str, f32)>,
@@ -480,6 +480,12 @@ impl Button {
         self.action = Some(action);
         self
     }
+    fn display_text(&self) -> std::borrow::Cow<'_, Text> {
+        match &self.text {
+            Some(text) => std::borrow::Cow::Borrowed(text),
+            None => std::borrow::Cow::Owned(Text::literal(&self.label)),
+        }
+    }
     /// `AbstractButton.extractDefaultLabel`: the label centred with a 2 px
     /// margin, and slid inside the button when it does not fit
     /// (`AbstractWidget.extractScrollingStringOverContents`), instead of being
@@ -487,47 +493,30 @@ impl Button {
     /// label on Create World, hi_in's Join Server in the Multiplayer footer).
     /// A button with a `trailing` icon is `SpriteIconButton.TextAndIcon`, whose
     /// label keeps clear of the icon: see [`Button::draw_label_at`].
+    #[cfg(test)]
     fn draw_label(&self, batch: &mut HudBatch, atlas: &HudAtlas, color: u32) {
         self.draw_label_at(batch, atlas, color, crate::hud_overlays::now_ms());
     }
 
-    /// [`Button::draw_label`] at `now_ms`. `SpriteIconButton.TextAndIcon`
-    /// (`extractContents`) hands the label to `acceptScrolling` with `left`
-    /// at the button's x plus 2, `right` at its x plus width minus the
-    /// sprite's width minus 4, and `centerX` at its x plus half its width: the
-    /// label slides inside that box when wider, and one that fits is moved
-    /// left until it ends where the icon's room begins. A plain button takes
-    /// its centre from the midpoint of the unreserved content bounds.
-    /// Controller glyph room narrows the fit and clip bounds, not the centre.
+    #[cfg(test)]
     fn draw_label_at(&self, batch: &mut HudBatch, atlas: &HudAtlas, color: u32, now_ms: i64) {
         let room = if self.action.is_some() && self.enabled {
             crate::widgets::action_glyph_room()
         } else {
             0.0
         };
-        let left = self.x + 2.0;
-        let (center_x, right) = match self.trailing {
-            Some((_, size)) => (
-                self.x + (self.w / 2.0).floor(),
-                self.x + self.w - size - 4.0,
-            ),
-            None => {
-                let right = self.x + self.w - 2.0;
-                // `acceptScrollingWithDefaultCenter`: truncate the midpoint toward zero.
-                (((left + right) / 2.0).trunc(), right)
-            }
-        };
-        crate::ui::scrolling_text_around_at(
+        crate::ui::button_label_at(
             batch,
             atlas,
+            [self.x, self.y, self.w, 20.0],
             &Text::literal(&self.label),
-            center_x,
-            left + room,
-            right,
-            self.y,
-            self.y + 20.0,
-            now_ms,
-            color,
+            crate::ui::ButtonLabelLayout {
+                room,
+                trailing_width: self.trailing.map(|(_, size)| size),
+                offset: None,
+                now_ms,
+                color,
+            },
         );
     }
 }
@@ -803,7 +792,6 @@ impl Title {
             message_lines: Cell::new(1),
             warning_check: Cell::new([0.0; 4]),
             credits_button: Cell::new([0.0; 4]),
-            removed_children: Vec::new(),
             allows_multiplayer: true,
             mods: 0,
             ban_queue: Default::default(),
@@ -2088,13 +2076,9 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
             7 => icon("accessibility.onboarding.accessibility.button.narration"),
             _ => Narratable::button(b.label.clone(), rect, b.enabled),
         };
-        // TitleScreen.init adds the icon row after Minecraft Realms and before
-        // Options... and Quit Game, which Sunrise draws first.
-        narratable.order(match b.id {
-            5..=7 => 1,
-            2 | 3 => 2,
-            _ => 0,
-        })
+        // `main_buttons` already lists widgets in `TitleScreen.init` order:
+        // Singleplayer, Multiplayer, Realms, added buttons, icon row, Options..., Quit Game.
+        narratable
     }
 
     /// The `Tooltip` vanilla sets on a button of the open screen, as its key:
@@ -2279,16 +2263,44 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
                 return (Action::None, true, true);
             }
         }
-        if matches!(self.mode, Mode::Main) && !self.removed_children.contains(&CREDITS_ID) {
-            let [bx, by, bw, bh] = self.credits_button.get();
-            if (bx..bx + bw).contains(&x) && (by..by + bh).contains(&y) {
+        if matches!(self.mode, Mode::Main) {
+            let credits_text = Text::translate(CREDITS_KEY, &[]);
+            if let Some([bx, by, bw, bh]) = crate::widgets::resolve_engine_input(
+                crate::widgets::WidgetBucket::Button,
+                Some(&credits_text),
+                None,
+                0,
+                self.credits_button.get(),
+                true,
+            ) && (bx..bx + bw).contains(&x)
+                && (by..by + bh).contains(&y)
+            {
                 return (Action::Credits, true, true);
             }
         }
+        let mut counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
         let hit = self
             .buttons(w, h)
             .into_iter()
-            .find(|b| b.enabled && x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + 20.0)
+            .find(|b| {
+                let label = b.display_text();
+                let key = crate::widgets::stable_key_from_text(label.as_ref());
+                let occ = {
+                    let c = counts.entry(key).or_insert(0);
+                    let cur = *c;
+                    *c = cur.saturating_add(1);
+                    cur
+                };
+                crate::widgets::resolve_engine_input(
+                    crate::widgets::WidgetBucket::Button,
+                    Some(label.as_ref()),
+                    None,
+                    occ,
+                    [b.x, b.y, b.w, 20.0],
+                    b.enabled,
+                )
+                .is_some_and(|[bx, by, bw, bh]| x >= bx && x < bx + bw && y >= by && y < by + bh)
+            })
             .map(|b| b.id);
         if hit.is_some() {
             self.focused_button = hit;
@@ -3015,7 +3027,28 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
         if let Some(id) = self.focused_button {
             let (w, h) = size;
             let buttons = self.buttons(w, h);
-            if let Some(b) = buttons.into_iter().find(|b| b.id == id && b.enabled) {
+            let mut counts: std::collections::HashMap<String, u32> =
+                std::collections::HashMap::new();
+            if let Some(b) = buttons.into_iter().find(|b| {
+                let label = b.display_text();
+                let key = crate::widgets::stable_key_from_text(label.as_ref());
+                let occ = {
+                    let c = counts.entry(key).or_insert(0);
+                    let cur = *c;
+                    *c = cur.saturating_add(1);
+                    cur
+                };
+                b.id == id
+                    && crate::widgets::resolve_engine_input(
+                        crate::widgets::WidgetBucket::Button,
+                        Some(label.as_ref()),
+                        None,
+                        occ,
+                        [b.x, b.y, b.w, 20.0],
+                        b.enabled,
+                    )
+                    .is_some()
+            }) {
                 let action = self.click_action(b.x, b.y, (w, h), Some(id), &mut true);
                 return (action, true);
             }
@@ -3389,6 +3422,26 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
             std::mem::discriminant(screen).hash(&mut hasher);
         }
         self.rules.borrow().is_some().hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Distinguishes sub-screens and overlays that share a `Title` `Mode::id()`.
+    pub fn sub_page_key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.rules.borrow().is_some().hash(&mut hasher);
+        self.preparing.hash(&mut hasher);
+        self.pack_validation.is_some().hash(&mut hasher);
+        self.confirm_experiments
+            .borrow()
+            .is_some()
+            .hash(&mut hasher);
+        self.experiments.borrow().is_some().hash(&mut hasher);
+        match &self.mode {
+            Mode::CreateFlat { flat, .. } => std::mem::discriminant(&flat.page).hash(&mut hasher),
+            Mode::Realms(screen) => screen.subscreen_key().hash(&mut hasher),
+            _ => {}
+        }
         hasher.finish()
     }
     /// The keyboard's focus left a text field for another widget: the field

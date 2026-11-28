@@ -10,14 +10,13 @@ pub trait Hooks {
     /// Post instead skips normal mapped release on either route, after the screen has declined.
     #[hook(
         target = "sunrise_client_gameplay::game::native_hooks::base::ClientGame<'_>::native_screen_key_released_pre",
-        receiver = "read",
         dispatch = "flat",
         side = "client",
         contract = "cancel",
         out = "canceled",
         neoforge = "ScreenEvent.KeyReleased.Pre",
         cancellable = true,
-        version = 3
+        version = 4
     )]
     fn screen_key_released_pre(
         screen: &ScreenView<'_>,

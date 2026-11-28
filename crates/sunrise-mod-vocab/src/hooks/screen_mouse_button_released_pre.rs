@@ -15,10 +15,9 @@ pub trait Hooks {
     /// press; a press that opened another screen ends on that one.
     #[hook(
         target = "sunrise_client_gameplay::game::native_hooks::base::ClientGame<'_>::native_screen_mouse_button_released_pre",
-        receiver = "read",
         dispatch = "flat",
         side = "client",
-        version = 2,
+        version = 3,
         contract = "cancel",
         out = "canceled",
         neoforge = "ScreenEvent.MouseButtonReleased.Pre",

@@ -143,7 +143,7 @@ pub(crate) mod tests {
     impl Hooks for EditorMod {
         fn screen_mouse_button_pressed_pre(
             &self,
-            _: &dyn mod_api::ClientHost,
+            _: &mut dyn mod_api::ClientHost,
             event: &mut ScreenMouseButtonPressedPreEvent<'_>,
         ) -> mod_api::Flow {
             let mut mouse = self.mouse.lock().unwrap();
@@ -159,7 +159,7 @@ pub(crate) mod tests {
 
         fn screen_mouse_button_pressed_post(
             &self,
-            host: &dyn mod_api::ClientHost,
+            host: &mut dyn mod_api::ClientHost,
             event: &mut ScreenMouseButtonPressedPostEvent<'_>,
         ) {
             let mut mouse = self.mouse.lock().unwrap();
@@ -175,7 +175,7 @@ pub(crate) mod tests {
 
         fn screen_mouse_button_released_post(
             &self,
-            _: &dyn mod_api::ClientHost,
+            _: &mut dyn mod_api::ClientHost,
             event: &mut ScreenMouseButtonReleasedPostEvent<'_>,
         ) {
             self.mouse.lock().unwrap().events.push(MouseStep::Release(
@@ -187,7 +187,7 @@ pub(crate) mod tests {
 
         fn screen_char_typed_pre(
             &self,
-            _: &dyn mod_api::ClientHost,
+            _: &mut dyn mod_api::ClientHost,
             event: &mut ScreenCharTypedPreEvent<'_>,
         ) -> mod_api::Flow {
             if event.screen.id == "world_preset_editor" && event.c == '!' {
@@ -198,7 +198,7 @@ pub(crate) mod tests {
         }
         fn screen_char_typed_post(
             &self,
-            _: &dyn mod_api::ClientHost,
+            _: &mut dyn mod_api::ClientHost,
             event: &mut ScreenCharTypedPostEvent<'_>,
         ) {
             if event.screen.id == "world_preset_editor" {
@@ -207,7 +207,7 @@ pub(crate) mod tests {
         }
         fn screen_key_pressed_post(
             &self,
-            _: &dyn mod_api::ClientHost,
+            _: &mut dyn mod_api::ClientHost,
             event: &mut ScreenKeyPressedPostEvent<'_>,
         ) -> mod_api::Flow {
             if event.screen.id == "world_preset_editor" {
@@ -229,7 +229,7 @@ pub(crate) mod tests {
 
         fn screen_key_released_pre(
             &self,
-            _: &dyn mod_api::ClientHost,
+            _: &mut dyn mod_api::ClientHost,
             event: &mut ScreenKeyReleasedPreEvent<'_>,
         ) -> mod_api::Flow {
             self.releases.lock().unwrap().push((
@@ -272,7 +272,7 @@ pub(crate) mod tests {
         }
         fn screen_key_pressed_pre(
             &self,
-            host: &dyn mod_api::ClientHost,
+            host: &mut dyn mod_api::ClientHost,
             event: &mut ScreenKeyPressedPreEvent<'_>,
         ) -> mod_api::Flow {
             if event.key != "key.keyboard.space" || event.screen.id != "world_preset_editor" {

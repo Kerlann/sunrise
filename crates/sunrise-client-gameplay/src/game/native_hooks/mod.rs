@@ -54,6 +54,8 @@ pub(in crate::game) mod screen_input_post;
 
 pub(in crate::game) mod screen_init_post;
 
+pub(in crate::game) mod screen_init_pre;
+
 #[path = "cut_merged_screen_exclusion_areas.rs"]
 pub(in crate::game) mod screen_exclusion_areas;
 

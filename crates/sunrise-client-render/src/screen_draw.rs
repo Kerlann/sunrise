@@ -547,6 +547,29 @@ pub(crate) fn scrolling_string_over_contents(
     scrolling_with_default_center(out, m, message, left, right, y, y + h, now_ms);
 }
 
+fn scrolling_string_colored(
+    out: &mut Vec<Draw>,
+    m: &Measure,
+    message: &Text,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    margin: i32,
+    now_ms: i64,
+    color: i32,
+) {
+    let start = out.len();
+    scrolling_string_over_contents(out, m, message, x, y, w, h, margin, now_ms);
+    if color != WHITE {
+        for draw in &mut out[start..] {
+            if let Draw::Text { color: c, .. } = draw {
+                *c = color;
+            }
+        }
+    }
+}
+
 /// `Button` (`extractDefaultSprite`, then `AbstractButton.extractDefaultLabel`:
 /// `extractScrollingStringOverContents` with a margin of 2, which scrolls a
 /// label wider than the button with the clock, `now_ms`).
@@ -562,33 +585,124 @@ pub fn button(
     highlighted: bool,
     now_ms: i64,
 ) {
+    let orig_rect = [x as f32, y as f32, w as f32, h as f32];
+    let (
+        rect,
+        overridden_msg,
+        active,
+        highlighted,
+        alpha,
+        label_text_color,
+        tab_order_group,
+        sprites,
+        tooltip_narration,
+    ) = match crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
+        bucket: crate::widgets::WidgetBucket::Button,
+        rect: orig_rect,
+        label: Some(label),
+        explicit_key: None,
+        active,
+        hovered: highlighted,
+        focused: false,
+        tab_order_group: 0,
+    }) {
+        crate::widgets::ResolvedEngineWidget::Skip => return,
+        crate::widgets::ResolvedEngineWidget::Unchanged => (
+            orig_rect,
+            None,
+            active,
+            highlighted,
+            1.0,
+            None,
+            0,
+            None,
+            None,
+        ),
+        crate::widgets::ResolvedEngineWidget::Draw(props) => {
+            let hl = match props.override_render_highlighted_sprite {
+                Some(forced) => props.active && forced,
+                None => props.active && props.hovered,
+            };
+            (
+                props.rect,
+                props.message,
+                props.active,
+                hl,
+                props.alpha,
+                props.label_text_color,
+                props.tab_order_group,
+                props.sprites,
+                props.tooltip_narration,
+            )
+        }
+    };
+    let label = overridden_msg.as_ref().unwrap_or(label);
+    let (x, y, w, h) = (
+        rect[0].round() as i32,
+        rect[1].round() as i32,
+        rect[2].round() as i32,
+        rect[3].round() as i32,
+    );
+    let plain = label.plain();
+    crate::widgets::record(&plain, rect, active);
+    if active && plain.trim().is_empty() {
+        crate::widgets::target(rect);
+    }
     // Its narration: hovered is the mouse over it (`isHovered`), which the
     // narrator tests.
     crate::widgets::narratable(|| {
-        crate::widgets::Narratable::button(
-            label.plain(),
-            [x as f32, y as f32, w as f32, h as f32],
-            active,
-        )
+        let mut n = crate::widgets::Narratable::button(plain, rect, active).order(tab_order_group);
+        if let Some(hint) = tooltip_narration {
+            n = n.hint(hint);
+        }
+        n
     });
-    let sprite_id = if !active {
-        "widget/button_disabled"
-    } else if highlighted {
-        "widget/button_highlighted"
+    let sprite_id = sprites
+        .as_ref()
+        .map(|s| {
+            if !active {
+                s.disabled.as_deref().unwrap_or(s.normal.as_str())
+            } else if highlighted {
+                s.highlighted.as_deref().unwrap_or(s.normal.as_str())
+            } else {
+                s.normal.as_str()
+            }
+        })
+        .unwrap_or_else(|| {
+            if !active {
+                "widget/button_disabled"
+            } else if highlighted {
+                "widget/button_highlighted"
+            } else {
+                "widget/button"
+            }
+        });
+    out.push(Draw::Sprite {
+        sprite: sprite_id.to_owned(),
+        x,
+        y,
+        w,
+        h,
+        color: crate::widgets::scale_argb_alpha(0xFFFF_FFFF, alpha),
+    });
+    if let Some(argb) = label_text_color {
+        let color = crate::widgets::scale_argb_alpha(argb, alpha);
+        scrolling_string_colored(out, m, label, x, y, w, h, 2, now_ms, color);
+    } else if (alpha - 1.0).abs() > f32::EPSILON {
+        let color = crate::widgets::label_argb_color(active, None, alpha);
+        scrolling_string_colored(out, m, label, x, y, w, h, 2, now_ms, color);
     } else {
-        "widget/button"
-    };
-    sprite(out, sprite_id, x, y, w, h);
-    // `AbstractWidget.WithInactiveMessage.defaultInactiveMessage`: an inactive
-    // widget's message is -6250336 (0xFFA0A0A0), not the active white.
-    let inactive;
-    let label = if active {
-        label
-    } else {
-        inactive = label.clone().with_color(0xFFA0_A0A0);
-        &inactive
-    };
-    scrolling_string_over_contents(out, m, label, x, y, w, h, 2, now_ms);
+        // `AbstractWidget.WithInactiveMessage.defaultInactiveMessage`: an inactive
+        // widget's message is -6250336 (0xFFA0A0A0), not the active white.
+        let inactive;
+        let label = if active {
+            label
+        } else {
+            inactive = label.clone().with_color(0xFFA0_A0A0);
+            &inactive
+        };
+        scrolling_string_over_contents(out, m, label, x, y, w, h, 2, now_ms);
+    }
 }
 /// `Tooltip.splitTooltip` of a widget's tooltip, shown under the mouse.
 pub fn tooltip(out: &mut Vec<Draw>, m: &Measure, message: &Text, mouse: (i32, i32)) {
@@ -679,13 +793,6 @@ impl TextField {
     }
     fn text_x(&self) -> i32 {
         self.x + if self.bordered { 4 } else { 0 }
-    }
-    fn text_y(&self) -> i32 {
-        if self.bordered {
-            self.y + (self.height - 8) / 2
-        } else {
-            self.y
-        }
     }
     /// `setValue`.
     pub fn set_value(&mut self, m: &Measure, value: &str) {
@@ -894,34 +1001,87 @@ impl TextField {
         blink_ms: u64,
         format: Option<&dyn Fn(&str, usize) -> Text>,
     ) {
-        let rect = [
+        let orig_rect = [
             self.x as f32,
             self.y as f32,
             self.width as f32,
             self.height as f32,
         ];
-        crate::widgets::target_as(rect, crate::widgets::Kind::Field);
+        let msg_text = (!self.message.is_empty()).then(|| Text::literal(self.message.as_str()));
+        let (rect, active, alpha, tab_order_group, tooltip_narration) =
+            match crate::widgets::resolve_engine_widget(crate::widgets::EngineWidgetInput {
+                bucket: crate::widgets::WidgetBucket::Field,
+                rect: orig_rect,
+                label: msg_text.as_ref(),
+                explicit_key: None,
+                active: true,
+                hovered: false,
+                focused: self.focused,
+                tab_order_group: 0,
+            }) {
+                crate::widgets::ResolvedEngineWidget::Skip => return,
+                crate::widgets::ResolvedEngineWidget::Unchanged => (orig_rect, true, 1.0, 0, None),
+                crate::widgets::ResolvedEngineWidget::Draw(props) => (
+                    props.rect,
+                    props.active,
+                    props.alpha,
+                    props.tab_order_group,
+                    props.tooltip_narration,
+                ),
+            };
+        let (fx, fy, fw, fh) = (
+            rect[0].round() as i32,
+            rect[1].round() as i32,
+            rect[2].round() as i32,
+            rect[3].round() as i32,
+        );
+        if active {
+            crate::widgets::target_as(rect, crate::widgets::Kind::Field);
+        }
         crate::widgets::narratable(|| {
-            crate::widgets::Narratable::edit_box(self.message.clone(), self.value.clone(), rect)
-                .focused(self.focused)
+            let mut n = crate::widgets::Narratable::edit_box(
+                self.message.clone(),
+                self.value.clone(),
+                rect,
+            )
+            .focused(self.focused && active)
+            .order(tab_order_group);
+            if let crate::widgets::What::EditBox { active: a, .. } = &mut n.what {
+                *a = active;
+            }
+            if let Some(hint) = tooltip_narration {
+                n = n.hint(hint);
+            }
+            n
         });
         if self.bordered {
-            let s = if self.focused {
+            let s = if self.focused && active {
                 "widget/text_field_highlighted"
             } else {
                 "widget/text_field"
             };
-            sprite(out, s, self.x, self.y, self.width, self.height);
+            out.push(Draw::Sprite {
+                sprite: s.to_owned(),
+                x: fx,
+                y: fy,
+                w: fw,
+                h: fh,
+                color: crate::widgets::scale_argb_alpha(0xFFFF_FFFF, alpha),
+            });
         }
-        let color = self.text_color;
+        let color = crate::widgets::scale_argb_alpha(self.text_color as u32, alpha);
         let len = chars(&self.value);
         let rest = sub(&self.value, self.display, len);
-        let shown_len = m.plain(&rest, self.inner_width(), false);
+        let inner_w = if self.bordered { fw - 8 } else { fw };
+        let shown_len = m.plain(&rest, inner_w, false);
         let displayed = sub(&rest, 0, shown_len);
         let rel_cursor = self.cursor as isize - self.display as isize;
         let on_screen = rel_cursor >= 0 && rel_cursor <= shown_len as isize;
-        let show_cursor = self.focused && (blink_ms / 300).is_multiple_of(2) && on_screen;
-        let (tx, ty) = (self.text_x(), self.text_y());
+        let show_cursor = self.focused && active && (blink_ms / 300).is_multiple_of(2) && on_screen;
+        let (tx, ty) = (
+            fx + if self.bordered { 4 } else { 0 },
+            if self.bordered { fy + (fh - 8) / 2 } else { fy },
+        );
         let mut draw_x = tx;
         let rel_highlight =
             (self.highlight as isize - self.display as isize).clamp(0, shown_len as isize) as usize;
@@ -944,7 +1104,7 @@ impl TextField {
         let insert = self.cursor < len || crate::ui::utf16_len(&self.value) >= self.max_length;
         let mut cursor_x = draw_x;
         if !on_screen {
-            cursor_x = if rel_cursor > 0 { tx + self.width } else { tx };
+            cursor_x = if rel_cursor > 0 { tx + fw } else { tx };
         } else if insert {
             cursor_x -= 1;
             draw_x -= 1;
@@ -971,7 +1131,7 @@ impl TextField {
         }
         if rel_highlight as isize != rel_cursor {
             let hx = tx + m.width_str(&sub(&displayed, 0, rel_highlight));
-            let right = self.x + self.width;
+            let right = fx + fw;
             out.push(Draw::Highlight {
                 x0: cursor_x.min(right),
                 y0: ty - 1,
@@ -1531,5 +1691,136 @@ mod max_length_tests {
         field.max_length = 4;
         field.insert_text(&m, "ab😀");
         assert_eq!(field.value, "ab😀", "four units, both of the emoji's");
+    }
+
+    #[test]
+    fn button_records_widget_and_empty_active_focus_target() {
+        let atlas = atlas();
+        let m = Measure(&atlas.font);
+        let saved = crate::widgets::take();
+        crate::widgets::end_frame(810);
+        let mut out = Vec::new();
+        button(
+            &mut out,
+            &m,
+            &Text::literal("Done"),
+            10,
+            20,
+            100,
+            20,
+            true,
+            false,
+            0,
+        );
+        button(
+            &mut out,
+            &m,
+            &Text::empty(),
+            120,
+            20,
+            20,
+            20,
+            true,
+            false,
+            0,
+        );
+        button(
+            &mut out,
+            &m,
+            &Text::empty(),
+            150,
+            20,
+            20,
+            20,
+            false,
+            false,
+            0,
+        );
+        crate::widgets::end_frame(811);
+        let recorded = crate::widgets::last();
+        // `widgets::record` stores labelled widgets only; active empty-label buttons register as focus targets.
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(
+            (recorded[0].label.as_str(), recorded[0].enabled),
+            ("Done", true)
+        );
+        let targets: Vec<[f32; 4]> = crate::widgets::last_targets()
+            .iter()
+            .map(|t| t.rect)
+            .collect();
+        assert_eq!(targets, [[120.0, 20.0, 20.0, 20.0]]);
+        crate::widgets::put(saved);
+    }
+
+    #[test]
+    fn unlabelled_button_collected_moved_and_hidden_via_override_table() {
+        let atlas = atlas();
+        let m = Measure(&atlas.font);
+        let saved = crate::widgets::take();
+        let draw_two = |out: &mut Vec<Draw>| {
+            button(out, &m, &Text::empty(), 10, 20, 20, 20, true, false, 0);
+            button(out, &m, &Text::empty(), 40, 20, 20, 20, true, false, 0);
+        };
+
+        let mut scratch = Vec::new();
+        let ((), collected) = crate::widgets::with_widget_collector(|| draw_two(&mut scratch));
+        assert_eq!(collected.len(), 2);
+        assert_eq!(collected[0].key.key, "");
+        assert_eq!(collected[0].key.occurrence, 0);
+        assert!(collected[0].message.is_none());
+        assert_eq!(collected[1].key.key, "");
+        assert_eq!(collected[1].key.occurrence, 1);
+        assert!(collected[1].message.is_none());
+
+        let mut maps = crate::widgets::EngineOverrideMaps::default();
+        maps.overrides.insert(
+            collected[0].key.clone(),
+            crate::widgets::EngineWidgetOverride {
+                visible: Some(false),
+                ..Default::default()
+            },
+        );
+        let moved_rect = [180.0, 60.0, 20.0, 20.0];
+        maps.overrides.insert(
+            collected[1].key.clone(),
+            crate::widgets::EngineWidgetOverride {
+                rect: Some(moved_rect),
+                ..Default::default()
+            },
+        );
+        crate::widgets::end_frame(820);
+        let mut out = Vec::new();
+        let ((), output) = crate::widgets::with_widget_overrides(
+            &mut maps,
+            (185.0, 65.0),
+            std::time::Instant::now(),
+            || draw_two(&mut out),
+        );
+        crate::widgets::end_frame(821);
+
+        assert_eq!(output.hits.len(), 2);
+        assert!(!output.hits[0].interactive && output.hits[0].blocks_original);
+        assert!(output.hits[1].interactive && output.hits[1].blocks_original);
+        assert_eq!(output.hits[1].resolved_rect, moved_rect);
+        let targets: Vec<[f32; 4]> = crate::widgets::last_targets()
+            .iter()
+            .map(|t| t.rect)
+            .collect();
+        assert_eq!(targets, [moved_rect]);
+        assert!(out.iter().any(|draw| matches!(
+            draw,
+            Draw::Sprite {
+                x: 180,
+                y: 60,
+                w: 20,
+                h: 20,
+                ..
+            }
+        )));
+        assert!(
+            !out.iter()
+                .any(|draw| matches!(draw, Draw::Sprite { x: 10, y: 20, .. }))
+        );
+        crate::widgets::put(saved);
     }
 }

@@ -190,6 +190,7 @@ impl Title {
                 y,
                 w: 150.0,
                 label,
+                text: None,
                 enabled,
                 id,
                 icon: None,

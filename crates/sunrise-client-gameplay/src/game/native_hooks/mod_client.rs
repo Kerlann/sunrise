@@ -605,7 +605,7 @@ impl crate::game::ClientGame<'_> {
                 );
             }
         }
-        if s.screen.has_draw() {
+        if s.screen.has_draw() && !sunrise_client::widgets::is_collecting_widgets() {
             let frame = s.frame(batch, (ox, oy), self.client.cursor);
             let mut draw = crate::game::host::draw::GameDrawContext::new(self, batch);
             s.screen.draw(self, frame, &mut draw);
@@ -631,6 +631,9 @@ impl crate::game::ClientGame<'_> {
     }
     /// The open mod screen's tooltip under the cursor.
     pub(crate) fn draw_native_screen_tooltip(&mut self, batch: &mut HudBatch) {
+        if sunrise_client::widgets::is_collecting_widgets() {
+            return;
+        }
         // Over no item: an empty slot still gets the mod's hint (which fuel it takes).
         // A carried stack hides only slot tooltips, as AbstractContainerScreen's;
         // the screen's other parts keep theirs, as a vanilla widget's tooltip does.
@@ -842,13 +845,7 @@ impl crate::game::ClientGame<'_> {
     /// follows on opening and when a resize rebuilds the receiver's children.
     pub fn observe_change(&mut self, current: Option<ObservedScreen>) {
         let changed = match (&self.client.screen_state.0.observed, &current) {
-            (Some(old), Some(new)) => {
-                old.id != new.id
-                    || old.menu != new.menu
-                    || old.menu_generation != new.menu_generation
-                    || old.mod_screen != new.mod_screen
-                    || old.dialog_key != new.dialog_key
-            }
+            (Some(old), Some(new)) => !old.same_receiver(new),
             (None, None) => false,
             _ => true,
         };
@@ -873,7 +870,67 @@ impl crate::game::ClientGame<'_> {
                     from.is_some(),
                 );
             }
+            let opening_overlay = current.as_ref().is_some_and(|new| new.overlay);
+            let revealed_suspended = old.is_some()
+                && current.as_ref().is_some_and(|new| {
+                    self.client
+                        .screen_state
+                        .0
+                        .suspended_under_overlay
+                        .last()
+                        .is_some_and(|(saved, _)| saved.same_receiver(new))
+                });
             self.client.screen_state.0.bump_instance();
+            if opening_overlay {
+                if let Some(prev) = self.client.screen_state.0.observed.take() {
+                    let next_id = self.client.screen_state.0.widgets.next_id.get();
+                    let saved_widgets = std::mem::take(&mut self.client.screen_state.0.widgets);
+                    self.client.screen_state.0.widgets.next_id.set(next_id);
+                    self.client
+                        .screen_state
+                        .0
+                        .suspended_under_overlay
+                        .push((prev, saved_widgets));
+                }
+                self.reset_screen_ime();
+                self.client.screen_state.0.observed = current.clone();
+                if let Some(new) = &current
+                    && self.common.options.execution_role.is_client()
+                {
+                    self.init_screen_widgets(&new.view());
+                }
+                return;
+            }
+            if revealed_suspended {
+                let overlay_next_id = self.client.screen_state.0.widgets.next_id.get();
+                self.clear_screen_widgets();
+                let (saved_obs, saved_widgets) = self
+                    .client
+                    .screen_state
+                    .0
+                    .suspended_under_overlay
+                    .pop()
+                    .expect("revealed suspended screen exists");
+                let restored_next = saved_widgets.next_id.get().max(overlay_next_id);
+                saved_widgets.next_id.set(restored_next);
+                self.client.screen_state.0.widgets = saved_widgets;
+                self.client.screen_state.0.observed = current.clone();
+                if let Some(new) = &current
+                    && saved_obs.screen_size != new.screen_size
+                    && self.common.options.execution_role.is_client()
+                {
+                    if self.screen_repositions_on_resize(new.id) {
+                        self.reposition_screen_widgets();
+                    } else {
+                        self.clear_screen_widgets();
+                        self.init_screen_widgets(&new.view());
+                    }
+                } else {
+                    self.sync_children_cache();
+                }
+                return;
+            }
+            self.client.screen_state.0.suspended_under_overlay.clear();
             self.clear_screen_widgets();
             self.client.screen_state.0.observed = current.clone();
             if let Some(new) = &current
@@ -885,39 +942,92 @@ impl crate::game::ClientGame<'_> {
         }
         if let (Some(old), Some(new)) = (&self.client.screen_state.0.observed, &current)
             && old.screen_size != new.screen_size
-            // Screen.resize calls repositionElements. Screen's default rebuilds
-            // widgets; these receivers override it to relayout existing children.
-            // A panel rect can also move independently (e.g. opening a recipe book).
-            && !matches!(
-                new.id,
-                "options"
-                    | "world_options"
-                    | "stats"
-                    | "advancements"
-                    | "social"
-                    | "debug_options"
-                    | "dialog"
-                    | "dialog_warning"
-                    | "confirm_link"
-                    | "demo_intro"
-                    | "link_prompt"
-                    | "code_of_conduct"
-                    | "world_select"
-                    | "world_create"
-                    | "world_create_flat"
-                    | "world_create_buffet"
-                    | "world_edit"
-                    | "world_recover"
-                    | "multiplayer"
-                    | "multiplayer_warning"
-                    | "disconnected"
-                    | "onboarding"
-            )
+            && self.common.options.execution_role.is_client()
         {
-            self.clear_screen_widgets();
-            self.init_screen_widgets(&new.view());
+            if self.screen_repositions_on_resize(new.id) {
+                self.reposition_screen_widgets();
+            } else {
+                self.clear_screen_widgets();
+                self.init_screen_widgets(&new.view());
+            }
         }
         self.client.screen_state.0.observed = current;
+    }
+    /// Whether this screen's vanilla 26.3 counterpart overrides `Screen.repositionElements()`
+    /// to re-layout existing children instead of inheriting `Screen.repositionElements()`
+    /// (`Screen.java:444`, which calls `rebuildWidgets()`).
+    fn screen_repositions_on_resize(&self, id: &str) -> bool {
+        match id {
+            // OptionsScreen.java:88, OptionsSubScreen.java:56, VideoSettingsScreen.java:295,
+            // KeyBindsScreen.java:53, LanguageSelectScreen.java:84, PackSelectionScreen.java:163,
+            // CreditsAndAttributionScreen.java:39, TelemetryInfoScreen.java:82
+            "options"
+            // WorldOptionsScreen.java:454, PopupScreen.java:92, RestrictionsScreen.java:105,
+            // AbstractGameRulesScreen.java:86
+            | "world_options"
+            // StatsScreen.java:136
+            | "stats"
+            // AdvancementsScreen.java:82
+            | "advancements"
+            // FriendsOverlayScreen.java:115
+            | "friends"
+            // SocialInteractionsScreen.java:149
+            | "social"
+            // DebugOptionsScreen.java:110
+            | "debug_options"
+            // DialogScreen.java:101, WaitingForResponseScreen.java:47
+            | "dialog"
+            // DialogScreen.WarningScreen extends ConfirmScreen (ConfirmScreen.java:59)
+            | "dialog_warning"
+            // ServerLinksDialogScreen extends ButtonListDialogScreen extends DialogScreen (DialogScreen.java:101)
+            | "server_links"
+            // ConfirmLinkScreen extends ConfirmScreen (ConfirmScreen.java:59)
+            | "confirm_link"
+            | "link_prompt"
+            | "ban_notice"
+            // ClientPacketListener.java:1611 opens PopupScreen (PopupScreen.java:92)
+            | "demo_intro"
+            // ConfirmScreen (ConfirmScreen.java:59)
+            | "command_prompt"
+            | "server_pack_prompt"
+            | "world_delete"
+            | "server_delete"
+            | "low_disk_space"
+            | "missing_biome_regions"
+            | "missing_mods"
+            | "adopt_biome_regions"
+            | "pack_validation_failed"
+            // CodeOfConductScreen / SafetyScreen extend WarningScreen (WarningScreen.java:56)
+            | "code_of_conduct"
+            | "multiplayer_warning"
+            // SelectWorldScreen.java:139
+            | "world_select"
+            // CreateWorldScreen.java:267, ExperimentsScreen.java:80,
+            // ConfirmExperimentalFeaturesScreen.java:69,98, AbstractGameRulesScreen.java:86
+            | "world_create"
+            // CreateFlatWorldScreen.java:98
+            | "world_create_flat"
+            // CreateBuffetWorldScreen.java:78
+            | "world_create_buffet"
+            // EditWorldScreen.java:142
+            | "world_edit"
+            // RecoverWorldDataScreen.java:143
+            | "world_recover"
+            // GenericMessageScreen.java:22
+            | "world_backup"
+            // JoinMultiplayerScreen.java:133
+            | "multiplayer"
+            // DisconnectedScreen.java:71
+            | "disconnected"
+            // AccessibilityOnboardingScreen.java:90
+            | "onboarding"
+            // RealmsMainScreen.java:188 and Realms*Screen subclasses
+            | "realms" => true,
+            // DeathScreen.TitleConfirmScreen extends ConfirmScreen (ConfirmScreen.java:59);
+            // ordinary DeathScreen inherits Screen.repositionElements() -> rebuildWidgets().
+            "dead" => self.client.chat_ui.death_confirm.is_some(),
+            _ => false,
+        }
     }
     pub fn observe_screen(&mut self) {
         self.settle_title_mode();
@@ -942,6 +1052,7 @@ impl crate::game::ClientGame<'_> {
                 (true, _, _) => (true, false, None),
                 key => key,
             }),
+            sub_page: self.observed_sub_page(view.id),
             title: view
                 .title
                 .and_then(|_| self.client.remote.as_ref()?.shared_menu_title_snapshot()),
@@ -952,6 +1063,33 @@ impl crate::game::ClientGame<'_> {
             partial_tick: view.partial_tick,
             regions: Vec::new(),
         }
+    }
+    fn observed_sub_page(&self, id: &str) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        match id {
+            "options" => self.client.chat_ui.options.sub_page_key().hash(&mut hasher),
+            "world_options" => self
+                .client
+                .world_options
+                .0
+                .as_ref()
+                .map(|o| o.sub_page_key())
+                .hash(&mut hasher),
+            "dead" => self
+                .client
+                .chat_ui
+                .death_confirm
+                .is_some()
+                .hash(&mut hasher),
+            _ if self.client.screen == Screen::Playing && self.observed_overlay_now().is_none() => {
+                if let Some(title) = self.client.title.0.as_ref() {
+                    title.sub_page_key().hash(&mut hasher);
+                }
+            }
+            _ => {}
+        }
+        hasher.finish()
     }
     /// Snapshot of the receiving screen for screen input hooks, including overlays.
     pub(in crate::game) fn observed_input_screen(&self) -> Option<ObservedScreen> {
@@ -1203,7 +1341,7 @@ impl crate::game::ClientGame<'_> {
     }
     /// `ScreenEvent.CharacterTyped.Post` for a character that neither mounted
     /// widgets nor any text box took, on the captured receiving screen.
-    pub(crate) fn screen_chars_post_on(&self, receiver: Option<&ObservedScreen>, c: char) {
+    pub(crate) fn screen_chars_post_on(&mut self, receiver: Option<&ObservedScreen>, c: char) {
         if !mod_api::__private::listened(mod_api::HookId::ScreenCharTypedPost) {
             return;
         }
@@ -1327,7 +1465,7 @@ impl crate::game::ClientGame<'_> {
     /// game's own key handling, which a cancel then skips. False with no
     /// subscriber, no receiving screen, or a key with no vanilla name.
     pub(crate) fn screen_key_post_on(
-        &self,
+        &mut self,
         receiver: Option<&ObservedScreen>,
         key: KeyCode,
         pressed: bool,
@@ -1359,7 +1497,7 @@ impl crate::game::ClientGame<'_> {
     /// control socket's `key` command both ask before a screen acts on a key.
     /// False when no receiving screen is open, and for a key with no vanilla name.
     pub(crate) fn screen_key_pressed_on(
-        &self,
+        &mut self,
         receiver: Option<&ObservedScreen>,
         key: KeyCode,
         repeat: bool,
@@ -1378,7 +1516,7 @@ impl crate::game::ClientGame<'_> {
         canceled
     }
     pub(crate) fn screen_key_released_on(
-        &self,
+        &mut self,
         receiver: Option<&ObservedScreen>,
         key: KeyCode,
     ) -> bool {
@@ -1394,7 +1532,7 @@ impl crate::game::ClientGame<'_> {
         );
         canceled
     }
-    pub(in crate::game) fn screen_mouse_dragged(&self, delta: [f32; 2]) -> ScreenMousePre {
+    pub(in crate::game) fn screen_mouse_dragged(&mut self, delta: [f32; 2]) -> ScreenMousePre {
         if self.pad_synthetic_input() || delta == [0.0; 2] {
             return ScreenMousePre::NotFired;
         }
@@ -1623,7 +1761,8 @@ impl crate::game::ClientGame<'_> {
         let gated = heard
             || (self.common.options.execution_role.is_client()
                 && !self.client.screen_state.0.replacing
-                && mod_api::__private::listened(mod_api::HookId::ScreenInitPost));
+                && (mod_api::__private::listened(mod_api::HookId::ScreenInitPre)
+                    || mod_api::__private::listened(mod_api::HookId::ScreenInitPost)));
         let Some(title) = self.client.title.0.as_mut() else {
             return;
         };
@@ -1742,7 +1881,7 @@ impl crate::game::ClientGame<'_> {
     /// `world_create`, `multiplayer`, `add_server`…), no menu and no menu
     /// title, the whole window as its rectangle and no slots (no menu is
     /// open). None while no title screen is up.
-    pub fn title_screen_view(&self, batch: &HudBatch) -> Option<ScreenView<'_>> {
+    pub fn title_screen_view(&self, batch: &HudBatch) -> Option<ScreenView<'static>> {
         let title = self.client.title.0.as_ref()?;
         Some(ScreenView::from(mod_api::__private::built::ScreenView {
             id: title.mode.id(),
@@ -1886,6 +2025,7 @@ impl crate::game::ClientGame<'_> {
             HookId::ScreenCharTypedPost,
             HookId::ScreenOpening,
             HookId::ScreenClosing,
+            HookId::ScreenInitPre,
             HookId::ScreenInitPost,
             HookId::ScreenRoom,
             HookId::ScreenExclusionAreas,
@@ -1951,7 +2091,7 @@ impl crate::game::ClientGame<'_> {
     }
     /// Button Post sees the original receiver and its answer; return the final handled bit.
     pub(in crate::game) fn screen_button_post(
-        &self,
+        &mut self,
         receiver: &ObservedScreen,
         button: i32,
         pressed: bool,
@@ -1982,7 +2122,7 @@ impl crate::game::ClientGame<'_> {
         result.or(handled)
     }
     /// Unhandled scroll/drag notices go to the receiver captured before handling.
-    pub(in crate::game) fn screen_mouse_post(&self, post: ScreenMousePost) {
+    pub(in crate::game) fn screen_mouse_post(&mut self, post: ScreenMousePost) {
         if post.handled {
             return;
         }

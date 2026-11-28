@@ -299,6 +299,7 @@ pub(super) fn buttons(w: f32, h: f32, state: &State) -> Vec<Button> {
         y,
         w,
         label: lang::get_or(key, fallback),
+        text: Some(Text::translate(key, &[])),
         enabled,
         id,
         icon: None,

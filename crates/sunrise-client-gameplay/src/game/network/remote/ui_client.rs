@@ -23,7 +23,9 @@ impl crate::game::ClientGame<'_> {
                     super::super::screen_info::tr("connect.reconfiguring", &[]),
                 )
             });
-            self.draw_reconfiguring(batch, since);
+            sunrise_client::widgets::with_native_action(0, || {
+                self.draw_reconfiguring(batch, since);
+            });
             return true;
         }
         if r.joined || loading {
@@ -99,13 +101,15 @@ impl crate::game::ClientGame<'_> {
         });
         let atlas = &self.client.gui.atlas;
         let status = sunrise_game_data::text::Text::untrusted(r.status.as_str());
-        sunrise_client::level_loading::draw_connecting(
-            batch,
-            atlas,
-            &status,
-            self.client.cursor,
-            cancel,
-        );
+        sunrise_client::widgets::with_native_action(1, || {
+            sunrise_client::level_loading::draw_connecting(
+                batch,
+                atlas,
+                &status,
+                self.client.cursor,
+                cancel,
+            );
+        });
         true
     }
     /// `MultiPlayerGameMode.attack` runs `Player.attack` on this client too.

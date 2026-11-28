@@ -161,6 +161,7 @@ pub(super) fn buttons(
         y,
         w,
         label,
+        text: None,
         enabled,
         id,
         icon: None,
@@ -424,37 +425,20 @@ impl Title {
             let x = x0 + tw * i as f32;
             let selected = o.tab == i;
             let label = Text::translate(key, &[]);
-            crate::widgets::record(&label.plain(), [x, 0.0, tw, TAB_BAR], true);
-            crate::widgets::target_as([x, 0.0, tw, TAB_BAR], crate::widgets::Kind::Tab(selected));
-            let sprite = match (selected, ui::hovered(cursor, x, 0.0, tw, TAB_BAR)) {
-                (true, true) => "widget/tab_selected_highlighted",
-                (true, false) => "widget/tab_selected",
-                (false, true) => "widget/tab_highlighted",
-                (false, false) => "widget/tab",
-            };
-            ui::nine_slice(batch, atlas, sprite, x, 0.0, tw, TAB_BAR, u32::MAX);
-            let lw = atlas.font.width_text(&label).floor();
-            if selected {
-                ui::menu_background(batch, atlas, x + 2.0, 2.0, tw - 4.0, TAB_BAR - 2.0, false);
-                // renderFocusUnderline.
-                let uw = lw.min(tw - 4.0);
-                batch.fill(
-                    atlas,
-                    x + ((tw - uw) / 2.0).floor(),
-                    TAB_BAR - 2.0,
-                    uw,
-                    1.0,
-                    u32::MAX,
-                );
-            }
-            ui::menu_tab_label(
+            ui::tab_button(
                 batch,
                 atlas,
-                &label,
-                (x, 0.0, tw, TAB_BAR),
-                selected,
-                true,
-                crate::hud_overlays::now_ms(),
+                ui::TabButtonSpec {
+                    rect: [x, 0.0, tw, TAB_BAR],
+                    label: &label,
+                    selected,
+                    active: true,
+                    hovered: ui::hovered(cursor, x, 0.0, tw, TAB_BAR),
+                    now_ms: crate::hud_overlays::now_ms(),
+                    header_bar: true,
+                    record_label: true,
+                    target_when_inactive: true,
+                },
             );
         }
         let (gx, gy) = grid(w, h, o.tab);
