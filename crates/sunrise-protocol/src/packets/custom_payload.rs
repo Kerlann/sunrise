@@ -280,6 +280,10 @@ mod tests {
             assert!(ClientboundPayload::check(channel, 1_048_577, None).is_err());
         }
         assert!(is_reserved_channel("sunrise:recipe_check"));
+        assert!(is_reserved_channel("sunrise:custom_registries"));
+        assert!(is_reserved_channel("sunrise:data_map_known"));
+        assert!(is_reserved_channel("sunrise:data_map_known_reply"));
+        assert!(is_reserved_channel("sunrise:data_map_sync"));
         assert!(is_reserved_channel("sunrise:datapack_registries"));
         assert!(is_reserved_channel("sunrise:datapack_offer"));
         assert!(is_reserved_channel("sunrise:perf"));
