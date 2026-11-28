@@ -2782,7 +2782,7 @@ impl crate::game::ServerGame<'_> {
         }
     }
     /// Deliver one committed entity event immediately to tracking guests and the entity itself,
-    /// without touching unrelated entries in `self.lan_entity_events`.
+    /// without touching unrelated entries in `server.lan_queues.entity_events`.
     pub(in crate::game::server_side) fn deliver_entity_event(
         &mut self,
         id: i32,
