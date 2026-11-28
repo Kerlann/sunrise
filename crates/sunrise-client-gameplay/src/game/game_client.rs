@@ -5241,8 +5241,7 @@ impl crate::game::ClientGame<'_> {
                 }
             }
             Screen::Inventory if pressed => {
-                self.inventory_press(!left);
-                true
+                self.inventory_press(!left) || !self.is_redirecting_engine_click()
             }
             Screen::Inventory => {
                 self.inventory_mouse_release(!left)
@@ -5250,8 +5249,7 @@ impl crate::game::ClientGame<'_> {
             }
             Screen::Chat if left_press => self.chat_click(),
             Screen::Creative if pressed => {
-                self.click_creative(!left);
-                true
+                self.click_creative(!left) || !self.is_redirecting_engine_click()
             }
             Screen::Creative => {
                 self.inventory_mouse_release(!left)

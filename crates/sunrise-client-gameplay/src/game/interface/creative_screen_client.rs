@@ -90,6 +90,9 @@ impl crate::game::ClientGame<'_> {
         {
             return true;
         }
+        if self.is_redirecting_engine_click() {
+            return false;
+        }
         // Holding the scrollbar scrolls as the mouse moves (mouseDragged).
         if !right
             && self.client.creative_screen.0.press_scrollbar(

@@ -236,6 +236,9 @@ impl crate::game::ClientGame<'_> {
             self.client.inv_clicks.skip_release();
             return true;
         }
+        if self.is_redirecting_engine_click() {
+            return self.station_click(right);
+        }
         let (slot, outside) = self.inventory_target();
         // mouseClicked: `lastClickSlot = slot` for every press that reaches
         // the container, and the double click is the same slot and button

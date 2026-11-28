@@ -1114,6 +1114,10 @@ impl crate::game::ClientGame<'_> {
         inner.engine_children = new_slots;
     }
 
+    pub(in crate::game) fn is_redirecting_engine_click(&self) -> bool {
+        REDIRECTING_ENGINE_CLICK.get()
+    }
+
     fn with_redirecting_engine_click<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
         struct Guard(bool);
         impl Drop for Guard {
@@ -3400,7 +3404,7 @@ impl ScreenWidgets for crate::game::ClientGame<'_> {
         let generation = self.client.screen_state.0.widgets.generation();
         enum TargetKind {
             MountedButton(usize),
-            Engine([f32; 4]),
+            Engine(widgets::EngineWidgetKey, [f32; 4]),
         }
         let target = {
             let inner = self.client.screen_state.0.widgets.inner.borrow();
@@ -3449,7 +3453,7 @@ impl ScreenWidgets for crate::game::ClientGame<'_> {
                         .map(|h| h.original_rect)
                         .unwrap_or(slot.default_rect)
                 };
-                Some(TargetKind::Engine(target_rect))
+                Some(TargetKind::Engine(slot.key.clone(), target_rect))
             } else {
                 None
             }
@@ -3465,19 +3469,20 @@ impl ScreenWidgets for crate::game::ClientGame<'_> {
                 }
                 accepted == Some(true)
             }
-            Some(TargetKind::Engine([ox, oy, ow, oh])) => {
+            Some(TargetKind::Engine(key, [ox, oy, ow, oh])) => {
                 if ow <= 0.0 || oh <= 0.0 {
                     return false;
                 }
                 let prev_cursor = self.client.cursor;
                 self.client.cursor = (ox + ow * 0.5, oy + oh * 0.5);
-                let handled = self
-                    .with_redirecting_engine_click(|game| {
+                let handled = widgets::with_selected_engine_widget(&key, || {
+                    self.with_redirecting_engine_click(|game| {
                         game.with_screen_input_overrides(|game| {
                             game.route_screen_button(MouseButton::Left, 0, true, false)
                         })
                     })
-                    .unwrap_or(false);
+                })
+                .unwrap_or(false);
                 self.settle_title_mode();
                 self.client.cursor = prev_cursor;
                 if self.client.screen_state.0.widgets.generation() == generation {

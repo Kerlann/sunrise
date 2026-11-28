@@ -3698,6 +3698,14 @@ fn press_id_and_mutating_widgets_from_screen_input_hooks_and_lazy_discovery() {
             let _ = game.hud_layers([640, 480]);
             sunrise_client::widgets::end_frame(52_005);
 
+            // `press(id)` on Inventory must return false when the click does not reach that widget
+            // (not unconditional true from AbstractContainerScreen's press fallback).
+            game.common.level.recipe_book.open = [false; 4];
+            assert!(
+                !game.screen_widgets().unwrap().press(filter_id),
+                "press(id) must return false when the click does not reach the Inventory widget"
+            );
+
             // Moving an engine slider over another engine button routes press, drag, and release
             // exclusively to the moved slider; the button underneath receives none.
             game.open_options(false);
