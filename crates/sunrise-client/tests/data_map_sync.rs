@@ -341,6 +341,154 @@ fn optional_and_required_maps_sync_on_join_and_update_on_reload() {
     assert!(updated["chemlib:hint"].is_empty());
 }
 
+/// A join whose configuration completed before `/reload` receives the reloaded generation's
+/// `UpdateTags` before its `sunrise:data_map_sync` payload on the game thread.
+#[test]
+#[ignore = "daily"]
+fn join_spanning_reload_resends_current_tags_before_data_maps() {
+    use sunrise_protocol::packets::configuration::{RegistryTags, TagEntry};
+
+    let _publication = data_map_net::isolate_server_publication();
+    let entries = LocalDataMaps::from_entries(vec![known("minecraft:item", "chemlib:fuel", false)]);
+
+    let mut initial_sync = SyncData::empty();
+    initial_sync.tags.registries.push(RegistryTags {
+        registry: "minecraft:item".into(),
+        tags: vec![TagEntry {
+            name: "test:fuels".into(),
+            entries: vec![1],
+        }],
+    });
+    let mut initial_maps = BTreeMap::new();
+    initial_maps.insert(
+        "minecraft:item".to_owned(),
+        vec![(
+            "chemlib:fuel".to_owned(),
+            vec![("minecraft:coal".to_owned(), Tag::Int(100))],
+        )],
+    );
+    data_map_net::serve(Some(Arc::new(SyncedDataMapsSnapshot {
+        registries: initial_maps,
+    })));
+
+    let (_resources, data) = Resources::new("interleaved-join");
+    let mut host = Host::start(initial_sync, entries.clone());
+    let session = connect(host.port(), "InterleavedJoin", &data, entries);
+
+    // Finish configuration under generation 1 before Hub::tick runs begin_player_join.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut joined = false;
+    while !joined {
+        for receipt in session.poll() {
+            let (event, _credit) = receipt.into_parts();
+            let event = match event {
+                Event::Configuration(task) => {
+                    let Some(effect) = task.handle() else {
+                        continue;
+                    };
+                    effect
+                }
+                Event::Cookie(task) => {
+                    task.handle();
+                    continue;
+                }
+                Event::FinishConfiguration(change) => {
+                    change.acknowledge();
+                    continue;
+                }
+                event => event,
+            };
+            match event {
+                Event::Joined { .. } => joined = true,
+                Event::Disconnected { reason, .. } => {
+                    panic!("disconnected during config: {reason}")
+                }
+                _ => {}
+            }
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for config");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // Commit generation 2 (new tag membership + new data map) before placement runs.
+    let mut reloaded_sync = SyncData::empty();
+    reloaded_sync.tags.registries.push(RegistryTags {
+        registry: "minecraft:item".into(),
+        tags: vec![TagEntry {
+            name: "test:fuels".into(),
+            entries: vec![1, 2],
+        }],
+    });
+    host.hub.sync = Arc::new(reloaded_sync);
+    let mut reloaded_maps = BTreeMap::new();
+    reloaded_maps.insert(
+        "minecraft:item".to_owned(),
+        vec![(
+            "chemlib:fuel".to_owned(),
+            vec![
+                ("minecraft:coal".to_owned(), Tag::Int(100)),
+                ("minecraft:stick".to_owned(), Tag::Int(200)),
+            ],
+        )],
+    );
+    data_map_net::serve(Some(Arc::new(SyncedDataMapsSnapshot {
+        registries: reloaded_maps,
+    })));
+
+    // Now drive placement and record play packets in arrival order.
+    let mut saw_reloaded_tags = false;
+    let mut saw_maps_after_tags = false;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !saw_maps_after_tags {
+        host.tick();
+        for receipt in session.poll() {
+            let (event, _credit) = receipt.into_parts();
+            match event {
+                Event::Disconnected { reason, .. } => panic!("disconnected in play: {reason}"),
+                Event::Packet(packet) => match *packet {
+                    play::Clientbound::UpdateTags(tags) => {
+                        if tags.registries.iter().any(|reg| {
+                            reg.registry == "minecraft:item"
+                                && reg
+                                    .tags
+                                    .iter()
+                                    .any(|t| t.name == "test:fuels" && t.entries == vec![1, 2])
+                        }) {
+                            saw_reloaded_tags = true;
+                        }
+                    }
+                    play::Clientbound::CustomPayload(p)
+                        if p.channel == data_map_net::SYNC_CHANNEL =>
+                    {
+                        let (registry, maps) = data_map_net::decode_sync_payload(&p.data).unwrap();
+                        if registry == "minecraft:item" {
+                            assert!(
+                                saw_reloaded_tags,
+                                "reloaded UpdateTags must arrive before sunrise:data_map_sync"
+                            );
+                            assert_eq!(
+                                maps["chemlib:fuel"],
+                                vec![
+                                    ("minecraft:coal".to_owned(), Tag::Int(100)),
+                                    ("minecraft:stick".to_owned(), Tag::Int(200)),
+                                ]
+                            );
+                            saw_maps_after_tags = true;
+                        }
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for paired UpdateTags + sunrise:data_map_sync"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// Client missing a `DataMapSync::Required` map disconnects naming the map
 /// (`ClientRegistryManager.handleKnownDataMaps`).
 #[test]

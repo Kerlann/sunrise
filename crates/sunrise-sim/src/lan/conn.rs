@@ -340,6 +340,10 @@ pub struct PlayerSender {
     /// Synced data maps the client advertised during configuration
     /// (`RegistryManager.ATTRIBUTE_KNOWN_DATA_MAPS`).
     pub known_data_maps: Option<Arc<crate::data_map_net::KnownDataMaps>>,
+    /// The `SyncData::generation` whose tags were sent to this client during configuration,
+    /// so `begin_player_join` resends current tags before play-phase data maps if a `/reload`
+    /// committed between configuration and placement.
+    pub config_sync_generation: u64,
     /// The plugin channels the client announced, in configuration and play.
     pub announced: Arc<super::announced_channels::AnnouncedChannels>,
     /// Its `sunrise:levels` answer: its revision and the levels besides its own it can view.
@@ -423,6 +427,7 @@ impl PlayerSender {
             virtual_host: None,
             datapack_offer: None,
             known_data_maps: None,
+            config_sync_generation: 0,
             announced: Arc::default(),
             viewed_levels: Default::default(),
             menu_extra_rev: 0,
@@ -465,6 +470,7 @@ impl PlayerSender {
             wire: None,
             datapack_offer: None,
             known_data_maps: None,
+            config_sync_generation: 0,
             announced: Arc::default(),
             viewed_levels: Default::default(),
             menu_extra_rev: 0,
@@ -511,6 +517,7 @@ impl PlayerSender {
             virtual_host: None,
             datapack_offer: None,
             known_data_maps: None,
+            config_sync_generation: 0,
             announced: Arc::default(),
             viewed_levels: Default::default(),
             menu_extra_rev: 0,
@@ -2455,6 +2462,7 @@ fn play(
         virtual_host: virtual_host.map(Arc::new),
         datapack_offer: parts.datapack_offer.map(Into::into),
         known_data_maps: parts.channels.known_data_maps.map(Arc::new),
+        config_sync_generation: parts.sync.generation,
         announced: parts.channels.announced.clone().unwrap_or_default(),
         viewed_levels: parts.channels.viewed_levels.answer(),
         menu_extra_rev: parts.channels.menu_extra_rev.revision(),
@@ -4490,6 +4498,7 @@ mod outgoing_budget_tests {
             wire: None,
             datapack_offer: None,
             known_data_maps: None,
+            config_sync_generation: 0,
             announced: Arc::default(),
             viewed_levels: Default::default(),
             menu_extra_rev: 0,

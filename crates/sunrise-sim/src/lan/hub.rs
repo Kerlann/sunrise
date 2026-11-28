@@ -1465,6 +1465,14 @@ impl Hub {
         if g.brand == "sunrise" {
             super::recipes::send_content(g);
             super::recipes::advertise_viewer_channels(g);
+            // If a `/reload` committed between configuration and placement, resend the current
+            // generation's tags before sending its data maps so client listeners never pair old
+            // tag membership with new data-map rows.
+            if g.sender.config_sync_generation != 0
+                && g.sender.config_sync_generation != self.sync.generation
+            {
+                g.send(&C::UpdateTags(self.sync.tags_for_brand(&g.brand)));
+            }
             crate::data_map_net::sync_connection(&g.sender, &self.lan.shared.data_maps_known);
         }
         self.send_permission_level(i);

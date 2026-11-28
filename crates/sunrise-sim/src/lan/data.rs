@@ -262,7 +262,14 @@ enum SyncLoad {
     Reload,
 }
 
+fn next_sync_generation() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 pub struct SyncData {
+    /// Monotonic generation identifying the committed tag and data-map pair for this sync load.
+    pub generation: u64,
     pub content_identity: Option<[u8; 32]>,
     pub builtin: Builtin,
     /// Entry names per synchronized registry (for id lookups).
@@ -481,6 +488,7 @@ impl SyncData {
             &mut recipes,
         );
         Self {
+            generation: next_sync_generation(),
             effect_particle_ids: Default::default(),
             builtin: Builtin::default(),
             dynamic: Dynamic::default(),
@@ -927,6 +935,7 @@ impl SyncData {
             None
         };
         let mut sync = Self {
+            generation: next_sync_generation(),
             effect_particle_ids: Default::default(),
             content_identity,
             builtin,
