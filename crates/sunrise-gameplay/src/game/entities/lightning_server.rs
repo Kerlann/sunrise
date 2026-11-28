@@ -928,6 +928,12 @@ impl crate::game::ServerGame<'_> {
                     ) && self.common.orbs[i].hurt(5.0)
                     {
                         self.common.orbs.remove(i);
+                        crate::game::record_departure!(
+                            self.common.dim,
+                            id,
+                            "minecraft:experience_orb",
+                            Some("killed")
+                        );
                     }
                 }
                 _ => {}

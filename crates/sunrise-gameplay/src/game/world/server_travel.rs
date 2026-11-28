@@ -929,6 +929,15 @@ impl crate::game::ServerGame<'_> {
             return;
         };
         if target != self.common.dim {
+            #[cfg(feature = "state-digest")]
+            if let Some(hook) = host.play.get(&conn).and_then(|play| play.hook.as_ref()) {
+                crate::game::record_departure!(
+                    self.common.dim,
+                    hook.id,
+                    "minecraft:fishing_bobber",
+                    Some("changed_dimension")
+                );
+            }
             drop_hook(host, conn);
         }
         let Some(g) = host.hub.guest(conn) else {
@@ -1509,10 +1518,23 @@ impl crate::game::ServerGame<'_> {
         // Keep the root out of both levels until its passengers have been
         // admitted: teleportCrossDimension copies passengers before the root.
         let vehicle = if let Some(body) = take_vehicle(&mut parked.boats, id, at, yaw, motion) {
+            crate::game::record_departure!(
+                source,
+                id,
+                sunrise_gameplay_common::game::entity::Entity::native_type(&body).as_ref(),
+                Some("changed_dimension")
+            );
             OffLevel::Boat(body)
         } else if let Some(body) = take_vehicle(&mut parked.carts, id, at, yaw, motion) {
+            crate::game::record_departure!(source, id, body.kind.id(), Some("changed_dimension"));
             OffLevel::Cart(body)
         } else if let Some(body) = take_vehicle(&mut parked.mobs, id, at, yaw, motion) {
+            crate::game::record_departure!(
+                source,
+                id,
+                crate::game::native_hooks::mob_kind(&body),
+                Some("changed_dimension")
+            );
             OffLevel::Mob(body)
         } else {
             return;

@@ -184,14 +184,22 @@ impl crate::game::ServerGame<'_> {
     /// `noPhysics` write stored for a shulker bullet leaves with it.
     pub(in crate::game::server_side) fn remove_projectile(&mut self, id: u32) {
         #[cfg(feature = "state-digest")]
-        let dim = self.common.dim;
-        self.common.creatures.projectiles.retain(|p| {
-            let keep = p.id != id;
-            if !keep {
-                crate::game::record_departure!(dim, p.id, p.entity_type(), None);
-            }
-            keep
-        });
+        if crate::game::state_transcript::is_recording()
+            && let Some(p) = self
+                .common
+                .creatures
+                .projectiles
+                .iter()
+                .find(|p| p.id == id)
+        {
+            crate::game::state_transcript::record_departure(
+                self.common.dim,
+                p.id,
+                p.entity_type(),
+                None,
+            );
+        }
+        self.common.creatures.projectiles.retain(|p| p.id != id);
         self.forget_entity(id);
     }
 
@@ -208,14 +216,17 @@ impl crate::game::ServerGame<'_> {
     /// leaves with it.
     pub(in crate::game::server_side) fn remove_ominous_spawner(&mut self, id: u32) {
         #[cfg(feature = "state-digest")]
-        let dim = self.common.dim;
-        self.common.ominous_spawners.retain(|s| {
-            let keep = s.id != id;
-            if !keep {
-                crate::game::record_departure!(dim, s.id, "minecraft:ominous_item_spawner", None);
-            }
-            keep
-        });
+        if crate::game::state_transcript::is_recording()
+            && self.common.ominous_spawners.iter().any(|s| s.id == id)
+        {
+            crate::game::state_transcript::record_departure(
+                self.common.dim,
+                id,
+                "minecraft:ominous_item_spawner",
+                None,
+            );
+        }
+        self.common.ominous_spawners.retain(|s| s.id != id);
         self.forget_entity(id);
     }
 
@@ -223,14 +234,17 @@ impl crate::game::ServerGame<'_> {
     /// with it.
     pub(in crate::game::server_side) fn remove_breath_cloud(&mut self, id: u32) {
         #[cfg(feature = "state-digest")]
-        let dim = self.common.dim;
-        self.common.breath_clouds.retain(|c| {
-            let keep = c.id != id;
-            if !keep {
-                crate::game::record_departure!(dim, c.id, "minecraft:area_effect_cloud", None);
-            }
-            keep
-        });
+        if crate::game::state_transcript::is_recording()
+            && self.common.breath_clouds.iter().any(|c| c.id == id)
+        {
+            crate::game::state_transcript::record_departure(
+                self.common.dim,
+                id,
+                "minecraft:area_effect_cloud",
+                None,
+            );
+        }
+        self.common.breath_clouds.retain(|c| c.id != id);
         self.forget_entity(id);
     }
 

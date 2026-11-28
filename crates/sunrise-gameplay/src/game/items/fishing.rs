@@ -557,6 +557,12 @@ impl crate::game::ServerGame<'_> {
         let (id, join) = (hook.id, hook.join);
         let damage = self.retrieve_hook_extracted(rod, &mut hook);
         self.common.hook.retire_extracted(id, join);
+        crate::game::record_departure!(
+            self.common.dim,
+            id,
+            "minecraft:fishing_bobber",
+            Some("discarded")
+        );
         damage
     }
     pub fn retrieve_hook_extracted(&mut self, rod: &ItemStack, hook: &mut Hook) -> u32 {

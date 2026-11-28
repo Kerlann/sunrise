@@ -18,6 +18,12 @@ impl crate::game::ServerGame<'_> {
                 {
                     set.remove(&uuid);
                 }
+                crate::game::record_departure!(
+                    self.common.dim,
+                    id,
+                    "minecraft:ender_dragon",
+                    Some("killed")
+                );
                 self.discard_resident_dragon();
             }
             return;
@@ -67,6 +73,15 @@ impl crate::game::ServerGame<'_> {
                 .dragon
                 .as_ref()
                 .map_or((0, p), |d| (d.id, d.position));
+            #[cfg(feature = "state-digest")]
+            if id != 0 {
+                crate::game::record_departure!(
+                    self.common.dim,
+                    id,
+                    "minecraft:ender_dragon",
+                    Some("killed")
+                );
+            }
             self.discard_resident_dragon();
             if fight {
                 self.dragon_killed();

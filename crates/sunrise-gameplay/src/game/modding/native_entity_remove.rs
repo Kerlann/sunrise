@@ -270,14 +270,8 @@ impl crate::game::ServerGame<'_> {
                 return true;
             };
             if let Some(i) = dropped.iter().position(|item| item.id == id) {
-                let removed = dropped.remove(i);
-                crate::game::record_departure!(
-                    dim,
-                    removed.id,
-                    "minecraft:item",
-                    Some("discarded")
-                );
-                retired(&removed);
+                retired(&dropped.remove(i));
+                crate::game::record_departure!(dim, id, "minecraft:item", Some("discarded"));
             }
             false
         });
@@ -299,19 +293,17 @@ impl crate::game::ServerGame<'_> {
                 Target::Projectile(id) => self.remove_projectile(id),
                 Target::Trident(id) => {
                     #[cfg(feature = "state-digest")]
-                    let dim = self.common.dim;
-                    self.common.tridents.retain(|t| {
-                        let keep = t.id != id;
-                        if !keep {
-                            crate::game::record_departure!(
-                                dim,
-                                t.id,
-                                "minecraft:trident",
-                                Some("discarded")
-                            );
-                        }
-                        keep
-                    });
+                    if crate::game::state_transcript::is_recording()
+                        && self.common.tridents.iter().any(|t| t.id == id)
+                    {
+                        crate::game::state_transcript::record_departure(
+                            self.common.dim,
+                            id,
+                            "minecraft:trident",
+                            Some("discarded"),
+                        );
+                    }
+                    self.common.tridents.retain(|t| t.id != id);
                     self.forget_entity(id);
                 }
                 Target::Boat(_) | Target::Cart(_)
@@ -327,22 +319,26 @@ impl crate::game::ServerGame<'_> {
                 Target::Projectile(_) | Target::Trident(_) => {}
                 Target::Crystal(id) => {
                     #[cfg(feature = "state-digest")]
-                    let dim = self.common.dim;
-                    self.common.crystals.retain(|c| {
-                        let keep = c.id != id;
-                        if !keep {
-                            crate::game::record_departure!(
-                                dim,
-                                c.id,
-                                "minecraft:end_crystal",
-                                Some("discarded")
-                            );
-                        }
-                        keep
-                    });
+                    if crate::game::state_transcript::is_recording()
+                        && self.common.crystals.iter().any(|c| c.id == id)
+                    {
+                        crate::game::state_transcript::record_departure(
+                            self.common.dim,
+                            id,
+                            "minecraft:end_crystal",
+                            Some("discarded"),
+                        );
+                    }
+                    self.common.crystals.retain(|c| c.id != id);
                 }
                 Target::Dragon(id) => {
                     if self.common.dragon.as_ref().is_some_and(|d| d.id == id) {
+                        crate::game::record_departure!(
+                            self.common.dim,
+                            id,
+                            "minecraft:ender_dragon",
+                            Some("discarded")
+                        );
                         self.discard_resident_dragon();
                     }
                 }
@@ -365,18 +361,23 @@ impl crate::game::ServerGame<'_> {
                 // Both command kill and handle removal already notified this row's
                 // leave. Retire its owning slot so tracking drops the row too.
                 Target::General(id) => {
-                    #[cfg(feature = "state-digest")]
-                    let dim = self.common.dim;
                     let rows = &mut self.common.resident_entities.general.rows;
                     if let Some(index) = rows.iter().position(|row| row.id == id) {
-                        let _removed = rows.remove(index);
-                        crate::game::record_departure!(
-                            dim,
-                            _removed.id,
-                            sunrise_gameplay_common::game::entity::Entity::native_type(&_removed)
-                                .as_ref(),
-                            Some("discarded")
-                        );
+                        #[cfg(feature = "state-digest")]
+                        let kind = crate::game::state_transcript::is_recording().then(|| {
+                            sunrise_gameplay_common::game::entity::Entity::native_type(&rows[index])
+                                .into_owned()
+                        });
+                        rows.remove(index);
+                        #[cfg(feature = "state-digest")]
+                        if let Some(kind) = kind {
+                            crate::game::state_transcript::record_departure(
+                                self.common.dim,
+                                id,
+                                kind,
+                                Some("discarded"),
+                            );
+                        }
                         self.forget_entity(id);
                     }
                 }

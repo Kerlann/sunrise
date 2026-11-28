@@ -1608,6 +1608,12 @@ impl crate::game::ServerGame<'_> {
                                     "a leaving player stays listed while their menu closes",
                                 );
                             *guest = host.hub.guests.remove(at);
+                            crate::game::record_departure!(
+                                theirs,
+                                carrier,
+                                "minecraft:player",
+                                Some("unloaded_with_player")
+                            );
                         }
                         if let Err(e) = self.enter_level(back) {
                             log::error!("could not reopen {}: {e}", back.id());

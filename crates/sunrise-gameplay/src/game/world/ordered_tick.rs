@@ -429,10 +429,10 @@ impl crate::game::ServerGame<'_> {
                                     };
                                     i = current;
                                     if !invulnerable && self.common.orbs[i].hurt(amount) {
-                                        let _gone = self.common.orbs.remove(i);
+                                        self.common.orbs.remove(i);
                                         crate::game::record_departure!(
                                             self.common.dim,
-                                            _gone.id,
+                                            orb_id,
                                             "minecraft:experience_orb",
                                             Some("killed")
                                         );
@@ -530,12 +530,12 @@ impl crate::game::ServerGame<'_> {
                     let (from, to) = (snow.0, snow.1);
                     self.entity_section_step(orb_id, [from.x, from.y, from.z], [to.x, to.y, to.z]);
                     if !stays {
-                        let _gone = self.common.orbs.remove(i);
+                        self.common.orbs.remove(i);
                         crate::game::record_departure!(
                             self.common.dim,
-                            _gone.id,
+                            orb_id,
                             "minecraft:experience_orb",
-                            None
+                            Some("discarded")
                         );
                     }
                 }
@@ -555,21 +555,10 @@ impl crate::game::ServerGame<'_> {
     /// Close a run of falling blocks before the next entity can observe the list.
     fn remove_landed_falling(&mut self) {
         if !self.server.ordered.landed.is_empty() {
-            #[cfg(feature = "state-digest")]
-            let dim = self.common.dim;
             let landed = &mut self.server.ordered.landed;
-            self.common.falling.retain(|block| {
-                let keep = !landed.contains(&block.join);
-                if !keep {
-                    crate::game::record_departure!(
-                        dim,
-                        block.id,
-                        "minecraft:falling_block",
-                        Some("discarded")
-                    );
-                }
-                keep
-            });
+            self.common
+                .falling
+                .retain(|block| !landed.contains(&block.join));
             landed.clear();
         }
     }

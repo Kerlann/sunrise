@@ -1238,8 +1238,8 @@ impl crate::game::ServerGame<'_> {
     ) -> bool {
         self.with_vehicle_removal_effects(super::commands::Target::Stand(id), effects, |game| {
             if let Some(i) = game.armor_stands.iter().position(|stand| stand.id == id) {
-                let _stand = game.armor_stands.remove(i);
-                crate::game::record_departure!(game.common.dim, _stand.id, TYPE_ID, None);
+                game.armor_stands.remove(i);
+                crate::game::record_departure!(game.common.dim, id, TYPE_ID, None);
             }
         })
         .is_some()

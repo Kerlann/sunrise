@@ -49,21 +49,24 @@ impl crate::game::ServerGame<'_> {
     /// of the dead entities' memory (`prune_entity_memory`).
     pub fn forget_untied_knots(&mut self) {
         let fences = self.lead_fences();
-        #[cfg(feature = "state-digest")]
-        let dim = self.common.dim;
         self.server.knot_ids.retain(|p, _| fences.contains(p));
-        self.common.resident_entities.knots.retain(|knot| {
-            let keep = fences.contains(&knot.fence);
-            if !keep {
-                crate::game::record_departure!(
-                    dim,
-                    knot.id,
-                    "minecraft:leash_knot",
-                    Some("discarded")
-                );
+        #[cfg(feature = "state-digest")]
+        if crate::game::state_transcript::is_recording() {
+            for knot in self.common.resident_entities.knots.iter() {
+                if !fences.contains(&knot.fence) {
+                    crate::game::state_transcript::record_departure(
+                        self.common.dim,
+                        knot.id,
+                        "minecraft:leash_knot",
+                        Some("discarded"),
+                    );
+                }
             }
-            keep
-        });
+        }
+        self.common
+            .resident_entities
+            .knots
+            .retain(|knot| fences.contains(&knot.fence));
     }
     /// `LeashFenceKnotEntity.notifyLeasheeRemoved`: only a knot losing a
     /// holder asks whether it still has another one. The departing entity may
@@ -89,21 +92,24 @@ impl crate::game::ServerGame<'_> {
         {
             return;
         }
-        #[cfg(feature = "state-digest")]
-        let dim = self.common.dim;
         self.server.knot_ids.remove(&fence);
-        self.common.resident_entities.knots.retain(|knot| {
-            let keep = knot.fence != fence;
-            if !keep {
-                crate::game::record_departure!(
-                    dim,
-                    knot.id,
-                    "minecraft:leash_knot",
-                    Some("discarded")
-                );
+        #[cfg(feature = "state-digest")]
+        if crate::game::state_transcript::is_recording() {
+            for knot in self.common.resident_entities.knots.iter() {
+                if knot.fence == fence {
+                    crate::game::state_transcript::record_departure(
+                        self.common.dim,
+                        knot.id,
+                        "minecraft:leash_knot",
+                        Some("discarded"),
+                    );
+                }
             }
-            keep
-        });
+        }
+        self.common
+            .resident_entities
+            .knots
+            .retain(|knot| knot.fence != fence);
     }
     /// `LeashFenceKnotEntity.getOrCreateKnot` → `createKnot`: the first lead
     /// tied to a fence makes its knot, a real entity with its own id (the
@@ -537,21 +543,24 @@ impl crate::game::ServerGame<'_> {
     ) -> bool {
         if let Some(fence) = self.natural_knot(id) {
             let at = leash::knot_state(fence).position.components();
-            #[cfg(feature = "state-digest")]
-            let dim = self.common.dim;
             self.server.knot_ids.remove(&fence);
-            self.common.resident_entities.knots.retain(|k| {
-                let keep = k.id != id;
-                if !keep {
-                    crate::game::record_departure!(
-                        dim,
-                        k.id,
-                        "minecraft:leash_knot",
-                        Some("killed")
-                    );
-                }
-                keep
-            });
+            #[cfg(feature = "state-digest")]
+            if crate::game::state_transcript::is_recording()
+                && self
+                    .common
+                    .resident_entities
+                    .knots
+                    .iter()
+                    .any(|k| k.id == id)
+            {
+                crate::game::state_transcript::record_departure(
+                    self.common.dim,
+                    id,
+                    "minecraft:leash_knot",
+                    Some("killed"),
+                );
+            }
+            self.common.resident_entities.knots.retain(|k| k.id != id);
             if !self.server.broken_knots.contains(&fence) {
                 self.server.broken_knots.push(fence);
             }

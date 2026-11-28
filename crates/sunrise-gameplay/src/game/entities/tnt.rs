@@ -162,14 +162,8 @@ impl ServerGame<'_> {
     pub(in crate::game::server_side) fn take_removed_tnt(&mut self, id: u32) -> Option<PrimedTnt> {
         self.with_destroying_vehicle(super::commands::Target::Tnt(id), |game| {
             let i = game.tnts.iter().position(|t| t.id == id)?;
-            let removed = game.tnts.remove(i);
-            crate::game::record_departure!(
-                game.common.dim,
-                removed.id,
-                "minecraft:tnt",
-                Some("discarded")
-            );
-            Some(removed)
+            crate::game::record_departure!(game.common.dim, id, "minecraft:tnt", Some("discarded"));
+            Some(game.tnts.remove(i))
         })?
     }
 

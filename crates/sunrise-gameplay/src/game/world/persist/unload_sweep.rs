@@ -65,18 +65,22 @@ impl crate::game::ServerGame<'_> {
             }
             keep
         });
-        self.common.crystals.retain(|c| {
-            let keep = keep_row(c.id, c.position, &mut self.common.persist.transient);
-            if !keep {
-                crate::game::record_departure!(
-                    dim,
-                    c.id,
-                    "minecraft:end_crystal",
-                    Some("unloaded_to_chunk")
-                );
+        #[cfg(feature = "state-digest")]
+        if crate::game::state_transcript::is_recording() {
+            for c in self.common.crystals.iter() {
+                if gone(c.position) {
+                    crate::game::state_transcript::record_departure(
+                        dim,
+                        c.id,
+                        "minecraft:end_crystal",
+                        Some("unloaded_to_chunk"),
+                    );
+                }
             }
-            keep
-        });
+        }
+        self.common
+            .crystals
+            .retain(|c| keep_row(c.id, c.position, &mut self.common.persist.transient));
         self.common.ominous_spawners.retain(|s| {
             let keep = !gone(Vec3::new(s.position[0], s.position[1], s.position[2]));
             if !keep {
@@ -289,18 +293,22 @@ impl crate::game::ServerGame<'_> {
             }
             keep
         });
-        self.common.orbs.retain(|o| {
-            let keep = keep_row(o.id, o.position, &mut self.common.persist.transient);
-            if !keep {
-                crate::game::record_departure!(
-                    dim,
-                    o.id,
-                    "minecraft:experience_orb",
-                    Some("unloaded_to_chunk")
-                );
+        #[cfg(feature = "state-digest")]
+        if crate::game::state_transcript::is_recording() {
+            for o in self.common.orbs.iter() {
+                if gone(o.position) {
+                    crate::game::state_transcript::record_departure(
+                        dim,
+                        o.id,
+                        "minecraft:experience_orb",
+                        Some("unloaded_to_chunk"),
+                    );
+                }
             }
-            keep
-        });
+        }
+        self.common
+            .orbs
+            .retain(|o| keep_row(o.id, o.position, &mut self.common.persist.transient));
         // Unloaded with their chunk: PersistentEntitySectionManager.stopTracking.
         self.native_leaves_flush();
         // the ones saved with the chunk go with it (a trident too, unsaved).
@@ -318,54 +326,70 @@ impl crate::game::ServerGame<'_> {
             }
             keep
         });
-        self.common.falling.retain(|f| {
-            let keep = keep_row(f.id, f.position, &mut self.common.persist.transient);
-            if !keep {
-                crate::game::record_departure!(
-                    dim,
-                    f.id,
-                    "minecraft:falling_block",
-                    Some("unloaded_to_chunk")
-                );
+        #[cfg(feature = "state-digest")]
+        if crate::game::state_transcript::is_recording() {
+            for f in self.common.falling.iter() {
+                if gone(f.position) {
+                    crate::game::state_transcript::record_departure(
+                        dim,
+                        f.id,
+                        "minecraft:falling_block",
+                        Some("unloaded_to_chunk"),
+                    );
+                }
             }
-            keep
-        });
-        self.common.rockets.retain(|r| {
-            let keep = keep_row(r.id, r.position, &mut self.common.persist.transient);
-            if !keep {
-                crate::game::record_departure!(
-                    dim,
-                    r.id,
-                    "minecraft:firework_rocket",
-                    Some("unloaded_to_chunk")
-                );
+        }
+        self.common
+            .falling
+            .retain(|f| keep_row(f.id, f.position, &mut self.common.persist.transient));
+        #[cfg(feature = "state-digest")]
+        if crate::game::state_transcript::is_recording() {
+            for r in self.common.rockets.iter() {
+                if gone(r.position) {
+                    crate::game::state_transcript::record_departure(
+                        dim,
+                        r.id,
+                        "minecraft:firework_rocket",
+                        Some("unloaded_to_chunk"),
+                    );
+                }
             }
-            keep
-        });
-        self.common.tridents.retain(|t| {
-            let keep = keep_row(t.id, t.position, &mut self.common.persist.transient);
-            if !keep {
-                crate::game::record_departure!(
-                    dim,
-                    t.id,
-                    "minecraft:trident",
-                    Some("unloaded_to_chunk")
-                );
+        }
+        self.common
+            .rockets
+            .retain(|r| keep_row(r.id, r.position, &mut self.common.persist.transient));
+        #[cfg(feature = "state-digest")]
+        if crate::game::state_transcript::is_recording() {
+            for t in self.common.tridents.iter() {
+                if gone(t.position) {
+                    crate::game::state_transcript::record_departure(
+                        dim,
+                        t.id,
+                        "minecraft:trident",
+                        Some("unloaded_to_chunk"),
+                    );
+                }
             }
-            keep
-        });
-        self.common.tnts.retain(|t| {
-            let keep = keep_row(t.id, t.position, &mut self.common.persist.transient);
-            if !keep {
-                crate::game::record_departure!(
-                    dim,
-                    t.id,
-                    "minecraft:tnt",
-                    Some("unloaded_to_chunk")
-                );
+        }
+        self.common
+            .tridents
+            .retain(|t| keep_row(t.id, t.position, &mut self.common.persist.transient));
+        #[cfg(feature = "state-digest")]
+        if crate::game::state_transcript::is_recording() {
+            for t in self.common.tnts.iter() {
+                if gone(t.position) {
+                    crate::game::state_transcript::record_departure(
+                        dim,
+                        t.id,
+                        "minecraft:tnt",
+                        Some("unloaded_to_chunk"),
+                    );
+                }
             }
-            keep
-        });
+        }
+        self.common
+            .tnts
+            .retain(|t| keep_row(t.id, t.position, &mut self.common.persist.transient));
         self.common.resident_entities.general.rows.retain(|row| {
             let keep = !leaving.contains(&row.id);
             if !keep {

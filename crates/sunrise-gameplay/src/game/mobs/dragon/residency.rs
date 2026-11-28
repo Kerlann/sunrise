@@ -17,12 +17,6 @@ impl crate::game::ServerGame<'_> {
             .filter(|dragon| dragon.id != 0)
             .map(|dragon| dragon.id)
         {
-            crate::game::record_departure!(
-                self.common.dim,
-                id,
-                "minecraft:ender_dragon",
-                Some("discarded")
-            );
             for part in 0..8 {
                 self.forget_entity(dragon_part_id(id, part));
             }

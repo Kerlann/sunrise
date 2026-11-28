@@ -391,6 +391,7 @@ impl crate::game::ServerGame<'_> {
         if !with_frame {
             self.common.item_frames[i].item = None;
         } else {
+            crate::game::record_departure!(self.common.dim, f.id, f.kind(), Some("killed"));
             // BlockAttachedEntity.kill precedes ItemFrame.dropItem's break sound.
             self.entity_killed_event_by(at, source);
             self.server_play_sound(&sound(&f, "break"), at, 1.0, 1.0);
@@ -582,6 +583,7 @@ impl crate::game::ServerGame<'_> {
             return false;
         };
         let mut f = self.common.item_frames.remove(index);
+        crate::game::record_departure!(self.common.dim, f.id, f.kind(), Some("killed"));
         self.entity_killed_event_by(center(&f), source);
         self.server_play_sound(&sound(&f, "break"), center(&f), 1.0, 1.0);
         self.drop_frame_items(&mut f, true, false, false);

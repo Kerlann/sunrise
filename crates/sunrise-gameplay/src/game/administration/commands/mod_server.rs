@@ -1460,25 +1460,26 @@ impl crate::game::ServerGame<'_> {
             }
             Target::Item(id) => {
                 if let Some(i) = self.common.dropped.iter().position(|i| i.id == id) {
+                    #[cfg(feature = "state-digest")]
+                    let _reason =
+                        crate::game::state_transcript::override_departure_reason("killed");
                     self.remove_dropped(i);
                 }
             }
             // Entity.kill removes the orb.
             Target::Orb(id) => {
                 #[cfg(feature = "state-digest")]
-                let dim = self.common.dim;
-                self.common.orbs.retain(|o| {
-                    let keep = o.id != id;
-                    if !keep {
-                        crate::game::record_departure!(
-                            dim,
-                            o.id,
-                            "minecraft:experience_orb",
-                            Some("killed")
-                        );
-                    }
-                    keep
-                });
+                if crate::game::state_transcript::is_recording()
+                    && self.common.orbs.iter().any(|o| o.id == id)
+                {
+                    crate::game::state_transcript::record_departure(
+                        self.common.dim,
+                        id,
+                        "minecraft:experience_orb",
+                        Some("killed"),
+                    );
+                }
+                self.common.orbs.retain(|o| o.id != id);
             }
             Target::Projectile(id) => self.remove_projectile(id),
             Target::Stand(id) => {
@@ -1492,30 +1493,31 @@ impl crate::game::ServerGame<'_> {
                     self.remove_framed_map(&frame);
                 }
                 #[cfg(feature = "state-digest")]
-                let dim = self.common.dim;
-                self.common.item_frames.retain(|f| {
-                    let keep = f.id != id;
-                    if !keep {
-                        crate::game::record_departure!(dim, f.id, f.kind(), Some("killed"));
-                    }
-                    keep
-                });
+                if crate::game::state_transcript::is_recording()
+                    && let Some(f) = self.common.item_frames.iter().find(|f| f.id == id)
+                {
+                    crate::game::state_transcript::record_departure(
+                        self.common.dim,
+                        id,
+                        f.kind(),
+                        Some("killed"),
+                    );
+                }
+                self.common.item_frames.retain(|f| f.id != id);
             }
             Target::Painting(id) => {
                 #[cfg(feature = "state-digest")]
-                let dim = self.common.dim;
-                self.common.paintings.retain(|p| {
-                    let keep = p.id != id;
-                    if !keep {
-                        crate::game::record_departure!(
-                            dim,
-                            p.id,
-                            "minecraft:painting",
-                            Some("killed")
-                        );
-                    }
-                    keep
-                });
+                if crate::game::state_transcript::is_recording()
+                    && self.common.paintings.iter().any(|p| p.id == id)
+                {
+                    crate::game::state_transcript::record_departure(
+                        self.common.dim,
+                        id,
+                        "minecraft:painting",
+                        Some("killed"),
+                    );
+                }
+                self.common.paintings.retain(|p| p.id != id);
             }
             Target::Boat(_) | Target::Cart(_) => {
                 if !self.kill_vehicle_object(t) {
@@ -1526,14 +1528,17 @@ impl crate::game::ServerGame<'_> {
                 if self
                     .with_destroying_vehicle(t, |game| {
                         #[cfg(feature = "state-digest")]
-                        let dim = game.common.dim;
-                        game.server.others.0.retain(|o| {
-                            let keep = o.id != id;
-                            if !keep {
-                                crate::game::record_departure!(dim, o.id, &o.kind, Some("killed"));
-                            }
-                            keep
-                        });
+                        if crate::game::state_transcript::is_recording()
+                            && let Some(o) = game.server.others.0.iter().find(|o| o.id == id)
+                        {
+                            crate::game::state_transcript::record_departure(
+                                game.common.dim,
+                                id,
+                                &o.kind,
+                                Some("killed"),
+                            );
+                        }
+                        game.server.others.0.retain(|o| o.id != id);
                         game.forget_entity(id);
                     })
                     .is_none()
@@ -1543,19 +1548,17 @@ impl crate::game::ServerGame<'_> {
             }
             Target::Fangs(id) => {
                 #[cfg(feature = "state-digest")]
-                let dim = self.common.dim;
-                self.common.fangs.list.retain(|f| {
-                    let keep = f.id != id;
-                    if !keep {
-                        crate::game::record_departure!(
-                            dim,
-                            f.id,
-                            "minecraft:evoker_fangs",
-                            Some("killed")
-                        );
-                    }
-                    keep
-                });
+                if crate::game::state_transcript::is_recording()
+                    && self.common.fangs.list.iter().any(|f| f.id == id)
+                {
+                    crate::game::state_transcript::record_departure(
+                        self.common.dim,
+                        id,
+                        "minecraft:evoker_fangs",
+                        Some("killed"),
+                    );
+                }
+                self.common.fangs.list.retain(|f| f.id != id);
             }
             Target::Crystal(id) => self.kill_crystal(id),
             Target::Dragon(id) => self.kill_dragon(id),
@@ -1571,51 +1574,45 @@ impl crate::game::ServerGame<'_> {
             }
             Target::Falling(id) => {
                 #[cfg(feature = "state-digest")]
-                let dim = self.common.dim;
-                self.common.falling.retain(|f| {
-                    let keep = f.id != id;
-                    if !keep {
-                        crate::game::record_departure!(
-                            dim,
-                            f.id,
-                            "minecraft:falling_block",
-                            Some("killed")
-                        );
-                    }
-                    keep
-                });
+                if crate::game::state_transcript::is_recording()
+                    && self.common.falling.iter().any(|f| f.id == id)
+                {
+                    crate::game::state_transcript::record_departure(
+                        self.common.dim,
+                        id,
+                        "minecraft:falling_block",
+                        Some("killed"),
+                    );
+                }
+                self.common.falling.retain(|f| f.id != id);
             }
             Target::Rocket(id) => {
                 #[cfg(feature = "state-digest")]
-                let dim = self.common.dim;
-                self.common.rockets.retain(|r| {
-                    let keep = r.id != id;
-                    if !keep {
-                        crate::game::record_departure!(
-                            dim,
-                            r.id,
-                            "minecraft:firework_rocket",
-                            Some("killed")
-                        );
-                    }
-                    keep
-                });
+                if crate::game::state_transcript::is_recording()
+                    && self.common.rockets.iter().any(|r| r.id == id)
+                {
+                    crate::game::state_transcript::record_departure(
+                        self.common.dim,
+                        id,
+                        "minecraft:firework_rocket",
+                        Some("killed"),
+                    );
+                }
+                self.common.rockets.retain(|r| r.id != id);
             }
             Target::Trident(id) => {
                 #[cfg(feature = "state-digest")]
-                let dim = self.common.dim;
-                self.common.tridents.retain(|t| {
-                    let keep = t.id != id;
-                    if !keep {
-                        crate::game::record_departure!(
-                            dim,
-                            t.id,
-                            "minecraft:trident",
-                            Some("killed")
-                        );
-                    }
-                    keep
-                });
+                if crate::game::state_transcript::is_recording()
+                    && self.common.tridents.iter().any(|t| t.id == id)
+                {
+                    crate::game::state_transcript::record_departure(
+                        self.common.dim,
+                        id,
+                        "minecraft:trident",
+                        Some("killed"),
+                    );
+                }
+                self.common.tridents.retain(|t| t.id != id);
             }
             Target::Spawner(id) => self.remove_ominous_spawner(id),
             Target::Cloud(id) => self.remove_breath_cloud(id),

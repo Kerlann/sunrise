@@ -44,10 +44,10 @@ impl crate::game::ServerGame<'_> {
                         Vec::new()
                     };
                 if let Some(k) = self.common.dropped.iter().position(|item| item.id == id) {
-                    let _gone = self.common.dropped.remove(k);
+                    self.common.dropped.remove(k);
                     crate::game::record_departure!(
                         self.common.dim,
-                        _gone.id,
+                        id,
                         "minecraft:item",
                         Some("killed")
                     );

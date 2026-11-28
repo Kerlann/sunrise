@@ -3772,6 +3772,15 @@ impl crate::game::ServerGame<'_> {
                     .iter()
                     .any(|p| p.distance_squared(c.position) < 0.01);
             self.crystal_destroyed(i, &c, None, respawn);
+            #[cfg(feature = "state-digest")]
+            if self.common.crystals.iter().any(|crystal| crystal.id == id) {
+                crate::game::record_departure!(
+                    self.common.dim,
+                    id,
+                    "minecraft:end_crystal",
+                    Some("killed")
+                );
+            }
             self.common.crystals.retain(|crystal| crystal.id != id);
             self.entity_killed_event([c.position.x, c.position.y, c.position.z], false);
         }
@@ -4139,6 +4148,12 @@ impl crate::game::ServerGame<'_> {
                 self.server.fight.dragon_uuid = Some(self.uuid_for(id));
                 self.server.fight.killed = false;
                 if !active {
+                    crate::game::record_departure!(
+                        self.common.dim,
+                        id,
+                        "minecraft:ender_dragon",
+                        Some("discarded")
+                    );
                     self.discard_resident_dragon();
                     self.server.fight.dragon_uuid = None;
                 }
@@ -4179,6 +4194,12 @@ impl crate::game::ServerGame<'_> {
                 .position(|c| c.position.distance_squared(p) < 0.01)
             {
                 let c = self.common.crystals.remove(i);
+                crate::game::record_departure!(
+                    self.common.dim,
+                    c.id,
+                    "minecraft:end_crystal",
+                    Some("killed")
+                );
                 self.common.world.modified.insert((
                     c.position.x.floor() as i32 >> 4,
                     c.position.z.floor() as i32 >> 4,
