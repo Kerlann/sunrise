@@ -1376,6 +1376,7 @@ mod tests {
     }
     use super::conn::MEMORY_ADDRESS;
     use super::*;
+    use crate::data_map_net::LocalDataMaps;
     use std::{io::Read, time::Instant};
 
     #[test]
@@ -1385,8 +1386,14 @@ mod tests {
             announce: false,
             ..NetConfig::lan(0, "handoffs".into(), 1)
         };
-        let mut lan =
-            Lan::start_listener(Arc::new(data::SyncData::empty()), config, true, false).unwrap();
+        let mut lan = Lan::start_listener(
+            Arc::new(data::SyncData::empty()),
+            config,
+            true,
+            false,
+            LocalDataMaps::default(),
+        )
+        .unwrap();
         let intention = sunrise_protocol::packets::handshake::Intention {
             host: "entry.test".into(),
             port: 25565,
@@ -1421,10 +1428,22 @@ mod tests {
             announce: false,
             ..NetConfig::lan(0, "config-incarnation".into(), 1)
         };
-        let lan_a =
-            Lan::start_listener(Arc::new(data::SyncData::empty()), config(), true, false).unwrap();
-        let mut lan_b =
-            Lan::start_listener(Arc::new(data::SyncData::empty()), config(), true, false).unwrap();
+        let lan_a = Lan::start_listener(
+            Arc::new(data::SyncData::empty()),
+            config(),
+            true,
+            false,
+            LocalDataMaps::default(),
+        )
+        .unwrap();
+        let mut lan_b = Lan::start_listener(
+            Arc::new(data::SyncData::empty()),
+            config(),
+            true,
+            false,
+            LocalDataMaps::default(),
+        )
+        .unwrap();
         let conn_a = lan_a.shared.next_configuration_connection().unwrap();
         let conn_b = lan_b.shared.next_configuration_connection().unwrap();
         let (inc_a, local_a) = mod_api::__private::configuration_connection_parts(conn_a);
