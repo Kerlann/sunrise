@@ -1,1 +1,1 @@
-sunrise-gameplay game::server_side::dedicated::transfer::tests::prepared_join_applies_saved_entities_and_player_data_before_placing_the_same_body lib daily resources
+sunrise-gameplay game::server_side::dedicated::transfer::tests::prepared_join_calls_login_then_announces_once lib daily resources
