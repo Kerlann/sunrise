@@ -121,8 +121,7 @@ pub struct ModsState {
     pub settings: crate::game::native_hooks::mod_settings::SharedSettings,
     pub active_condition_root: Option<Arc<()>>,
     pub load_condition_candidate: Option<sunrise_world::conditions::LoadConditions>,
-    pub load_conditions:
-        Arc<std::sync::OnceLock<Result<crate::game::load_conditions::ConditionTable, String>>>,
+    pub load_conditions: Arc<std::sync::OnceLock<crate::game::load_conditions::ConditionTable>>,
     pub profession_declarations:
         Arc<std::sync::OnceLock<Vec<(String, mod_api::ProfessionDefinition)>>>,
     pub loot_modifier_serializers:

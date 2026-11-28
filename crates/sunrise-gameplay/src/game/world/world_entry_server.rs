@@ -451,7 +451,7 @@ impl crate::game::ServerGame<'_> {
             priority_layers,
         } = functions::overlay_files(&data);
         let inventory = sunrise_mod_package::enabled::EnabledMods::read(root)?;
-        let base_conditions = load_conditions::conditions_for_mods(&self.common.mods, &inventory)?;
+        let base_conditions = load_conditions::conditions_for_mods(&self.common.mods, &inventory);
         // Tag files are not conditional. Collect the candidate's static holders
         // and pending tags before registry codecs can inspect them.
         let tag_files = sunrise_world::loot::PackOverlay::new(&files);

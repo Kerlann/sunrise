@@ -22,8 +22,7 @@ impl ServerGame<'_> {
                 sunrise_gameplay_common::game::load_conditions::conditions_for_mods(
                     &self.common.mods,
                     &inventory,
-                )
-                .map_err(ReloadStageError::DataSource)?,
+                ),
             );
         }
         self.prepare_server_reload(stack)

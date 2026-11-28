@@ -30,7 +30,7 @@ impl crate::game::CommonGame<'_> {
         self.protect_condition_root();
         self.mods.load_condition_candidate = None;
         let inventory = sunrise_mod_package::enabled::EnabledMods::read(&self.options.resources)?;
-        self.mods.load_condition_candidate = Some(conditions_for_mods(&self.mods, &inventory)?);
+        self.mods.load_condition_candidate = Some(conditions_for_mods(&self.mods, &inventory));
         self.stage_enabled_inventory()
     }
 
@@ -55,7 +55,7 @@ impl crate::game::CommonGame<'_> {
     ) -> std::result::Result<sunrise_world::conditions::LoadConditions, String> {
         let inventory = sunrise_mod_package::enabled::EnabledMods::read(&self.options.resources)
             .map_err(|error| error.to_string())?;
-        conditions_for_mods(&self.mods, &inventory)
+        Ok(conditions_for_mods(&self.mods, &inventory))
     }
 
     /// Stage the enabled packs’ actual winners before readers use their holders.
@@ -441,15 +441,15 @@ pub fn worldgen_load_conditions(
 pub fn conditions_for_mods(
     sources: &super::mods::ModsState,
     inventory: &sunrise_mod_package::enabled::EnabledMods,
-) -> Result<sunrise_world::conditions::LoadConditions, String> {
+) -> sunrise_world::conditions::LoadConditions {
     if let Some(candidate) = &sources.load_condition_candidate {
-        return Ok(candidate.with_mod_inventory(inventory.server_ids()));
+        return candidate.with_mod_inventory(inventory.server_ids());
     }
     let table = sources
         .load_conditions
         .get_or_init(|| {
             // Every candidate shares the owner of each startup-frozen load condition.
-            Ok(Arc::new(
+            Arc::new(
                 mod_api::__private::installed_load_conditions()
                     .iter()
                     .map(|entry| {
@@ -462,30 +462,28 @@ pub fn conditions_for_mods(
                         )
                     })
                     .collect(),
-            ))
+            )
         })
-        .clone()?;
+        .clone();
     let conditions = sunrise_world::conditions::LoadConditions::new(inventory.server_ids());
-    Ok(
-        conditions.with_lookup(table.iter().map(|(id, (owner, handler))| {
-            let name = id.to_string();
-            let enabled = sources.code_owner_enabled(owner.id());
-            let owner = owner.clone();
-            let handler = handler.clone();
-            (name.clone(), move |args: &serde_json::Value| {
-                if !enabled {
-                    return Ok(false);
-                }
-                // The evaluator passes the arguments without the key that named the condition.
-                owner
-                    .call("load condition", "test_load_condition", || {
-                        handler.test(args)
-                    })
-                    .map_err(|reason| format!("condition {name}: {reason}"))?
-                    .map_err(|error| format!("condition {name}: mod {}: {error}", owner.id()))
-            })
-        })),
-    )
+    conditions.with_lookup(table.iter().map(|(id, (owner, handler))| {
+        let name = id.to_string();
+        let enabled = sources.code_owner_enabled(owner.id());
+        let owner = owner.clone();
+        let handler = handler.clone();
+        (name.clone(), move |args: &serde_json::Value| {
+            if !enabled {
+                return Ok(false);
+            }
+            // The evaluator passes the arguments without the key that named the condition.
+            owner
+                .call("load condition", "test_load_condition", || {
+                    handler.test(args)
+                })
+                .map_err(|reason| format!("condition {name}: {reason}"))?
+                .map_err(|error| format!("condition {name}: mod {}: {error}", owner.id()))
+        })
+    }))
 }
 
 pub(in crate::game) fn content_root_with_conditions(
@@ -496,7 +494,7 @@ pub(in crate::game) fn content_root_with_conditions(
     inventory: &sunrise_mod_package::enabled::EnabledMods,
     sources: &super::mods::ModsState,
 ) -> sunrise_game_data::Result<std::path::PathBuf> {
-    let conditions = conditions_for_mods(sources, inventory)?;
+    let conditions = conditions_for_mods(sources, inventory);
     let conditions = worldgen_load_conditions(&conditions, root, &[]);
     sunrise_sim::mod_content::resource_root_with_conditions(
         root,

@@ -454,8 +454,7 @@ fn load_conditions_admit_registered_foreign_ids_but_refuse_every_unknown_id() {
             let inventory = sunrise_mod_package::enabled::EnabledMods::default();
             let conditions = sunrise_gameplay_common::game::load_conditions::conditions_for_mods(
                 &sources, &inventory,
-            )
-            .unwrap();
+            );
             let file = |id: &str| json!({"neoforge:conditions":[{"type":id, "value":true}]});
             assert!(conditions.allows_file(&file("c:config"), "data/demo/advancement/known.json"));
             assert!(conditions.allows_file(
@@ -498,14 +497,12 @@ fn load_conditions_disabled_owner_does_not_execute_registered_handler() {
                 sunrise_gameplay_common::game::load_conditions::conditions_for_mods(
                     &sources, &inventory
                 )
-                .unwrap()
                 .allows_file(&file, "flag.json")
             );
             assert!(mod_api::__private::set_mod_enabled("testmod", false));
             let disabled = sunrise_gameplay_common::game::load_conditions::conditions_for_mods(
                 &sources, &inventory,
-            )
-            .unwrap();
+            );
             assert!(!disabled.allows_file(&file, "flag.json"));
             assert_eq!(disabled.check_errors(), Ok(()));
             assert_eq!(count.load(Ordering::SeqCst), 1);
@@ -514,7 +511,6 @@ fn load_conditions_disabled_owner_does_not_execute_registered_handler() {
                 sunrise_gameplay_common::game::load_conditions::conditions_for_mods(
                     &sources, &inventory
                 )
-                .unwrap()
                 .allows_file(&file, "flag.json")
             );
             assert_eq!(count.load(Ordering::SeqCst), 2);
@@ -553,8 +549,7 @@ fn load_condition_panic_disables_only_that_handler_across_generations() {
             let inventory = sunrise_mod_package::enabled::EnabledMods::default();
             let load = sunrise_gameplay_common::game::load_conditions::conditions_for_mods(
                 &sources, &inventory,
-            )
-            .unwrap();
+            );
             let faulty = json!({"neoforge:conditions":[{"type":"foreign:faulty","value":"panic"}]});
             let path = "data/foreign/recipe/faulty.json";
             assert!(!load.allows_file(&faulty, path));
@@ -574,8 +569,7 @@ fn load_condition_panic_disables_only_that_handler_across_generations() {
 
             let next = sunrise_gameplay_common::game::load_conditions::conditions_for_mods(
                 &sources, &inventory,
-            )
-            .unwrap();
+            );
             let error = next.allows_file_isolated(&faulty, path).unwrap_err();
             assert_eq!(
                 error,
