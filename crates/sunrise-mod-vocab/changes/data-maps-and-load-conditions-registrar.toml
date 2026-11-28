@@ -1,13 +1,16 @@
 ids = [
+    "handle:LoadConditions::register",
     "hook:data_map_types",
     "hook:register_load_conditions",
+    "method:DataMap::ty",
     "method:Hooks::data_map_types",
     "method:Hooks::register_load_conditions",
     "trait:DataMap",
     "trait:LoadConditions",
     "type:DataMapType",
     "type:DataMapTypesEvent",
-    "type:HookId",
+    "type:HookId.DataMapTypes",
+    "type:HookId.RegisterLoadConditions",
     "type:RegisterLoadConditionsEvent",
 ]
 why = """
