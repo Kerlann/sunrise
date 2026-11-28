@@ -194,6 +194,16 @@ thread_local! {
     static LAST_TARGET_META: RefCell<Option<(EngineWidgetKey, i32)>> = const { RefCell::new(None) };
 }
 
+/// Clone the collector identity and resolved `tab_order_group` of the engine widget most recently
+/// resolved by [`resolve_engine_widget`] for `widgets::record_as` (leaving it available if a
+/// subsequent `widgets::target_as` runs for the same widget).
+pub(super) fn peek_last_resolved_target_meta() -> (Option<EngineWidgetKey>, i32) {
+    LAST_TARGET_META.with_borrow(|slot| match slot.as_ref() {
+        Some((key, group)) => (Some(key.clone()), *group),
+        None => (None, 0),
+    })
+}
+
 /// Take the collector identity and resolved `tab_order_group` of the engine widget most recently
 /// resolved by [`resolve_engine_widget`] for the `widgets::target_as` call immediately following it.
 pub(super) fn take_last_resolved_target_meta() -> (Option<EngineWidgetKey>, i32) {
@@ -493,8 +503,10 @@ pub fn without_engine_overrides<R>(f: impl FnOnce() -> R) -> R {
     impl Drop for Guard {
         fn drop(&mut self) {
             BYPASS_OVERRIDES.set(self.0);
+            LAST_TARGET_META.set(None);
         }
     }
+    LAST_TARGET_META.set(None);
     let _guard = Guard(BYPASS_OVERRIDES.replace(true));
     f()
 }
@@ -503,6 +515,7 @@ pub fn without_engine_overrides<R>(f: impl FnOnce() -> R) -> R {
 /// `ui::slider_ext`, `ui::EditBox`, `graphics_style`, `screen_draw`, `pack_screen`, and plain-text
 /// engine controls).
 pub fn resolve_engine_widget(input: EngineWidgetInput<'_>) -> ResolvedEngineWidget {
+    LAST_TARGET_META.set(None);
     if BYPASS_OVERRIDES.get() {
         return ResolvedEngineWidget::Unchanged;
     }

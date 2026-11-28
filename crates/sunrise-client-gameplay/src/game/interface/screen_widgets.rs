@@ -1193,12 +1193,12 @@ impl crate::game::ClientGame<'_> {
             .map_or(0, |slot| slot.default_tab_order_group)
     }
 
-    /// Resolved `tab_order_group` for any focus `Target` (mounted or engine) for real Tab
-    /// traversal (`ContainerEventHandler.nextFocusPath`).
+    /// Resolved `tab_order_group` for any focus `Target` (mounted or engine) by identity, never
+    /// by comparing rectangles (`ContainerEventHandler.nextFocusPath`).
     pub(in crate::game) fn tab_order_group_for_target(
         &self,
         target: Target,
-        target_meta: &[(Target, widgets::TargetMeta)],
+        meta: &widgets::TargetMeta,
     ) -> i32 {
         if let Kind::Mounted { id, .. } = target.kind {
             let wid = ScreenWidgetId::from_raw(id);
@@ -1222,24 +1222,18 @@ impl crate::game::ClientGame<'_> {
             }
             return 0;
         }
-        if let Some((_, meta)) = target_meta
-            .iter()
-            .find(|(t, _)| t.kind == target.kind && t.rect == target.rect)
-        {
-            if let Some(key) = &meta.key {
-                let inner = self.client.screen_state.0.widgets.inner.borrow();
-                if let Some(group) = inner
-                    .engine_overrides
-                    .overrides
-                    .get(key)
-                    .and_then(|ov| ov.tab_order_group)
-                {
-                    return group;
-                }
+        if let Some(key) = &meta.key {
+            let inner = self.client.screen_state.0.widgets.inner.borrow();
+            if let Some(group) = inner
+                .engine_overrides
+                .overrides
+                .get(key)
+                .and_then(|ov| ov.tab_order_group)
+            {
+                return group;
             }
-            return meta.tab_order_group;
         }
-        0
+        meta.tab_order_group
     }
 
     /// Whether `screen_init_pre` cancelled engine widgets on the active screen.

@@ -157,6 +157,8 @@ pub struct TargetMeta {
 thread_local! {
     /// Buttons drawn since the last `end_frame`, and the last frame's.
     static WIDGETS: RefCell<(Vec<Widget>, Vec<Widget>, u64)> = const { RefCell::new((Vec::new(), Vec::new(), 0)) };
+    /// Parallel identity and tab-order metadata for `WIDGETS`.
+    static WIDGET_META: RefCell<(Vec<TargetMeta>, Vec<TargetMeta>)> = const { RefCell::new((Vec::new(), Vec::new())) };
     /// Every interactive rectangle (sliders, fields, list rows, the
     /// on-screen keyboard's keys), labelled or not: where a controller can move focus. Drawn since
     /// `end_frame`, the last frame's, and how many frames rotated.
@@ -190,6 +192,7 @@ pub struct Saved(
     (Vec<FocusLink>, Vec<FocusLink>),
     (Vec<[f32; 4]>, Vec<[f32; 4]>),
     (Vec<TargetMeta>, Vec<TargetMeta>),
+    (Vec<TargetMeta>, Vec<TargetMeta>),
 );
 
 /// This thread's buttons and targets, leaving none.
@@ -204,6 +207,7 @@ pub fn take() -> Saved {
         FOCUS_LINKS.take(),
         STEPPERS.take(),
         TARGET_META.take(),
+        WIDGET_META.take(),
     )
 }
 
@@ -215,6 +219,7 @@ pub fn put(saved: Saved) {
     FOCUS_LINKS.set(saved.6);
     STEPPERS.set(saved.7);
     TARGET_META.set(saved.8);
+    WIDGET_META.set(saved.9);
     ACTIONS.set(saved.2);
     ACTION_GLYPHS.set(saved.3);
     ACTION_SCREENS.set(saved.4);
@@ -371,10 +376,18 @@ pub fn mark_mounted((labelled, targets): (usize, usize), id: u64, field: bool) {
 pub fn clip_frame((labelled, targets): (usize, usize), y0: f32, y1: f32) {
     let shown = |y: f32, h: f32| (y0..y1).contains(&(y + h / 2.0));
     WIDGETS.with_borrow_mut(|(current, _, _)| {
-        let mut at = 0;
-        current.retain(|w| {
-            at += 1;
-            at <= labelled || shown(w.y, w.h)
+        WIDGET_META.with_borrow_mut(|(meta, _)| {
+            let mut i = labelled.min(current.len());
+            while i < current.len() {
+                if shown(current[i].y, current[i].h) {
+                    i += 1;
+                } else {
+                    current.remove(i);
+                    if i < meta.len() {
+                        meta.remove(i);
+                    }
+                }
+            }
         });
     });
     TARGETS.with_borrow_mut(|(current, _, _)| {
@@ -398,6 +411,7 @@ pub fn clip_frame((labelled, targets): (usize, usize), y0: f32, y1: f32) {
 /// pointer or a controller, so its widgets, targets, declared buttons and lists go.
 pub fn cover_frame() {
     WIDGETS.with_borrow_mut(|(current, _, _)| current.clear());
+    WIDGET_META.with_borrow_mut(|(current, _)| current.clear());
     TARGETS.with_borrow_mut(|(current, _, _)| current.clear());
     TARGET_META.with_borrow_mut(|(current, _)| current.clear());
     ACTIONS.with_borrow_mut(|(current, _)| current.clear());
@@ -502,6 +516,21 @@ pub fn last_targets_with_meta() -> Vec<(Target, TargetMeta)> {
     })
 }
 
+/// The labelled widgets of the last drawn frame paired with their collector identity and
+/// `tab_order_group`.
+pub fn last_with_meta() -> Vec<(Widget, TargetMeta)> {
+    WIDGETS.with_borrow(|(_, last_widgets, _)| {
+        WIDGET_META.with_borrow(|(_, last_meta)| {
+            last_widgets
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(i, widget)| (widget, last_meta.get(i).cloned().unwrap_or_default()))
+                .collect()
+        })
+    })
+}
+
 /// Counts drawn frames: focus waits for a new one after scrolling a list.
 pub fn generation() -> u64 {
     TARGETS.with_borrow(|(_, _, generation)| *generation)
@@ -518,6 +547,7 @@ pub fn record_as(label: &str, [x, y, w, h]: [f32; 4], enabled: bool, kind: Kind)
     if label.is_empty() {
         return;
     }
+    let (key, tab_order_group) = widgets_override::peek_last_resolved_target_meta();
     WIDGETS.with_borrow_mut(|(current, _, _)| {
         if current.len() < 512 {
             current.push(Widget {
@@ -528,6 +558,12 @@ pub fn record_as(label: &str, [x, y, w, h]: [f32; 4], enabled: bool, kind: Kind)
                 h,
                 enabled,
                 kind,
+            });
+            WIDGET_META.with_borrow_mut(|(meta, _)| {
+                meta.push(TargetMeta {
+                    key,
+                    tab_order_group,
+                });
             });
         }
     });
@@ -585,6 +621,9 @@ pub fn end_frame(frames: u64) {
         if *seen != frames {
             *seen = frames;
             *last = std::mem::take(current);
+            WIDGET_META.with_borrow_mut(|(current, last)| {
+                *last = std::mem::take(current);
+            });
             TARGETS.with_borrow_mut(|(current, last, generation)| {
                 *last = std::mem::take(current);
                 *generation += 1;
