@@ -99,6 +99,10 @@ impl ClientGame<'_> {
             .collect();
         SpectatorMenu::new(players, teams, &LivePlayerInfos(self))
     }
+    /// The player list as the menu reads it: the lookup every press goes through.
+    pub fn spectator_player_infos(&self) -> impl PlayerInfo + '_ {
+        LivePlayerInfos(self)
+    }
     pub fn spectator_outcome(&mut self, outcome: Outcome) {
         if let Outcome::Teleport(uuid) = outcome {
             // PlayerMenuItem.selectItem.
