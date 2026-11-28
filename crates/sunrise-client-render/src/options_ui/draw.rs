@@ -101,7 +101,6 @@ impl OptionsUi {
             let (w, h) = (batch.width, batch.height);
             let page = self.page();
             let in_world = self.in_world;
-            let waiting = self.waiting();
             if self.resource_error.is_some() {
                 self.draw_resource_error(batch, atlas, cursor);
             } else if page == Page::HdrCalibration
@@ -110,23 +109,57 @@ impl OptionsUi {
                 let layout = calibration.draw_background(batch, atlas);
                 calibration.draw_contents(batch, atlas, cursor, layout);
             } else if page == Page::ControllerRadialName
-                && let Some(naming) = self.radial.screen.naming.as_mut()
+                && let Some(naming) = self.radial.screen.naming.as_ref()
             {
-                naming.draw_contents(batch, atlas, cursor);
-            } else if let Some(shell) = self.shell_mut() {
-                shell.draw_background(s, batch, atlas, in_world, waiting);
-                shell.draw_contents(batch, atlas, cursor);
-                shell.discard_draw();
+                naming.collect_widgets(batch, atlas, cursor);
+            } else if let Some(shell) = self.shell() {
+                shell.collect_widgets(s, batch, atlas, cursor);
             } else if matches!(page, Page::Mods | Page::Packs) {
-                let size = (w, h);
+                let (iw, ih) = (w as i32, h as i32);
                 let blink = self.pack_focus.elapsed().as_millis() as u64;
                 let m = crate::screen_draw::Measure(&atlas.font);
                 let mouse = (cursor.0.floor() as i32, cursor.1.floor() as i32);
                 let draws = if page == Page::Mods {
-                    let screen = self.mods_page(s, size);
+                    if let Some(screen) = self
+                        .mods_screen
+                        .as_mut()
+                        .filter(|p| p.width == iw && p.height == ih)
+                    {
+                        screen.draw(&m, mouse, blink, crate::hud_overlays::now_ms())
+                    } else {
+                        let mut screen =
+                            crate::mods_screen::ModsScreen::new(iw, ih, in_world, &s.mods);
+                        screen.draw(&m, mouse, blink, crate::hud_overlays::now_ms())
+                    }
+                } else if let Some(screen) = self
+                    .pack_screen
+                    .as_ref()
+                    .filter(|p| p.width == iw && p.height == ih)
+                {
                     screen.draw(&m, mouse, blink, crate::hud_overlays::now_ms())
                 } else {
-                    let screen = self.packs(atlas, size);
+                    let title = if self.data_pack_dir.is_some() {
+                        "dataPack.title"
+                    } else {
+                        "resourcePack.title"
+                    };
+                    let mut screen = crate::pack_screen::PackScreen::new(
+                        &m,
+                        crate::text::Text::translate(title, &[]),
+                        iw,
+                        ih,
+                        in_world,
+                        self.pack_infos.clone(),
+                        &self.pack_selection,
+                    );
+                    if self.data_pack_dir.is_none() {
+                        screen.with_options = self
+                            .pack_configs
+                            .iter()
+                            .filter(|(_, c)| !c.entries().is_empty())
+                            .map(|(id, _)| id.clone())
+                            .collect();
+                    }
                     screen.draw(&m, mouse, blink, crate::hud_overlays::now_ms())
                 };
                 let _ = crate::screen_draw::paint(batch, atlas, &draws);

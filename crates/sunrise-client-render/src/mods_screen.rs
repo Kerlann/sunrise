@@ -928,9 +928,11 @@ impl ModsScreen {
         // The info panel's contents.
         if let Some(e) = self.current() {
             let (items, content, width, pinned) = self.panel_items(m, e);
-            self.panel_content.set(content);
-            self.panel_pinned.set(pinned);
-            self.panel.set(self.panel.amount, content, view);
+            if !crate::widgets::is_collecting_widgets() {
+                self.panel_content.set(content);
+                self.panel_pinned.set(pinned);
+                self.panel.set(self.panel.amount, content, view);
+            }
             let scroll = self.panel.amount as i32;
             out.push(Draw::Scissor {
                 x0: fx,

@@ -1781,6 +1781,14 @@ pub(crate) trait Hosted {
         waiting: Option<Capture>,
     );
     fn draw_contents(&mut self, batch: &mut HudBatch, atlas: &HudAtlas, cursor: (f32, f32));
+    /// Read-only widget discovery pass: collects widgets without mutating shell state.
+    fn collect_widgets(
+        &self,
+        s: &Settings,
+        batch: &mut HudBatch,
+        atlas: &HudAtlas,
+        cursor: (f32, f32),
+    );
     #[cfg(test)]
     fn draw_test_frame(
         &mut self,
@@ -2087,6 +2095,15 @@ impl<S: Screen> Shell<S> {
         self.reveal_page = true;
         self.page = Some(page);
         self.path.clear();
+    }
+    #[cfg(test)]
+    pub(crate) fn test_state_flags(&self) -> (bool, bool, bool, bool) {
+        (
+            self.frame_draw.is_some(),
+            self.reveal_page,
+            self.focus_next.is_some(),
+            self.drawn.is_some(),
+        )
     }
     /// Follow `row`'s link to `page`: it opens alone, and Escape comes back to the page the row
     /// is on (while searching, the page it was found on).
@@ -2733,6 +2750,88 @@ impl<S: Screen> Shell<S> {
         };
         dock_note(batch, atlas, cols, about.to_owned(), color);
     }
+    fn draw_view(
+        &self,
+        batch: &mut HudBatch,
+        atlas: &HudAtlas,
+        cursor: (f32, f32),
+        view: &View<S::Page, S::Row>,
+        search: &mut ui::EditBox,
+    ) -> PageList<S::Page> {
+        let cols = view.cols;
+        let current = self.current(view);
+        self::mark(batch, atlas, &cols, &lang::get(self.screen.title()));
+        let pages = self.page_list(view, Some(atlas));
+        self.draw_pages(batch, atlas, view, &pages, cursor);
+        side_lines(batch, atlas, &cols, pages.used, &self.screen.side());
+        let focused = self.focus == Some(Target::Search);
+        search_field(search, batch, atlas, &cols, cursor, focused);
+        let name_of = |page| {
+            view.pages
+                .iter()
+                .find(|p| p.id == page)
+                .map(|p| p.name.clone())
+        };
+        let query = search.value.trim();
+        let heading = if query.is_empty() {
+            current.and_then(name_of).unwrap_or_default()
+        } else {
+            lang::get("Results for \"%s\"").replace("%s", query)
+        };
+        self::plate(batch, atlas, &cols, &heading);
+        let over_list = cursor.1 >= cols.top && cursor.1 < cols.bottom;
+        let mut described = None;
+        let mut waiting = None;
+        self::list(
+            batch,
+            atlas,
+            &cols,
+            &view.lines,
+            self.scroll.amount,
+            |page| name_of(page).unwrap_or_default(),
+            |batch, i, y| {
+                let row = &view.rows[i];
+                let [rx, ry, rw, rh] = cols.row(y);
+                let hover = over_list && ui::hovered(cursor, rx, ry, rw, rh);
+                let focused = self.shows_focus(Target::Row(row.id))
+                    || self.shows_focus(Target::Reset(row.id));
+                // A wait is what the strip says; then the pointer's row wins over the keyboard's.
+                if self.waits(row) {
+                    waiting = Some(i);
+                }
+                if hover || self.dragging == Some(row.id) || (focused && described.is_none()) {
+                    described = Some(i);
+                }
+                self.draw_row(batch, atlas, &cols, row, y, over_list.then_some(cursor));
+            },
+        );
+        scroller(batch, atlas, &cols, view.content, self.scroll.amount);
+        if let Some((_, row)) = self.first_row(view) {
+            crate::widgets::focus_link(cols.search(), true, row);
+        }
+        self.draw_dock(batch, atlas, view, waiting.or(described), current);
+        // Undo and Apply, over Done, only once there is something for them to do. A controller's
+        // X presses Apply where there is one, else Undo.
+        for (target, rect) in self.foot(&cols) {
+            use crate::widgets::Action as Declared;
+            let (label, declared, primary) = match target {
+                Target::Undo => (UNDO, (!self.pending).then_some(Declared::Apply), false),
+                Target::Apply => (APPLY, Some(Declared::Apply), true),
+                _ => (DONE, Some(Declared::Done), true),
+            };
+            let label = Text::literal(lang::get(label));
+            let flags = (self.shows_focus(target), primary);
+            let room = match declared {
+                Some(declared) => {
+                    crate::widgets::declare_action(declared, rect, true);
+                    crate::widgets::action_glyph_room()
+                }
+                None => 0.0,
+            };
+            foot_button(batch, atlas, rect, &label, cursor, flags, room);
+        }
+        pages
+    }
 }
 impl<S: Screen + Default> Hosted for Shell<S> {
     fn open(&mut self) {
@@ -2791,79 +2890,21 @@ impl<S: Screen + Default> Hosted for Shell<S> {
             .frame_draw
             .take()
             .expect("shell background before contents");
-        let cols = view.cols;
-        let current = self.current(&view);
-        self::mark(batch, atlas, &cols, &lang::get(self.screen.title()));
-        let pages = self.page_list(&view, Some(atlas));
-        self.draw_pages(batch, atlas, &view, &pages, cursor);
-        side_lines(batch, atlas, &cols, pages.used, &self.screen.side());
+        let mut search = self.search.clone();
+        let pages = self.draw_view(batch, atlas, cursor, &view, &mut search);
+        self.search = search;
         self.drawn = Some(pages);
-        let focused = self.focus == Some(Target::Search);
-        search_field(&mut self.search, batch, atlas, &cols, cursor, focused);
-        let name_of = |page| {
-            view.pages
-                .iter()
-                .find(|p| p.id == page)
-                .map(|p| p.name.clone())
-        };
-        let query = self.search.value.trim();
-        let heading = if query.is_empty() {
-            current.and_then(name_of).unwrap_or_default()
-        } else {
-            lang::get("Results for \"%s\"").replace("%s", query)
-        };
-        self::plate(batch, atlas, &cols, &heading);
-        let over_list = cursor.1 >= cols.top && cursor.1 < cols.bottom;
-        let mut described = None;
-        let mut waiting = None;
-        self::list(
-            batch,
-            atlas,
-            &cols,
-            &view.lines,
-            self.scroll.amount,
-            |page| name_of(page).unwrap_or_default(),
-            |batch, i, y| {
-                let row = &view.rows[i];
-                let [rx, ry, rw, rh] = cols.row(y);
-                let hover = over_list && ui::hovered(cursor, rx, ry, rw, rh);
-                let focused = self.shows_focus(Target::Row(row.id))
-                    || self.shows_focus(Target::Reset(row.id));
-                // A wait is what the strip says; then the pointer's row wins over the keyboard's.
-                if self.waits(row) {
-                    waiting = Some(i);
-                }
-                if hover || self.dragging == Some(row.id) || (focused && described.is_none()) {
-                    described = Some(i);
-                }
-                self.draw_row(batch, atlas, &cols, row, y, over_list.then_some(cursor));
-            },
-        );
-        scroller(batch, atlas, &cols, view.content, self.scroll.amount);
-        if let Some((_, row)) = self.first_row(&view) {
-            crate::widgets::focus_link(cols.search(), true, row);
-        }
-        self.draw_dock(batch, atlas, &view, waiting.or(described), current);
-        // Undo and Apply, over Done, only once there is something for them to do. A controller's
-        // X presses Apply where there is one, else Undo.
-        for (target, rect) in self.foot(&cols) {
-            use crate::widgets::Action as Declared;
-            let (label, declared, primary) = match target {
-                Target::Undo => (UNDO, (!self.pending).then_some(Declared::Apply), false),
-                Target::Apply => (APPLY, Some(Declared::Apply), true),
-                _ => (DONE, Some(Declared::Done), true),
-            };
-            let label = Text::literal(lang::get(label));
-            let flags = (self.shows_focus(target), primary);
-            let room = match declared {
-                Some(declared) => {
-                    crate::widgets::declare_action(declared, rect, true);
-                    crate::widgets::action_glyph_room()
-                }
-                None => 0.0,
-            };
-            foot_button(batch, atlas, rect, &label, cursor, flags, room);
-        }
+    }
+    fn collect_widgets(
+        &self,
+        s: &Settings,
+        batch: &mut HudBatch,
+        atlas: &HudAtlas,
+        cursor: (f32, f32),
+    ) {
+        let view = self.build(s, (batch.width, batch.height));
+        let mut search = self.search.clone();
+        let _ = self.draw_view(batch, atlas, cursor, &view, &mut search);
     }
     fn click_with_outcome(
         &mut self,

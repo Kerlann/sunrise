@@ -407,10 +407,30 @@ impl NameEntry {
         atlas: &HudAtlas,
         cursor: (f32, f32),
     ) {
+        let mut field = self.field.clone();
+        Self::draw_contents_with_field(&mut field, batch, atlas, cursor);
+        self.field = field;
+    }
+
+    pub(crate) fn collect_widgets(
+        &self,
+        batch: &mut HudBatch,
+        atlas: &HudAtlas,
+        cursor: (f32, f32),
+    ) {
+        let mut field = self.field.clone();
+        Self::draw_contents_with_field(&mut field, batch, atlas, cursor);
+    }
+
+    fn draw_contents_with_field(
+        field: &mut ui::EditBox,
+        batch: &mut HudBatch,
+        atlas: &HudAtlas,
+        cursor: (f32, f32),
+    ) {
         let (w, h) = (batch.width.ceil(), batch.height.ceil());
         let title = Text::literal(lang::get("sunrise.radial.name_title"));
         style::title(batch, atlas, &title);
-        let field = &mut self.field;
         let (x, top) = ((w / 2.0).floor() - NAME_W / 2.0, name_top(h));
         (field.x, field.y, field.width, field.height) = (x, top, NAME_W, BUTTON_H);
         field.draw(batch, atlas, None);

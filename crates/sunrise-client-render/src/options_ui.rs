@@ -8730,6 +8730,79 @@ mod tests {
         ui.resource_error = Some("failed".into());
         assert_ne!(mod1, ui.sub_page_key());
     }
+
+    #[test]
+    fn options_discovery_leaves_shell_and_pack_state_unchanged() {
+        let atlas = atlas();
+        let s = Settings::default();
+        let output = crate::gfx::EffectiveOutput::default();
+        let mut batch = HudBatch::new([854, 480], s.gui_scale_inputs());
+
+        // 1. Settings shell page: discovery must not reset frame_draw, consume reveal_page or
+        // focus_next, or write drawn.
+        let mut ui = OptionsUi::default();
+        ui.open_at(true, Page::Graphics);
+        ui.sunrise.show(crate::sunrise_ui::Tab::Graphics(
+            crate::graphics_ui::Page::General,
+        ));
+        ui.sunrise
+            .focus_soon(crate::sunrise_ui::SunriseRow::ShaderOptions);
+        let before = ui.sunrise.test_state_flags();
+        assert_eq!(before, (false, true, true, false));
+        let ((), collected) = crate::widgets::with_widget_collector(|| {
+            ui.draw_background(&s, output, &mut batch, &atlas);
+            ui.draw_contents(&s, &mut batch, &atlas, (0.0, 0.0));
+            ui.draw_overlays(&mut batch, &atlas, (0.0, 0.0));
+        });
+        assert!(
+            !collected.is_empty(),
+            "shell discovery must collect widgets"
+        );
+        assert_eq!(
+            ui.sunrise.test_state_flags(),
+            before,
+            "shell discovery must leave frame_draw, reveal_page, focus_next, and drawn untouched"
+        );
+        // Also verify an in-flight live draw survives discovery without losing frame_draw.
+        ui.draw_background(&s, output, &mut batch, &atlas);
+        let in_flight = ui.sunrise.test_state_flags();
+        assert!(in_flight.0, "live draw_background prepares frame_draw");
+        let _ = crate::widgets::with_widget_collector(|| {
+            ui.draw_contents(&s, &mut batch, &atlas, (0.0, 0.0));
+        });
+        assert_eq!(
+            ui.sunrise.test_state_flags(),
+            in_flight,
+            "discovery during an in-flight shell frame must not mutate shell state"
+        );
+        ui.draw_contents(&s, &mut batch, &atlas, (0.0, 0.0));
+        ui.draw_overlays(&mut batch, &atlas, (0.0, 0.0));
+
+        // 2. Packs and Mods pages: discovery must not lazily initialize or consume screen state.
+        let mut packs_ui = OptionsUi::default();
+        packs_ui.open_at(true, Page::Packs);
+        packs_ui.pack_reselected = true;
+        let ((), pack_collected) = crate::widgets::with_widget_collector(|| {
+            packs_ui.draw_contents(&s, &mut batch, &atlas, (0.0, 0.0));
+        });
+        assert!(
+            !pack_collected.is_empty(),
+            "packs discovery must collect widgets"
+        );
+        assert!(packs_ui.pack_screen.is_none());
+        assert!(packs_ui.pack_reselected);
+
+        let mut mods_ui = OptionsUi::default();
+        mods_ui.open_at(true, Page::Mods);
+        let ((), mods_collected) = crate::widgets::with_widget_collector(|| {
+            mods_ui.draw_contents(&s, &mut batch, &atlas, (0.0, 0.0));
+        });
+        assert!(
+            !mods_collected.is_empty(),
+            "mods discovery must collect widgets"
+        );
+        assert!(mods_ui.mods_screen.is_none());
+    }
 }
 
 fn preset_from_slider(v: f64) -> usize {
