@@ -276,6 +276,25 @@ pub fn with_selected_engine_widget<R>(key: &EngineWidgetKey, f: impl FnOnce() ->
     f()
 }
 
+/// Single derivation of an engine widget's collector identity from its bucket, optional label,
+/// optional explicit key, and draw-order occurrence index.
+fn engine_widget_key(
+    bucket: WidgetBucket,
+    label: Option<&Text>,
+    explicit_key: Option<&str>,
+    occurrence: u32,
+) -> EngineWidgetKey {
+    let key = match explicit_key {
+        Some(explicit) => explicit.to_owned(),
+        None => label.map(stable_key_from_text).unwrap_or_default(),
+    };
+    EngineWidgetKey {
+        key,
+        bucket,
+        occurrence,
+    }
+}
+
 /// Whether the engine widget described by `(bucket, label, explicit_key, occurrence)` is allowed
 /// to receive the current input event (`true` unless a different widget is selected via
 /// [`with_selected_engine_widget`]).
@@ -289,14 +308,7 @@ pub fn matches_selected_engine_widget(
         let Some(selected) = slot.as_ref() else {
             return true;
         };
-        if selected.bucket != bucket || selected.occurrence != occurrence {
-            return false;
-        }
-        let key_str = match explicit_key {
-            Some(explicit) => explicit.to_owned(),
-            None => label.map(stable_key_from_text).unwrap_or_default(),
-        };
-        selected.key == key_str
+        *selected == engine_widget_key(bucket, label, explicit_key, occurrence)
     })
 }
 
@@ -318,15 +330,7 @@ pub fn resolve_engine_input(
     if !HAS_INPUT_OVERRIDES.get() {
         return default_active.then_some(default_rect);
     }
-    let key_str = match explicit_key {
-        Some(explicit) => explicit.to_owned(),
-        None => label.map(stable_key_from_text).unwrap_or_default(),
-    };
-    let key = EngineWidgetKey {
-        key: key_str,
-        bucket,
-        occurrence,
-    };
+    let key = engine_widget_key(bucket, label, explicit_key, occurrence);
     INPUT_OVERRIDES.with_borrow(|slot| {
         let Some(maps) = slot.as_ref() else {
             return default_active.then_some(default_rect);
@@ -358,15 +362,7 @@ pub fn resolve_engine_tab_order_group(
     if !HAS_INPUT_OVERRIDES.get() {
         return default_group;
     }
-    let key_str = match explicit_key {
-        Some(explicit) => explicit.to_owned(),
-        None => label.map(stable_key_from_text).unwrap_or_default(),
-    };
-    let key = EngineWidgetKey {
-        key: key_str,
-        bucket,
-        occurrence,
-    };
+    let key = engine_widget_key(bucket, label, explicit_key, occurrence);
     INPUT_OVERRIDES.with_borrow(|slot| {
         slot.as_ref()
             .and_then(|maps| maps.overrides.get(&key))
@@ -594,10 +590,7 @@ pub fn resolve_engine_widget(input: EngineWidgetInput<'_>) -> ResolvedEngineWidg
     if !collecting && !overriding {
         return ResolvedEngineWidget::Unchanged;
     }
-    let key_str = match input.explicit_key {
-        Some(explicit) => explicit.to_owned(),
-        None => input.label.map(stable_key_from_text).unwrap_or_default(),
-    };
+    let mut key = engine_widget_key(input.bucket, input.label, input.explicit_key, 0);
     if collecting {
         COLLECTOR.with_borrow_mut(|slot| {
             let Some(state) = slot.as_mut() else {
@@ -606,22 +599,19 @@ pub fn resolve_engine_widget(input: EngineWidgetInput<'_>) -> ResolvedEngineWidg
             let occurrence = {
                 let count = state
                     .counts
-                    .entry((key_str.clone(), input.bucket))
+                    .entry((key.key.clone(), key.bucket))
                     .or_insert(0);
                 let current = *count;
                 *count = current.saturating_add(1);
                 current
             };
+            key.occurrence = occurrence;
             let message = input
                 .label
                 .filter(|t| !t.is_empty() || t.translation_key_hint().is_some())
                 .cloned();
             state.widgets.push(CollectedWidget {
-                key: EngineWidgetKey {
-                    key: key_str,
-                    bucket: input.bucket,
-                    occurrence,
-                },
+                key,
                 rect: input.rect,
                 message,
                 active: input.active,
@@ -638,17 +628,13 @@ pub fn resolve_engine_widget(input: EngineWidgetInput<'_>) -> ResolvedEngineWidg
         let occurrence = {
             let count = pass
                 .counts
-                .entry((key_str.clone(), input.bucket))
+                .entry((key.key.clone(), key.bucket))
                 .or_insert(0);
             let current = *count;
             *count = current.saturating_add(1);
             current
         };
-        let key = EngineWidgetKey {
-            key: key_str,
-            bucket: input.bucket,
-            occurrence,
-        };
+        key.occurrence = occurrence;
         let message = input
             .label
             .filter(|t| !t.is_empty() || t.translation_key_hint().is_some())
@@ -1265,5 +1251,139 @@ mod tests {
             label_argb_color(true, Some(0xFF11_2233), 1.0) as u32,
             0xFF11_2233
         );
+    }
+
+    #[test]
+    fn same_kind_same_label_controls_share_single_identity_across_input_tab_and_override() {
+        let label = Text::literal("Action");
+        let base_rect = [10.0, 20.0, 80.0, 20.0];
+        let ((), collected) = with_widget_collector(|| {
+            for _ in 0..2 {
+                assert!(matches!(
+                    resolve_engine_widget(EngineWidgetInput {
+                        bucket: WidgetBucket::Button,
+                        rect: base_rect,
+                        label: Some(&label),
+                        explicit_key: None,
+                        active: true,
+                        hovered: false,
+                        focused: false,
+                        tab_order_group: 0,
+                    }),
+                    ResolvedEngineWidget::Skip
+                ));
+            }
+        });
+        assert_eq!(collected.len(), 2);
+        assert_eq!(collected[0].key.occurrence, 0);
+        assert_eq!(collected[1].key.occurrence, 1);
+
+        let rect0 = [100.0, 10.0, 80.0, 20.0];
+        let rect1 = [200.0, 10.0, 80.0, 20.0];
+        let mut maps = EngineOverrideMaps::default();
+        maps.overrides.insert(
+            collected[0].key.clone(),
+            EngineWidgetOverride {
+                rect: Some(rect0),
+                tab_order_group: Some(2),
+                ..Default::default()
+            },
+        );
+        maps.overrides.insert(
+            collected[1].key.clone(),
+            EngineWidgetOverride {
+                rect: Some(rect1),
+                tab_order_group: Some(-5),
+                ..Default::default()
+            },
+        );
+
+        let (resolved, _) = with_widget_overrides(&mut maps, (0.0, 0.0), Instant::now(), || {
+            let first = resolve_engine_widget(EngineWidgetInput {
+                bucket: WidgetBucket::Button,
+                rect: base_rect,
+                label: Some(&label),
+                explicit_key: None,
+                active: true,
+                hovered: false,
+                focused: false,
+                tab_order_group: 0,
+            });
+            let second = resolve_engine_widget(EngineWidgetInput {
+                bucket: WidgetBucket::Button,
+                rect: base_rect,
+                label: Some(&label),
+                explicit_key: None,
+                active: true,
+                hovered: false,
+                focused: false,
+                tab_order_group: 0,
+            });
+            (first, second)
+        });
+        match resolved {
+            (ResolvedEngineWidget::Draw(p0), ResolvedEngineWidget::Draw(p1)) => {
+                assert_eq!(p0.rect, rect0);
+                assert_eq!(p0.tab_order_group, 2);
+                assert_eq!(p1.rect, rect1);
+                assert_eq!(p1.tab_order_group, -5);
+            }
+            other => panic!("expected Draw for both controls, got {other:?}"),
+        }
+
+        with_input_overrides(&mut maps, || {
+            assert_eq!(
+                resolve_engine_input(WidgetBucket::Button, Some(&label), None, 0, base_rect, true,),
+                Some(rect0)
+            );
+            assert_eq!(
+                resolve_engine_input(WidgetBucket::Button, Some(&label), None, 1, base_rect, true,),
+                Some(rect1)
+            );
+            assert_eq!(
+                resolve_engine_tab_order_group(WidgetBucket::Button, Some(&label), None, 0, 0),
+                2
+            );
+            assert_eq!(
+                resolve_engine_tab_order_group(WidgetBucket::Button, Some(&label), None, 1, 0),
+                -5
+            );
+            with_selected_engine_widget(&collected[1].key, || {
+                assert!(!matches_selected_engine_widget(
+                    WidgetBucket::Button,
+                    Some(&label),
+                    None,
+                    0,
+                ));
+                assert!(matches_selected_engine_widget(
+                    WidgetBucket::Button,
+                    Some(&label),
+                    None,
+                    1,
+                ));
+                assert_eq!(
+                    resolve_engine_input(
+                        WidgetBucket::Button,
+                        Some(&label),
+                        None,
+                        0,
+                        base_rect,
+                        true,
+                    ),
+                    None
+                );
+                assert_eq!(
+                    resolve_engine_input(
+                        WidgetBucket::Button,
+                        Some(&label),
+                        None,
+                        1,
+                        base_rect,
+                        true,
+                    ),
+                    Some(rect1)
+                );
+            });
+        });
     }
 }
