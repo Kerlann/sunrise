@@ -1,17 +1,28 @@
 #![cfg(test)]
+#[cfg(feature = "client")]
 use std::path::Path;
+#[cfg(feature = "client")]
 use std::path::PathBuf;
+#[cfg(feature = "client")]
 use sunrise_perf_format::v1::StopReason;
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "client")]
     use super::*;
+    #[cfg(feature = "client")]
     use std::time::Instant;
+    #[cfg(feature = "client")]
     use sunrise_gameplay::dedicated::report::Recording;
+    #[cfg(feature = "client")]
     use sunrise_gameplay::game::server_side::dedicated::report::Plan;
+    #[cfg(feature = "client")]
     use sunrise_level::spans;
+    #[cfg(feature = "client")]
     use sunrise_perf_format::v1::Trigger;
+    #[cfg(feature = "client")]
     use sunrise_sim::server_perf::SamplerOptions;
 
+    #[cfg(feature = "client")]
     fn server_game<'a>(
         resources: &'a mut Option<std::sync::Arc<sunrise_gameplay_common::game::Resources>>,
         root: &Path,
@@ -52,6 +63,7 @@ mod tests {
     }
 
     /// A server that holds a seed, a world name, a player's name, a named mob and a sign writes a capture with none of them.
+    #[cfg(feature = "client")]
     #[test]
     #[ignore = "daily"]
     fn a_capture_of_a_server_with_names_text_and_a_seed_holds_none_of_them() {
@@ -88,7 +100,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("hz-privacy-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut perf = sunrise_sim::server_perf::ServerPerf::new(0.0, 250.0);
-        let sunrise = sunrise_sim::server_perf::sunrise_options(0);
+        let sunrise = sunrise_sim::server_perf::sunrise_options();
         let plan = Plan {
             seconds: 2,
             samples: true,

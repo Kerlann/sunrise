@@ -37,10 +37,10 @@ and an area. There are two kinds:
 | `Keep` | Where it comes from |
 |---|---|
 | `BossBars` | `hud_overlays::boss_bars_bottom(h, n)`: vanilla's `BossHealthOverlay` layout, y from 12 in steps of 19 until a third of the view's height; as wide as the 182 px bar or its widest name |
-| `StatusRows` | the survival rows above the hotbar (health with its absorption rows, armour, food or the mount's hearts, air), from the highest row's top to the view's bottom, as `hud_layout::draws_top` reports them; `room.bottom()` is the lowest y an overlay may reach |
+| `StatusRows` | the survival rows above the hotbar (health with its absorption rows, armour, food or the mount's hearts, air), from the top of the highest visible row to the view's bottom (`run_gui_layer` passes the layer body's clipped top to `keep_status_rows`); `room.bottom()` is the lowest y an overlay may reach |
 
 `ClientGame::hud_room` (`crates/sunrise-client-gameplay/src/game/interface/hud_room.rs`) gathers what is showing.
-Nothing shows while F1 or Replay Studio hides the HUD, or off a world. `hud` empties `ui.room` at
+Nothing shows while F1 hides the HUD, or off a world. `hud` empties `ui.room` at
 the start of every frame, and `hud_layers` fills it in before the world's HUD draws, so every
 overlay in the frame reads the same room and never a stale one.
 
@@ -60,7 +60,7 @@ let room = Room::new(320.0, 240.0).with(Keep::BossBars, [69.0, 0.0, 182.0, 36.0]
 assert_eq!(room.below_top(18.0), 38.0); // below two bars
 ```
 
-The other HUD boxes (the PvP & HUD widgets, mods' corner panels) don't use the room
+Mods' corner panels don't use the room
 yet. Chat, the hotbar, effect icons and subtitles aren't keep-outs yet either. #10125 asks for
 these push-aside points for mods.
 

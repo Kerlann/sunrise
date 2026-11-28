@@ -198,29 +198,27 @@ impl MotionResources {
         let properties = MovementProperties::from_table(file.table("movement")?)?;
         let bundle: BTreeMap<String, String> =
             sunrise_world::json_file::read(&root.join("block-tags.json"))?;
-        let mut definitions = TagDefinitions::default();
+        let mut definitions = TagDefinitions::with_conventions("block")?;
         for (name, text) in bundle {
             definitions.apply_json(&name, "vanilla", &text)?;
         }
         let built = definitions
-            .build(|name, _| assets.registry.default_state(name).map(|_| name.to_owned()))?;
-        if !built.missing.is_empty() {
-            return Err("unresolved motion block tags".into());
-        }
-        let tag = |name: &str| -> Result<BTreeSet<String>> {
-            Ok(built
+            .bind(|name, _| assets.registry.default_state(name).map(|_| name.to_owned()));
+        // Assets::load reports unresolved block tags. An omitted tag has no members here.
+        let tag = |name: &str| {
+            built
                 .tags
                 .get(name)
-                .ok_or_else(|| format!("missing motion tag {name}"))?
-                .iter()
+                .into_iter()
+                .flatten()
                 .cloned()
-                .collect())
+                .collect()
         };
         let climbing = ClimbingRegistry::new(
             assets.registry,
-            &tag("minecraft:trapdoors")?,
-            &tag("minecraft:climbable")?,
-            &tag("minecraft:can_glide_through")?,
+            &tag("minecraft:trapdoors"),
+            &tag("minecraft:climbable"),
+            &tag("minecraft:can_glide_through"),
         )?;
         Ok(Self {
             landing: crate::landing::load(root, &properties)?,
@@ -228,18 +226,18 @@ impl MotionResources {
             fluids: FluidResources::new(assets, facts)?,
             attributes,
             blocks: properties.bind(&MovementTags {
-                fences: tag("minecraft:fences")?,
-                walls: tag("minecraft:walls")?,
-                suppresses_bounce: tag("minecraft:suppresses_bounce")?,
+                fences: tag("minecraft:fences"),
+                walls: tag("minecraft:walls"),
+                suppresses_bounce: tag("minecraft:suppresses_bounce"),
             })?,
-            climbable: tag("minecraft:climbable")?,
-            causes_suffocation: tag("minecraft:causes_suffocation")?,
-            soul_speed_blocks: tag("minecraft:soul_speed_blocks")?,
+            climbable: tag("minecraft:climbable"),
+            causes_suffocation: tag("minecraft:causes_suffocation"),
+            soul_speed_blocks: tag("minecraft:soul_speed_blocks"),
             climbing,
-            fall_reset: tag("minecraft:fall_damage_resetting")?,
-            inside_step_sound: tag("minecraft:inside_step_sound_blocks")?,
-            combination_step_sound: tag("minecraft:combination_step_sound_blocks")?,
-            crystal_sound: tag("minecraft:crystal_sound_blocks")?,
+            fall_reset: tag("minecraft:fall_damage_resetting"),
+            inside_step_sound: tag("minecraft:inside_step_sound_blocks"),
+            combination_step_sound: tag("minecraft:combination_step_sound_blocks"),
+            crystal_sound: tag("minecraft:crystal_sound_blocks"),
         })
     }
 }

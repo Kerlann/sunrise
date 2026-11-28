@@ -100,10 +100,10 @@ impl Renderer {
         let surface = self.surface.take();
         let hdr = self.hdr.take_if(|_| !layered);
         let offscreen = std::mem::replace(&mut self.offscreen, target);
-        let window_depth = std::mem::replace(&mut self.depth, depth);
+        let window_depth = self.swap_world_depth(depth);
         // The frame's own targets at `size` can run out of memory too.
         let drawn = self.draw_frame(frame, Some(GpuChecks::push(&self.device)), output, hooks);
-        self.depth = window_depth;
+        self.swap_world_depth(window_depth);
         self.offscreen = offscreen;
         match hdr {
             Some(hdr) => self.hdr = Some(hdr),
@@ -170,6 +170,13 @@ impl PendingScreenshot {
 }
 
 impl PendingScreenshot {
+    /// Tests: the HDR10 copy's size and pixels (16-bit RGB, big-endian PQ codes), when the frame
+    /// had one.
+    #[cfg(feature = "test-support")]
+    pub fn hdr_pixels(&self) -> Option<([u32; 2], &[u8])> {
+        self.hdr.as_ref().map(|h| (h.size, h.pixels.as_slice()))
+    }
+
     /// The frame the screenshot hook may read and change (`ScreenshotEvent.getImage`).
     pub fn image_mut(&mut self) -> &mut mod_api::ScreenshotImage {
         &mut self.image

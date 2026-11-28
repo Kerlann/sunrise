@@ -995,7 +995,7 @@ pub enum BuiltTexture {
 #[derive(Clone, Debug, Default)]
 pub struct Pipelines {
     keys: Vec<Identifier>,
-    built: Vec<Option<Built>>,
+    built: Vec<Option<Arc<Built>>>,
     /// The render assets' generation this set was loaded for; 0 for none.
     generation: u64,
     invalid: std::sync::Arc<std::sync::Mutex<Vec<usize>>>,
@@ -1169,7 +1169,7 @@ impl Pipelines {
                         Ok((built_program, oit, texture))
                     });
                 match loaded {
-                    Ok((built_program, oit, texture)) => Some(Built {
+                    Ok((built_program, oit, texture)) => Some(Arc::new(Built {
                         owner: pipeline.owner().to_owned(),
                         id: pipeline.id.clone(),
                         program: Arc::new(built_program.translated),
@@ -1186,7 +1186,7 @@ impl Pipelines {
                         texture,
                         bind_group_layout: pipeline.bind_group_layout.clone(),
                         push_constant_size: pipeline.push_constant_size,
-                    }),
+                    })),
                     Err(reason) => {
                         let refusal = format!(
                             "render pipeline {} from mod {} refused: {reason}",
@@ -1328,7 +1328,7 @@ impl Pipelines {
     }
 
     /// Every slot in order, with what the load built for it.
-    pub fn built(&self) -> &[Option<Built>] {
+    pub fn built(&self) -> &[Option<Arc<Built>>] {
         &self.built
     }
 
@@ -1814,6 +1814,25 @@ pub(crate) fn wgpu_compare(compare: DepthCompare) -> wgpu::CompareFunction {
     }
 }
 
+/// The raster depth bias `ds` declares. With `standard_z` (the pack's forward depth plane, where
+/// nearer is smaller) the constant and the slope scale are negated, since mods declare the bias
+/// for reversed-Z, where a positive bias moves toward the camera.
+pub(crate) fn wgpu_depth_bias(ds: mod_api::DepthState, standard_z: bool) -> wgpu::DepthBiasState {
+    let (constant, slope_scale) = if standard_z {
+        (
+            ds.depth_bias_constant.saturating_neg(),
+            -ds.depth_bias_slope_scale,
+        )
+    } else {
+        (ds.depth_bias_constant, ds.depth_bias_slope_scale)
+    };
+    wgpu::DepthBiasState {
+        constant,
+        slope_scale,
+        clamp: 0.0,
+    }
+}
+
 /// Owned runtime descriptors (`depth_targets`, `uniforms`, `pipelines`) for `PackPost`.
 pub fn pack_runtime_specs() -> sunrise_render_shaderpack::pack_post::OwnedModPackRuntime {
     pack_runtime_specs_of(registered())
@@ -1900,6 +1919,11 @@ pub(crate) fn pack_runtime_specs_of(
             pass_slot: mod_pass_slot(pass_slot),
             depth_target,
             depth_compare,
+            // Judged on the declared values: negating a zero slope gives -0.0, which wgpu's
+            // bias comparison does not equal to the default.
+            depth_bias: depth_state
+                .filter(|ds| ds.depth_bias_constant != 0 || ds.depth_bias_slope_scale != 0.0)
+                .map(|ds| wgpu_depth_bias(ds, true)),
             depth_write,
             cull: pipeline.state.cull,
             program_mode: pipeline
@@ -1967,6 +1991,24 @@ mod tests {
     use super::*;
     use mod_api::__private::game::RegistrationContextNew;
     use mod_api::WorldDepth;
+
+    /// Every macro the game defines when it serves Sunrise's HDR to a pack is refused as a
+    /// mod's pack define, so only the serving decision sets it.
+    #[test]
+    fn a_mod_pack_define_cant_set_sunrise_hdrs_macros() {
+        let plain = sunrise_shaders::Macros::standard();
+        let mut served = plain.clone();
+        served.define_sunrise_hdr(sunrise_shaders::Tonemap::Pack);
+        let names: Vec<&str> = served
+            .names()
+            .filter(|name| !plain.is_defined(name))
+            .collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+        for name in names {
+            let binding = mod_api::PackBinding::new().define(name);
+            assert!(binding.validate_syntax().is_err(), "{name}");
+        }
+    }
 
     const VSH: &str = "\
 #version 330
@@ -2517,6 +2559,7 @@ void main() {
             "shadowcolorimg0",
             "shadowcolorimg1",
             "cameraPosition",
+            "bossBattle",
         ] {
             let err = run(vec![ModEntry::new(
                 "mod_one",
@@ -2539,6 +2582,7 @@ void main() {
             "depthtex0",
             "colorimg0",
             "shadowcolorimg0",
+            "bossBattle",
         ] {
             let err = run(vec![ModEntry::new(
                 "mod_one",
@@ -2554,6 +2598,38 @@ void main() {
             .unwrap_err();
             assert!(err.contains(reserved_uniform), "{err}");
             assert!(err.contains("mod_one"), "{err}");
+        }
+        // A built-in uniform is refused in the other two positions too: an opaque depth sampler,
+        // and a frame uniform's previous-value name.
+        for reserved in ["cameraPosition", "bossBattle"] {
+            let opaque = run(vec![ModEntry::new(
+                "mod_one",
+                Box::new(Custom(Box::new(move |ev| {
+                    ev.register(pipeline("mod_one:p", "mod_one:p").pack_binding(
+                        PackBinding::new().depth_target(
+                            PackDepthTarget::new(id("mod_one:d")).opaque_depth_sampler(reserved),
+                        ),
+                    ));
+                }))),
+            )])
+            .unwrap_err();
+            assert!(opaque.contains(reserved), "{opaque}");
+            let previous = run(vec![ModEntry::new(
+                "mod_one",
+                Box::new(Custom(Box::new(move |ev| {
+                    ev.register(
+                        pipeline("mod_one:p", "mod_one:p").pack_binding(
+                            PackBinding::new().frame_uniform(
+                                PackUniformDecl::new("modProjection", PackUniformType::Mat4)
+                                    .with_previous(reserved),
+                            ),
+                        ),
+                    );
+                }))),
+            )])
+            .unwrap_err();
+            assert!(previous.contains(reserved), "{previous}");
+            assert!(previous.contains("mod_one"), "{previous}");
         }
 
         // Same identifier claimed as both a sampler and a uniform is refused (same-mod and cross-mod).
@@ -2802,6 +2878,52 @@ void main() {
         assert_eq!(
             own_vertex.program_mode,
             ModProgramMode::ModVertexPackFragment
+        );
+    }
+
+    #[test]
+    fn only_a_declared_depth_bias_reaches_the_pack_spec_in_standard_z() {
+        let biased = |name: &str, constant: i32, slope: f32| {
+            RenderPipeline::new(
+                id(name),
+                id(name),
+                PipelineBlend::Opaque,
+                WorldDepth::Tested,
+            )
+            .depth_compare(mod_api::DepthCompare::Greater)
+            .depth_bias(constant, slope)
+            .pack_binding(
+                mod_api::PackBinding::new()
+                    .program("example_program")
+                    .slot(mod_api::PackPassSlot::AfterOpaqueGbuffers),
+            )
+        };
+        let list = [
+            biased("example:none", 0, 0.0),
+            biased("example:both", 100, 2.0),
+            biased("example:slope", 0, 3.0),
+        ];
+        let runtime = pack_runtime_specs_of(&list);
+        let [none, both, slope] = &runtime.pipelines[..] else {
+            panic!("three pipelines expected");
+        };
+        assert_eq!(none.depth_bias, None);
+        // Reversed-Z bias 100 and 2.0 are -100 and -2.0 in the pack's forward depth.
+        assert_eq!(
+            both.depth_bias,
+            Some(wgpu::DepthBiasState {
+                constant: -100,
+                slope_scale: -2.0,
+                clamp: 0.0,
+            })
+        );
+        assert_eq!(
+            slope.depth_bias,
+            Some(wgpu::DepthBiasState {
+                constant: 0,
+                slope_scale: -3.0,
+                clamp: 0.0,
+            })
         );
     }
 

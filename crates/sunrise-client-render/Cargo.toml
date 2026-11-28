@@ -56,8 +56,7 @@ miniz_oxide = "0.8"
 naga = { version = "30.0.1", features = ["wgsl-in", "glsl-in", "hlsl-out"] }
 half = "2"
 png = "0.18"
-# Project icons served by Modrinth are often WebP or JPEG rather than PNG, and
-# the pack browser showed nothing for those. Both are small pure-Rust decoders.
+# WebP and JPEG decoding for `hud::decode_image_bytes`: small pure-Rust decoders.
 image-webp = { version = "0.2", default-features = false }
 zune-jpeg = { version = "0.4", default-features = false, features = ["std"] }
 pollster = "0.4"
@@ -119,6 +118,7 @@ name = "standard_pack_gpu_entities"
 path = "examples/standard_pack_gpu_entities.rs"
 
 [dev-dependencies]
+sunrise-core = { path = "../sunrise-core", features = ["test-support"] }
 tempfile = "3"
 mod_platform = { package = "sunrise-mod-api", path = "../sunrise-mod-api", features = ["testing"] }
 sunrise-perf = { path = "../sunrise-perf" }

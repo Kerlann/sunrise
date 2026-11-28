@@ -16,8 +16,9 @@ from unittest.mock import patch
 from pathlib import Path
 
 import tools
+from tests.git_fixture import isolated_git_env
 from tools import lab, prebuilt_game
-from tests.os_support import needs_runner_shell, needs_symlinks
+from tests.os_support import BASH, needs_runner_shell, needs_symlinks
 
 COMMIT = "c" * 40
 
@@ -172,11 +173,12 @@ class StageToolTests(unittest.TestCase):
             manifest.parent.mkdir(parents=True)
             manifest.write_text("[package]\nname = 'fixture'\n")
             git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "core.autocrlf=false"]
-            subprocess.run([*git, "init", "-q"], cwd=source, check=True)
-            subprocess.run([*git, "add", "tracked.rs", "crates"], cwd=source, check=True)
-            subprocess.run([*git, "update-index", "--chmod=+x", "tracked.rs"], cwd=source, check=True)
-            subprocess.run([*git, "commit", "-qm", "fixture"], cwd=source, check=True)
-            commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=source, check=True, text=True,
+            env = isolated_git_env()
+            subprocess.run([*git, "init", "-q"], cwd=source, env=env, check=True)
+            subprocess.run([*git, "add", "tracked.rs", "crates"], cwd=source, env=env, check=True)
+            subprocess.run([*git, "update-index", "--chmod=+x", "tracked.rs"], cwd=source, env=env, check=True)
+            subprocess.run([*git, "commit", "-qm", "fixture"], cwd=source, env=env, check=True)
+            commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=source, env=env, check=True, text=True,
                                     stdout=subprocess.PIPE).stdout.strip()
             # A Windows checkout's line endings, and edits never committed: neither reaches the stage.
             (source / "tracked.rs").write_bytes(committed.replace(b"\n", b"\r\n") + b"fn edited() {}\r\n")
@@ -957,11 +959,12 @@ class TrackedBlobsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", folder]
-            subprocess.run([*git, "init", "-q"], check=True)
+            env = isolated_git_env()
+            subprocess.run([*git, "init", "-q"], env=env, check=True)
             (root / "a.rs").write_bytes(b"fn a() {}\nfn b() {}\n")
-            subprocess.run([*git, "add", "a.rs"], check=True)
-            subprocess.run([*git, "commit", "-q", "-m", "a"], check=True)
-            subprocess.run([*git, "config", "core.autocrlf", "true"], check=True)
+            subprocess.run([*git, "add", "a.rs"], env=env, check=True)
+            subprocess.run([*git, "commit", "-q", "-m", "a"], env=env, check=True)
+            subprocess.run([*git, "config", "core.autocrlf", "true"], env=env, check=True)
             blobs = dict(prebuilt_game.tracked_blobs(root, "HEAD"))
         self.assertEqual(blobs, {"a.rs": b"fn a() {}\nfn b() {}\n"})
 
@@ -1424,7 +1427,7 @@ class LauncherPinTests(unittest.TestCase):
             with patch.object(prebuilt_game, "LAUNCHER_PIN", pin):
                 for value, accepted in (("a" * 40, True), ("A" * 40, False), ("a" * 39, False), ("main", False), ("a" * 41, False)):
                     pin.write_text(value + "\n")
-                    shell = subprocess.run([str(script)], capture_output=True, text=True)
+                    shell = subprocess.run([BASH, str(script)], capture_output=True, text=True)
                     self.assertEqual(shell.returncode == 0, accepted, value)
                     if accepted:
                         self.assertEqual(prebuilt_game.launcher_pin(), value)
@@ -1434,7 +1437,7 @@ class LauncherPinTests(unittest.TestCase):
         # The tracked pin is read, never written: the script and the tool agree on it.
         tracked = prebuilt_game.LAUNCHER_PIN.read_text().strip()
         script = prebuilt_game.ROOT / "tools/ci/launcher_pin.sh"
-        self.assertEqual(subprocess.run([str(script)], capture_output=True, text=True).stdout.strip(), tracked)
+        self.assertEqual(subprocess.run([BASH, str(script)], capture_output=True, text=True).stdout.strip(), tracked)
         self.assertEqual(prebuilt_game.launcher_pin(), tracked)
 
 
@@ -1446,23 +1449,24 @@ class LauncherCheckoutTests(unittest.TestCase):
             root = Path(directory)
             (script, _), pin_file = scripts_beside_a_pin(directory, "launcher_checkout.sh", "launcher_pin.sh")
             source = root / "source"
-            subprocess.run(git + ["init", "-q", str(source)], check=True)
+            env = isolated_git_env(LAUNCHER_URL=source.as_uri())
+            subprocess.run(git + ["init", "-q", str(source)], env=env, check=True)
             commits = []
             for name in ("one", "two"):
                 (source / "file").write_text(name)
-                subprocess.run(git + ["-C", str(source), "add", "file"], check=True)
-                subprocess.run(git + ["-C", str(source), "commit", "-q", "-m", name], check=True)
-                commits.append(subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"], check=True,
+                subprocess.run(git + ["-C", str(source), "add", "file"], env=env, check=True)
+                subprocess.run(git + ["-C", str(source), "commit", "-q", "-m", name], env=env, check=True)
+                commits.append(subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"], env=env, check=True,
                                               capture_output=True, text=True).stdout.strip())
-            env = {**os.environ, "LAUNCHER_URL": source.as_uri(), "GIT_CONFIG_GLOBAL": os.devnull}
             pin_file.write_text(commits[0] + "\n")
-            done = subprocess.run([str(script), str(root / "out")], env=env, capture_output=True, text=True)
+            done = subprocess.run([BASH, str(script), str(root / "out")], env=env, capture_output=True, text=True)
             self.assertEqual(done.returncode, 0, done.stderr)
             self.assertEqual((root / "out/file").read_text(), "one")
-            state = subprocess.run(["git", "-C", str(root / "out"), "symbolic-ref", "-q", "HEAD"], capture_output=True)
+            state = subprocess.run(["git", "-C", str(root / "out"), "symbolic-ref", "-q", "HEAD"], env=env,
+                                   capture_output=True)
             self.assertNotEqual(state.returncode, 0)  # detached
             pin_file.write_text("f" * 40 + "\n")
-            done = subprocess.run([str(script), str(root / "out2")], env=env, capture_output=True, text=True)
+            done = subprocess.run([BASH, str(script), str(root / "out2")], env=env, capture_output=True, text=True)
             self.assertNotEqual(done.returncode, 0)
 
 
@@ -1541,6 +1545,17 @@ class SmokeStartTests(unittest.TestCase):
                 environment = run.call_args.kwargs["env"]
                 for key in ("SUNRISE_HOME", "SUNRISE_LAUNCHER_HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME"):
                     self.assertTrue(Path(environment[key]).is_relative_to(root))
+
+    def test_stage_catalog_and_prebuilt_game_import_cleanly_as_scripts(self):
+        root = Path(__file__).resolve().parent.parent
+        with tempfile.TemporaryDirectory() as directory:
+            for args in (
+                [sys.executable, "-E", str(root / "tools/ci/test_stage_catalog.py"), "--help"],
+                [sys.executable, "-E", str(root / "tools/prebuilt_game.py"), "--help"],
+            ):
+                with self.subTest(args=args):
+                    done = subprocess.run(args, cwd=directory, capture_output=True, text=True)
+                    self.assertEqual(done.returncode, 0, done.stderr)
 
 
 if __name__ == "__main__":

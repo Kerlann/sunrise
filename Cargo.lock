@@ -541,6 +541,7 @@ name = "cargo-sunrise-mod"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "cap-std",
  "dunce",
  "getrandom 0.4.3",
  "libc",
@@ -4636,6 +4637,7 @@ dependencies = [
  "socket2",
  "sunrise-assets",
  "sunrise-bench",
+ "sunrise-client",
  "sunrise-client-gameplay",
  "sunrise-client-input",
  "sunrise-client-lib",
@@ -4650,7 +4652,6 @@ dependencies = [
  "sunrise-java-properties",
  "sunrise-level",
  "sunrise-mod-api",
- "sunrise-mod-api-gen",
  "sunrise-mod-api-macros",
  "sunrise-mod-package",
  "sunrise-mod-runtime",
@@ -5866,6 +5867,7 @@ dependencies = [
  "sunrise-mod-vocab",
  "sunrise-threads",
  "tar",
+ "tempfile",
  "ureq",
  "xxhash-rust",
 ]

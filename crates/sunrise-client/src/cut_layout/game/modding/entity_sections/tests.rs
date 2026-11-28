@@ -2,13 +2,16 @@
 
 use mod_api::{EntityEnteringSectionEvent, EntityResidency, Hooks, HostSide};
 use mod_api::{EntityRef, WorldEpoch};
+#[cfg(feature = "client")]
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use sunrise_gameplay_common::game::entity_sections::{
     Crossing, EntitySections, LiveSectionHost, Scope, SectionWriter, section_coord, section_of,
     tell_live,
 };
+#[cfg(feature = "client")]
 use sunrise_sim::mobs::living::section_writes::PositionWrite;
+#[cfg(feature = "client")]
 use {
     crate::game::server_side::native_entity_refs::tests::with_client_game,
     sunrise_gameplay::game::native_entity_refs::tests::{fixture_resident_column, with_game},
@@ -48,6 +51,50 @@ fn section_read_backend_refuses_reads_outside_its_snapshot() {
         menu.merchant_offers(&host),
         Err(mod_api::LevelReadError::Unavailable)
     ));
+}
+
+#[test]
+fn live_section_host_refuses_registry_reads_instead_of_panicking() {
+    use mod_api::prelude::KeysHost;
+
+    let host = LiveSectionHost::new(None);
+    let mut visited = 0;
+    assert_eq!(
+        host.visit_registry_entries("minecraft:item", &mut |_| {
+            visited += 1;
+            core::ops::ControlFlow::Continue(())
+        }),
+        Err(mod_api::RegistryReadError::Unavailable)
+    );
+    assert_eq!(visited, 0);
+    let entry = mod_api::RegistryEntry::new(
+        mod_api::Identifier::parse("minecraft:item").unwrap(),
+        mod_api::Identifier::parse("minecraft:stone").unwrap(),
+    );
+    assert_eq!(host.registry_entry_in_tag(&entry, "minecraft:logs"), None);
+    assert!(matches!(
+        host.biome("minecraft:plains"),
+        Err(mod_api::BiomeKeyError::Unavailable)
+    ));
+    assert!(host.game_event_key("minecraft:step").is_none());
+    assert!(host.block_key("minecraft:stone").is_none());
+    assert!(host.effect_key("minecraft:speed").is_none());
+    assert!(
+        host.registry_entry("minecraft:item", "minecraft:stone")
+            .is_none()
+    );
+    assert_eq!(
+        host.registry_protocol_id(
+            &mod_api::Identifier::parse("minecraft:item").unwrap(),
+            &mod_api::Identifier::parse("minecraft:stone").unwrap(),
+        ),
+        None
+    );
+    assert!(host.block_keys().is_empty());
+    assert!(host.item_keys().is_empty());
+    assert!(host.entity_type_keys().is_empty());
+    assert!(host.menu_keys().is_empty());
+    assert!(host.enchantment_keys().is_empty());
 }
 
 #[test]
@@ -126,10 +173,13 @@ fn live_section_host_reports_moved_entity_residency_in_callback() {
 }
 
 /// What each told crossing carried: client side, entity id, old, new, chunk changed.
+#[cfg(feature = "client")]
 type Calls = Arc<Mutex<Vec<(bool, u32, [i32; 3], [i32; 3], bool)>>>;
 
+#[cfg(feature = "client")]
 struct Listener(Calls);
 
+#[cfg(feature = "client")]
 #[mod_api::__subscriptions]
 impl Hooks for Listener {
     fn entity_entering_section(&self, host: HostSide<'_>, event: &mut EntityEnteringSectionEvent) {
@@ -143,10 +193,13 @@ impl Hooks for Listener {
     }
 }
 
+#[cfg(feature = "client")]
 type Positions = Arc<Mutex<Vec<(Option<[f64; 3]>, EntityResidency)>>>;
 
+#[cfg(feature = "client")]
 struct PositionListener(Positions);
 
+#[cfg(feature = "client")]
 #[mod_api::__subscriptions]
 impl Hooks for PositionListener {
     fn entity_entering_section(&self, host: HostSide<'_>, event: &mut EntityEnteringSectionEvent) {
@@ -158,6 +211,7 @@ impl Hooks for PositionListener {
     }
 }
 
+#[cfg(feature = "client")]
 fn observe(test: impl FnOnce(Calls)) {
     let calls = Calls::default();
     let mods = vec![mod_api::ModEntry::new(
@@ -168,6 +222,7 @@ fn observe(test: impl FnOnce(Calls)) {
     mod_platform::testing::with_mods(mods, || test(calls));
 }
 
+#[cfg(feature = "client")]
 fn observe_positions(test: impl FnOnce(Positions)) {
     let positions = Positions::default();
     let mods = vec![mod_api::ModEntry::new(
@@ -178,10 +233,13 @@ fn observe_positions(test: impl FnOnce(Positions)) {
     mod_platform::testing::with_mods(mods, || test(positions));
 }
 
+#[cfg(feature = "client")]
 type CallbackCount = Arc<AtomicUsize>;
 
+#[cfg(feature = "client")]
 struct CountListener(CallbackCount);
 
+#[cfg(feature = "client")]
 #[mod_api::__subscriptions]
 impl Hooks for CountListener {
     fn entity_entering_section(&self, _: HostSide<'_>, _: &mut EntityEnteringSectionEvent) {
@@ -189,6 +247,7 @@ impl Hooks for CountListener {
     }
 }
 
+#[cfg(feature = "client")]
 fn observe_count(test: impl FnOnce(CallbackCount)) {
     let count = Arc::new(AtomicUsize::new(0));
     let mods = vec![mod_api::ModEntry::new(
@@ -367,6 +426,7 @@ fn nested_writes_stay_queued_until_the_current_event_returns() {
     s.end_telling();
 }
 
+#[cfg(feature = "client")]
 #[test]
 #[ignore = "daily"]
 fn no_listener_files_no_entity() {
@@ -383,6 +443,7 @@ fn no_listener_files_no_entity() {
     });
 }
 
+#[cfg(feature = "client")]
 #[test]
 #[ignore = "daily"]
 fn a_server_mob_moved_twice_in_one_tick_is_told_each_move() {
@@ -418,6 +479,7 @@ fn a_server_mob_moved_twice_in_one_tick_is_told_each_move() {
 
 /// A cow joined at `at` in a loaded, empty chunk (0, 0), floating (`NoGravity`): filed by its
 /// join, as `addEntity` files it.
+#[cfg(feature = "client")]
 fn floating_cow(game: &mut sunrise_gameplay::game::ServerGame<'_>, at: [f64; 3]) -> u32 {
     if !game.world.chunks.contains_key(&(0, 0)) {
         game.world.chunks.insert(
@@ -438,6 +500,7 @@ fn floating_cow(game: &mut sunrise_gameplay::game::ServerGame<'_>, at: [f64; 3])
     id
 }
 
+#[cfg(feature = "client")]
 fn rising_cow(
     game: &mut sunrise_gameplay::game::ServerGame<'_>,
     at: [f64; 3],
@@ -454,6 +517,7 @@ fn rising_cow(
     id
 }
 
+#[cfg(feature = "client")]
 #[test]
 #[ignore = "daily"]
 fn borrowed_no_physics_moves_with_a_passive_listener_keep_their_order() {
@@ -483,9 +547,11 @@ fn borrowed_no_physics_moves_with_a_passive_listener_keep_their_order() {
 
 /// A goal that, when it starts, teleports its mob to each of its targets in turn, once: the
 /// `snapTo` an enderman's, a pet's or a shulker's teleport makes in its tick.
+#[cfg(feature = "client")]
 #[derive(Clone, Debug)]
 struct Teleports(Vec<[f64; 3]>);
 
+#[cfg(feature = "client")]
 impl sunrise_sim::mobs::goals::Goal for Teleports {
     fn flags(&self) -> u8 {
         0
@@ -514,6 +580,7 @@ impl sunrise_sim::mobs::goals::Goal for Teleports {
 
 /// The cow `id`, moving at `velocity`, runs real mob ticks until one has teleported it through
 /// `targets` (its [`Teleports`] goal starting) and then walked it on, in that same tick.
+#[cfg(feature = "client")]
 fn teleport_then_walk(
     game: &mut sunrise_gameplay::game::ServerGame<'_>,
     id: u32,
@@ -537,6 +604,7 @@ fn teleport_then_walk(
     panic!("the cow's tick never teleported it");
 }
 
+#[cfg(feature = "client")]
 #[test]
 #[ignore = "daily"]
 fn a_mobs_teleport_and_its_walk_in_one_tick_are_two_crossings() {
@@ -558,6 +626,7 @@ fn a_mobs_teleport_and_its_walk_in_one_tick_are_two_crossings() {
     });
 }
 
+#[cfg(feature = "client")]
 #[test]
 #[ignore = "daily"]
 fn a_real_mob_tick_exposes_each_intermediate_position_to_the_listener() {
@@ -577,6 +646,7 @@ fn a_real_mob_tick_exposes_each_intermediate_position_to_the_listener() {
     });
 }
 
+#[cfg(feature = "client")]
 #[derive(Clone, Debug)]
 struct TeleportsAndChecks {
     callbacks: CallbackCount,
@@ -584,6 +654,7 @@ struct TeleportsAndChecks {
     ran: bool,
 }
 
+#[cfg(feature = "client")]
 impl sunrise_sim::mobs::goals::Goal for TeleportsAndChecks {
     fn flags(&self) -> u8 {
         0
@@ -620,6 +691,7 @@ impl sunrise_sim::mobs::goals::Goal for TeleportsAndChecks {
     }
 }
 
+#[cfg(feature = "client")]
 #[test]
 #[ignore = "daily"]
 fn a_real_mob_tick_tells_inside_each_position_write() {
@@ -654,6 +726,7 @@ fn a_real_mob_tick_tells_inside_each_position_write() {
     });
 }
 
+#[cfg(feature = "client")]
 #[test]
 #[ignore = "daily"]
 fn a_mobs_teleport_out_and_its_walk_back_in_one_tick_are_two_crossings() {
@@ -675,6 +748,7 @@ fn a_mobs_teleport_out_and_its_walk_back_in_one_tick_are_two_crossings() {
     });
 }
 
+#[cfg(feature = "client")]
 #[test]
 #[ignore = "daily"]
 fn a_mob_that_teleports_twice_in_its_tick_then_walks_is_three_crossings() {
@@ -702,9 +776,11 @@ fn a_mob_that_teleports_twice_in_its_tick_then_walks_is_three_crossings() {
 /// A goal that, when it starts, runs `LivingEntity.refreshDimensions`' nudge for a mob that grew
 /// from a 0.1 by 0.1 box (`fudgePositionAfterSizeChange`, a `setPos`), then sets the mob moving
 /// up at 0.6, once.
+#[cfg(feature = "client")]
 #[derive(Clone, Debug)]
 struct Grows(bool);
 
+#[cfg(feature = "client")]
 impl sunrise_sim::mobs::goals::Goal for Grows {
     fn flags(&self) -> u8 {
         0
@@ -730,6 +806,7 @@ impl sunrise_sim::mobs::goals::Goal for Grows {
     }
 }
 
+#[cfg(feature = "client")]
 #[test]
 #[ignore = "daily"]
 fn a_size_change_nudge_in_a_mobs_tick_then_its_walk_are_two_crossings() {
@@ -764,6 +841,7 @@ fn a_size_change_nudge_in_a_mobs_tick_then_its_walk_are_two_crossings() {
     });
 }
 
+#[cfg(feature = "client")]
 #[test]
 #[ignore = "daily"]
 fn a_mods_random_teleport_of_a_mob_is_told_at_once() {
@@ -784,6 +862,7 @@ fn a_mods_random_teleport_of_a_mob_is_told_at_once() {
     });
 }
 
+#[cfg(feature = "client")]
 #[test]
 #[ignore = "daily"]
 fn a_server_entity_that_leaves_is_forgotten() {
@@ -810,6 +889,7 @@ fn a_server_entity_that_leaves_is_forgotten() {
     });
 }
 
+#[cfg(feature = "client")]
 #[test]
 #[ignore = "daily"]
 fn a_server_mobs_own_move_is_not_reconstructed_after_its_post() {
@@ -839,6 +919,7 @@ fn a_server_mobs_own_move_is_not_reconstructed_after_its_post() {
     });
 }
 
+#[cfg(feature = "client")]
 #[test]
 #[ignore = "daily"]
 fn a_client_is_told_each_teleport_and_where_its_entities_really_are() {
@@ -932,6 +1013,7 @@ fn a_client_is_told_each_teleport_and_where_its_entities_really_are() {
     });
 }
 
+#[cfg(feature = "client")]
 #[test]
 #[ignore = "daily"]
 fn a_refused_player_add_does_not_hide_the_resident_entities_crossing() {
@@ -990,6 +1072,7 @@ fn a_refused_player_add_does_not_hide_the_resident_entities_crossing() {
 /// A mod's `teleport_to_level` into another level is a change of level, not a crossing: the
 /// recreated entity is filed in the new level untold (its join), this call tells nothing of its
 /// own, and its next move there over a section edge is told once.
+#[cfg(feature = "client")]
 #[test]
 #[ignore = "daily"]
 fn an_entity_moved_into_another_level_is_told_once_at_its_next_crossing() {
@@ -1057,6 +1140,7 @@ fn section_host_reads_entity_type_defaults_without_unwinding() {
 /// A mod-owned type with a 5000 health base answers 1024, while its spawn base stays 5000.
 /// An attribute a mod adds to a type (a Skeleton's luck) answers too. No read answers for
 /// `minecraft:item` (no supplier) or a type no one registered.
+#[cfg(feature = "client")]
 #[test]
 #[ignore = "daily"]
 fn section_host_and_game_read_the_same_entity_type_defaults() {
@@ -1147,6 +1231,7 @@ fn section_host_and_game_read_the_same_entity_type_defaults() {
     });
 }
 
+#[cfg(feature = "client")]
 #[test]
 #[ignore = "daily"]
 fn ticked_live_preserves_order_removals_and_reindexed_rows() {
@@ -1281,6 +1366,7 @@ fn ticked_live_preserves_order_removals_and_reindexed_rows() {
     });
 }
 
+#[cfg(feature = "client")]
 #[test]
 #[ignore = "daily"]
 fn borrowed_tick_tells_nested_passenger_and_vehicle_writes_before_resuming() {
@@ -1422,8 +1508,11 @@ fn a_move_followed_by_a_discard_still_tells_its_crossing() {
     assert_eq!(told(&mut s), [crossing(8, [0, 4, 0], [1, 4, 0])]);
 }
 
+#[cfg(feature = "client")]
 use sunrise_gameplay_common::game::native_entity_refs_common::NativeEntityRefsCommonGameExt1 as _;
 
+#[cfg(feature = "client")]
 use sunrise_gameplay_common::game::native_ticks::NativeTicksGameExt1 as _;
 
+#[cfg(feature = "client")]
 use sunrise_gameplay_common::game::entity_sections::EntitySectionsGameExt1 as _;

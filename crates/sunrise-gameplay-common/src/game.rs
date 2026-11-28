@@ -792,8 +792,6 @@ pub enum Screen {
     /// A screen of a native mod's own (`mod_screen_open`): it draws and
     /// takes its input through the screen hooks.
     Mod,
-    /// PvP & HUD's widget editor (game/interface/hud_editor.rs).
-    HudEditor,
 }
 impl Screen {
     /// The id native mods see for this screen (`ScreenView.id`, the
@@ -823,7 +821,6 @@ impl Screen {
             Screen::Win => "win",
             Screen::DebugOptions => "debug_options",
             Screen::Mod => "mod",
-            Screen::HudEditor => "hud_editor",
         }
     }
 }
@@ -3724,10 +3721,10 @@ pub fn in_own_process(name: &str, body: impl FnOnce()) {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(
-        out.status.success() && report.contains("test result: ok. 1 passed;"),
-        "{name} failed in its own process:\n{report}"
-    );
+    if !(out.status.success() && report.contains("test result: ok. 1 passed;")) {
+        eprint!("{report}");
+        panic!("child test process failed");
+    }
 }
 #[allow(unused_imports)]
 pub use {

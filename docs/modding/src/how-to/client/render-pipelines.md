@@ -265,8 +265,8 @@ A pipeline reads large, sparsely updated data (compact geometry records, per-ins
 a std430 storage buffer. Create it once with `host.create_storage_buffer(&StorageBufferDescriptor::new(size))`
 (a multiple of 4 bytes, up to the device's `max_buffer_size`), update ranges with
 `buffer.write_range(host, offset, bytes)` (queued and applied in call order before the next frame),
-and free it with `buffer.release(host)`. It survives a resource reload and a world close, and is
-freed when the mod unloads.
+and free it with `buffer.release(host)`. See `StorageBufferRef` for when a mod must recreate a
+buffer instead of reusing its handle.
 
 Declare it in the layout with `BindEntry::new("Tints", BindingKind::StorageBuffer { read_only: true, min_size: 16 })`
 (`min_size` is the smallest range the block accepts, 16 for a `vec4[]` block; it must be non-zero and
@@ -308,11 +308,17 @@ include `STORAGE_WRITE_ONLY`, `STORAGE_READ_ONLY` or `STORAGE_READ_WRITE` for th
 or access the adapter lacks is refused when the target is created, with
 `RenderTargetError::UnsupportedStorage`. `host.render_capabilities()` lists the formats with
 read-write storage in `read_write_storage`, and `float32_filterable` says whether an `R32Float`
-target can be sampled with `SamplerFilter::Linear`. A device refusal of the allocation itself is
+target can be sampled with `SamplerFilter::Linear`; where it cannot, the target is read with nearest filtering. A device refusal of the allocation itself is
 `RenderTargetError::Device`.
 
-A render target survives a resource reload and a world close, and is freed by
-`target.release(host)` or when its mod unloads.
+The sizes every GPU call is checked against are the device's own, and `host.render_capabilities().limits`
+(`RenderLimits`) reads them: `max_buffer_size`, `max_storage_buffer_binding_size`,
+`max_uniform_buffer_binding_size`, `max_compute_workgroups_per_dimension` and
+`max_texture_dimension_2d`. Size buffers, dispatches and targets from these instead of trying an
+allocation and reading the refusal.
+
+Free the target with `target.release(host)`. See `RenderTargetRef` for the lifetime of a target
+and its contents.
 
 ## Samplers and mipmapped textures
 
@@ -325,9 +331,17 @@ For anything else set the public fields of the descriptor: `address_u`, `address
 detail: a `max_lod` above `0.25` blends linearly between the two nearest mip levels (vanilla's
 `NEAREST_MIPMAP_LINEAR` and `LINEAR_MIPMAP_LINEAR`, and Vulkan's linear mipmap mode for `maxLod > 0.25`), and
 `Some(0.0)` reads only the base level. `None` is what `Sampler::new` gives: vanilla's absent `maxLod` (1000),
-so it blends between levels too. A sampler that blends is a filtering one: to sample a depth target, or an
-`R32Float` target where `float32_filterable` is false, set `max_lod = Some(0.0)` with `SamplerFilter::Nearest`.
-A negative or non-finite `max_lod` is `BindGroupLayoutError::BadMaxLod`. Anisotropy is not offered.
+so it blends between levels too. A depth texture, or an `R32Float` one where `float32_filterable` is false,
+cannot be filtered: standalone draw and compute pipelines read it with nearest filtering and no
+blending between levels, without changing the sampler you declared. This also applies to direct
+mod draws during shader-pack rendering. A translated shader-pack program has a fixed sampler layout:
+if it is linked to your draw slot and the binding needs a non-filtering variant, submission returns
+`PipelineDrawError::PackSamplerLayout`. A negative or non-finite `max_lod` is
+`BindGroupLayoutError::BadMaxLod`. Anisotropy is not offered.
+
+The engine checks the bindings at submission and prepares any needed GPU variant before the pass.
+If the device refuses that variant, the affected draws or dispatches are skipped and the renderer
+logs the pipeline and device error once.
 
 A dynamic texture (see [Textures made at run time](dynamic-textures.md)) made with `mip_levels` above 1 is
 bound to such a sampler by its id, `TextureSource::DynamicTexture(id)`, and the shader's `texture`,
@@ -365,13 +379,19 @@ and `Particles` resolves `gbuffers_particles -> gbuffers_textured_lit -> gbuffer
 Pipelines that need pack-defined programs, preprocessor defines, an auxiliary depth target, or
 per-frame pack uniforms attach an optional `.pack_binding(PackBinding::new()...)`. Startup refuses
 invalid GLSL identifiers, reserved Iris/OptiFine sampler/image/uniform names, and cross-mod or
-namespace collisions across samplers, uniforms, defines, and depth-target IDs.
+namespace collisions across samplers, uniforms, defines, and depth-target IDs. A pack binding also
+cannot declare `SUNRISE_HDR` or `SUNRISE_HDR_TONEMAP_PACK`, which the engine defines itself, even
+when HDR is not served.
 
 During a world draw hook, feed declared per-frame pack uniforms with
 `ctx.set_pack_uniform(name, PackUniformValue::...)` (returns `false` without panicking when `name`
 or its `PackUniformType` is not registered; any `previous_name` declared on the uniform is tracked
-automatically across frames). To inspect whether an active shader pack bound a specific pipeline to
-one of its translated programs (`PackOverrideState::Bound`), left it on the mod's own fallback
+automatically across frames). If a pack program declares either name with an incompatible GLSL
+type, that uniform reads zero instead of receiving a converted value. The engine logs the uniform
+name, both types, and the program once per program and uniform. The pipeline stays bound.
+
+To inspect whether an active shader pack bound a specific pipeline to one of its translated
+programs (`PackOverrideState::Bound`), left it on the mod's own fallback
 shader (`PackOverrideState::UnboundPack`), or no pack is active (`PackOverrideState::NoPack`), call
 `ctx.pack_override_state(pipeline)`. To check generally whether a shader pack is currently loaded
 and rendering the world (always `false` on the title screen, matching `IrisApi.isShaderPackInUse()`),
@@ -382,10 +402,11 @@ integer id (`mc_Entity`) for a block state, as Sunrise's shader-pack loader maps
 engine's own terrain carries for it, which a mod writes into its vertices so waving, emissive, water
 or translucent blocks shade like terrain. It is `None` unless a `shaders/` pack is loaded and
 rendering (the title screen and a pack still loading included), under a native pack, when the pack
-gives the state no id and for a state the live block-state index lacks. The answer changes when the
-active pack is loaded, switched or turned off, and no pack-reload signal exists yet:
-`shader_pack_active()` stays `true` when one pack replaces another, and nothing else tells a mod. Ask
-again when you need the id instead of caching it across frames. Item and entity ids
+gives the state no id and for a state the live block-state index lacks. The answer can change when
+the active pack is loaded, switched or turned off. `shader_pack_active()` alone cannot detect a
+switch: it can be `true` for both packs. To notice pack changes, compare the optional generation
+from `host.shader_pack_state().map(|state| state.generation)` each frame; see
+[Shadow pass, clouds and pack changes](#shadow-pass-clouds-and-pack-changes). Item and entity ids
 (`item.properties`, `entity.properties`) are not part of it.
 
 ### Your own vertex stage, and the main depth
@@ -511,6 +532,9 @@ anything is queued: a refused call returns a `PipelineDrawError` and queues noth
 - **Transient bytes.** `draw.draw_vertices(pipeline, &[vertex_bytes, instance_bytes],
   Some((IndexFormat::Uint16, index_bytes)), draw, &DrawBindings::EMPTY)` uploads this frame's
   slices and draws them. There is one slice per binding, in binding order.
+
+A renderer rebuild retires both `MeshRef` and `UniformBufferRef` handles, even on the same
+GPU device. New allocations by the same mod never make those handles valid again.
 
 `MeshDraw::vertices(range)` draws a range of vertices, `MeshDraw::indexed(range, base_vertex)`
 draws a range of an index buffer, and `.with_instances(range)` sets the instance range. The
@@ -642,11 +666,13 @@ same `register_render_pipelines` hook as a draw pipeline.
    give it, and is never culled. `dispatch_indirect` reads the three counts from a storage buffer
    created with `indirect: true`.
 
-Everything a mod can get wrong comes back as an `Err`: a workgroup size, workgroup storage or
-binding count over the device's limits makes the pipeline resolve `Invalid`, a shader that needs
-subgroup operations resolves `UnsupportedFeature` when `RenderCapabilities::subgroup` is false,
-and a dispatch over `max_compute_workgroups_per_dimension` is `TooManyWorkgroups`. Your GPU
-objects survive a resource reload and a world close; free them with `release`.
+A workgroup size, workgroup storage or binding count over the device's limits makes the pipeline
+resolve `Invalid`. A shader that needs subgroup operations resolves `UnsupportedFeature` when
+`RenderCapabilities::subgroup` is false, and a dispatch over
+`max_compute_workgroups_per_dimension` returns `TooManyWorkgroups`. To sample the live world depth
+from a compute node, declare `.reads(FrameTarget::MainDepth)` and bind `TextureSource::WorldDepth`.
+The same sampler rules apply as for standalone draws. Free retained storage buffers and render
+targets with `release`.
 
 ## Indirect draws
 
@@ -723,6 +749,5 @@ if let Some(bytes) = ticket.poll_readback(host)? {
   buffer and the buffer has `copy_src` (`BufferError::{InvalidAlignment, Empty, OutOfRange,
   NotReadable}`), all refused before the GPU is touched. There is no cap on tickets beyond the
   device's memory: running out is `BufferError::ExceedsDeviceLimit`.
-- **Letting go.** `ticket.release(host)` drops a ticket you no longer want; unpolled tickets are freed
-  when the mod unloads. A spent or unknown ticket, a node the frame did not run, and a lost device
-  are `BufferError::Unavailable`.
+- **Letting go.** `ticket.release(host)` drops a ticket you no longer want. See `ReadbackTicket`
+  for how reloads and device replacement affect outstanding tickets.

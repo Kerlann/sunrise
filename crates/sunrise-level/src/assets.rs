@@ -128,7 +128,7 @@ impl Assets {
         }
         let (registry, flags) = sunrise_world::level::data::load_registry_with_flags(root)?;
         let bundle: Value = sunrise_world::json_file::read(&root.join("block-tags.json"))?;
-        let mut definitions = TagDefinitions::default();
+        let mut definitions = TagDefinitions::with_conventions("block")?;
         for (name, text) in bundle
             .as_object()
             .ok_or_else(|| invalid("invalid block tag bundle"))?
@@ -141,31 +141,26 @@ impl Assets {
             )?;
         }
         let built =
-            definitions.build(|name, _| registry.default_state(name).map(|_| name.to_owned()))?;
-        if !built.missing.is_empty() {
-            return Err(invalid("unresolved block tags").into());
+            definitions.bind(|name, _| registry.default_state(name).map(|_| name.to_owned()));
+        // TagLoader.build reports and omits only the tag that could not bind.
+        for (tag, entries) in built.missing {
+            log::warn!(
+                "block tag {tag} has missing required entries: {}",
+                entries
+                    .iter()
+                    .map(|entry| format!("{} ({})", entry.entry.display(), entry.source))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
         }
-        let motion: BTreeSet<_> = built
-            .tags
-            .get("minecraft:blocks_motion_in_heightmap")
-            .ok_or_else(|| invalid("missing motion tag"))?
-            .iter()
+        let members = |tag: &str| built.tags.get(tag).into_iter().flatten();
+        let motion: BTreeSet<_> = members("minecraft:blocks_motion_in_heightmap")
             .map(String::as_str)
             .collect();
-        let no_leaves: BTreeSet<_> = built
-            .tags
-            .get("minecraft:blocks_motion_in_heightmap_no_leaves")
-            .ok_or_else(|| invalid("missing no-leaves motion tag"))?
-            .iter()
+        let no_leaves: BTreeSet<_> = members("minecraft:blocks_motion_in_heightmap_no_leaves")
             .map(String::as_str)
             .collect();
-        let blocks_fluid_flow = built
-            .tags
-            .get("minecraft:blocks_fluid_flow")
-            .ok_or_else(|| invalid("missing fluid flow tag"))?
-            .iter()
-            .cloned()
-            .collect();
+        let blocks_fluid_flow = members("minecraft:blocks_fluid_flow").cloned().collect();
         let properties = Properties(Arc::new(
             flags
                 .iter()

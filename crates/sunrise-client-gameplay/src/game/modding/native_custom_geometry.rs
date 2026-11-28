@@ -5,7 +5,7 @@ use crate::game::host::draw::GameWorldDrawContext;
 use glam::{DVec3, Mat4, Vec3};
 use mod_api::{
     DrawError, InstanceError, ModelInstance, ModelRef, NameTagOptions, PipelineDrawError,
-    PipelineQuad, RenderLevelStage, RenderPipelineRef, WorldLine, WorldQuad,
+    PipelineQuad, RenderLevelStage, RenderPipelineRef, WorldLine, WorldQuad, WorldTextOptions,
 };
 use sunrise_client::mesher::Vertex;
 use sunrise_client::screen_effects::{CameraQuads, sampling};
@@ -321,13 +321,17 @@ impl ClientGame<'_> {
             .extend_from_slice(see_through);
     }
     /// A mod's label as `SubmitNodeCollection.submitNameTag` draws a name: 0.5 above `at`,
-    /// facing the camera, 0.025 blocks a font pixel. See-through, twice: opaque white text in
-    /// the world, its light raised to at least 2 unless `exact_light` (no backdrop), and the
-    /// faded text on the backdrop over everything, unlit. Otherwise once, depth tested and
+    /// facing the camera, `options.scale` blocks a font pixel (a name tag's 0.025 by default).
+    /// See-through, twice: opaque white text in the world, its light raised to at least 2
+    /// unless `exact_light` (no backdrop), and the faded text on the backdrop over everything,
+    /// unlit. Otherwise once, depth tested and
     /// translucent: the faded text on the backdrop in the caller's light. The faded text's alpha
     /// (unless `faded_alpha`) and the backdrop's follow the player's text background opacity.
-    /// Refused whole, before layout, for a position that is not finite; any newly
-    /// rasterized glyphs are uploaded with the label.
+    /// Refused whole, before layout, for a position that is not finite
+    /// ([`DrawError::NonFinite`]) or a scale that is not finite and positive
+    /// ([`DrawError::InvalidScale`]); after layout, for a finite scale whose text positions
+    /// overflow f32 ([`DrawError::NonFinite`]). Any newly rasterized glyphs are uploaded with
+    /// the label, and also when it is refused after layout, as the atlas already holds them.
     pub(in crate::game) fn native_world_name_tag(
         &self,
         draw: &mut WorldGeometry,
@@ -336,6 +340,9 @@ impl ClientGame<'_> {
         options: NameTagOptions,
     ) -> Result<(), DrawError> {
         draw.check_label(at)?;
+        if !options.scale.is_finite() || options.scale <= 0.0 {
+            return Err(DrawError::InvalidScale);
+        }
         let text = sunrise_client_lib::api_text::to_engine_inprocess(text);
         let from_camera = DVec3::from(at) - DVec3::from(draw.camera());
         let o = from_camera + DVec3::new(0.0, 0.5, 0.0);
@@ -350,7 +357,8 @@ impl ClientGame<'_> {
             .faded_alpha
             .map_or_else(|| self.client.settings.faded_text_alpha(0.25), u32::from);
         let light = options.light;
-        let unit = super::names::NAME_TAG_UNIT;
+        // PoseStack.scale(s, -s, s) in place of the name tag's 0.025.
+        let unit = options.scale;
         let (mut world, mut see_through) = (Vec::new(), Vec::new());
         let quads = |alpha, backdrop, layer, light, out: &mut Vec<Vertex>| {
             self.styled_name_tag_quads(o, &lines, alpha, backdrop, layer, light, unit, out, None)
@@ -371,9 +379,72 @@ impl ClientGame<'_> {
             let lit = sunrise_client::block_entity_render::vertex_light(light);
             quads(faded, backdrop, 0, lit, &mut world)
         };
+        // A finite scale can still overflow the camera-relative positions (f32::MAX): refused
+        // as any draw whose coordinates overflow f32, with nothing drawn.
+        let finite = |v: &Vertex| v.pos.iter().all(|c| c.is_finite());
+        if !world.iter().chain(&see_through).all(finite) {
+            self.client.text_patches.borrow_mut().append(&mut patches);
+            return Err(DrawError::NonFinite);
+        }
         draw.label(from_camera.length_squared(), &world, &see_through);
         self.client.text_patches.borrow_mut().append(&mut patches);
         Ok(())
+    }
+    /// A mod's posed text, as a block entity's text is drawn (`world_text_quads`), under
+    /// `pose` (row-major 3×4) at `origin`, the camera subtracted in `f64`. Depth tested, it
+    /// draws with the labels the world's name tags draw with, far to near by `origin`, full
+    /// bright when `glowing` (`LightCoordsUtil.FULL_BRIGHT`, as glowing sign text) and otherwise
+    /// in `light`. See-through (`Font.DisplayMode.SEE_THROUGH`, `RenderPipelines.TEXT_SEE_THROUGH`:
+    /// no depth test, no lightmap), with the labels' copies over everything. Refused whole,
+    /// before layout, for an `origin`, `pose` or `at` that is not finite, and after it when a
+    /// finite pose or origin still overflows a vertex to infinity or NaN.
+    pub(in crate::game) fn native_world_text(
+        &self,
+        draw: &mut WorldGeometry,
+        origin: [f64; 3],
+        pose: [f32; 12],
+        text: &mod_api::Text,
+        options: WorldTextOptions,
+    ) -> Result<f32, DrawError> {
+        draw.check_label(origin)?;
+        if !pose.iter().chain(&options.at).all(|v| v.is_finite()) {
+            return Err(DrawError::NonFinite);
+        }
+        let text = sunrise_client_lib::api_text::to_engine_inprocess(text);
+        let from_camera = DVec3::from(origin) - DVec3::from(draw.camera());
+        let pose =
+            Mat4::from_translation(from_camera.as_vec3()) * world_geometry::row_major_3x4(pose);
+        let hud = |c: u32| {
+            sunrise_client::hud::rgba((c >> 16) as u8, (c >> 8) as u8, c as u8, (c >> 24) as u8)
+        };
+        let look = super::native_block_entity_draw::TextLook {
+            color: hud(options.color),
+            shadow: options.shadow,
+            outline: options.outline.map(hud),
+            background: hud(options.background),
+        };
+        let (layer, light) = if options.see_through {
+            (2, 0)
+        } else {
+            let light = if options.glowing { 0xFF } else { options.light };
+            (0, sunrise_client::block_entity_render::vertex_light(light))
+        };
+        let mut quads = Vec::new();
+        let width = self.world_text_quads(&text, options.at, look, pose, |quad| {
+            quads.extend(quad.map(|v| Vertex { layer, light, ..v }));
+            true
+        });
+        // A huge pose entry or origin can overflow the camera-relative corners: draw nothing.
+        if !quads.iter().flat_map(|v| v.pos).all(f32::is_finite) {
+            return Err(DrawError::NonFinite);
+        }
+        let (world, see_through): (&[Vertex], &[Vertex]) = if options.see_through {
+            (&[], &quads)
+        } else {
+            (&quads, &[])
+        };
+        draw.label(from_camera.length_squared(), world, see_through);
+        Ok(width)
     }
     /// Submit unlit ARGB world lines atomically. Invalid coordinates or widths leave the batch
     /// unchanged.
@@ -583,7 +654,8 @@ impl ClientGame<'_> {
             .ok_or(mod_api::RenderTargetError::Unavailable)?;
         gpu.render_target_size(mod_api::content::crash::current_native_mod(), target)
     }
-    /// The optional device features of the active device; all off without one.
+    /// The optional device features and limits of the active device; all off (and zero)
+    /// without one.
     pub(in crate::game) fn render_capabilities(&self) -> mod_api::RenderCapabilities {
         self.mod_gpu().map_or_else(
             || {
@@ -593,6 +665,7 @@ impl ClientGame<'_> {
                     false,
                     false,
                     false,
+                    mod_api::RenderLimits::default(),
                 )
             },
             |gpu| gpu.render_capabilities(),
@@ -618,12 +691,16 @@ impl ClientGame<'_> {
         bindings: &mod_api::DrawBindings<'_>,
     ) -> Result<Option<sunrise_client::gfx::mod_pipelines::ResolvedDrawBindings>, PipelineDrawError>
     {
+        let pack_linked = !draw.is_oit_pass() && self.pack_slot_bound(slot as usize);
         let draw = std::cell::RefCell::new(draw);
         self.resolve_draw_bindings_into(
             slot,
             bindings,
             None,
             &[],
+            "",
+            &[],
+            pack_linked,
             &mut |bytes| draw.borrow_mut().push_inline_uniform(bytes),
             &mut |bytes| draw.borrow_mut().push_texel_data(bytes),
         )
@@ -633,12 +710,16 @@ impl ClientGame<'_> {
     /// pass (`active_target = None`) or an offscreen pass (`active_target = Some((target, mip_level))`:
     /// a mod render target's mip level or a transient frame-graph target at level 0), refusing
     /// self-sampling with [`PipelineDrawError::TargetReadWriteHazard`].
+    #[allow(clippy::too_many_arguments)]
     fn resolve_draw_bindings_into(
         &self,
         slot: u32,
         bindings: &mod_api::DrawBindings<'_>,
         active_target: Option<(mod_api::FrameTarget, u32)>,
         transients: &[mod_api::RenderTargetDescriptor],
+        pass_label: &str,
+        reads: &[mod_api::FrameTarget],
+        pack_linked: bool,
         push_inline: &mut dyn FnMut(&[u8]) -> std::ops::Range<usize>,
         push_texel: &mut dyn FnMut(&[u8]) -> std::ops::Range<usize>,
     ) -> Result<Option<sunrise_client::gfx::mod_pipelines::ResolvedDrawBindings>, PipelineDrawError>
@@ -665,6 +746,9 @@ impl ClientGame<'_> {
             bindings,
             active_target,
             transients,
+            pass_label,
+            reads,
+            pack_linked,
             push_inline,
             push_texel,
         )
@@ -672,7 +756,8 @@ impl ClientGame<'_> {
 
     /// [`Self::resolve_draw_bindings_into`] for any pipeline kind: `layout` is the pipeline's
     /// declared bind group, `pc_size` its push-constant bytes (0 for compute) and `writes_depth`
-    /// whether it writes depth (a depth-sampling hazard).
+    /// whether it writes depth (a depth-sampling hazard). Transient samples must be among
+    /// `reads`, the declared reads of `pass_label`; see [`PipelineDrawError::InvalidBinding`].
     #[allow(clippy::too_many_arguments)]
     pub(in crate::game) fn resolve_bindings_against(
         &self,
@@ -682,10 +767,16 @@ impl ClientGame<'_> {
         bindings: &mod_api::DrawBindings<'_>,
         active_target: Option<(mod_api::FrameTarget, u32)>,
         transients: &[mod_api::RenderTargetDescriptor],
+        pass_label: &str,
+        reads: &[mod_api::FrameTarget],
+        pack_linked: bool,
         push_inline: &mut dyn FnMut(&[u8]) -> std::ops::Range<usize>,
         push_texel: &mut dyn FnMut(&[u8]) -> std::ops::Range<usize>,
     ) -> Result<Option<sunrise_client::gfx::mod_pipelines::ResolvedDrawBindings>, PipelineDrawError>
     {
+        use sunrise_client::gfx::mod_pipelines::SamplerLayout;
+        use sunrise_client::gfx::mod_render_targets::{wgpu_color_format, wgpu_depth_format};
+
         if layout.is_empty() && pc_size == 0 {
             if !bindings.entries.is_empty() || bindings.push_constants.is_some() {
                 return Err(PipelineDrawError::InvalidBinding);
@@ -723,9 +814,19 @@ impl ClientGame<'_> {
         {
             return Err(PipelineDrawError::TargetReadWriteHazard);
         }
-        let active_transient_target = match active_target {
-            Some((mod_api::FrameTarget::Transient(id), _)) => Some(id),
-            _ => None,
+        let resolve_transient = |id: mod_api::TransientTargetId| {
+            let target = mod_api::FrameTarget::Transient(id);
+            if active_target.is_some_and(|(active, _)| active == target) {
+                return Err(PipelineDrawError::TargetReadWriteHazard);
+            }
+            let desc = transients
+                .get(id.raw() as usize)
+                .ok_or(PipelineDrawError::InvalidBinding)?;
+            if !reads.contains(&target) {
+                gpu.warn_undeclared_transient_read_once(pass_label, id);
+                return Err(PipelineDrawError::InvalidBinding);
+            }
+            Ok(desc)
         };
 
         // Validate every declared entry before appending to byte pools so a refused draw appends
@@ -758,6 +859,9 @@ impl ClientGame<'_> {
                 mips: sunrise_client::gfx::mod_render_targets::TargetMips,
             },
         }
+        let float32_filterable = gpu.float32_filterable();
+        let mut sampler_layout = SamplerLayout::default();
+        let mut sampled = 0;
         let mut staged = Vec::with_capacity(layout.entries.len());
         for decl in &layout.entries {
             let mut matches = bindings
@@ -798,122 +902,107 @@ impl ClientGame<'_> {
                 (
                     mod_api::BindingKind::CombinedImageSampler { sampler },
                     mod_api::BindingValue::Texture(source),
-                ) => match source {
-                    mod_api::TextureSource::TransientTargetColor(target, attachment) => {
-                        if active_transient_target == Some(*target) {
-                            return Err(PipelineDrawError::TargetReadWriteHazard);
+                ) => {
+                    let (entry, format) = match source {
+                        mod_api::TextureSource::TransientTargetColor(target, attachment) => {
+                            let format = resolve_transient(*target)?
+                                .color_targets
+                                .get(*attachment as usize)
+                                .ok_or(PipelineDrawError::InvalidBinding)?;
+                            (
+                                StagedEntry::TransientColor {
+                                    target: *target,
+                                    attachment: *attachment,
+                                },
+                                wgpu_color_format(*format),
+                            )
                         }
-                        let Some(desc) = transients.get(target.raw() as usize) else {
-                            return Err(PipelineDrawError::InvalidBinding);
-                        };
-                        let filterable =
-                            sunrise_client::gfx::mod_pipelines::sampler_filtering(&sampler);
-                        if !sunrise_client::gfx::mod_frame_graph::validate_transient_color_binding(
-                            desc,
-                            *attachment,
-                            filterable,
-                            gpu.float32_filterable(),
-                        ) {
-                            return Err(PipelineDrawError::InvalidBinding);
+                        mod_api::TextureSource::TransientTargetDepth(target) => {
+                            let format = wgpu_depth_format(resolve_transient(*target)?.depth)
+                                .ok_or(PipelineDrawError::InvalidBinding)?;
+                            (StagedEntry::TransientDepth { target: *target }, format)
                         }
-                        staged.push(StagedEntry::TransientColor {
-                            target: *target,
-                            attachment: *attachment,
-                        });
-                    }
-                    mod_api::TextureSource::TransientTargetDepth(target) => {
-                        if active_transient_target == Some(*target) {
-                            return Err(PipelineDrawError::TargetReadWriteHazard);
-                        }
-                        let Some(desc) = transients.get(target.raw() as usize) else {
-                            return Err(PipelineDrawError::InvalidBinding);
-                        };
-                        let filterable =
-                            sunrise_client::gfx::mod_pipelines::sampler_filtering(&sampler);
-                        if !sunrise_client::gfx::mod_frame_graph::validate_transient_depth_binding(
-                            desc, filterable,
-                        ) {
-                            return Err(PipelineDrawError::InvalidBinding);
-                        }
-                        staged.push(StagedEntry::TransientDepth { target: *target });
-                    }
-                    other => {
-                        let mut mips = None;
-                        let (view_id, view) = match other {
-                            mod_api::TextureSource::AtlasSprite(id) => {
-                                let sprite_key = id
-                                    .to_string()
-                                    .strip_prefix("minecraft:")
-                                    .map(str::to_owned)
-                                    .unwrap_or_else(|| id.to_string());
-                                if !self
-                                    .client
-                                    .client_pack
-                                    .render
-                                    .sprite_layers
-                                    .contains_key(&sprite_key)
-                                    && !self.client.gui.atlas.sprites.contains_key(&sprite_key)
-                                {
-                                    return Err(PipelineDrawError::InvalidBinding);
+                        other => {
+                            let mut mips = None;
+                            let (view_id, view) = match other {
+                                mod_api::TextureSource::AtlasSprite(id) => {
+                                    let sprite_key = id
+                                        .to_string()
+                                        .strip_prefix("minecraft:")
+                                        .map(str::to_owned)
+                                        .unwrap_or_else(|| id.to_string());
+                                    if !self
+                                        .client
+                                        .client_pack
+                                        .render
+                                        .sprite_layers
+                                        .contains_key(&sprite_key)
+                                        && !self.client.gui.atlas.sprites.contains_key(&sprite_key)
+                                    {
+                                        return Err(PipelineDrawError::InvalidBinding);
+                                    }
+                                    gpu.mod_atlas_texture_view()
                                 }
-                                gpu.mod_atlas_texture_view()
-                            }
-                            mod_api::TextureSource::DynamicTexture(id) => {
-                                self.resolve_dynamic_texture_view(gpu, id)?
-                            }
-                            mod_api::TextureSource::StandaloneTexture(id) => {
-                                let asset_path = if id.path().ends_with(".png") {
-                                    format!("assets/{}/{}", id.namespace(), id.path())
-                                } else {
-                                    format!("assets/{}/textures/{}.png", id.namespace(), id.path())
-                                };
-                                gpu.resolve_mod_standalone_texture(id, || {
-                                    self.common.pack.source.read(&asset_path).ok()
-                                })?
-                            }
-                            mod_api::TextureSource::WorldDepth => {
-                                if writes_depth {
-                                    return Err(PipelineDrawError::InvalidBinding);
+                                mod_api::TextureSource::DynamicTexture(id) => {
+                                    self.resolve_dynamic_texture_view(gpu, id)?
                                 }
-                                gpu.mod_world_depth_texture_view()
-                            }
-                            mod_api::TextureSource::Lightmap => gpu.mod_lightmap_texture_view(),
-                            mod_api::TextureSource::RenderTargetColor(target, attachment) => {
-                                let filterable =
-                                    sunrise_client::gfx::mod_pipelines::sampler_filtering(&sampler);
-                                let (id, view, target_mips) = gpu.resolve_mod_render_target_color(
-                                    owner,
-                                    *target,
-                                    *attachment,
-                                    filterable,
-                                )?;
-                                mips = Some(target_mips);
-                                (id, view)
-                            }
-                            mod_api::TextureSource::RenderTargetDepth(target) => {
-                                let filterable =
-                                    sunrise_client::gfx::mod_pipelines::sampler_filtering(&sampler);
-                                gpu.resolve_mod_render_target_depth(owner, *target, filterable)?
-                            }
-                            mod_api::TextureSource::RenderTargetColorMip(view) => {
-                                let filterable =
-                                    sunrise_client::gfx::mod_pipelines::sampler_filtering(&sampler);
-                                let (id, view, target_mips) = gpu
-                                    .resolve_mod_render_target_color_mips(
-                                        owner, *view, filterable,
-                                    )?;
-                                mips = Some(target_mips);
-                                (id, view)
-                            }
-                            _ => return Err(PipelineDrawError::InvalidBinding),
-                        };
-                        staged.push(StagedEntry::Texture {
-                            view_id,
-                            view,
-                            mips,
-                        });
-                    }
-                },
+                                mod_api::TextureSource::StandaloneTexture(id) => {
+                                    let asset_path = if id.path().ends_with(".png") {
+                                        format!("assets/{}/{}", id.namespace(), id.path())
+                                    } else {
+                                        format!(
+                                            "assets/{}/textures/{}.png",
+                                            id.namespace(),
+                                            id.path()
+                                        )
+                                    };
+                                    gpu.resolve_mod_standalone_texture(id, || {
+                                        self.common.pack.source.read(&asset_path).ok()
+                                    })?
+                                }
+                                mod_api::TextureSource::WorldDepth => {
+                                    if writes_depth {
+                                        return Err(PipelineDrawError::InvalidBinding);
+                                    }
+                                    gpu.mod_world_depth_texture_view()
+                                }
+                                mod_api::TextureSource::Lightmap => gpu.mod_lightmap_texture_view(),
+                                mod_api::TextureSource::RenderTargetColor(target, attachment) => {
+                                    let (id, view, target_mips) = gpu
+                                        .resolve_mod_render_target_color(
+                                            owner,
+                                            *target,
+                                            *attachment,
+                                        )?;
+                                    mips = Some(target_mips);
+                                    (id, view)
+                                }
+                                mod_api::TextureSource::RenderTargetDepth(target) => {
+                                    gpu.resolve_mod_render_target_depth(owner, *target)?
+                                }
+                                mod_api::TextureSource::RenderTargetColorMip(view) => {
+                                    let (id, view, target_mips) =
+                                        gpu.resolve_mod_render_target_color_mips(owner, *view)?;
+                                    mips = Some(target_mips);
+                                    (id, view)
+                                }
+                                _ => return Err(PipelineDrawError::InvalidBinding),
+                            };
+                            let format = view.texture().format();
+                            (
+                                StagedEntry::Texture {
+                                    view_id,
+                                    view,
+                                    mips,
+                                },
+                                format,
+                            )
+                        }
+                    };
+                    sampler_layout.record(sampled, &sampler, format, float32_filterable);
+                    sampled += 1;
+                    staged.push(entry);
+                }
                 (
                     mod_api::BindingKind::TexelBuffer { format },
                     mod_api::BindingValue::TexelBuffer(bytes),
@@ -970,6 +1059,11 @@ impl ClientGame<'_> {
                 }
                 _ => return Err(PipelineDrawError::InvalidBinding),
             }
+        }
+        // A translated pack program owns its pipeline layout, unlike direct mod draws into
+        // pack targets. Refuse only that route and only if the bindings require another layout.
+        if pack_linked && !sampler_layout.is_empty() {
+            return Err(PipelineDrawError::PackSamplerLayout);
         }
         // One render pass gives a mip level one usage: a draw binds no level both as a storage
         // image it writes and as anything else (a sampled view, or another storage access).
@@ -1094,6 +1188,7 @@ impl ClientGame<'_> {
         let push_constants = pc_slice.map(push_inline);
         Ok(Some(
             sunrise_client::gfx::mod_pipelines::ResolvedDrawBindings {
+                sampler_layout,
                 entries: resolved_entries,
                 push_constants,
             },
@@ -1444,6 +1539,7 @@ impl ClientGame<'_> {
     ) -> Result<(), mod_api::ComputeDispatchError> {
         use mod_api::ComputeDispatchError as Refused;
         use sunrise_client::gfx::mod_compute::{DispatchKind, RecordedDispatch};
+        use sunrise_client::gfx::mod_pipelines::ResolvedDrawBindings;
         let dispatches = pass.dispatches.as_mut().ok_or(Refused::Unavailable)?;
         let gpu = self.mod_gpu().ok_or(Refused::Unavailable)?;
         let compute = self.client.client_pack.render.mod_pipelines.compute();
@@ -1485,6 +1581,9 @@ impl ClientGame<'_> {
                 bindings,
                 None,
                 transients,
+                &pass.label,
+                &pass.reads,
+                false,
                 &mut |bytes| {
                     let start = inline.len();
                     inline.extend_from_slice(bytes);
@@ -1505,9 +1604,11 @@ impl ClientGame<'_> {
             return Err(Refused::InvalidBinding);
         }
         // A storage image's texture format is the one its shader declares.
-        let entries = resolved
-            .as_ref()
-            .map_or(&[][..], |bound| &bound.entries[..]);
+        let ResolvedDrawBindings {
+            sampler_layout,
+            entries,
+            ..
+        } = resolved.unwrap_or_default();
         for (index, entry) in entries.iter().enumerate() {
             if let sunrise_client::gfx::mod_pipelines::ResolvedSet1Entry::StorageImage {
                 format,
@@ -1521,7 +1622,8 @@ impl ClientGame<'_> {
         }
         dispatches.push(RecordedDispatch {
             slot,
-            entries: resolved.map_or_else(Vec::new, |bindings| bindings.entries),
+            sampler_layout,
+            entries,
             inline,
             texel,
             kind,
@@ -1579,6 +1681,9 @@ impl ClientGame<'_> {
             bindings,
             active_target,
             transients,
+            &pass.label,
+            &pass.reads,
+            false,
             &mut |bytes| {
                 let start = pass.inline_uniforms.len();
                 pass.inline_uniforms.extend_from_slice(bytes);
@@ -1640,6 +1745,9 @@ impl ClientGame<'_> {
             indirect.bindings,
             active_target,
             transients,
+            &pass.label,
+            &pass.reads,
+            false,
             &mut |bytes| {
                 let start = pass.inline_uniforms.len();
                 pass.inline_uniforms.extend_from_slice(bytes);
@@ -1768,6 +1876,9 @@ impl ClientGame<'_> {
             bindings,
             active_target,
             transients,
+            &pass.label,
+            &pass.reads,
+            false,
             &mut |bytes| {
                 let start = pass.inline_uniforms.len();
                 pass.inline_uniforms.extend_from_slice(bytes);
@@ -4876,10 +4987,6 @@ mod tests {
             // The renderer's own textures that `TextureSource` binds resolve from the handles.
             let gpu = game.mod_gpu().unwrap();
             assert_eq!(
-                gpu.mod_world_depth_texture_view().0,
-                sunrise_client::gfx::mod_uniforms::WORLD_DEPTH_VIEW_ID
-            );
-            assert_eq!(
                 gpu.mod_lightmap_texture_view().0,
                 sunrise_client::gfx::mod_uniforms::LIGHTMAP_VIEW_ID
             );
@@ -4888,6 +4995,31 @@ mod tests {
                 sunrise_client::gfx::mod_uniforms::ATLAS_VIEW_ID
             );
             assert!(gpu.dynamic_texture_view(u64::MAX).is_none());
+
+            // An active pack alone must not reject a direct draw; it is the translated
+            // program's fixed sampler layout for this slot that makes the binding invalid.
+            game.client.title.0 = None;
+            game.client.screen = sunrise_gameplay_common::game::Screen::Playing;
+            game.client
+                .pack_frame_state
+                .set(Some(mod_api::ShaderPackState::new(false, None, 1)));
+            let depth = mod_api::DrawBindings::default()
+                .texture("ColorTex", mod_api::TextureSource::WorldDepth);
+            assert!(game.resolve_draw_bindings(&mut draw, 0, &depth).is_ok());
+            game.client.pack_frame_slots.borrow_mut().push(0);
+            assert_eq!(
+                game.resolve_draw_bindings(&mut draw, 0, &depth)
+                    .unwrap_err(),
+                PipelineDrawError::PackSamplerLayout
+            );
+            let filterable = mod_api::DrawBindings::default()
+                .texture("ColorTex", mod_api::TextureSource::Lightmap);
+            assert!(
+                game.resolve_draw_bindings(&mut draw, 0, &filterable)
+                    .is_ok()
+            );
+            game.client.pack_frame_slots.borrow_mut().clear();
+            game.client.pack_frame_state.set(None);
 
             // Without the game's handles (the renderer still out), nothing resolves.
             game.client.mod_gpu = None;
@@ -4918,6 +5050,731 @@ mod tests {
                 Err(mod_api::PipelineDrawError::Mesh(MeshError::Unavailable))
             );
             game.client.renderer.0 = renderer_slot;
+        });
+    }
+
+    struct WorldDepthCompute(std::sync::Arc<Mutex<Option<mod_api::RenderTargetRef>>>);
+
+    #[mod_api::__subscriptions]
+    impl Hooks for WorldDepthCompute {
+        fn register_render_pipelines(
+            &self,
+            _: &mod_api::RegistrationContext,
+            event: &mut mod_api::RegisterRenderPipelinesEvent<'_>,
+        ) {
+            let shader = Identifier::parse("depth_probe:sample").unwrap();
+            let layout = mod_api::BindGroupLayout::builder()
+                .entry(mod_api::BindEntry::new(
+                    "OutImage",
+                    mod_api::BindingKind::StorageImage {
+                        access: mod_api::StorageImageAccess::WriteOnly,
+                    },
+                ))
+                .sampler(
+                    "DepthTex",
+                    mod_api::Sampler::new(
+                        mod_api::SamplerFilter::Nearest,
+                        mod_api::SamplerAddress::ClampToEdge,
+                    ),
+                )
+                .build()
+                .unwrap();
+            event.compute_pipeline(
+                mod_api::ComputePipeline::builder(shader.clone(), shader)
+                    .bind_group_layout(layout)
+                    .build(),
+            );
+        }
+
+        fn frame_graph_setup(
+            &self,
+            host: &dyn ClientHost,
+            event: &mut mod_api::FrameGraphSetupEvent<'_>,
+        ) {
+            let target = *self.0.lock().unwrap().get_or_insert_with(|| {
+                host.create_render_target(
+                    &mod_api::RenderTargetDescriptor::new([1, 1])
+                        .color_target(mod_api::RenderTargetFormat::Rgba8Unorm)
+                        .storage(mod_api::StorageImageAccess::WriteOnly),
+                )
+                .unwrap()
+            });
+            let pipeline = host
+                .render_assets()
+                .compute_pipeline(&Identifier::parse("depth_probe:sample").unwrap())
+                .unwrap();
+            event
+                .graph
+                .add_compute_pass(
+                    mod_api::ComputePassDescriptor::new("sample live world depth")
+                        .reads(mod_api::FrameTarget::MainDepth)
+                        .writes(mod_api::FrameTarget::Mod(target)),
+                    &mut |node| {
+                        node.dispatch(
+                            pipeline,
+                            &mod_api::DrawBindings::default()
+                                .storage_image(
+                                    "OutImage",
+                                    mod_api::StorageImageBinding::new(target, 0, 0),
+                                )
+                                .texture("DepthTex", mod_api::TextureSource::WorldDepth),
+                            [1, 1, 1],
+                        )
+                        .unwrap()
+                    },
+                )
+                .unwrap();
+        }
+    }
+
+    /// A frame hook that hands the renderer the frame graph a fixture recorded, to feed it
+    /// through the renderer's ordinary `FrameGraphRunner` while the fixture's world assets and
+    /// stages stay as they are. It also notes the world depth view `gpu` publishes (its view ID
+    /// and size) each time the frame reaches its custom geometry boundary.
+    struct Recorded<'a> {
+        graph: Option<sunrise_client::gfx::mod_frame_graph::RecordedFrameGraph>,
+        gpu: &'a sunrise_client::gfx::ModGpuResources,
+        depth_seen: Vec<(u64, [u32; 2])>,
+    }
+    impl sunrise_client::gfx::world_primitives::FrameHooks for Recorded<'_> {
+        fn wants_after_sky(&self) -> bool {
+            false
+        }
+        fn on_custom_geometry(&mut self, _: &[mod_api::RenderableSection], _: bool) {
+            let (id, depth) = self.gpu.mod_world_depth_texture_view();
+            self.depth_seen
+                .push((id, [depth.texture().width(), depth.texture().height()]));
+        }
+        fn take_frame_graph(
+            &mut self,
+        ) -> Option<sunrise_client::gfx::mod_frame_graph::RecordedFrameGraph> {
+            self.graph.take()
+        }
+        fn on_after_sky(&mut self, _: &[mod_api::RenderableSection], _: bool) {}
+        fn on_prepare_render_buffers(
+            &mut self,
+            _: &[mod_api::RenderableSection],
+            _: bool,
+            _: &mut sunrise_client::gfx::world_primitives::PreparedHookGeometry,
+        ) {
+        }
+        fn on_render_stage(
+            &mut self,
+            _: RenderLevelStage,
+            _: &[mod_api::RenderableSection],
+            _: bool,
+        ) -> &[sunrise_client::gfx::world_primitives::DrawRanges] {
+            &[]
+        }
+        fn prepared_primitives(&self) -> sunrise_client::gfx::world_primitives::Batch<'_> {
+            Default::default()
+        }
+        fn on_after_level(&mut self, _: &[mod_api::RenderableSection], _: bool) {}
+    }
+
+    /// Clear world depth, record and render the `WorldDepthCompute` frame graph, and read back
+    /// the pixel the compute pass wrote. Returns what `render` returned with that pixel.
+    fn world_depth_frame(
+        game: &mut ClientGame<'_>,
+        depth: &wgpu::TextureView,
+        value: f32,
+        render: &std::sync::Arc<sunrise_client_render::assets::RenderAssets>,
+        probe: &Mutex<Option<mod_api::RenderTargetRef>>,
+        gpu: &sunrise_client::gfx::ModGpuResources,
+    ) -> (bool, [u8; 4]) {
+        use mod_api::__private::take_hook_panics;
+        use sunrise_client::gfx::world_primitives::FrameHooks;
+        let renderer = game.client.renderer.0.as_ref().unwrap();
+        let mut encoder = renderer.device.create_command_encoder(&Default::default());
+        // Initialize/store the actual view that WorldDepth resolves. This node runs before
+        // the normal world pass so its known value is independent of world geometry and
+        // the engine's unrelated store policy for graph reads later in the frame.
+        drop(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(value),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            ..Default::default()
+        }));
+        renderer.queue.submit([encoder.finish()]);
+
+        let camera = test_camera([0.0; 3], Mat4::IDENTITY);
+        let mut draw = WorldGeometry::default();
+        draw.reset([0.0; 3], Mat4::IDENTITY, [0.0; 2]);
+        let original = std::mem::replace(&mut game.client.client_pack.render, render.clone());
+        let graph = {
+            let mut driver = GameWorldStageDriver::new(game, &camera, 0.0, &mut draw);
+            driver.on_frame_graph_setup(&[], false);
+            driver.take_frame_graph().expect("native compute graph")
+        };
+        game.client.client_pack.render = original;
+        let panics = take_hook_panics();
+        assert!(panics.is_empty(), "{panics:?}");
+        let mut hooks = Recorded {
+            graph: Some(graph),
+            gpu,
+            depth_seen: Vec::new(),
+        };
+        let drawn = game
+            .render_with(|renderer, frame| renderer.render(frame, Some(&mut hooks)))
+            .unwrap();
+        let target = probe.lock().unwrap().expect("native output target");
+        let (_, view, _) = gpu
+            .resolve_mod_render_target_color(Some("depth_probe"), target, 0)
+            .unwrap();
+        let renderer = game.client.renderer.0.as_ref().unwrap();
+        let readback = renderer.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("native compute output"),
+            size: 256,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = renderer.device.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_buffer(
+            view.texture().as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: None,
+                },
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        renderer.queue.submit([encoder.finish()]);
+        let slice = readback.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |result| result.unwrap());
+        renderer
+            .device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+        let pixel = <[u8; 4]>::try_from(&slice.get_mapped_range().unwrap()[..4]).unwrap();
+        (drawn, pixel)
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn native_frame_graph_compute_reads_world_depth_after_resize_with_the_default_sampler() {
+        use mod_api::__private::{game::RegistrationContextNew, take_hook_panics};
+        if super::super::native_entity_refs::tests::run_fresh_cases(
+            "game::client_side::native_custom_geometry::tests::native_frame_graph_compute_reads_world_depth_after_resize_with_the_default_sampler",
+            "SUNRISE_MOD_WORLD_DEPTH_COMPUTE_CHILD",
+            &["run"],
+        ) {
+            return;
+        }
+
+        super::super::native_entity_refs::tests::with_client_game(|game| {
+            let (event_loop, window) =
+                crate::game::native_hooks::particle_count_tests::hidden_window();
+            game.common.options.offscreen = true;
+            game.client.title.0 = None;
+            game.client.screen = sunrise_gameplay_common::game::Screen::Playing;
+            let renderer = game.new_renderer(window.clone()).unwrap();
+            game.set_renderer(renderer);
+            game.client.window.0 = Some(window);
+            // Keep the window/event loop alive through GPU teardown.
+            let _event_loop = event_loop;
+
+            let probe = std::sync::Arc::new(Mutex::new(None));
+            mod_platform::__private::install(
+                vec![ModEntry::new(
+                    "depth_probe",
+                    Box::new(WorldDepthCompute(probe.clone())),
+                )]
+                .into(),
+            );
+            let _ = take_hook_panics();
+            let mut compute = Vec::new();
+            sunrise_gameplay_common::game::native_hooks::native_register_render_pipelines(
+                &mod_api::RegistrationContext::new(),
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut compute,
+            );
+            sunrise_client_render::mod_compute::register(compute).unwrap();
+            let shaders = tempfile::tempdir().unwrap();
+            let path = shaders.path().join("assets/depth_probe/shaders/compute");
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(
+                path.join("sample.csh"),
+                "#version 450
+layout(local_size_x = 1) in;
+layout(rgba8) writeonly uniform image2D OutImage;
+uniform sampler2D DepthTex;
+void main() {
+    float depth = textureLod(DepthTex, vec2(0.5), 0.0).r;
+    imageStore(OutImage, ivec2(0), vec4(depth, 0.4, 1.0 - depth, 1.0));
+}
+",
+            )
+            .unwrap();
+            let mut render = sunrise_client_render::assets::RenderAssets::unpublished();
+            render.mod_pipelines = sunrise_client_render::mod_pipelines::Pipelines::load(
+                &sunrise_assets::resource_source::ResourceSource::directory(
+                    shaders.path().to_owned(),
+                ),
+                7,
+            )
+            .unwrap();
+            game.client
+                .renderer
+                .0
+                .as_mut()
+                .unwrap()
+                .build_mod_pipelines(&render.mod_pipelines, &|_| None)
+                .unwrap();
+            let render = std::sync::Arc::new(render);
+            let gpu = game.mod_gpu().unwrap().clone();
+            // Depth 0.25 and 0.75 times 255 give 63.75 and 191.25: they round to 64 and 191;
+            // green 0.4 times 255 rounds to 102.
+            let (initial_id, depth) = gpu.mod_world_depth_texture_view();
+            assert_eq!(
+                world_depth_frame(game, &depth, 0.25, &render, &probe, &gpu),
+                (true, [64, 102, 191, 255])
+            );
+            assert_eq!(gpu.mod_world_depth_texture_view().0, initial_id);
+
+            let width = depth.texture().width() + 16;
+            let height = depth.texture().height() + 16;
+            game.client
+                .renderer
+                .0
+                .as_mut()
+                .unwrap()
+                .resize(width, height);
+            let (resized_id, depth) = gpu.mod_world_depth_texture_view();
+            assert_eq!(
+                [depth.texture().width(), depth.texture().height()],
+                [width, height]
+            );
+            assert_ne!(resized_id, initial_id);
+            assert_eq!(
+                world_depth_frame(game, &depth, 0.75, &render, &probe, &gpu),
+                (true, [191, 102, 64, 255])
+            );
+            drop(game.client.renderer.0.take());
+            drop(game.client.mod_gpu.take());
+        });
+    }
+
+    /// A screenshot twice the window's size draws one frame over a world depth of its own
+    /// (`Renderer::draw_scaled_frame`), and the window's depth comes back under a view ID no
+    /// earlier view had. Only view IDs and sizes are compared.
+    #[test]
+    #[ignore = "daily"]
+    fn a_scaled_screenshot_reads_its_own_world_depth_then_a_new_window_id() {
+        if super::super::native_entity_refs::tests::run_fresh_cases(
+            "game::client_side::native_custom_geometry::tests::a_scaled_screenshot_reads_its_own_world_depth_then_a_new_window_id",
+            "SUNRISE_MOD_SCALED_SCREENSHOT_DEPTH_CHILD",
+            &["run"],
+        ) {
+            return;
+        }
+
+        super::super::native_entity_refs::tests::with_client_game(|game| {
+            let (event_loop, window) =
+                crate::game::native_hooks::particle_count_tests::hidden_window();
+            game.common.options.offscreen = true;
+            game.client.title.0 = None;
+            game.client.screen = sunrise_gameplay_common::game::Screen::Playing;
+            let renderer = game.new_renderer(window.clone()).unwrap();
+            game.set_renderer(renderer);
+            game.client.window.0 = Some(window);
+            // Keep the window/event loop alive through GPU teardown.
+            let _event_loop = event_loop;
+
+            let gpu = game.mod_gpu().unwrap().clone();
+            let (window_id, depth) = gpu.mod_world_depth_texture_view();
+            let window_size = [depth.texture().width(), depth.texture().height()];
+            {
+                let renderer = game.client.renderer.0.as_mut().unwrap();
+                renderer.screenshot_quality = 2;
+                renderer.screenshot = Some(sunrise_client::gfx::ScreenshotRequest {
+                    path: "unused.png".into(),
+                    size: None,
+                    scaled: true,
+                    background: false,
+                });
+            }
+            let mut hooks = Recorded {
+                graph: None,
+                gpu: &gpu,
+                depth_seen: Vec::new(),
+            };
+            let drawn = game
+                .render_with(|renderer, frame| renderer.render(frame, Some(&mut hooks)))
+                .unwrap();
+            assert!(!drawn, "the screenshot frame never reaches the window");
+
+            // Inside the frame: a depth of another ID and another size than the window's.
+            assert_eq!(hooks.depth_seen.len(), 1);
+            let (scaled_id, scaled_size) = hooks.depth_seen[0];
+            assert_ne!(scaled_id, window_id);
+            assert_ne!(scaled_size, window_size);
+
+            // After it: the window's size again, under an ID neither of the two views had.
+            let (restored_id, depth) = gpu.mod_world_depth_texture_view();
+            assert_ne!(restored_id, scaled_id);
+            assert_ne!(restored_id, window_id);
+            assert_eq!(
+                [depth.texture().width(), depth.texture().height()],
+                window_size
+            );
+            drop(game.client.renderer.0.take());
+            drop(game.client.mod_gpu.take());
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn a_sampled_transient_the_pass_does_not_declare_in_its_reads_is_refused() {
+        use crate::game::host::draw::GameFrameGraphContext;
+        use mod_api::{ComputeDispatchError, DrawBindings, FrameGraphContext, FrameTarget};
+        use sunrise_assets::resource_source::{Resource, ResourceSource};
+        use sunrise_client::gfx::mod_pipelines::{PipelineVertex, ResolvedSet1Entry};
+        use sunrise_client::world_geometry::FrameGraphSurface;
+
+        // Pipeline registration is process-global; publish only in the fresh child.
+        if super::super::native_entity_refs::tests::run_fresh_cases(
+            "game::client_side::native_custom_geometry::tests::a_sampled_transient_the_pass_does_not_declare_in_its_reads_is_refused",
+            "SUNRISE_UNDECLARED_TRANSIENT_READ_CHILD",
+            &["run"],
+        ) {
+            return;
+        }
+        super::super::native_entity_refs::tests::with_client_game(|game| {
+            let (_event_loop, window) =
+                crate::game::native_hooks::particle_count_tests::hidden_window();
+            game.common.options.offscreen = true;
+            let renderer = game.new_renderer(window.clone()).unwrap();
+            game.set_renderer(renderer);
+            game.client.window.0 = Some(window);
+
+            let draw_id = Identifier::parse("transient_probe:core/sample").unwrap();
+            let compute_id = Identifier::parse("transient_probe:sample").unwrap();
+            let layout = mod_api::BindGroupLayout::builder()
+                .uniform_buffer("ProbeParams", 16)
+                .sampler(
+                    "InputTex",
+                    mod_api::Sampler::new(
+                        mod_api::SamplerFilter::Nearest,
+                        mod_api::SamplerAddress::ClampToEdge,
+                    ),
+                );
+            let draw_pipeline = mod_api::RenderPipeline::new(
+                draw_id.clone(),
+                draw_id.clone(),
+                mod_api::PipelineBlend::Opaque,
+                mod_api::WorldDepth::ThroughWalls,
+            )
+            .bind_group_layout(layout.clone().build().unwrap());
+            let compute_pipeline =
+                mod_api::ComputePipeline::builder(compute_id.clone(), compute_id.clone())
+                    .bind_group_layout(
+                        layout
+                            .entry(mod_api::BindEntry::new(
+                                "Out",
+                                mod_api::BindingKind::StorageBuffer {
+                                    read_only: false,
+                                    min_size: 4,
+                                },
+                            ))
+                            .build()
+                            .unwrap(),
+                    )
+                    .build();
+            let vanilla = tempfile::tempdir().unwrap();
+            std::fs::write(
+                vanilla.path().join("render-pipelines.json"),
+                r#"{"required":["minecraft:pipeline/solid_block"],"optional":["minecraft:pipeline/wireframe"]}"#,
+            )
+            .unwrap();
+            sunrise_client_render::mod_pipelines::register(vec![draw_pipeline], vanilla.path())
+                .unwrap();
+            sunrise_client_render::mod_compute::register(vec![compute_pipeline]).unwrap();
+
+            let shaders = ResourceSource::indexed(
+                [
+                    (
+                        "assets/transient_probe/shaders/core/sample.vsh",
+                        "#version 330
+in vec3 Position;
+in vec2 UV0;
+in vec4 Color;
+out vec2 vUv;
+out vec4 vColor;
+void main() {
+    gl_Position = vec4(Position.xy, 0.5, 1.0);
+    vUv = UV0;
+    vColor = Color;
+}
+",
+                    ),
+                    (
+                        "assets/transient_probe/shaders/core/sample.fsh",
+                        "#version 330
+layout(std140) uniform ProbeParams { vec4 Bias; };
+uniform sampler2D InputTex;
+in vec2 vUv;
+in vec4 vColor;
+out vec4 fragColor;
+void main() { fragColor = texture(InputTex, vUv) * vColor + Bias; }
+",
+                    ),
+                    (
+                        "assets/transient_probe/shaders/compute/sample.csh",
+                        "#version 450
+layout(local_size_x = 1) in;
+layout(std140) uniform ProbeParams { vec4 Bias; };
+uniform sampler2D InputTex;
+layout(std430) buffer Out { uint values[]; };
+void main() { values[0] = floatBitsToUint(textureLod(InputTex, vec2(0.5), 0.0).r + Bias.x); }
+",
+                    ),
+                ]
+                .into_iter()
+                .map(|(path, shader)| (path.into(), Resource::bytes(shader.as_bytes().to_vec())))
+                .collect(),
+            );
+            let mut render = sunrise_client_render::assets::RenderAssets::unpublished();
+            render.mod_pipelines =
+                sunrise_client_render::mod_pipelines::Pipelines::load(&shaders, 7).unwrap();
+            game.client
+                .renderer
+                .0
+                .as_mut()
+                .unwrap()
+                .build_mod_pipelines(&render.mod_pipelines, &|_| None)
+                .unwrap();
+            let pipeline = render.mod_pipelines.resolve(&draw_id).unwrap();
+            let compute = render.mod_pipelines.compute().resolve(&compute_id).unwrap();
+            game.client.client_pack.render = std::sync::Arc::new(render);
+
+            let storage = game
+                .create_storage_buffer(&mod_api::StorageBufferDescriptor::new(16))
+                .unwrap();
+            let vertices =
+                [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]].map(|[x, y]| PipelineVertex {
+                    pos: [x, y, 0.0],
+                    uv: [(x + 1.0) / 2.0, (y + 1.0) / 2.0],
+                    color: u32::MAX,
+                });
+            let inline = [0u8; 16];
+
+            // The refusals below and the cycle after them log through the production warning
+            // set; this test process is fresh, so installing its logger changes nothing shared.
+            static WARNINGS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+            struct Capture;
+            impl log::Log for Capture {
+                fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+                    metadata.level() == log::Level::Warn
+                }
+                fn log(&self, record: &log::Record<'_>) {
+                    let text = record.args().to_string();
+                    if self.enabled(record.metadata()) && text.starts_with("Sunrise: frame graph") {
+                        WARNINGS.lock().unwrap().push(text);
+                    }
+                }
+                fn flush(&self) {}
+            }
+            log::set_logger(&Capture).unwrap();
+            log::set_max_level(log::LevelFilter::Warn);
+
+            // Per case: whether the draw declares the read, lists the transient in `.writes`,
+            // or renders into it, and what the draw returns. The compute dispatch, which samples
+            // the transient's depth, follows the first two cases only.
+            for (declared, writes_only, own_attachment, expected) in [
+                (true, false, false, Ok(())),
+                (false, false, false, Err(PipelineDrawError::InvalidBinding)),
+                (false, true, false, Err(PipelineDrawError::InvalidBinding)),
+                (
+                    false,
+                    false,
+                    true,
+                    Err(PipelineDrawError::TargetReadWriteHazard),
+                ),
+            ] {
+                let accepted = expected.is_ok();
+                let with_compute = !writes_only && !own_attachment;
+                let mut surface = FrameGraphSurface::default();
+                let mut graph = GameFrameGraphContext::new(game, &mut surface);
+                let input = graph
+                    .create_transient(&mod_api::RenderTargetDescriptor::rgba8(
+                        [8, 8],
+                        mod_api::RenderTargetDepth::Depth32Float,
+                    ))
+                    .unwrap();
+                let target = if own_attachment {
+                    input
+                } else {
+                    graph
+                        .create_transient(&mod_api::RenderTargetDescriptor::rgba8(
+                            [8, 8],
+                            mod_api::RenderTargetDepth::None,
+                        ))
+                        .unwrap()
+                };
+                let mut draw =
+                    mod_api::FramePassDescriptor::new("draw", FrameTarget::Transient(target));
+                if declared {
+                    draw = draw.reads(FrameTarget::Transient(input));
+                }
+                if writes_only {
+                    draw = draw.writes(FrameTarget::Transient(input));
+                }
+
+                // The valid inline uniform is first in both layouts, so a partial append by
+                // the draw recorder would leave bytes even if it later refused the sampler.
+                let draw_bindings = DrawBindings::new()
+                    .inline_uniform("ProbeParams", &inline)
+                    .texture(
+                        "InputTex",
+                        mod_api::TextureSource::TransientTargetColor(input, 0),
+                    );
+                graph
+                    .add_pass(draw, &mut |pass| {
+                        assert_eq!(
+                            pass.draw_vertices(
+                                pipeline,
+                                &[bytemuck::cast_slice(&vertices)],
+                                None,
+                                mod_api::MeshDraw::vertices(0..4),
+                                &draw_bindings,
+                            ),
+                            expected,
+                        );
+                    })
+                    .unwrap();
+                if with_compute {
+                    // Declaring another read does not declare this transient.
+                    let dispatch =
+                        mod_api::ComputePassDescriptor::new("compute").reads(if declared {
+                            FrameTarget::Transient(input)
+                        } else {
+                            FrameTarget::MainDepth
+                        });
+                    let compute_bindings = DrawBindings::new()
+                        .inline_uniform("ProbeParams", &inline)
+                        .texture(
+                            "InputTex",
+                            mod_api::TextureSource::TransientTargetDepth(input),
+                        )
+                        .storage_buffer("Out", storage.slice(0, 16));
+                    graph
+                        .add_compute_pass(dispatch, &mut |node| {
+                            assert_eq!(
+                                node.dispatch(compute, &compute_bindings, [1, 1, 1]),
+                                if declared {
+                                    Ok(())
+                                } else {
+                                    Err(ComputeDispatchError::InvalidBinding)
+                                },
+                            );
+                        })
+                        .unwrap();
+                }
+
+                let draw = &surface.graph.passes[0];
+                if accepted {
+                    assert_eq!(draw.draws.len(), 1);
+                    assert_eq!(draw.inline_uniforms, inline);
+                    assert!(matches!(
+                        draw.draws[0].bindings.as_ref().unwrap().entries.as_slice(),
+                        [ResolvedSet1Entry::InlineUniform { .. }, ResolvedSet1Entry::TransientColor { target, attachment: 0 }]
+                            if *target == input
+                    ));
+                } else {
+                    assert!(draw.draws.is_empty());
+                    assert!(draw.transient_vertices.is_empty());
+                    assert!(draw.inline_uniforms.is_empty());
+                }
+                if with_compute {
+                    let dispatches = surface.graph.passes[1].dispatches.as_deref().unwrap();
+                    if accepted {
+                        assert_eq!(dispatches.len(), 1);
+                        assert_eq!(dispatches[0].inline, inline);
+                        assert!(matches!(
+                            dispatches[0].entries.as_slice(),
+                            [ResolvedSet1Entry::InlineUniform { .. }, ResolvedSet1Entry::TransientDepth { target }, ResolvedSet1Entry::StorageBuffer { .. }]
+                                if *target == input
+                        ));
+                    } else {
+                        assert!(dispatches.is_empty());
+                    }
+                }
+            }
+
+            // A cycle whose pass labels are exactly the old string-prefixed key of the refusal
+            // above ("undeclared transient read", "draw", "0"), refused twice: it is admitted
+            // once, and it neither suppresses nor is suppressed by the refusal of pass "draw"
+            // sampling transient 0 that was logged during the cases.
+            let mut surface = FrameGraphSurface::default();
+            let mut graph = GameFrameGraphContext::new(game, &mut surface);
+            let output = graph
+                .create_transient(&mod_api::RenderTargetDescriptor::rgba8(
+                    [8, 8],
+                    mod_api::RenderTargetDepth::None,
+                ))
+                .unwrap();
+            let first = graph
+                .add_pass(
+                    mod_api::FramePassDescriptor::new(
+                        "undeclared transient read",
+                        FrameTarget::Transient(output),
+                    ),
+                    &mut |_| {},
+                )
+                .unwrap();
+            let second = graph
+                .add_pass(
+                    mod_api::FramePassDescriptor::new("draw", FrameTarget::Transient(output))
+                        .after_pass(first),
+                    &mut |_| {},
+                )
+                .unwrap();
+            for _ in 0..2 {
+                assert_eq!(
+                    graph
+                        .add_pass(
+                            mod_api::FramePassDescriptor::new("0", FrameTarget::Transient(output))
+                                .after_pass(second)
+                                .before_pass(first),
+                            &mut |_| {},
+                        )
+                        .unwrap_err(),
+                    mod_api::FrameGraphError::Cycle {
+                        passes: vec![
+                            "undeclared transient read".to_owned(),
+                            "draw".to_owned(),
+                            "0".to_owned(),
+                        ],
+                    },
+                );
+            }
+
+            // Each warning kind is logged once however often it recurs: the draw refusals of
+            // the second and third cases share the first one's key, and the second cycle
+            // attempt shares the first one's.
+            assert_eq!(
+                *WARNINGS.lock().unwrap(),
+                [
+                    "Sunrise: frame graph pass draw samples transient target 0 without declaring it in its reads; binding refused",
+                    "Sunrise: frame graph pass compute samples transient target 0 without declaring it in its reads; binding refused",
+                    "Sunrise: frame graph cycle detected between undeclared transient read, draw, 0",
+                ]
+            );
+            drop(game.client.renderer.0.take());
+            drop(game.client.mod_gpu.take());
         });
     }
 }

@@ -194,7 +194,6 @@ sunrise-client cut_layout::game::server_side::chat_server::enchantment_snapshot_
 sunrise-client cut_layout::game::server_side::chat_server::end_clock_tests::time_moves_the_clock_the_end_runs_on lib daily resources
 sunrise-client cut_layout::game::client_side::chat::suggestion_completion_tests::chat_completion_reaches_mods_from_keyboard_and_mouse lib daily resources
 sunrise-gameplay game::server_side::commands_server::persistent_component_tests::native_persistent_components_are_available_to_give lib daily resources
-sunrise-client-gameplay game::client_side::chat::tests::studio_is_in_the_client_chat_tree_without_a_mod_registering_it lib daily resources
 sunrise-client cut_layout::game::server_side::chiseled_bookshelf::tests::a_book_written_over_a_book_makes_its_slot_the_last_touched lib daily resources
 sunrise-client cut_layout::game::server_side::chiseled_bookshelf::tests::an_empty_slot_clicked_as_occupied_still_plays_the_pickup lib daily resources
 sunrise-client cut_layout::game::client_side::client_ambient::effect_particle_tests::an_oozing_player_swirls_slime_ball_crumbs lib daily resources
@@ -449,8 +448,6 @@ sunrise-client cut_layout::game::creatures::projectile_batch_tests::canceled_imp
 sunrise-client cut_layout::game::creatures::projectile_batch_tests::no_impact_expiration_retires_only_the_expired_owner lib daily resources
 sunrise-client cut_layout::game::creatures::pufferfish_player::pufferfish_sting_tests::a_silent_fish_damages_and_poisons_without_the_sting lib daily resources
 sunrise-client cut_layout::game::creatures::pufferfish_player::pufferfish_sting_tests::the_sting_event_goes_out_once_per_accepted_hit lib daily resources
-sunrise-client cut_layout::game::creatures::retained_limits_tests::pending_pushes_deliver_once_and_do_not_cross_world_reset lib daily child-process
-sunrise-client cut_layout::game::server_side::creatures_server::retained_limits_tests::same_mob_guest_attack_survives_movement_panic lib daily child-process
 sunrise-client cut_layout::game::creatures::revenge_home_tests::a_zombie_takes_revenge_only_on_a_cow_inside_its_home lib daily resources
 sunrise-client cut_layout::game::creatures::spawn_egg_mob_tests::a_mooshroom_egg_child_rolls_the_colour_flip lib daily resources
 sunrise-client cut_layout::game::creatures::spawn_egg_mob_tests::an_egg_used_on_a_mob_posts_entity_interact lib daily resources

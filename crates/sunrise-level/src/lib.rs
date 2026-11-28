@@ -31,7 +31,6 @@ pub use sunrise_world::json_folder;
 pub use sunrise_world::moving_colliders;
 
 // --- lowered modules ---
-#[cfg(target_os = "linux")]
 pub mod api_context;
 pub mod assets;
 pub mod audio_capture;
@@ -61,7 +60,6 @@ pub mod jigsaw_block;
 pub mod level_loading;
 pub mod light;
 pub mod light_border;
-pub mod lod_data;
 pub mod logging;
 pub mod mod_chunk_tickets;
 pub mod options_file;
@@ -71,6 +69,9 @@ pub mod pack_meta;
 pub mod pack_tags;
 pub mod par;
 pub mod particle_options;
+// Its sampler sources (`sunrise_threads::heap_sample`, `::profile`) and its only user
+// (`sunrise-sim`'s `server_perf::samples::linux`) are Linux-only.
+#[cfg(target_os = "linux")]
 pub mod perf_capture;
 pub mod poi_sections;
 pub mod potent_sulfur_level;

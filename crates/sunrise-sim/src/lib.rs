@@ -7,6 +7,8 @@ mod rule_replacements;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_fixtures;
 #[cfg(test)]
+mod test_game_dir;
+#[cfg(test)]
 mod test_log;
 
 pub use sunrise_assets::resource_source;
@@ -38,7 +40,6 @@ pub use sunrise_world::json_folder;
 pub use sunrise_world::moving_colliders;
 
 // --- lowered level re-exports ---
-#[cfg(target_os = "linux")]
 pub use sunrise_level::api_context;
 pub use sunrise_level::assets;
 pub use sunrise_level::audio_capture;
@@ -67,7 +68,6 @@ pub use sunrise_level::jigsaw_block;
 pub use sunrise_level::level_loading;
 pub use sunrise_level::light;
 pub use sunrise_level::light_border;
-pub use sunrise_level::lod_data;
 pub use sunrise_level::logging;
 pub use sunrise_level::mod_chunk_tickets;
 pub use sunrise_level::pack_image;
@@ -75,6 +75,7 @@ pub use sunrise_level::pack_meta;
 pub use sunrise_level::pack_tags;
 pub use sunrise_level::par;
 pub use sunrise_level::particle_options;
+#[cfg(target_os = "linux")]
 pub use sunrise_level::perf_capture;
 pub use sunrise_level::poi_sections;
 pub use sunrise_level::potent_sulfur_level;
@@ -155,7 +156,6 @@ pub mod lan;
 pub mod landing;
 pub mod lang_load;
 pub mod living_attributes;
-pub mod lod_net;
 pub mod map_decoration_types;
 pub mod menu;
 pub mod menu_extra_net;
@@ -182,6 +182,9 @@ pub mod portal_sections;
 pub mod pose;
 pub mod powder_snow;
 pub mod pregen;
+#[cfg(test)]
+#[path = "../../sunrise-core/src/prepared_test_root.rs"]
+pub(crate) mod prepared_test_root;
 pub mod projectiles;
 pub mod raid;
 pub mod random_tick_sections;
