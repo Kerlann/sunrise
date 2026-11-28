@@ -151,8 +151,6 @@ pub(crate) mod tests {
     use sunrise_gameplay_common::game::native_server::NativeServerGameExt3;
     #[cfg(feature = "client")]
     use sunrise_gameplay_common::game::player_identity::PlayerIdentityGameExt1;
-    #[cfg(feature = "client")]
-    pub use sunrise_gameplay_common::game::test_fixtures::{fixture_facts_mut, resolve_parts};
     pub use sunrise_gameplay_common::game::test_fixtures::{
         fixture_root, record_key, run_fresh_cases,
     };
@@ -209,9 +207,8 @@ pub(crate) mod tests {
 
     #[cfg(feature = "client")]
     pub(crate) use super::super::super::native_item_places_test_support::{
-        with_client_game, with_game, with_game_at, with_game_role, with_game_role_and_facts,
-        with_game_role_and_facts_client, with_game_role_client, with_resident_game,
-        with_uncached_client_game,
+        with_client_game, with_game, with_game_at, with_game_role, with_game_role_client,
+        with_resident_game, with_uncached_client_game,
     };
 
     #[test]

@@ -12,15 +12,6 @@ pub(crate) fn resolve_cached_block_definitions_with_fixture(
     }
     sunrise_gameplay_common::game::api_values::resolve_cached_block_definitions(cached_registry)
 }
-#[cfg(all(test, feature = "client"))]
-pub(crate) fn resolve_cached_block_definitions(
-    cached_registry: &'static sunrise_world::registry::BlockRegistry,
-) -> Result<&'static sunrise_world::registry::BlockRegistry, String> {
-    resolve_cached_block_definitions_with_fixture(cached_registry, || {
-        mod_platform::__private::part_tests::install_parts_fixture(&[])
-    })
-}
-
 #[cfg(test)]
 pub(crate) fn install_test_platform() {
     mod_platform::__private::test_platform::install();
