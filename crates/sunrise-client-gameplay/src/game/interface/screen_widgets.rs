@@ -1966,22 +1966,35 @@ impl crate::game::ClientGame<'_> {
                 .entries[idx] = Some(entry);
             return None;
         }
+        let entry_id = entry.id;
         let result = f(self, &mut entry);
-        if self.client.screen_state.0.widgets.generation() == generation {
-            if entry.disabled || !entry.owner.is_enabled() {
-                entry.disabled = true;
-                self.client.screen_state.0.widgets.clear_links_for(idx);
-            }
+        let still_same_screen = self.client.screen_state.0.widgets.generation() == generation;
+        if still_same_screen {
             let restored = {
                 let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
-                if let Some(slot) = inner.entries.get_mut(idx) {
+                if inner.order.contains(&entry_id)
+                    && let Some(slot) = inner.entries.get_mut(idx)
+                    && slot.is_none()
+                {
+                    if entry.disabled || !entry.owner.is_enabled() {
+                        entry.disabled = true;
+                        if inner.focused == Some(idx) {
+                            inner.focused = None;
+                        }
+                        if inner.dragging.is_some_and(|(drag_idx, _)| drag_idx == idx) {
+                            inner.dragging = None;
+                        }
+                    }
                     *slot = Some(entry);
                     None
                 } else {
                     Some(entry)
                 }
             };
-            if let Some(entry) = restored {
+            if let Some(mut entry) = restored {
+                if focused {
+                    entry.apply_focus(false);
+                }
                 entry.dispose();
             }
         } else {
@@ -2438,11 +2451,25 @@ impl crate::game::ClientGame<'_> {
                     if button != 0 {
                         return id.is_none();
                     }
+                    let entry_id = self
+                        .client
+                        .screen_state
+                        .0
+                        .widgets
+                        .inner
+                        .borrow()
+                        .entries
+                        .get(idx)
+                        .and_then(Option::as_ref)
+                        .map(|e| e.id);
                     self.play_audio_button_click();
                     let accepted =
                         self.with_mounted_widget(idx, |game, entry| entry.press_button(game));
                     if accepted == Some(true)
                         && self.client.screen_state.0.widgets.generation() == generation
+                        && entry_id.is_some_and(|eid| {
+                            self.client.screen_state.0.widgets.index_of(eid) == Some(idx)
+                        })
                     {
                         self.set_mounted_widget_focus(Some(idx));
                         self.client
@@ -2473,6 +2500,17 @@ impl crate::game::ClientGame<'_> {
                     return true;
                 }
                 Hit::Custom => {
+                    let entry_id = self
+                        .client
+                        .screen_state
+                        .0
+                        .widgets
+                        .inner
+                        .borrow()
+                        .entries
+                        .get(idx)
+                        .and_then(Option::as_ref)
+                        .map(|e| e.id);
                     let (handled, take_focus) = self
                         .with_mounted_widget(idx, |game, entry| {
                             if let MountedWidgetKind::Custom(widget) = &mut entry.kind {
@@ -2499,7 +2537,12 @@ impl crate::game::ClientGame<'_> {
                             }
                         })
                         .unwrap_or((false, false));
-                    if handled && self.client.screen_state.0.widgets.generation() == generation {
+                    if handled
+                        && self.client.screen_state.0.widgets.generation() == generation
+                        && entry_id.is_some_and(|eid| {
+                            self.client.screen_state.0.widgets.index_of(eid) == Some(idx)
+                        })
+                    {
                         if take_focus {
                             self.set_mounted_widget_focus(Some(idx));
                         }

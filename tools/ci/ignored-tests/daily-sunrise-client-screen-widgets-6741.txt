@@ -1,4 +1,5 @@
 # Screen widgets parity (#6741, #6742, #972)
+sunrise-client cut_layout::game::client_side::native_hooks_client::base::screen_widgets_tests::callback_clear_and_replace_does_not_overwrite_replacement_slot lib daily child-process
 sunrise-client cut_layout::game::client_side::native_hooks_client::base::screen_widgets_tests::custom_widget_mouse_moved_and_should_take_focus_after_interaction lib daily child-process
 sunrise-client cut_layout::game::client_side::native_hooks_client::base::screen_widgets_tests::discovery_replay_has_no_callback_or_live_state_side_effects lib daily child-process
 sunrise-client cut_layout::game::client_side::native_hooks_client::base::screen_widgets_tests::engine_screens_enumerate_stable_ids_and_modify_widgets_across_frames lib daily child-process

@@ -4040,3 +4040,76 @@ fn discovery_replay_has_no_callback_or_live_state_side_effects() {
         });
     });
 }
+
+#[test]
+#[ignore = "daily"]
+fn callback_clear_and_replace_does_not_overwrite_replacement_slot() {
+    if run_fresh_cases(
+        "cut_layout::game::client_side::native_hooks_client::base::screen_widgets_tests::callback_clear_and_replace_does_not_overwrite_replacement_slot",
+        "SUNRISE_WIDGETS_CALLBACK_REPLACE_CHILD",
+        &["window"],
+    ) {
+        return;
+    }
+
+    with_mods(Vec::new().into(), || {
+        with_client_game(|game| {
+            let (_el, win_id) = attach_offscreen_window(game);
+            game.client.pause_menu = true;
+            game.set_screen(Screen::Paused);
+            game.observe_screen();
+
+            let first_drops = Arc::new(AtomicUsize::new(0));
+            let replacement_presses = Arc::new(AtomicUsize::new(0));
+            let replacement_id = Arc::new(Mutex::new(None));
+
+            let first_drop_guard = DropCounter(first_drops.clone());
+            let rep_presses = replacement_presses.clone();
+            let rep_id_slot = replacement_id.clone();
+
+            let first_id = game.screen_widgets().unwrap().add_button(Button::new(
+                [16.0, 16.0, 120.0, 20.0],
+                ApiText::literal("ReplaceMe"),
+                move |_state, host| {
+                    let _ = &first_drop_guard;
+                    let widgets = host.screen_widgets().expect("active screen widgets");
+                    widgets.clear();
+                    let presses = rep_presses.clone();
+                    let new_id = widgets.add_button(Button::new(
+                        [16.0, 16.0, 120.0, 20.0],
+                        ApiText::literal("Replacement"),
+                        move |_state, _host| {
+                            presses.fetch_add(1, Ordering::SeqCst);
+                        },
+                    ));
+                    *rep_id_slot.lock().unwrap() = Some(new_id);
+                },
+            ));
+
+            // Click the first button: its callback clears and adds a replacement at slot 0.
+            move_mouse(game, win_id, 40.0, 26.0);
+            send_mouse_button(game, win_id, MouseButton::Left, true);
+            send_mouse_button(game, win_id, MouseButton::Left, false);
+
+            let new_id = replacement_id
+                .lock()
+                .unwrap()
+                .expect("callback added replacement button");
+            assert_ne!(new_id, first_id);
+            assert_eq!(
+                first_drops.load(Ordering::SeqCst),
+                1,
+                "removed callback owner must be disposed, not restored over slot 0"
+            );
+            {
+                let widgets = game.screen_widgets().unwrap();
+                let children = widgets.children();
+                assert_eq!(children.len(), 1);
+                assert_eq!(children[0].id, new_id);
+                assert_eq!(children[0].message, Some(ApiText::literal("Replacement")));
+                assert!(widgets.press(new_id));
+            }
+            assert_eq!(replacement_presses.load(Ordering::SeqCst), 1);
+        });
+    });
+}
