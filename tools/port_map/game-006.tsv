@@ -88,7 +88,7 @@ LivingEntity.causeExtraKnockback	port	crates/sunrise-gameplay/src/game/items/enc
 LivingEntity.wasRecentlyStabbed	inline	crates/sunrise-gameplay/src/game/items/spear_server.rs::Game::spear_tick	Game::stabbed with contact_cooldown_ticks
 LivingEntity.rememberStabbedEntity	inline	crates/sunrise-gameplay/src/game/items/spear_server.rs::Game::spear_tick	stabbed.insert(key, now)
 LivingEntity.stabbedEntities	port	crates/sunrise-gameplay/src/game/items/spear_server.rs::Game::spear_tick	the living entities stabbed in one use feed the minecraft:spear_mobs trigger
-LivingEntity.stabAttack	port	crates/sunrise-gameplay/src/game/items/spear_server.rs::Game::stab_mob	gap: minor: the player's spear only; mobs never stab
+LivingEntity.stabAttack	port	crates/sunrise-gameplay/src/game/items/spear_server.rs::Game::stab_mob	the player's spear; a mob's is spear_use.rs stab_attack, settled by Game::mob_weapon_attack at Pause::Stab before its aiStep
 LivingEntity.handleHandSwap	skip:other		the LAN server sends both changed slots in one SetEquipment instead of entity event 55; clients end in the same state
 LivingEntity.handleEquipmentChanges	port	crates/sunrise-sim/src/lan/entity.rs::ServerEntity::send_equipment	changed slots as one SetEquipment
 LivingEntity.updatePlayersWithNewEquipment	inline	crates/sunrise-sim/src/lan/entity.rs::ServerEntity::send_equipment	the packet is built there

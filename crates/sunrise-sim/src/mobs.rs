@@ -4652,6 +4652,34 @@ impl Mob {
         self.prepare_tick();
         neutral_anger::around_tick(self, w.game_time, |m| ai::tick(m, w, level, events))
     }
+    /// [`Self::tick`], stopping after `LivingEntity.updatingUsingItem` raised stabs, for the
+    /// caller to settle them (the last events in `events`) before the mob moves;
+    /// [`Self::resume_after_stab`] then finishes the tick.
+    pub fn tick_until_stab(
+        &mut self,
+        w: &MobWorld,
+        level: &mut DamageLevel<'_>,
+        events: &mut Vec<MobEvent>,
+    ) -> ai::UntilStab {
+        self.prepare_tick();
+        neutral_anger::before_tick(self, w.game_time);
+        let progress = ai::tick_until_stab(self, w, level, events);
+        if matches!(progress, ai::UntilStab::Complete(_)) {
+            neutral_anger::after_tick(self, w.game_time);
+        }
+        progress
+    }
+    /// Finish a tick that [`Self::tick_until_stab`] stopped at its stabs.
+    pub fn resume_after_stab(
+        &mut self,
+        w: &MobWorld,
+        level: &mut DamageLevel<'_>,
+        events: &mut Vec<MobEvent>,
+    ) -> bool {
+        let kept = ai::resume_hostless_after_stab(self, w, level, events);
+        neutral_anger::after_tick(self, w.game_time);
+        kept
+    }
     /// A game-owned tick may pause before fox consumption to release its loans.
     pub fn tick_until_consumption(
         &mut self,

@@ -4566,6 +4566,8 @@ impl crate::game::ServerGame<'_> {
         self.complete_mob_removal(join, split);
     }
 
+    /// Settle `Mob.doHurtTarget` after the borrowed tick, or `LivingEntity.stabAttack` at the
+    /// attacker's `Pause::Stab`, before its `aiStep`.
     fn mob_weapon_attack(&mut self, hit: sunrise_sim::mobs::WeaponHit) -> bool {
         use sunrise_sim::mobs::{WeaponAttack, WeaponHit};
         let WeaponHit {
