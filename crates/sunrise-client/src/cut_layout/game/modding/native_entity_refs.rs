@@ -210,7 +210,8 @@ pub(crate) mod tests {
     #[cfg(feature = "client")]
     pub(crate) use super::super::super::native_item_places_test_support::{
         with_client_game, with_game, with_game_at, with_game_role, with_game_role_and_facts,
-        with_game_role_and_facts_client, with_resident_game, with_uncached_client_game,
+        with_game_role_and_facts_client, with_game_role_client, with_resident_game,
+        with_uncached_client_game,
     };
 
     #[test]

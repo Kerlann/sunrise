@@ -14,9 +14,14 @@ use sunrise_gameplay_common::game::resource_load::{Progress, with_skip_facts_mem
 #[path = "resource_load/test_cache.rs"]
 pub(crate) mod test_cache;
 
+#[cfg(test)]
+fn install_empty_parts_fixture() -> std::result::Result<(), Vec<String>> {
+    mod_platform::__private::part_tests::install_parts_fixture(&[])
+}
+
 /// Fixture helper for tests without a launch mod state.
 #[allow(clippy::too_many_arguments)]
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(crate) fn load_resources(
     roots: impl Into<packs::PackRoots>,
     additional_data: Vec<Arc<sunrise_level::datapack::DataPack>>,
@@ -27,6 +32,37 @@ pub(crate) fn load_resources(
     menu: bool,
     role: impl Into<mods::LoadRole>,
     progress: &Progress,
+    publish: &mut dyn FnMut(UiPublishArg, &std::path::Path),
+) -> Result<Loaded> {
+    load_resources_with_fixture(
+        roots,
+        additional_data,
+        launch_world,
+        vanilla_root,
+        settings,
+        started,
+        menu,
+        role,
+        progress,
+        install_empty_parts_fixture,
+        publish,
+    )
+}
+
+/// Loads a fixture using the caller's platform-specific empty-parts installer.
+#[allow(clippy::too_many_arguments)]
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn load_resources_with_fixture(
+    roots: impl Into<packs::PackRoots>,
+    additional_data: Vec<Arc<sunrise_level::datapack::DataPack>>,
+    launch_world: Option<&str>,
+    vanilla_root: &std::path::Path,
+    settings: &Settings,
+    started: Instant,
+    menu: bool,
+    role: impl Into<mods::LoadRole>,
+    progress: &Progress,
+    install_parts_fixture: fn() -> std::result::Result<(), Vec<String>>,
     publish: &mut dyn FnMut(UiPublishArg, &std::path::Path),
 ) -> Result<Loaded> {
     test_cache::load(
@@ -40,10 +76,10 @@ pub(crate) fn load_resources(
         false,
         role.into(),
         progress,
+        install_parts_fixture,
         publish,
     )
 }
-
 /// [`load_resources`] that leaves process-wide language untouched, for `isolated_server_game`.
 #[allow(clippy::too_many_arguments)]
 #[cfg(test)]
@@ -69,6 +105,7 @@ pub(crate) fn load_resources_skip_lang(
         true,
         role.into(),
         progress,
+        install_empty_parts_fixture,
         publish,
     )
 }

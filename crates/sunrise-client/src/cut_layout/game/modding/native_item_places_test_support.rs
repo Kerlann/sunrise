@@ -1,5 +1,6 @@
 //! Game fixtures exposed only to external tests through the `test-support` feature.
 
+#[cfg(test)]
 use mod_platform;
 use tempfile;
 
@@ -8,21 +9,63 @@ use sunrise_gameplay_common::game::test_fixtures::{
     fixture_facts_mut, fixture_root, resolve_parts,
 };
 
+#[cfg(test)]
+fn prepare_game_boot_with_test_platform(root: &std::path::Path) {
+    sunrise_gameplay_common::game::test_fixtures::prepare_game_boot(
+        root,
+        mod_platform::__private::part_tests::register_game_keys,
+    );
+}
+
 #[cfg(feature = "client")]
-pub fn with_game(test: impl FnOnce(&mut sunrise_gameplay::game::ServerGame<'_>)) {
-    with_game_at(fixture_root(), test);
+pub fn with_game_with_registration(
+    prepare_game_boot: fn(&std::path::Path),
+    install_parts_fixture: fn() -> Result<(), Vec<String>>,
+    test: impl FnOnce(&mut sunrise_gameplay::game::ServerGame<'_>),
+) {
+    with_game_role_and_facts_with(
+        fixture_root(),
+        sunrise_gameplay_common::game::execution_role::ExecutionRole::IntegratedServer,
+        None,
+        true,
+        prepare_game_boot,
+        install_parts_fixture,
+        test,
+    );
 }
 
 /// Boots a server with the origin's entity-ticking neighbourhood loaded.
 #[cfg(feature = "client")]
-pub fn with_resident_game(test: impl FnOnce(&mut sunrise_gameplay::game::ServerGame<'_>)) {
-    with_game(|game| {
+pub fn with_resident_game_with_registration(
+    prepare_game_boot: fn(&std::path::Path),
+    install_parts_fixture: fn() -> Result<(), Vec<String>>,
+    test: impl FnOnce(&mut sunrise_gameplay::game::ServerGame<'_>),
+) {
+    with_game_with_registration(prepare_game_boot, install_parts_fixture, |game| {
         prepare_entity_ticking_neighborhood(game, sunrise_core::position::ChunkPos::new(0, 0));
         test(game);
     });
 }
 
-#[cfg(feature = "client")]
+#[cfg(all(test, feature = "client"))]
+pub(crate) fn with_game(test: impl FnOnce(&mut sunrise_gameplay::game::ServerGame<'_>)) {
+    with_game_with_registration(
+        prepare_game_boot_with_test_platform,
+        || mod_platform::__private::part_tests::install_parts_fixture(&[]),
+        test,
+    );
+}
+
+#[cfg(all(test, feature = "client"))]
+pub(crate) fn with_resident_game(test: impl FnOnce(&mut sunrise_gameplay::game::ServerGame<'_>)) {
+    with_resident_game_with_registration(
+        prepare_game_boot_with_test_platform,
+        || mod_platform::__private::part_tests::install_parts_fixture(&[]),
+        test,
+    );
+}
+
+#[cfg(all(test, feature = "client"))]
 pub(crate) fn with_game_at(
     root: std::path::PathBuf,
     test: impl FnOnce(&mut sunrise_gameplay::game::ServerGame<'_>),
@@ -58,7 +101,7 @@ pub(crate) fn with_uncached_client_game(
     );
 }
 
-#[cfg(feature = "client")]
+#[cfg(all(test, feature = "client"))]
 pub(crate) fn with_game_role(
     root: std::path::PathBuf,
     role: sunrise_gameplay_common::game::execution_role::ExecutionRole,
@@ -77,7 +120,7 @@ pub(crate) fn with_game_role_client(
 }
 
 /// Configure the fixture's owned gameplay facts before constructing the game.
-#[cfg(feature = "client")]
+#[cfg(all(test, feature = "client"))]
 pub(crate) fn with_game_role_and_facts(
     root: std::path::PathBuf,
     role: sunrise_gameplay_common::game::execution_role::ExecutionRole,
@@ -86,7 +129,15 @@ pub(crate) fn with_game_role_and_facts(
     >,
     test: impl FnOnce(&mut sunrise_gameplay::game::ServerGame<'_>),
 ) {
-    with_game_role_and_facts_with(root, role, configure, configure.is_none(), test);
+    with_game_role_and_facts_with(
+        root,
+        role,
+        configure,
+        configure.is_none(),
+        prepare_game_boot_with_test_platform,
+        || mod_platform::__private::part_tests::install_parts_fixture(&[]),
+        test,
+    );
 }
 
 #[cfg(all(test, feature = "client"))]
@@ -109,21 +160,20 @@ fn with_game_role_and_facts_with(
         fn(&sunrise_world::registry::BlockRegistry, &mut sunrise_items::blocks::BlockFacts),
     >,
     cached: bool,
+    prepare_game_boot: fn(&std::path::Path),
+    install_parts_fixture: fn() -> Result<(), Vec<String>>,
     test: impl FnOnce(&mut sunrise_gameplay::game::ServerGame<'_>),
 ) {
-    use crate::game::{load_resources, load_resources_uncached};
+    use crate::game::{load_resources_uncached, load_resources_with_fixture};
     use crate::settings::Settings;
     use mod_api::Authority;
     use sunrise_gameplay_common::game::{Options, Progress};
 
-    sunrise_gameplay_common::game::test_fixtures::prepare_game_boot(
-        &root,
-        mod_platform::__private::part_tests::register_game_keys,
-    );
+    prepare_game_boot(&root);
     let saves = tempfile::tempdir().unwrap();
     let settings = Settings::default();
     let mut loaded = if cached {
-        load_resources(
+        load_resources_with_fixture(
             sunrise_assets::resource_source::ResourceRoot::directory(root.clone()),
             Vec::new(),
             None,
@@ -133,6 +183,7 @@ fn with_game_role_and_facts_with(
             false,
             role,
             &Progress::new(),
+            install_parts_fixture,
             &mut |_, _| unreachable!(),
         )
         .unwrap()

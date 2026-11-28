@@ -192,6 +192,7 @@ fn load_iterated_registries(root: &Path) -> std::result::Result<IteratedRegistri
 fn build_cached_entry(
     key: &CacheKey,
     settings: Settings,
+    install_parts_fixture: fn() -> std::result::Result<(), Vec<String>>,
 ) -> std::result::Result<Arc<CachedEntry>, String> {
     let _permit = acquire_in_process_load_permit();
     let key = key.clone();
@@ -201,8 +202,7 @@ fn build_cached_entry(
         .name("test-res-cache".into())
         .spawn(move || {
             // Install an empty Parts fixture first so entity and block keys share one installation.
-            mod_platform::__private::part_tests::install_parts_fixture(&[])
-                .map_err(|errors| errors.join("\n"))?;
+            install_parts_fixture().map_err(|errors| errors.join("\n"))?;
             let load_role = mods::LoadRole {
                 execution: key.role,
                 owning: key.owning,
@@ -351,6 +351,7 @@ fn hydrate_hit(
     settings: &Settings,
     skip_lang: bool,
     progress: &Progress,
+    install_parts_fixture: fn() -> std::result::Result<(), Vec<String>>,
 ) -> std::result::Result<Option<Loaded>, String> {
     #[cfg(feature = "client")]
     let mut client_pack = if key.role.is_client() {
@@ -375,8 +376,7 @@ fn hydrate_hit(
     }
     sunrise_level::chunk::set_block_states(cached.pack.assets.registry.len());
     if !mod_api::__private::parts_installation::parts_installed() {
-        mod_platform::__private::part_tests::install_parts_fixture(&[])
-            .map_err(|errors| errors.join("\n"))?;
+        install_parts_fixture().map_err(|errors| errors.join("\n"))?;
     }
     replay_iterated_registries(&cached.iterated)?;
     // Mods that requested custom entity-type keys change `type_key` slots inside `Resources`.
@@ -392,8 +392,10 @@ fn hydrate_hit(
     }
     publish_entity_type_defaults(&cached.resources.core.motion.attributes);
     sunrise_sim::save::level_mods::set_block_namespaces(Some(cached.mod_namespaces.clone()));
-    let registry =
-        crate::game::api_values::resolve_cached_block_definitions(cached.pack.assets.registry)?;
+    let registry = crate::game::api_values::resolve_cached_block_definitions_with_fixture(
+        cached.pack.assets.registry,
+        install_parts_fixture,
+    )?;
     let _ = sunrise_world::poi::extend(Vec::new());
     sunrise_gameplay_common::cauldron_contents::install(
         sunrise_gameplay_common::cauldron_contents::CauldronContents::vanilla(),
@@ -494,6 +496,7 @@ pub(crate) fn load(
     skip_lang: bool,
     load_role: mods::LoadRole,
     progress: &Progress,
+    install_parts_fixture: fn() -> std::result::Result<(), Vec<String>>,
     publish: &mut dyn FnMut(UiPublishArg, &Path),
 ) -> Result<Loaded> {
     if menu || !additional_data.is_empty() || launch_world.is_some() {
@@ -585,12 +588,20 @@ pub(crate) fn load(
             slot
         }
     };
-    let built = slot.get_or_init(|| build_cached_entry(&key, settings.clone()));
+    let built =
+        slot.get_or_init(|| build_cached_entry(&key, settings.clone(), install_parts_fixture));
     let cached = match built {
         Ok(cached) => cached,
         Err(error) => return Err(error.clone().into()),
     };
-    match hydrate_hit(cached, &key, settings, skip_lang, progress)? {
+    match hydrate_hit(
+        cached,
+        &key,
+        settings,
+        skip_lang,
+        progress,
+        install_parts_fixture,
+    )? {
         Some(loaded) => Ok(loaded),
         None => load_resources_uncached(
             roots,

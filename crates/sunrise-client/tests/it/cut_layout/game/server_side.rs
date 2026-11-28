@@ -1,8 +1,29 @@
+fn prepare_game_boot_with_platform(root: &std::path::Path) {
+    sunrise_gameplay_common::game::test_fixtures::prepare_game_boot(
+        root,
+        mod_platform::__private::part_tests::register_game_keys,
+    );
+}
+
 pub(crate) mod native_entity_refs {
     pub(crate) mod tests {
-        pub(crate) use sunrise_client::native_item_places_test_support::{
-            with_game, with_resident_game,
-        };
+        pub(crate) fn with_game(test: impl FnOnce(&mut sunrise_gameplay::game::ServerGame<'_>)) {
+            sunrise_client::native_item_places_test_support::with_game_with_registration(
+                super::super::prepare_game_boot_with_platform,
+                || mod_platform::__private::part_tests::install_parts_fixture(&[]),
+                test,
+            );
+        }
+
+        pub(crate) fn with_resident_game(
+            test: impl FnOnce(&mut sunrise_gameplay::game::ServerGame<'_>),
+        ) {
+            sunrise_client::native_item_places_test_support::with_resident_game_with_registration(
+                super::super::prepare_game_boot_with_platform,
+                || mod_platform::__private::part_tests::install_parts_fixture(&[]),
+                test,
+            );
+        }
     }
 }
 

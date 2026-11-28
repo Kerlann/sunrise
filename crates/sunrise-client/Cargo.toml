@@ -14,7 +14,6 @@ sunrise-hooks = { path = "../sunrise-hooks" }
 sunrise-mod-runtime = { path = "../sunrise-mod-runtime" }
 mod_api = { package = "sunrise-mod-vocab", path = "../sunrise-mod-vocab" }
 # The client-side lib-test fixtures shared with the `it` target. These are hidden behind `test-support`.
-mod_platform = { package = "sunrise-mod-api", path = "../sunrise-mod-api", features = ["engine-test-platform"], optional = true }
 tempfile = { version = "3", optional = true }
 sunrise-mod-api-macros = { path = "../sunrise-mod-api-macros" }
 sunrise-client-lib = { path = "../sunrise-client-lib", default-features = false, optional = true }
@@ -118,7 +117,6 @@ test-support = [
     "sunrise-client-gameplay?/test-support",
     "sunrise-gameplay/test-support",
     "sunrise-gameplay-common/test-support",
-    "dep:mod_platform",
     "dep:tempfile",
 ]
 # Per-level-tick state digest for determinism checks (game/world/state_digest.rs).
