@@ -431,7 +431,7 @@ mod tests {
         native_entity_refs::tests::with_game_at,
         native_guest_turn_tests::{open_fixture_hub, with_guests},
     };
-    use mod_api::{Flow, Hooks, ModEntry, ServerHost};
+    use mod_api::{Flow, Hooks, HostSide, ModEntry, ServerHost};
     use std::sync::{Arc, Mutex};
     use sunrise_core::{
         geometry::Vec3,
@@ -464,7 +464,7 @@ mod tests {
         rotation: [40.0, 10.0],
     };
 
-    fn join_held_player(game: &mut ServerGame<'_>) {
+    fn write_saved_player(game: &mut ServerGame<'_>, player: u128) {
         game.server.world_root = game.server.save.0.root.clone();
         let tag = Tag::compound([
             (
@@ -486,8 +486,12 @@ mod tests {
                 ),
             ),
         ]);
-        sunrise_sim::save::write_dat(&playerdata::path(&game.server.world_root, UUID), tag)
+        sunrise_sim::save::write_dat(&playerdata::path(&game.server.world_root, player), tag)
             .unwrap();
+    }
+
+    fn join_held_player(game: &mut ServerGame<'_>) {
+        write_saved_player(game, UUID);
         game.server
             .lan
             .as_mut()
@@ -502,6 +506,8 @@ mod tests {
         game.lan_guest_joined(CONN, &[], PREPARED, Some(PREPARED_SPAWN));
     }
 
+    /// Drive a configured join through the packet handler and check hook order and player
+    /// visibility, including that commands see saved health at the prepared spawn position.
     #[test]
     #[ignore = "daily"]
     fn prepared_join_calls_login_then_announces_once() {
@@ -513,9 +519,17 @@ mod tests {
         #[derive(Debug, PartialEq, Eq)]
         enum Stage {
             BeforePlacement,
+            Entities,
+            Construct,
+            File,
+            Commands,
+            ClientInformation,
             Announced,
         }
-        struct Observe(Arc<Mutex<Vec<Stage>>>);
+        struct Observe {
+            player: u128,
+            stages: Arc<Mutex<Vec<Stage>>>,
+        }
         #[mod_api::__subscriptions]
         impl Hooks for Observe {
             fn player_login(
@@ -524,10 +538,62 @@ mod tests {
                 event: &mut mod_api::PlayerLoginEvent<'_>,
             ) -> Flow {
                 assert_eq!(event.name, NAME);
-                assert_eq!(event.player, offline_uuid(NAME));
+                assert_eq!(event.player, self.player);
                 assert!(host.player(event.player).is_none());
-                self.0.lock().unwrap().push(Stage::BeforePlacement);
+                self.stages.lock().unwrap().push(Stage::BeforePlacement);
                 Flow::Continue
+            }
+            fn entities_load(
+                &self,
+                _: &mut dyn ServerHost,
+                event: &mut mod_api::EntitiesLoadEvent<'_>,
+            ) {
+                assert_eq!((event.chunk, event.count), ([0, 0], 1));
+                self.stages.lock().unwrap().push(Stage::Entities);
+            }
+            fn entity_constructing(
+                &self,
+                host: HostSide<'_>,
+                event: &mut mod_api::EntityConstructingEvent,
+            ) {
+                if matches!(host, HostSide::Server(_))
+                    && event.holder == mod_api::Holder::Player(self.player)
+                {
+                    self.stages.lock().unwrap().push(Stage::Construct);
+                }
+            }
+            fn player_load_from_file(
+                &self,
+                host: &mut dyn ServerHost,
+                event: &mut mod_api::PlayerLoadFromFileEvent<'_>,
+            ) {
+                assert_eq!(event.player, self.player);
+                assert!(host.player(event.player).is_none());
+                self.stages.lock().unwrap().push(Stage::File);
+            }
+            fn player_commands_sent(
+                &self,
+                host: &dyn mod_api::Host,
+                event: &mut mod_api::PlayerCommandsSentEvent<'_>,
+            ) -> Option<mod_api::CommandTreeSelection> {
+                assert_eq!(event.player.uuid(), self.player);
+                let living = host
+                    .living(event.player.entity())
+                    .expect("joining player's lent body");
+                assert_eq!(living.max_health(host), Some(30.0));
+                assert_eq!(living.health(host), Some(25.0));
+                assert_eq!(event.player.entity().position(host), Some(PREPARED));
+                self.stages.lock().unwrap().push(Stage::Commands);
+                None
+            }
+            fn client_information_updated(
+                &self,
+                host: &mut dyn ServerHost,
+                event: &mut mod_api::ClientInformationUpdatedEvent<'_>,
+            ) {
+                assert_eq!(event.player, self.player);
+                assert!(host.player(event.player).is_some());
+                self.stages.lock().unwrap().push(Stage::ClientInformation);
             }
             fn player_logged_in(
                 &self,
@@ -535,16 +601,20 @@ mod tests {
                 event: &mut mod_api::PlayerLoggedInEvent<'_>,
             ) {
                 assert_eq!(event.name, NAME);
-                assert_eq!(event.player, offline_uuid(NAME));
+                assert_eq!(event.player, self.player);
                 assert!(host.player(event.player).is_some());
-                self.0.lock().unwrap().push(Stage::Announced);
+                self.stages.lock().unwrap().push(Stage::Announced);
             }
         }
 
+        let player = offline_uuid(NAME);
         let stages = Arc::new(Mutex::new(Vec::new()));
         let mods = vec![ModEntry::new(
             "prepared-join-order",
-            Box::new(Observe(stages.clone())),
+            Box::new(Observe {
+                player,
+                stages: stages.clone(),
+            }),
         )]
         .into();
         let root = crate::prepared_test_root::prepared_root(&[
@@ -554,6 +624,21 @@ mod tests {
         ]);
         mod_platform::testing::with_mods(mods, || {
             with_game_at(root, |game| {
+                write_saved_player(game, player);
+                game.world.loaded_entities.push((
+                    (0, 0),
+                    vec![
+                        Tag::compound([
+                            ("id", string("minecraft:marker")),
+                            ("UUID", Tag::IntArray(vec![100, 2, 3, 4])),
+                            (
+                                "Pos",
+                                Tag::List(SAVED.map(|v| Tag::Double(v.to_bits())).to_vec()),
+                            ),
+                        ])
+                        .into(),
+                    ],
+                ));
                 open_fixture_hub(game);
                 let lan = &mut game.server.lan.as_mut().unwrap().hub.lan;
                 let mut client = Connection::local(lan.connect_local().unwrap());
@@ -568,7 +653,7 @@ mod tests {
                     .encode(),
                     login::Serverbound::Hello(login::ServerHello {
                         name: NAME.into(),
-                        uuid: offline_uuid(NAME),
+                        uuid: player,
                     })
                     .encode(),
                 ] {
@@ -630,9 +715,10 @@ mod tests {
                         .hub
                         .guests
                         .iter()
-                        .find(|g| g.placed)
+                        .find(|g| g.uuid == player && g.placed)
                     {
                         assert_eq!(guest.position, PREPARED);
+                        assert!(guest.motion.is_some(), "body already installed on join");
                         break;
                     }
                     assert!(
@@ -643,7 +729,15 @@ mod tests {
                 }
                 assert_eq!(
                     *stages.lock().unwrap(),
-                    [Stage::BeforePlacement, Stage::Announced]
+                    [
+                        Stage::BeforePlacement,
+                        Stage::Entities,
+                        Stage::Construct,
+                        Stage::File,
+                        Stage::Commands,
+                        Stage::ClientInformation,
+                        Stage::Announced,
+                    ]
                 );
             });
         });
