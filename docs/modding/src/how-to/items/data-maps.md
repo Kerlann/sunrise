@@ -143,9 +143,10 @@ loot tables are resource identifiers. Compostability is boolean.
 Builtin reads return canonical NBT compounds with the field above, rather than the
 input's shorthand: distances are `Float`, frequencies `Int`, compostability `Byte`, and
 identifiers `String`. Infinity remains an NBT Float, never JSON null. Use `BiomeKey`
-to query biome values and `GameEventKey` to query game-event values. All nine built-in NeoForge
-maps (these six and the three block maps below) are optional synced maps (`DataMapSync::Optional`)
-sent to Sunrise clients on join and on every `/reload`.
+to query biome values and `GameEventKey` to query game-event values. The built-in NeoForge maps other
+than `villager_compostables` (the remaining five and the three block maps below) are optional synced maps
+(`DataMapSync::Optional`) sent to Sunrise clients on join and on every `/reload`. `villager_compostables`
+is server-only: NeoForge builds it without a network codec.
 
 The gameplay readers and structure generation use immutable world-owned snapshots.
 Villager types apply to finalizeSpawn only; bred villagers retain the existing biome-facts
