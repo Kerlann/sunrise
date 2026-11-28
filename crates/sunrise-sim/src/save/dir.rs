@@ -697,6 +697,10 @@ impl SaveDir {
             .collect();
         self.queue(Folder::Region, records, false)
     }
+    /// Whether an earlier entity read for `(x, z)` failed, leaving the entity chunk pending.
+    pub fn is_entity_read_failed(&self, x: i32, z: i32) -> bool {
+        self.failed_entity_reads.lock().unwrap().contains(&(x, z))
+    }
     /// `EntityStorage.loadEntities`: read `entities/` separately from the terrain.
     /// An absent record is empty; a failed read leaves the entity chunk pending until the level closes.
     pub fn load_entities(&self, x: i32, z: i32) -> Result<Vec<Tag>> {
