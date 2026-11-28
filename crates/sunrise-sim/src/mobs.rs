@@ -517,10 +517,10 @@ impl MobTypes {
         Ok(Self { types: out })
     }
 }
-pub use sunrise_game_data::who::Who;
 /// The damage data types, re-exported from the crate both the damage rules and the
 /// simulation meet in, so `crate::mobs::Damage` and friends keep resolving here.
 pub use sunrise_entity_data::damage::{Damage, DamageKind, NamedDamage};
+pub use sunrise_game_data::who::Who;
 
 /// `damage` with the species of the mob that caused it, recorded as its portable id.
 pub(crate) fn with_species(mut damage: Damage, species: Species) -> Damage {

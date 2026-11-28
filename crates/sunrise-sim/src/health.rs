@@ -10,8 +10,8 @@ pub use mod_api::entity::health::{HurtSource, ShieldBlock, Victim};
 #[cfg(test)]
 use std::fs;
 use std::{io, path::Path};
-use sunrise_game_data::who::Who;
 use sunrise_entity_data::damage::{Damage, DamageKind, NamedDamage};
+use sunrise_game_data::who::Who;
 use sunrise_world::{
     attributes::live::LiveAttributes,
     block_landing::LandingDamage,

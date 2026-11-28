@@ -1,6 +1,6 @@
 use super::{Attack, DirectEntity, HurtSource, names_its_projectile};
-use sunrise_game_data::who::Who;
 use sunrise_entity_data::damage::{Damage, DamageKind};
+use sunrise_game_data::who::Who;
 
 impl Attack {
     /// `Enchantment.damageContext`: type predicates see the entities named by

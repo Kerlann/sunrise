@@ -18,7 +18,7 @@ pub struct EntityFields {
     /// `Rotation`'s second float: `Entity.getXRot`, positive looking down.
     pub pitch: f32,
     /// `fall_distance`: blocks fallen since the entity last landed (vanilla stores a double; the
-    /// NBT key is `FallDistance`, the field keeps the codec's own name).
+    /// NBT key is the lowercase `fall_distance`, as the field is named).
     pub fall_distance: f64,
     /// `Fire`: remaining fire ticks; negative while the entity is in fire but not burning.
     pub fire: i32,

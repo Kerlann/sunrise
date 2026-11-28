@@ -1,8 +1,8 @@
 //! The hit-local kill-credit loan, separate from the level's block/random loan.
 use super::{Attack, Hurting};
 use crate::items::ItemStack;
-use sunrise_game_data::who::Who;
 use sunrise_entity_data::damage::Damage;
+use sunrise_game_data::who::Who;
 
 /// A host's record of each mob's `LivingEntity.lastHurtByPlayer` UUID, by mob id.
 pub trait PlayerMemory {
