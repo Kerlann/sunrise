@@ -228,15 +228,24 @@ fn wait_data_map_sync(
         host.tick();
         for receipt in session.poll() {
             let (event, _credit) = receipt.into_parts();
-            if let Event::Packet(packet) = event
-                && let play::Clientbound::CustomPayload(p) = *packet
-                && p.channel == data_map_net::SYNC_CHANNEL
-            {
-                let (registry, maps) = data_map_net::decode_sync_payload(&p.data).unwrap();
-                if registry == expected_registry {
-                    return maps;
+            match event {
+                Event::Disconnected { reason, .. } => {
+                    panic!(
+                        "disconnected while waiting for sunrise:data_map_sync for {expected_registry}: {reason}"
+                    );
                 }
-                pending.push((registry, maps));
+                Event::Packet(packet) => {
+                    if let play::Clientbound::CustomPayload(p) = *packet
+                        && p.channel == data_map_net::SYNC_CHANNEL
+                    {
+                        let (registry, maps) = data_map_net::decode_sync_payload(&p.data).unwrap();
+                        if registry == expected_registry {
+                            return maps;
+                        }
+                        pending.push((registry, maps));
+                    }
+                }
+                _ => {}
             }
         }
         assert!(

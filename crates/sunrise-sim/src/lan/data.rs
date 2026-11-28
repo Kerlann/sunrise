@@ -473,8 +473,13 @@ impl SyncData {
         (packed, admitted)
     }
 
-    /// No registries, tags or recipes: enough for tests of the login phase.
+    /// No registries, tags or recipes: enough for tests of the login and play join phases.
     pub fn empty() -> Self {
+        let mut recipes = sunrise_core::vanilla_bytes::Writer::new();
+        <sunrise_protocol::packets::recipes::UpdateRecipes as sunrise_protocol::buf::Codec<_>>::write(
+            &sunrise_protocol::packets::recipes::UpdateRecipes::default(),
+            &mut recipes,
+        );
         Self {
             effect_particle_ids: Default::default(),
             builtin: Builtin::default(),
@@ -487,7 +492,7 @@ impl SyncData {
             custom_registry_tags: Vec::new(),
             features: Vec::new(),
             commands: None,
-            recipes: Vec::new(),
+            recipes: recipes.data,
             stonecutter_buttons: Arc::default(),
             advancements: super::advancements::ServerAdvancements::load(
                 Path::new(""),
