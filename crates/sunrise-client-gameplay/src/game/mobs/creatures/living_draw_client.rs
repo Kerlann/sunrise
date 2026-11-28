@@ -3,6 +3,73 @@ use crate::game::{mob_blocks::MobView, stock_layer_mask::StockLayerMask};
 use sunrise_client::mobs::render::FrameDraw;
 use sunrise_gameplay_common::game::creatures::living_draw::LivingFrame;
 
+/// Visibility and body-pass routing for one living entity (`LivingEntityRenderer.submit`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LivingVisibility {
+    invisible: bool,
+    illusioner_mirrors: bool,
+    seen_invisible: bool,
+    layers_only: bool,
+    /// Whether the glowing silhouette (and held-item GPU pass) may use GPU skinning.
+    /// An invisible illusioner's mirror body is kept on the CPU separately via `!illusioner_mirrors`.
+    silhouette_on_gpu: bool,
+}
+
+impl LivingVisibility {
+    fn of(mob: &Mob, is_player: bool, outline: Option<u32>, seen_invisible: bool) -> Self {
+        let invisible = mob.is_invisible();
+        // `IllusionerRenderer.isBodyVisible` is always true: an invisible illusioner
+        // hides its real body and draws its four mirror images in the normal render type.
+        let illusioner_mirrors = invisible && mob.species() == Species::Illusioner;
+        let layers_only = invisible && outline.is_none() && is_player && !seen_invisible;
+        // Controls GPU outline eligibility (`SkinFrame::outline_since`) when glowing:
+        // glowing invisible mobs take the CPU outline path instead.
+        let silhouette_on_gpu = outline.is_none() || !invisible;
+        Self {
+            invisible,
+            illusioner_mirrors,
+            seen_invisible,
+            layers_only,
+            silhouette_on_gpu,
+        }
+    }
+
+    fn skips(self, outline: Option<u32>) -> bool {
+        self.invisible
+            && outline.is_none()
+            && !self.layers_only
+            && !self.seen_invisible
+            && !self.illusioner_mirrors
+    }
+
+    fn posable(
+        self,
+        mob: &Mob,
+        skinning: bool,
+        is_player: bool,
+        modded: bool,
+        armor_empty: bool,
+    ) -> bool {
+        skinning
+            && !(is_player || modded)
+            && !self.layers_only
+            && !self.seen_invisible
+            && !self.illusioner_mirrors
+            && self.silhouette_on_gpu
+            && armor_empty
+            && !matches!(
+                mob.species(),
+                Species::Blaze | Species::MagmaCube | Species::GlowSquid | Species::SulfurCube
+            )
+    }
+
+    /// Whether the glowing pass drew the body only to capture its silhouette and
+    /// must drop the regular body vertices afterwards.
+    fn outline_only(self) -> bool {
+        self.invisible && !self.seen_invisible && !self.illusioner_mirrors
+    }
+}
+
 impl crate::game::ClientGame<'_> {
     /// Draws `mob` into `out` as the frame's mob pass does, or nothing when it is out of range,
     /// out of view, hidden or culled.
@@ -65,7 +132,8 @@ impl crate::game::ClientGame<'_> {
         // effect sets): only the name tag draws (and the outline of a
         // glowing mob, LivingEntityRenderer.getRenderType). A player keeps
         // its armour, elytra and held items (`LivingEntityRenderer.submit`
-        // skips only the body).
+        // skips only the body); an illusioner draws its four mirror images
+        // (`IllusionerRenderer.isBodyVisible` is always true).
         let invisible = mob.is_invisible();
         // Entity.isInvisibleTo(viewer): a spectator sees it anyway, the
         // body forced translucent (`LivingEntityRenderer.submit`).
@@ -76,8 +144,8 @@ impl crate::game::ClientGame<'_> {
                 self.own_player_is_spectator(),
                 true,
             );
-        let layers_only = invisible && outline.is_none() && is_player && !seen_invisible;
-        if invisible && outline.is_none() && !layers_only && !seen_invisible {
+        let vis = LivingVisibility::of(mob, is_player, outline, seen_invisible);
+        if vis.skips(outline) {
             return;
         }
         let culling = if PRECHECK
@@ -160,28 +228,17 @@ impl crate::game::ClientGame<'_> {
         };
         let body = out.len();
         // The GPU path: an ordinary mob, no layers the CPU path changes after drawing them
-        // (a player's, the HDR tiers below, the sulfur cube's shell). A glowing mob's
-        // silhouette is posed too (`SkinFrame::outline_since`), unless it is invisible:
-        // then only the outline draws.
-        let silhouette_on_gpu = outline.is_none() || !invisible;
-        let posable = skinning
-            && !(is_player || modded)
-            && !layers_only
-            && !seen_invisible
-            && silhouette_on_gpu
-            && armor.is_empty()
-            && !matches!(
-                mob.species(),
-                Species::Blaze | Species::MagmaCube | Species::GlowSquid | Species::SulfurCube
-            );
+        // (a player's, the HDR tiers below, the sulfur cube's shell, an invisible illusioner's
+        // four mirrors).
+        let posable = vis.posable(mob, skinning, is_player, modded, armor.is_empty());
         let added = if layers { resolved.layers } else { None };
         let data = super::super::humanoid_setup_anim::HiddenLayersData {
             game: self,
             hidden_layers: hidden,
         };
-        let mut skinned = None;
         frame_draw.capture_model = !modded
             && (added.is_some() || (listened && self.mob_render_post_listened(who.is_some())));
+        let mut skinned = None;
         if posable {
             let mut models = self.client.skin_models.0.borrow_mut();
             let mut frame = self.client.skin_frame.borrow_mut();
@@ -200,7 +257,7 @@ impl crate::game::ClientGame<'_> {
             );
             skinned = Some((mark, skin.bounds));
         } else if !modded {
-            if seen_invisible {
+            if vis.seen_invisible {
                 sunrise_client::mobs::render::render_seen_invisible(
                     mob,
                     alpha as f32,
@@ -212,7 +269,7 @@ impl crate::game::ClientGame<'_> {
                     &mut frame_draw,
                     out,
                 );
-            } else if layers_only {
+            } else if vis.layers_only {
                 sunrise_client::mobs::render::render_layers(
                     mob,
                     alpha as f32,
@@ -285,7 +342,7 @@ impl crate::game::ClientGame<'_> {
         if layers {
             if !modded {
                 // Held items join the GPU path's draws, their silhouette too.
-                let skin = (skinning && silhouette_on_gpu).then_some(&mut skinned);
+                let skin = (skinning && vis.silhouette_on_gpu).then_some(&mut skinned);
                 let view = MobView {
                     camera,
                     alpha,
@@ -331,7 +388,7 @@ impl crate::game::ClientGame<'_> {
                     .borrow_mut()
                     .outline_since(first, color);
             }
-            if invisible && !seen_invisible {
+            if vis.outline_only() {
                 out.truncate(entity_start);
                 return;
             }
@@ -367,3 +424,257 @@ impl crate::game::ClientGame<'_> {
 }
 
 use sunrise_gameplay_common::game::game_mode_common::GameModeCommonGameExt1 as _;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use sunrise_client::{
+        mobs::Part,
+        mobs_render::{ClientMobData, ClientMobModels, ClientMobRender, ClientMobVisuals},
+    };
+    use sunrise_sim::mobs::{Anim, Brain, Flags, MobType, illusioner};
+
+    fn synthetic_mob(id: u32, kind: &str, species: Species, anim: Anim) -> Mob {
+        let mob_type = Arc::new(MobType {
+            type_key: Default::default(),
+            id: kind.into(),
+            species,
+            width: 0.6,
+            height: 1.95,
+            eye_height: 1.62,
+            category: "monster".into(),
+            max_health: 32.0,
+            speed: 0.5,
+            flying_speed: 0.0,
+            attack_damage: 0.0,
+            attack_knockback: 0.0,
+            follow_range: 18.0,
+            step_height: 0.6,
+            armor: 0.0,
+            armor_toughness: 0.0,
+            knockback_resistance: 0.0,
+            jump_strength: 0.42,
+            attributes: Arc::default(),
+            item_stack_limits: Arc::default(),
+            attribute_bounds: Default::default(),
+            gravity: 0.08,
+            safe_fall_distance: 3.0,
+            fall_damage_multiplier: 1.0,
+            water_efficiency: 0.0,
+            water_slowdown: 0.8,
+            air_speed: 0.02,
+            baby_scale: 0.5,
+            head_rot_speed: 10.0,
+            max_head_x_rot: 40.0,
+            max_head_y_rot: 75.0,
+            ambient_interval: 120,
+            flags: Flags::default(),
+            brain: Brain::Passive,
+            anim,
+            sounds: [""; 3],
+            sound_overrides: Default::default(),
+            food: Default::default(),
+            tempt: Default::default(),
+            passenger_attachments: Vec::new(),
+        });
+        let mut mob = Mob::new(id, mob_type, Vec3::new(4.0, 64.0, -2.0), 0.0);
+        mob.random = sunrise_core::random::LegacyRandom::new(7);
+        mob
+    }
+
+    fn synthetic_models(kind: &str, half_width_px: f32) -> ClientMobModels {
+        let empty = |name: &str, pos: [f32; 3], children: Vec<Part>| Part {
+            name: name.into(),
+            pose: [pos[0], pos[1], pos[2], 0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            polygons: Vec::new(),
+            children,
+            layer: None,
+        };
+        let body = Part {
+            name: "body".into(),
+            pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            polygons: vec![sunrise_client::mobs::Polygon {
+                normal: [0.0, 0.0, 1.0],
+                vertices: [
+                    [-half_width_px, 0.0, 0.0, 0.0, 0.0],
+                    [half_width_px, 0.0, 0.0, 1.0, 0.0],
+                    [half_width_px, 12.0, 0.0, 1.0, 1.0],
+                    [-half_width_px, 12.0, 0.0, 0.0, 1.0],
+                ],
+                cull_back: false,
+            }],
+            children: Vec::new(),
+            layer: None,
+        };
+        let root = empty(
+            "root",
+            [0.0, 0.0, 0.0],
+            vec![
+                empty(
+                    "head",
+                    [0.0, 0.0, 0.0],
+                    vec![empty("hat", [0.0; 3], vec![])],
+                ),
+                body,
+                empty("arms", [0.0, 2.0, 0.0], vec![]),
+                empty("right_arm", [-5.0, 2.0, 0.0], vec![]),
+                empty("left_arm", [5.0, 2.0, 0.0], vec![]),
+                empty("right_leg", [-2.0, 12.0, 0.0], vec![]),
+                empty("left_leg", [2.0, 12.0, 0.0], vec![]),
+            ],
+        );
+        let mut models = ClientMobModels::default();
+        models.insert(
+            kind.to_owned(),
+            ClientMobVisuals {
+                shadow: None,
+                model: Arc::new(root),
+                layers: Default::default(),
+                texture: "entity/illager/illusioner".into(),
+            },
+        );
+        models
+    }
+
+    #[test]
+    fn living_visibility_routes_invisible_illusioners_without_affecting_ordinary_mobs() {
+        let mut ill = synthetic_mob(
+            1,
+            "minecraft:illusioner",
+            Species::Illusioner,
+            Anim::Illager,
+        );
+        let mut zombie = synthetic_mob(2, "minecraft:zombie", Species::Zombie, Anim::Zombie);
+        let mut player = synthetic_mob(
+            3,
+            "minecraft:player",
+            Species::Zombie,
+            Anim::Humanoid { zombie_arms: false },
+        );
+
+        // Visible illusioner can take GPU skinning.
+        let vis = LivingVisibility::of(&ill, false, None, false);
+        assert!(!vis.skips(None));
+        assert!(vis.posable(&ill, true, false, false, true));
+
+        // Invisible illusioner for ordinary viewer: stays in pass, falls back to CPU mirrors,
+        // and keeps its mirrors when glowing.
+        ill.invisible = true;
+        let vis = LivingVisibility::of(&ill, false, None, false);
+        assert!(!vis.skips(None));
+        assert!(!vis.posable(&ill, true, false, false, true));
+        let glow = LivingVisibility::of(&ill, false, Some(0x00FF_FFFF), false);
+        assert!(!glow.skips(Some(0x00FF_FFFF)));
+        assert!(!glow.outline_only());
+
+        // Ordinary invisible mob still skips when not glowing and drops body when glowing.
+        zombie.invisible = true;
+        let z_vis = LivingVisibility::of(&zombie, false, None, false);
+        assert!(z_vis.skips(None));
+        let z_glow = LivingVisibility::of(&zombie, false, Some(0x00FF_FFFF), false);
+        assert!(!z_glow.skips(Some(0x00FF_FFFF)));
+        assert!(z_glow.outline_only());
+
+        // Invisible player keeps layers_only.
+        player.invisible = true;
+        let p_vis = LivingVisibility::of(&player, true, None, false);
+        assert!(p_vis.layers_only);
+        assert!(!p_vis.skips(None));
+    }
+
+    #[test]
+    fn invisible_illusioner_precheck_bounds_contain_max_offset_and_min_scale_mirrors() {
+        let models = synthetic_models("minecraft:illusioner", 10.0);
+        let max_offsets = [
+            [3.0, 1.0, 3.0],
+            [-3.0, 0.0, -3.0],
+            [3.0, 1.0, -3.0],
+            [-3.0, 0.0, 3.0],
+        ];
+        let lookup = |_: &str| Some([0.0, 0.0, 1.0, 1.0]);
+        let data = ClientMobData::default();
+        let render_data = ClientMobRender {
+            models: &models,
+            data: &data,
+        };
+        let camera = glam::DVec3::new(0.0, 64.0, 6.0);
+
+        for scale in [1.0_f32, 0.0625_f32] {
+            let mut mob = synthetic_mob(
+                6,
+                "minecraft:illusioner",
+                Species::Illusioner,
+                Anim::Illager,
+            );
+            mob.invisible = true;
+            mob.age = 0;
+            mob.extra.model_scale = scale;
+            mob.extra.illusions = Some(illusioner::Illusions {
+                ticks: 0,
+                offsets: [max_offsets, max_offsets],
+            });
+            let mut out = Vec::new();
+            let mut frame_draw = FrameDraw::default();
+            sunrise_client::mobs::render::render_with_frame(
+                &mob,
+                0.0,
+                camera,
+                &lookup,
+                0x00F0_00F0,
+                &render_data,
+                &[],
+                &mut frame_draw,
+                &mut out,
+            );
+            assert!(!out.is_empty());
+            let bounds = crate::game::entity_client::mob_render_bounds(&mob, &models, 0.0).unwrap();
+            let lo = bounds.min_position();
+            let hi = bounds.max_position();
+            let (_, height, _) = mob.awake_dims();
+            let base_vertical = height * 3.0 + 0.5;
+            assert!(
+                ((mob.position.y - lo.y) - (base_vertical + illusioner::VERTICAL_WOBBLE)).abs()
+                    < 1e-12,
+                "scale={scale}: downward bound must only add vertical wobble, not upward scatter"
+            );
+            assert!(
+                ((hi.y - mob.position.y)
+                    - (base_vertical
+                        + illusioner::MAX_VERTICAL_SCATTER
+                        + illusioner::VERTICAL_WOBBLE))
+                    .abs()
+                    < 1e-12,
+                "scale={scale}: upward bound must match exact vertical scatter + wobble"
+            );
+            let mut max_dx = 0.0_f64;
+            let mut max_dy = 0.0_f64;
+            for vertex in &out {
+                let world = [
+                    f64::from(vertex.pos[0]) + camera.x,
+                    f64::from(vertex.pos[1]) + camera.y,
+                    f64::from(vertex.pos[2]) + camera.z,
+                ];
+                max_dx = max_dx.max((world[0] - mob.position.x).abs());
+                max_dy = max_dy.max(world[1] - mob.position.y);
+                assert!(
+                    world[0] >= lo.x - 1e-4
+                        && world[0] <= hi.x + 1e-4
+                        && world[1] >= lo.y - 1e-4
+                        && world[1] <= hi.y + 1e-4
+                        && world[2] >= lo.z - 1e-4
+                        && world[2] <= hi.z + 1e-4,
+                    "scale={scale}: mirror vertex {world:?} outside precheck bounds {lo:?}..{hi:?}"
+                );
+            }
+            if scale == 1.0 {
+                assert!(max_dx > 3.5, "got max_dx={max_dx}");
+            } else {
+                assert!(
+                    max_dy > base_vertical,
+                    "min-scale fixture must exceed unexpanded vertical precheck bound (max_dy={max_dy}, old={base_vertical})"
+                );
+            }
+        }
+    }
+}

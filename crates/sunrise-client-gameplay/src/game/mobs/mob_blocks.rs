@@ -77,6 +77,26 @@ fn cull_back_quads(out: &mut Vec<Vertex>, first: usize) {
     out.truncate(kept);
 }
 
+/// Root poses a mob's equipment layers submit under: four mirror poses for an invisible
+/// in-world illusioner (matching `IllusionerRenderer.submit`), otherwise the single entity pose.
+fn layer_origins(
+    mob: &Mob,
+    alpha: f32,
+    camera: glam::DVec3,
+    in_world: bool,
+) -> ([glam::Mat4; sunrise_sim::mobs::illusioner::COPIES], usize) {
+    if in_world && mob.species() == Species::Illusioner && mob.is_invisible() {
+        (
+            render::illusioner_mirror_origins(mob, alpha, camera),
+            sunrise_sim::mobs::illusioner::COPIES,
+        )
+    } else {
+        let mut origins = [glam::Mat4::IDENTITY; sunrise_sim::mobs::illusioner::COPIES];
+        origins[0] = render::origin_transform(mob, alpha, camera);
+        (origins, 1)
+    }
+}
+
 /// `CustomHeadLayer.translateToHead` and the banner's `head` display.
 fn banner_matrix(head: glam::Mat4) -> glam::Mat4 {
     head * glam::Mat4::from_translation(glam::Vec3::new(0.0, -0.25, 0.0))
@@ -188,10 +208,19 @@ impl ClientGame<'_> {
         let Some((pole, flag)) = &self.client.entity_models.banner else {
             return;
         };
-        let Some(head) = render::part_transform(mob, alpha as f32, camera, self, "head") else {
+        let (origins, origin_count) = layer_origins(mob, alpha as f32, camera, true);
+        let mut heads = [glam::Mat4::IDENTITY; sunrise_sim::mobs::illusioner::COPIES];
+        let head_count = render::part_transforms_at(
+            mob,
+            alpha as f32,
+            &origins[..origin_count],
+            self,
+            "head",
+            &mut heads,
+        );
+        if head_count == 0 {
             return;
-        };
-        let m = banner_matrix(head);
+        }
         let atlas = &self.client.gui.atlas;
         let uv = |name: &str| atlas.sprites.get(name).map(|r| [r.u0, r.v0, r.u1, r.v1]);
         // BannerRenderer: the flag sways with a per-banner phase.
@@ -204,22 +233,27 @@ impl ClientGame<'_> {
         );
         let still = Poses::new(pole);
         let white = 0xFFFF_FFFF;
-        if let Some(r) = uv("entity/banner/banner_base") {
-            render::draw(pole, m, &still, r, white, light, 0, out);
-            render::draw(flag, m, &flag_poses, r, white, light, 0, out);
-        }
-        let layers =
-            std::iter::once(("base", "white")).chain(sunrise_items::item_data::OMINOUS_LAYERS);
-        for (pattern, dye) in layers {
-            let Some(r) = uv(&format!("entity/banner/{pattern}")) else {
-                continue;
-            };
-            let index = render::DYE_NAMES
-                .iter()
-                .position(|n| *n == dye)
-                .unwrap_or(0);
-            let color = render::abgr(render::dye(index));
-            render::draw(flag, m, &flag_poses, r, color, light, 0, out);
+        let base_uv = uv("entity/banner/banner_base");
+        let resolved_layers: Vec<([f32; 4], u32)> = std::iter::once(("base", "white"))
+            .chain(sunrise_items::item_data::OMINOUS_LAYERS)
+            .filter_map(|(pattern, dye)| {
+                let r = uv(&format!("entity/banner/{pattern}"))?;
+                let index = render::DYE_NAMES
+                    .iter()
+                    .position(|n| *n == dye)
+                    .unwrap_or(0);
+                Some((r, render::abgr(render::dye(index))))
+            })
+            .collect();
+        for &head in &heads[..head_count] {
+            let m = banner_matrix(head);
+            if let Some(r) = base_uv {
+                render::draw(pole, m, &still, r, white, light, 0, out);
+                render::draw(flag, m, &flag_poses, r, white, light, 0, out);
+            }
+            for &(r, color) in &resolved_layers {
+                render::draw(flag, m, &flag_poses, r, color, light, 0, out);
+            }
         }
     }
     /// `BlockModelRenderState.submit` of a block state's baked model, as every block layer of
@@ -526,6 +560,7 @@ impl ClientGame<'_> {
             alpha,
             light,
         } = view;
+        let (origins, origin_count) = layer_origins(mob, alpha as f32, camera, in_world);
         // ItemInHandLayer submits with OverlayTexture.NO_OVERLAY: no hurt tint.
         for (slot, off_hand) in [
             (sunrise_items::equipment::MAINHAND, false),
@@ -548,13 +583,27 @@ impl ClientGame<'_> {
                 && mob.extra.using_item > 0
                 && sunrise_sim::mobs::anim::state(mob, alpha as f32).swing < 1.0e-5
                 && self.stack_scopes(stack);
-            let t = if spyglass_to_eye {
-                render::held_to_eye_matrix(mob, alpha as f32, camera, self, left)
+            let mut poses = [glam::Mat4::IDENTITY; sunrise_sim::mobs::illusioner::COPIES];
+            let pose_count = if spyglass_to_eye {
+                let Some(t) = render::held_to_eye_matrix(mob, alpha as f32, camera, self, left)
+                else {
+                    continue;
+                };
+                poses[0] = t;
+                1
             } else {
-                render::held_item_transform(mob, alpha as f32, camera, self, left)
-            };
-            let Some(t) = t else {
-                continue;
+                let n = render::held_item_transforms_at(
+                    mob,
+                    alpha as f32,
+                    &origins[..origin_count],
+                    self,
+                    left,
+                    &mut poses,
+                );
+                if n == 0 {
+                    continue;
+                }
+                n
             };
             let slot = if off_hand {
                 sunrise_sim::mobs::gear::OFF
@@ -659,13 +708,13 @@ impl ClientGame<'_> {
                 };
                 self.tint_held_item(&mut state, &stack, entity_id, hand, alpha as f32);
                 if let Some(skinned) = skin.as_deref_mut()
-                    && self.skin_item_into(&state, t, light, skinned)
+                    && self.skin_item_into(&state, &poses[..pose_count], light, skinned)
                 {
                     continue;
                 }
-                self.submit_item_world(&state, t, light, out);
+                self.submit_item_world_poses(&state, &poses[..pose_count], light, out);
             } else {
-                self.submit_item_unlit(&state, t, light, out);
+                self.submit_item_unlit_poses(&state, &poses[..pose_count], light, out);
             }
         }
     }
@@ -715,9 +764,19 @@ impl ClientGame<'_> {
         if !local_player && sunrise_sim::mobs::gear::enchanted(mob, sunrise_sim::mobs::gear::HEAD) {
             stack.enchant("minecraft:unbreaking", 1);
         }
-        let Some(head) = render::part_transform(mob, alpha as f32, camera, self, "head") else {
+        let (origins, origin_count) = layer_origins(mob, alpha as f32, camera, lit);
+        let mut heads = [glam::Mat4::IDENTITY; sunrise_sim::mobs::illusioner::COPIES];
+        let head_count = render::part_transforms_at(
+            mob,
+            alpha as f32,
+            &origins[..origin_count],
+            self,
+            "head",
+            &mut heads,
+        );
+        if head_count == 0 {
             return;
-        };
+        }
         if let Some(kind) = sunrise_gameplay_common::game::armor_stands_common::skull_kind(
             &self.client.client_pack.item_renderer.models,
             &stack.item,
@@ -759,9 +818,12 @@ impl ClientGame<'_> {
             } else {
                 0.0
             };
-            let pose = head
-                * glam::Mat4::from_translation(glam::Vec3::new(0.0, y_offset, 0.0))
-                * glam::Mat4::from_scale(glam::Vec3::splat(1.1875));
+            let mut poses = [glam::Mat4::IDENTITY; sunrise_sim::mobs::illusioner::COPIES];
+            for (&head, dst) in heads[..head_count].iter().zip(&mut poses) {
+                *dst = head
+                    * glam::Mat4::from_translation(glam::Vec3::new(0.0, y_offset, 0.0))
+                    * glam::Mat4::from_scale(glam::Vec3::splat(1.1875));
+            }
             let special = sunrise_assets::item_model::SpecialModel {
                 kind: if kind == "player" {
                     sunrise_assets::item_model::SpecialKind::PlayerHead
@@ -806,23 +868,20 @@ impl ClientGame<'_> {
                 })
                 .map(|(_, t)| sunrise_game_data::scoreboard::tag_to_json(t))
                 .unwrap_or(serde_json::Value::Null);
-            let has_foil = stack.data().is_some_and(|d| !d.enchantments.is_empty());
-            self.client.client_pack.item_renderer.submit_special(
-                &special,
-                &profile,
-                has_foil,
-                pose,
-                &self.client.gui.atlas.sprites,
-                &self.item_host(),
-                &mut sink,
-            );
+            self.client
+                .client_pack
+                .item_renderer
+                .submit_special_head_poses(
+                    &special,
+                    &profile,
+                    &poses[..head_count],
+                    &self.client.gui.atlas.sprites,
+                    &self.item_host(),
+                    &mut sink,
+                );
             return;
         }
         use sunrise_assets::item_model::DisplayContext;
-        let pose = head
-            * glam::Mat4::from_translation(glam::Vec3::new(0.0, -0.25, 0.0))
-            * glam::Mat4::from_rotation_y(std::f32::consts::PI)
-            * glam::Mat4::from_scale(glam::Vec3::new(0.625, -0.625, -0.625));
         let owner = super::item_draw::owner_at(
             [mob.position.x, mob.position.y, mob.position.z],
             mob.body_yaw,
@@ -830,10 +889,17 @@ impl ClientGame<'_> {
         );
         let seed = mob.id as i32 + 5;
         let state = self.resolve_item(&stack, DisplayContext::Head, Some(&owner), seed);
+        let mut poses = [glam::Mat4::IDENTITY; sunrise_sim::mobs::illusioner::COPIES];
+        for (&head, dst) in heads[..head_count].iter().zip(&mut poses) {
+            *dst = head
+                * glam::Mat4::from_translation(glam::Vec3::new(0.0, -0.25, 0.0))
+                * glam::Mat4::from_rotation_y(std::f32::consts::PI)
+                * glam::Mat4::from_scale(glam::Vec3::new(0.625, -0.625, -0.625));
+        }
         if lit {
-            self.submit_item_world(&state, pose, light, out);
+            self.submit_item_world_poses(&state, &poses[..head_count], light, out);
         } else {
-            self.submit_item_unlit(&state, pose, light, out);
+            self.submit_item_unlit_poses(&state, &poses[..head_count], light, out);
         }
     }
 }
