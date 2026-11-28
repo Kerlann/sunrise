@@ -2911,7 +2911,7 @@ impl crate::game::ClientGame<'_> {
         let inventory = self.observed_overlay_now().is_none()
             && matches!(self.client.screen, Screen::Inventory | Screen::Creative);
         let (cx, cy) = self.client.cursor;
-        widgets::last_targets_with_meta()
+        key_focus::drawn_targets_with_meta()
             .into_iter()
             .filter(|(t, meta)| {
                 !matches!(t.kind, Kind::Mounted { .. })

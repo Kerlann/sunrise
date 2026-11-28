@@ -2980,7 +2980,12 @@ impl OptionsUi {
             let (handled, events) = self.drag(s, atlas, (x, y), size, framebuffer, right);
             return (events, handled);
         }
-        self.active_pointer = None;
+        // Vanilla `AbstractWidget.isValidClickButton`: a non-primary press declined by a slider
+        // leaves focus and dragging intact so the later primary release still runs through
+        // `release_resolved`'s liveness check.
+        if !right {
+            self.active_pointer = None;
+        }
         let (events, handled) = if crate::widgets::has_input_overrides() {
             match self.resolve_pointer_press(s, atlas, (x, y), size, right) {
                 input_resolver::PointerPressRoute::Block => (Vec::new(), false),
@@ -2995,7 +3000,7 @@ impl OptionsUi {
                         crate::widgets::with_selected_engine_widget(&target.key, || {
                             self.click_unrevised(s, atlas, mx, my, size, framebuffer, right)
                         });
-                    if handled && self.sub_page_key() == target.page_key {
+                    if !right && handled && self.sub_page_key() == target.page_key {
                         self.active_pointer = Some(target);
                     }
                     (events, handled)

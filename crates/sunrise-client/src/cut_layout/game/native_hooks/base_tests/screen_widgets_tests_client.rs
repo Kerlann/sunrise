@@ -3419,6 +3419,7 @@ fn press_id_and_mutating_widgets_from_screen_input_hooks_and_lazy_discovery() {
 
     struct InputMutator {
         fired: Arc<AtomicBool>,
+        last_release_handled: Arc<AtomicBool>,
     }
 
     #[mod_api::__subscriptions]
@@ -3453,13 +3454,24 @@ fn press_id_and_mutating_widgets_from_screen_input_hooks_and_lazy_discovery() {
             self.fired.store(true, Ordering::SeqCst);
             Flow::Cancel
         }
+
+        fn screen_mouse_button_released_post(
+            &self,
+            _host: &mut dyn ClientHost,
+            event: &mut ScreenMouseButtonReleasedPostEvent<'_>,
+        ) {
+            self.last_release_handled
+                .store(event.was_release_handled, Ordering::SeqCst);
+        }
     }
 
     let fired = Arc::new(AtomicBool::new(false));
+    let last_release_handled = Arc::new(AtomicBool::new(false));
     let mods = vec![ModEntry::new(
         "input_mutator",
         Box::new(InputMutator {
             fired: fired.clone(),
+            last_release_handled: last_release_handled.clone(),
         }),
     )]
     .into();
@@ -4096,23 +4108,48 @@ fn press_id_and_mutating_widgets_from_screen_input_hooks_and_lazy_discovery() {
             );
             send_mouse_button(game, win_id, MouseButton::Left, true);
             let fov_after_press = game.client.settings.fov;
-            // Vanilla MouseHandler.onButton (`:73-76`): with Left held, a Right press and release
-            // clears activeButton so subsequent Left motion sends no drag.
-            send_mouse_button(game, win_id, MouseButton::Right, true);
-            send_mouse_button(game, win_id, MouseButton::Right, false);
             move_mouse(
                 game,
                 win_id,
                 f64::from(online_rect[0] + online_rect[2] - 10.0),
                 f64::from(online_rect[1] + online_rect[3] * 0.5),
             );
+            let fov_after_drag = game.client.settings.fov;
+            assert!(
+                fov_after_drag > fov_after_press,
+                "moved slider over Online button must receive plain Left press and drag"
+            );
+            // Vanilla MouseHandler.onButton (`:73-76`) + AbstractWidget.isValidClickButton:
+            // with Left held, a Right press and release clears activeButton so subsequent Left
+            // motion sends no drag, yet preserves active_pointer so hiding FOV before Left
+            // release cancels through release_resolved without emitting ButtonClick/Changed.
+            send_mouse_button(game, win_id, MouseButton::Right, true);
+            last_release_handled.store(true, Ordering::SeqCst);
+            send_mouse_button(game, win_id, MouseButton::Right, false);
+            assert!(
+                !last_release_handled.load(Ordering::SeqCst),
+                "Right release while Left dragged FOV must not dispatch a release action"
+            );
+            move_mouse(
+                game,
+                win_id,
+                f64::from(online_rect[0] + 10.0),
+                f64::from(online_rect[1] + online_rect[3] * 0.5),
+            );
             assert_eq!(
-                game.client.settings.fov, fov_after_press,
+                game.client.settings.fov, fov_after_drag,
                 "Left motion after Right press and release must leave FOV unchanged (vanilla MouseHandler)"
             );
+            assert!(game.screen_widgets().unwrap().set_visible(fov_id, false));
+            last_release_handled.store(true, Ordering::SeqCst);
             send_mouse_button(game, win_id, MouseButton::Left, false);
+            assert!(
+                !last_release_handled.load(Ordering::SeqCst),
+                "Left release after hiding FOV must cancel via release_resolved without ButtonClick/Changed"
+            );
 
-            // Plain Left drag moves FOV, and hiding the slider mid-drag cancels further drag motion.
+            // Plain Left drag + hide mid-drag cancels further drag motion.
+            assert!(game.screen_widgets().unwrap().set_visible(fov_id, true));
             game.client.settings.fov = 70.0;
             move_mouse(
                 game,
@@ -4128,10 +4165,10 @@ fn press_id_and_mutating_widgets_from_screen_input_hooks_and_lazy_discovery() {
                 f64::from(online_rect[0] + online_rect[2] - 10.0),
                 f64::from(online_rect[1] + online_rect[3] * 0.5),
             );
-            let fov_after_drag = game.client.settings.fov;
+            let fov_after_plain_drag = game.client.settings.fov;
             assert!(
-                fov_after_drag > fov_after_plain_press,
-                "moved slider over Online button must receive plain Left press and drag"
+                fov_after_plain_drag > fov_after_plain_press,
+                "re-shown moved slider must receive plain Left press and drag"
             );
             assert!(game.screen_widgets().unwrap().set_visible(fov_id, false));
             move_mouse(
@@ -4141,7 +4178,7 @@ fn press_id_and_mutating_widgets_from_screen_input_hooks_and_lazy_discovery() {
                 f64::from(online_rect[1] + online_rect[3] * 0.5),
             );
             assert_eq!(
-                game.client.settings.fov, fov_after_drag,
+                game.client.settings.fov, fov_after_plain_drag,
                 "hiding Options slider mid-drag must cancel further Left drag motion"
             );
             send_mouse_button(game, win_id, MouseButton::Left, false);
