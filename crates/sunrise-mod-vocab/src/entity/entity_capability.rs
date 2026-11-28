@@ -464,11 +464,11 @@ impl ResourceHandler<ItemResource> for PlayerItems {
         let Some(place) = self.place(host, index) else {
             return Ok(0);
         };
-        // `ArmorSlot.mayPickup`: bound armour stays on outside creative.
+        // `ArmorSlot.mayPickup`: bound armour stays on outside creative (`Player.isCreative`).
         let bound = resource.has_enchantment_effect(host, PREVENT_ARMOR_CHANGE);
         if (MAIN..OFF_HAND).contains(&index) && bound {
             let player = host.player(self.player);
-            if player.and_then(|player| player.has_infinite_materials(host)) != Some(true) {
+            if player.and_then(|player| player.is_creative(host)) != Some(true) {
                 return Ok(0);
             }
         }
