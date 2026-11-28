@@ -72,23 +72,34 @@ fn spyglass_mouse_sensitivity_only_applies_in_first_person() {
         game.common.using = Some((0, 0));
         game.common.use_start.item = Some(ItemStack::new("minecraft:spyglass", 1));
         game.client.smooth_camera = false;
+        game.client.settings.sensitivity = 0.5;
+        game.client.settings.invert_x = false;
+        game.client.settings.invert_y = false;
         game.apply_camera_type(CameraType::FirstPerson);
 
+        // `MouseHandler.turnPlayer` at sensitivity 0.5 with the float constants 0.6F and 0.2F:
+        // `ss = 0.5 * 0.6F + 0.2F`, `sensitivityMod = ss^3`, `sens = sensitivityMod * 8`.
+        // Scoping turns by `sensitivityMod`, otherwise by `sens`. Expected values computed
+        // independently in double arithmetic for the motion (2, -3).
         let mut first_person_mouse = MouseLook::default();
-        first_person_mouse.add_motion(1.0, 0.0);
+        first_person_mouse.add_motion(2.0, -3.0);
         let first_person_turn = first_person_mouse
             .handle_accumulated_movement(1.0, true, true, game.look_options())
             .unwrap();
         assert!(game.look_options().scoping);
+        assert_eq!(
+            first_person_turn,
+            (0.25000002235174246, -0.3750000335276137)
+        );
 
         game.apply_camera_type(CameraType::ThirdPersonBack);
         let mut third_person_mouse = MouseLook::default();
-        third_person_mouse.add_motion(1.0, 0.0);
+        third_person_mouse.add_motion(2.0, -3.0);
         let third_person_turn = third_person_mouse
             .handle_accumulated_movement(1.0, true, true, game.look_options())
             .unwrap();
         assert!(!game.look_options().scoping);
-        assert_ne!(first_person_turn, third_person_turn);
+        assert_eq!(third_person_turn, (2.0000001788139397, -3.0000002682209095));
     });
 }
 
