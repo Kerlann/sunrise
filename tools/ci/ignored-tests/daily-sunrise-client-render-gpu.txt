@@ -1,5 +1,5 @@
 # The daily GPU tests of sunrise-client-render (README.md).
-# Rows: PACKAGE TEST TARGET daily gpu, sorted; tools/ci/move_to_daily.py writes them.
+# Rows: PACKAGE TEST TARGET daily REASON, sorted; tools/ci/move_to_daily.py writes them.
 sunrise-client-render gfx::animate::tests::copied_layers_match_the_cpu_chains_every_tick lib daily gpu
 sunrise-client-render gfx::animate::tests::gpu_layers_match_the_cpu_chains_every_tick lib daily gpu
 sunrise-client-render gfx::animate::tests::inactive_sprites_are_skipped_by_collect lib daily gpu
@@ -50,7 +50,7 @@ sunrise-client-render gfx::gpu_culling::tests::the_count_draws_draw_each_kept_se
 sunrise-client-render gfx::gpu_culling::tests::the_gpu_draws_what_the_integer_test_keeps lib daily gpu
 sunrise-client-render gfx::gpu_culling::tests::the_statistics_come_back_with_their_frame lib daily gpu
 sunrise-client-render gfx::hdr::dither_tests::a_slow_gradient_gets_grain_instead_of_bands_on_hdr10 lib daily gpu
-sunrise-client-render gfx::hdr::dither_tests::hdr10s_dither_keeps_both_ends_exact_and_leans_to_them_in_their_last_code lib daily gpu
+sunrise-client-render gfx::hdr::dither_tests::hdr10s_dither_keeps_both_ends_exact_and_leans_to_them_in_their_last_code lib daily hardware-gpu
 sunrise-client-render gfx::hdr::dither_tests::scrgb_and_screenshots_get_no_dither lib daily gpu
 sunrise-client-render gfx::hdr::tests::a_scaled_screenshot_shoots_at_its_size_and_leaves_the_window_its_own_targets lib daily gpu
 sunrise-client-render gfx::hdr::tests::a_switched_encoding_keeps_the_tuning_and_shows_the_same_light lib daily gpu

@@ -170,13 +170,3 @@ pub(crate) fn each_adapter() -> impl Iterator<Item = (wgpu::Adapter, &'static st
     }
     adapters
 }
-
-#[cfg(test)]
-#[test]
-#[should_panic(expected = "GPU test could not run: missing required capability")]
-fn a_gpu_capability_can_only_be_skipped_when_not_required() {
-    use sunrise_render_shaderpack::test_gpu::skip_or_fail_with;
-
-    skip_or_fail_with(false, "missing optional capability");
-    skip_or_fail_with(true, "missing required capability");
-}

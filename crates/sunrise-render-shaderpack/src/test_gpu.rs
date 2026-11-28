@@ -11,7 +11,7 @@ pub fn skip_or_fail(reason: impl std::fmt::Display) {
 
 /// The same policy with the switch supplied explicitly, for tests that cannot change the environment.
 #[track_caller]
-pub fn skip_or_fail_with(required: bool, reason: impl std::fmt::Display) {
+fn skip_or_fail_with(required: bool, reason: impl std::fmt::Display) {
     assert!(
         !required,
         "GPU test could not run: {reason} (SUNRISE_GPU_TESTS_REQUIRE_ADAPTER=1)"
@@ -75,4 +75,16 @@ pub(crate) fn optional_device_with(
 pub(crate) fn device(adapter: &wgpu::Adapter) -> (wgpu::Device, wgpu::Queue) {
     pollster::block_on(adapter.request_device(&Default::default()))
         .expect("GPU test device creation failed")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::skip_or_fail_with;
+
+    #[test]
+    #[should_panic(expected = "missing required capability")]
+    fn a_gpu_capability_can_only_be_skipped_when_not_required() {
+        skip_or_fail_with(false, "missing optional capability");
+        skip_or_fail_with(true, "missing required capability");
+    }
 }

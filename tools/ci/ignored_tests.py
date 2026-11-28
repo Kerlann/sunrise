@@ -27,7 +27,9 @@ the runner has a Vulkan driver (an ICD file), and must pass there.
 A row marked `daily` (`PACKAGE TEST TARGET daily REASON`, in `daily-<package>.txt`) is a test moved out of
 `verify` into the daily run with `#[ignore = "daily"]` (tools/ci/move_to_daily.py): not a known failure, it must
 pass, and its row must name a test that still runs. Daily shards and `daily-rows` require an adapter for GPU
-fixtures, including rows with reason `gpu`. A package's shard runs the daily rows of the targets it already runs (its library; every target for the packages in INTEGRATION_TESTS); the shard `daily-rows`
+fixtures, including rows with reason `gpu`. Rows with reason `hardware-gpu` are selected only when the Vulkan
+probe reports a non-CPU adapter. A package's shard runs the daily rows of the targets it already runs (its
+library; every target for the packages in INTEGRATION_TESTS); the shard `daily-rows`
 (tools/ci/ignored_shards.py) runs every other daily row: the root workspace's tests are built once with verify's command
 (WORKSPACE_TEST_BUILD) and each package's test executables then run with `--ignored --exact TEST...`; a package that
 build didn't make, or one in OWN_BUILD, runs `cargo test -p PACKAGE TARGET... -- --ignored --exact TEST...`, from the
@@ -117,7 +119,9 @@ LISTED = re.compile(r"^(\S+): test$")
 DAILY_TARGET = re.compile(r"^(?:lib|(?:bin|test):[\w-]+)$")
 # Why a test is a daily test (CONTRIBUTING.md "CI tiers"): slower than 2 s, or what it needs. `stable-line` is a check
 # `verify` runs too, repeated in the daily because a stable release needs a green daily of its commit to hold it.
-DAILY_REASONS = ("slow", "game-boot", "resources", "child-process", "network", "gpu", "windows", "own-sdk", "stable-line")
+HARDWARE_GPU_REASON = "hardware-gpu"
+DAILY_REASONS = ("slow", "game-boot", "resources", "child-process", "network", "gpu", HARDWARE_GPU_REASON,
+                 "windows", "own-sdk", "stable-line")
 # A test that needs the daily head's SDK in book-quickstart.yml, not a previous Nightly.
 OWN_SDK_REASON = "own-sdk"
 # A daily reason for a test whose target compiles only on Windows (`#![cfg(windows)]`): no Linux shard or `daily-rows`
@@ -221,7 +225,7 @@ VULKAN_PROBE_SCRIPT = "import sys; sys.path.insert(0, sys.argv[1]); from tools.c
 VULKAN_UNAVAILABLE_TAGS = frozenset({"loader-missing", "instance-init-failed", "no-physical-devices", "query-failed",
                                      "probe-timed-out", "probe-crashed", "probe-output-capped"})
 # What vulkan_adapter_line prints; anything else a driver writes to the child's stdout is dropped.
-VULKAN_ADAPTER_LINE = re.compile(r"^vulkan adapter\[[0-3]\]: name=[\x20-\x7e]{1,80} type=[a-z-]+ api=\d+\.\d+\.\d+ max_storage_buffer_binding_size=\d+ \(\d+ MiB\) max_storage_buffers_per_shader_stage=\d+ max_texture_dimension_2d=\d+$")
+VULKAN_ADAPTER_LINE = re.compile(r"^vulkan adapter\[[0-3]\]: name=[\x20-\x7e]{1,80} type=(?P<type>[a-z-]+) api=\d+\.\d+\.\d+ max_storage_buffer_binding_size=\d+ \(\d+ MiB\) max_storage_buffers_per_shader_stage=\d+ max_texture_dimension_2d=\d+$")
 
 
 def vulkan_adapter_line(index, properties):
@@ -376,6 +380,11 @@ def vulkan_adapter_summaries():
                 and unavailable[1] in VULKAN_UNAVAILABLE_TAGS:
             return [line]
     return adapters or ["vulkan adapter: unavailable (query-failed)"]
+
+
+def has_hardware_vulkan(summaries):
+    """Whether the probe reported a Vulkan adapter that is not a CPU device."""
+    return any(match["type"] != "cpu" for line in summaries if (match := VULKAN_ADAPTER_LINE.fullmatch(line)))
 
 
 def parse_shard(shard):
@@ -1432,20 +1441,34 @@ def main(shards, report=None):
                                     "panic": _panic_locations.get(test), "policy": policy})
     known = known_failures()
     inputs = harness_inputs()
-    files = {(row.package, row.test): row.file for row in listed_entries()}
-    skipped = {"harness", "manual"} if has_vulkan() else {"harness", "manual", "gpu"}
-    if "gpu" in skipped:
-        print("no Vulkan driver on this runner: the tests marked `gpu` are skipped")
-    else:
-        for line in vulkan_adapter_summaries():
+    rows = listed_entries()
+    files = {(row.package, row.test): row.file for row in rows}
+    skipped = {"harness", "manual"}
+    summaries = []
+    if has_vulkan():
+        summaries = vulkan_adapter_summaries()
+        for line in summaries:
             print(line)
+    else:
+        skipped.add("gpu")
+        print("no Vulkan driver on this runner: the tests marked `gpu` are skipped")
+    hardware_vulkan = has_hardware_vulkan(summaries)
+    if not hardware_vulkan:
+        print("no hardware Vulkan adapter detected: hardware-gpu daily rows are skipped")
+    daily, skipped_daily = [], []
+    for row in rows:
+        if row.mark != "daily":
+            continue
+        if kept_out(row) or (row.reason == HARDWARE_GPU_REASON and not hardware_vulkan):
+            skipped_daily.append(row)
+        else:
+            daily.append(row)
+    groups = daily_rows_groups(daily)
     problems = []
     accepted_unshown = 0
     # Reuse the hash selection in two consecutive processes on the same runner.
     # Resource-backed client-lib families retain registries across tests; releasing
     # the process between halves bounds that retention without another CI leg.
-    daily = daily_rows()
-    groups = daily_rows_groups(daily)
     selections = [
         selection
         for shard in shards
@@ -1487,9 +1510,8 @@ def main(shards, report=None):
                 if listed == package and in_leg(test, number, count) and not os.environ.get(variable):
                     print(f"{package} {safe_identity(test)}: refused, needs {variable}; run by the parity harness")
                     skip.append(test)
-            # The daily rows another job runs never run here.
-            skip += [row.test for row in listed_entries() if row.mark == "daily" and kept_out(row)
-                     and row.package == package and in_leg(row.test, number, count)]
+            # --include-ignored would otherwise run daily rows excluded on this runner.
+            skip += [row.test for row in skipped_daily if row.package == package and in_leg(row.test, number, count)]
             if package == "sunrise-client" and count == 2:
                 # Half `number` of 2 is legs number, number + 2, ... of 2 * CLIENT_BATCHES (in_leg's crc32 modulo).
                 runs = [lambda sub=number + 2 * batch: run(package, skip, sub, 2 * CLIENT_BATCHES)
