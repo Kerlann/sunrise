@@ -131,8 +131,12 @@ impl Default for SourceLayout {
 impl SourceLayout {
     /// Read the source tree’s split layout marker. Older trees require their own generator.
     pub fn read(root: &Path) -> Result<Self, String> {
+        Self::read_tracked(root, &mut crate::Inputs::default())
+    }
+
+    pub(crate) fn read_tracked(root: &Path, inputs: &mut crate::Inputs) -> Result<Self, String> {
         let path = root.join(MARKER);
-        match fs::read_to_string(&path) {
+        match inputs.read_to_string(&path) {
             Ok(text) => match text.trim() {
                 #[cfg(test)]
                 "legacy" => Ok(LEGACY_LAYOUT),

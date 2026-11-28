@@ -98,7 +98,7 @@ impl crate::game::ClientGame<'_> {
                     .is_empty()
             });
         let outcome = if available {
-            native_shaders::outcome(&path)
+            native_shaders::outcome(&path, self.client.settings.sunrise.iris_compat_of(picked))
         } else {
             Some(false)
         };

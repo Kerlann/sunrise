@@ -611,6 +611,9 @@ pub struct Resources<'a> {
     pub mod_depth_targets: &'a [ModDepthTargetDecl],
     /// Mod-declared per-frame uniforms for uniform resolution and type validation.
     pub mod_uniforms: &'a [ModUniformDecl],
+    /// The pack is served Sunrise's HDR extension (`Post::hdr`): its programs read the display
+    /// uniforms (`pack_uniforms::DISPLAY`).
+    pub display_uniforms: bool,
     /// Deduplicates mod frame-uniform mismatch warnings by program and uniform name.
     pub mod_uniform_mismatches: &'a std::cell::RefCell<HashSet<(String, String)>>,
     /// Auxiliary depth target index written by the mod geometry pass currently being built, if any.
@@ -1209,7 +1212,9 @@ struct ResolvedModUniforms<'a> {
 }
 
 /// Resolve mod frame uniforms before the ordinary pack uploads are assigned. A mismatch
-/// keeps its shader slot at zero without refusing the program.
+/// keeps its shader slot at zero without refusing the program. In a pack served Sunrise's HDR
+/// extension the display uniforms (`pack_uniforms::DISPLAY`) are the display's, never a mod's:
+/// a mod uniform of such a name binds only where the pack isn't served.
 fn resolve_mod_uniforms<'a>(
     uniforms: &'a [sunrise_shaders::Uniform],
     initial_block: &mut [u8],
@@ -1220,7 +1225,8 @@ fn resolve_mod_uniforms<'a>(
     let mut bound = Vec::new();
     let mut handled = HashSet::new();
     let mut mismatched = HashSet::new();
-    for u in uniforms {
+    let display = |name: &str| pack.display_uniforms && pack_uniforms::DISPLAY.contains(&name);
+    for u in uniforms.iter().filter(|u| !display(&u.name)) {
         match match_mod_uniform(pack.mod_uniforms, &u.name, &u.ty) {
             ModUniformMatch::None => {}
             ModUniformMatch::Bound { index, previous } => {
@@ -1274,7 +1280,8 @@ pub fn build_pass(
     let features = device.features();
     // The frame's uniforms, then the pack's custom ones.
     let index = |name: &str, ty: &str| {
-        pack_uniforms::index_in(name, geometry.is_some()).or_else(|| custom_index(custom, name, ty))
+        pack_uniforms::index_in(name, geometry.is_some(), pack.display_uniforms)
+            .or_else(|| custom_index(custom, name, ty))
     };
     let mask = |flips: &[(u32, bool)]| flips.iter().filter(|f| f.1).fold(0u16, |m, f| m | 1 << f.0);
     let mut p = p;
@@ -1762,7 +1769,8 @@ pub fn build_compute(
     pack: &Resources<'_>,
 ) -> Option<Pass> {
     let index = |name: &str, ty: &str| {
-        pack_uniforms::index_in(name, false).or_else(|| custom_index(custom, name, ty))
+        pack_uniforms::index_in(name, false, pack.display_uniforms)
+            .or_else(|| custom_index(custom, name, ty))
     };
     let interface = &c.interface;
     let (entries, samplers, slots, reads, shadow_reads, images) = bindings(
@@ -2006,7 +2014,8 @@ pub struct PackPost {
     pub down: HashMap<wgpu::TextureFormat, (wgpu::RenderPipeline, wgpu::BindGroupLayout)>,
     /// The per-draw uniforms of gbuffers programs.
     pub draws: DrawUniforms,
-    /// Set 3 of flat terrain: an unknown-source fallback and immutable state/sprite tables.
+    /// Set 3 of flat terrain: an unknown-source fallback and the state/sprite tables
+    /// (`PackPost::write_block_ids` rewrites the states' ids).
     /// Each page's bind group tracks both its vertex buffer and optional source sidecar.
     pub block_ids: Option<(wgpu::BindGroupLayout, wgpu::Buffer, wgpu::Buffer)>,
     pub page_groups: HashMap<u32, (wgpu::Buffer, Option<wgpu::Buffer>, wgpu::BindGroup)>,
@@ -2400,6 +2409,7 @@ impl PackPost {
             jobs: defer.then(Default::default),
             mod_depth_targets: mods.depth_targets,
             mod_uniforms: mods.uniforms,
+            display_uniforms: hdr.is_some(),
             mod_uniform_mismatches: &mod_uniform_mismatches,
             mod_depth_target: std::cell::Cell::new(None),
             depth_compare: std::cell::Cell::new(wgpu::CompareFunction::LessEqual),
@@ -3649,5 +3659,23 @@ impl PackPost {
     /// bind groups are kept once made). A missing one reads as the dummy (flat, no specular).
     pub fn set_paged_maps(&mut self, maps: [Option<wgpu::TextureView>; 2]) {
         self.paged_maps = maps;
+    }
+
+    /// Rewrites flat terrain's state table (set 3, [`block_ids`]) with `table`, the states' ids
+    /// as `World::block_ids` gives them, beside the sprite `rects`: the draws from the next
+    /// submission on read them. `false`, with the table left as it was, when the two make a
+    /// table of another size than the one built (another registry or atlas). Nothing to do for
+    /// a pack whose terrain reads no table.
+    pub fn write_block_ids(&self, queue: &wgpu::Queue, table: &[i32], rects: &[u32]) -> bool {
+        let Some((_, _, buffer)) = &self.block_ids else {
+            return true;
+        };
+        let contents = terrain_tables(table, rects);
+        let bytes: &[u8] = bytemuck::cast_slice(&contents);
+        if bytes.len() as u64 != buffer.size() {
+            return false;
+        }
+        queue.write_buffer(buffer, 0, bytes);
+        true
     }
 }

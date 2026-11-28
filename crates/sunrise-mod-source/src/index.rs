@@ -324,6 +324,7 @@ type ChildScopes = HashMap<usize, IncludeScope>;
 
 type ModuleLoader<'a> = dyn FnMut(&str, &[String]) -> Result<Vec<Item>, String> + 'a;
 type ItemFilter<'a> = dyn Fn(&Item) -> bool + 'a;
+type SourceExpander<'a> = dyn Fn(&Path, &str) -> Result<String, String> + 'a;
 
 /// The indexed crates' modules, parsed as they are first reached.
 pub struct Index<'a> {
@@ -337,7 +338,7 @@ pub struct Index<'a> {
     /// Every source file read, for the build script to track.
     pub read: std::cell::RefCell<Vec<std::path::PathBuf>>,
     /// Rewrites a source file's text before it is parsed: the game's generated module lists.
-    expand: fn(&Path, &str) -> Result<String, String>,
+    expand: Option<Box<SourceExpander<'a>>>,
     /// Crates added for one consumer beside its crates ([`Index::add_crate`]).
     extra: Vec<(String, String)>,
     /// A crate's root file where it is not `lib.rs` (a library's `[lib] path`).
@@ -394,7 +395,7 @@ impl<'a> Index<'a> {
         Self {
             root,
             crates,
-            expand: |_, source| Ok(source.to_owned()),
+            expand: None,
             included,
             modules: Vec::new(),
             by_path: HashMap::new(),
@@ -414,8 +415,11 @@ impl<'a> Index<'a> {
     }
 
     /// Reads each source file through `expand` before parsing it.
-    pub fn expanding(mut self, expand: fn(&Path, &str) -> Result<String, String>) -> Self {
-        self.expand = expand;
+    pub fn expanding(
+        mut self,
+        expand: impl Fn(&Path, &str) -> Result<String, String> + 'a,
+    ) -> Self {
+        self.expand = Some(Box::new(expand));
         self
     }
 
@@ -659,7 +663,10 @@ impl<'a> Index<'a> {
         let path = self.root.join(dir).join(file);
         let source = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         self.read.borrow_mut().push(path.clone());
-        let source = (self.expand)(self.root, &source)?;
+        let source = match &self.expand {
+            Some(expand) => expand(self.root, &source)?,
+            None => source,
+        };
         let file = syn::parse_file(&source).map_err(|e| format!("{}: {e}", path.display()))?;
         self.expand_includes(file.items, include_scope)
     }

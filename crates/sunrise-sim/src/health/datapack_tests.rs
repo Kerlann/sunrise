@@ -39,7 +39,14 @@ fn prepared_health_load_validates_float_schema() {
         assert_eq!(error, format!("{}: {message}", schema.display()));
     }
     fs::write(&schema, r#"{"health":7,"absorption":254}"#).unwrap();
-    assert!(HealthResources::load(root.path()).is_ok());
+    let resources = HealthResources::load(root.path()).unwrap();
+    let mut player = PlayerHealth::initial(&resources, 36.0).unwrap();
+    assert_eq!((player.health(), player.absorption()), (36.0, 0.0));
+    let exposes = |values: Option<Vec<sunrise_world::synced_values::DataValue<f32>>>| {
+        values.map(|values| values.iter().map(|v| (v.id, v.value)).collect::<Vec<_>>())
+    };
+    assert_eq!(exposes(player.data.non_default()), Some(vec![(7, 36.0)]));
+    assert_eq!(exposes(player.data.take_dirty()), Some(vec![(7, 36.0)]));
 }
 
 #[test]

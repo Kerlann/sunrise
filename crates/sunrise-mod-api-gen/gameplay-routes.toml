@@ -224,6 +224,11 @@ borrow = "shared"
 kind = "shared_trait"
 owner = "::sunrise_gameplay_common::game::native_entity_state_common::NativeEntityStateCommonGameExt1<'_>"
 
+[host.client."EntityFireFrostBackend::entity_ticks_frozen"]
+borrow = "shared"
+kind = "shared_trait"
+owner = "::sunrise_gameplay_common::game::native_entity_state_common::NativeEntityStateCommonGameExt1<'_>"
+
 [host.client."EntityIdentityBackend::entity_is_multipart"]
 borrow = "shared"
 kind = "shared_trait"
@@ -1395,6 +1400,11 @@ kind = "shared_trait"
 owner = "::sunrise_gameplay_common::game::native_entity_state_common::NativeEntityStateCommonGameExt1<'_>"
 
 [host.server."EntityFireFrostBackend::entity_is_on_fire"]
+borrow = "shared"
+kind = "shared_trait"
+owner = "::sunrise_gameplay_common::game::native_entity_state_common::NativeEntityStateCommonGameExt1<'_>"
+
+[host.server."EntityFireFrostBackend::entity_ticks_frozen"]
 borrow = "shared"
 kind = "shared_trait"
 owner = "::sunrise_gameplay_common::game::native_entity_state_common::NativeEntityStateCommonGameExt1<'_>"

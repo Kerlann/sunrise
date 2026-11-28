@@ -2551,9 +2551,7 @@ impl Renderer {
             keep_timed_frames: false,
             own_timing: None,
             #[cfg(feature = "test-support")]
-            tone_curve_ran: false,
-            #[cfg(feature = "test-support")]
-            pack_loads: 0,
+            test_hooks: Default::default(),
             pack_entity_rest: Vec::new(),
             cloud_bindings,
             pack_weather: None,

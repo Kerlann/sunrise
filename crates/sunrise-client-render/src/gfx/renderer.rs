@@ -426,12 +426,9 @@ pub struct Renderer {
     pub(crate) keep_timed_frames: bool,
     /// Times Sunrise's own passes on the GPU, as `pass_timing` does (`own_pass_times`).
     pub(crate) own_timing: Option<pack_timing::PassTiming>,
-    /// Tests: whether the last real frame ran Sunrise's tone curve (`sunrise_tone_curve`).
+    /// What tests read from and set on this renderer (`test_hooks`).
     #[cfg(feature = "test-support")]
-    pub(crate) tone_curve_ran: bool,
-    /// Tests: how many shader pack builds `load_shader_pack` started.
-    #[cfg(feature = "test-support")]
-    pub(crate) pack_loads: u64,
+    pub test_hooks: super::test_hooks::TestHooks,
     /// The entity vertices Sunrise draws itself while a shader pack draws the others.
     pub(crate) pack_entity_rest: Vec<Vertex>,
     /// Set 1 of the cloud pipeline, for a shader pack's `gbuffers_clouds`.

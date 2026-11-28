@@ -61,7 +61,7 @@ fn final_pack(served: &str, plain: &str, hdr: Option<Tonemap>) -> Post {
     pack(&[("final", &fsh)], hdr)
 }
 
-fn texture(gpu: &Fixture, size: [u32; 2], format: T) -> wgpu::Texture {
+pub(super) fn texture(gpu: &Fixture, size: [u32; 2], format: T) -> wgpu::Texture {
     gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("HDR extension fixture"),
         size: wgpu::Extent3d {
@@ -130,6 +130,7 @@ fn run(
         &screen.create_view(&Default::default()),
         &fixture_frame(&hud),
         &Default::default(),
+        Default::default(),
         size,
         window,
         &[],
@@ -144,7 +145,7 @@ fn run(
 
 /// Every texel of `texture` once `encoder` ran, as floats: half floats as stored, 8-bit
 /// unorm values as their byte.
-fn texels(
+pub(super) fn texels(
     gpu: &Fixture,
     mut encoder: wgpu::CommandEncoder,
     texture: &wgpu::Texture,

@@ -419,7 +419,8 @@ impl PackPost {
     /// Runs the pack over the world drawn into `world` (colour) and `world_depth`, then draws
     /// the result onto `screen`. Notifies after the sky if the frame assigned the stage to this
     /// pack, and after the last pack world pass, before composition. A pack's hand is still part
-    /// of its world passes for the depth snapshots.
+    /// of its world passes for the depth snapshots. `display`: the display the frame is shown on,
+    /// which a pack served Sunrise's HDR extension reads (`pack_uniforms::DISPLAY`).
     #[allow(clippy::too_many_arguments)]
     pub fn run_frame(
         &mut self,
@@ -433,6 +434,7 @@ impl PackPost {
         sky: &SkyInputs<'_>,
         hand: &HandInputs<'_>,
         inputs: &PackInputs,
+        display: pack_uniforms::Display,
         size: [u32; 2],
         window: [u32; 2],
         pages: &[TerrainPage],
@@ -552,6 +554,7 @@ impl PackPost {
             .center_depth
             .get_or_insert_with(|| crate::pack_center_depth::CenterDepth::new(device))
             .collect();
+        self.uniforms.display = display;
         self.uniforms.update(frame_view, inputs, size);
         self.mod_uniforms.advance_frame();
         // `smooth` starts on the first frame that knows the camera's biome.

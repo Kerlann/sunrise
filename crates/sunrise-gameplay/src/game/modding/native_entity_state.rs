@@ -486,14 +486,6 @@ impl crate::game::ServerGame<'_> {
         let target = self.native_entity_target(entity)?;
         Some(self.read_entity_base(target)?.base.no_gravity)
     }
-    /// Returns the entity's frozen ticks (`Entity.getTicksFrozen`).
-    pub(in crate::game) fn entity_ticks_frozen(&self, entity: EntityRef) -> Option<i32> {
-        match self.native_entity_body(entity)? {
-            Body::Player(p) => Some(p.ticks_frozen),
-            Body::Mob(m) => Some(m.ticks_frozen),
-            _ => None,
-        }
-    }
     /// Sets the persistent glowing tag (`Entity.setGlowingTag`), for every kind.
     pub(in crate::game) fn entity_set_glowing(&mut self, entity: EntityRef, glowing: bool) -> bool {
         self.native_entity_target(entity)

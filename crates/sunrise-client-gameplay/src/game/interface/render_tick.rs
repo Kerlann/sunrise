@@ -85,13 +85,10 @@ pub(in crate::game) fn mob_tracking_body(mob: &Mob) -> TrackingBody {
     }
 }
 
-/// `GameRenderer.nightVisionScale` for an optional night-vision duration (`-1` is infinite).
+/// `GameRenderer.nightVisionScale` for an optional night-vision duration (`-1` is infinite):
+/// the one computation the lightmap and a shader pack share.
 fn night_vision_scale(duration: Option<i32>, partial: f32) -> f32 {
-    match duration {
-        Some(d) if !(0..=200).contains(&d) => 1.0,
-        Some(d) => 0.7 + ((d as f32 - partial) * std::f32::consts::PI * 0.2).sin() * 0.3,
-        None => 0.0,
-    }
+    duration.map_or(0.0, |d| super::sculk::night_vision_scale(d, partial))
 }
 
 /// `ClientLevel.tickWeatherEffects`: the MOTION_BLOCKING height of the column
@@ -252,10 +249,7 @@ impl crate::game::ClientGame<'_> {
                 .map(|effect| (effect.duration, effect.duration == -1))
         });
         let darkness = fog_effects
-            .map(|e| {
-                e.darkness_blend
-                    .map(|(previous, current)| previous + (current - previous) * partial)
-            })
+            .map(|e| e.darkness_at(partial))
             .unwrap_or_else(|| self.darkness_fog());
         let fire_resistance = fog_effects.map_or_else(
             || self.common.potions.effects.get("fire_resistance").is_some(),
@@ -1503,5 +1497,40 @@ mod tests {
                 ]
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod night_vision_tests {
+    use super::super::sculk::night_vision_scale as shared;
+    use super::night_vision_scale;
+
+    /// The lightmap's optional wrapper and a shader pack's read are one computation
+    /// (`GameRenderer.nightVisionScale`): infinite is full strength, the last 200 ticks
+    /// flicker on vanilla's sine table, and a negative duration other than -1 is not
+    /// infinite (`MobEffectInstance.endsWithin(200)`).
+    #[test]
+    fn the_lightmap_and_a_shader_pack_read_one_night_vision_scale() {
+        for (duration, partial) in [
+            (-1, 0.0),
+            (0, 0.5),
+            (37, 0.25),
+            (200, 0.0),
+            (201, 0.0),
+            (-2, 0.0),
+        ] {
+            assert_eq!(
+                night_vision_scale(Some(duration), partial),
+                shared(duration, partial),
+                "duration {duration}"
+            );
+        }
+        assert_eq!(night_vision_scale(None, 0.5), 0.0);
+        assert_eq!(shared(-1, 0.0), 1.0, "infinite");
+        assert_eq!(shared(201, 0.0), 1.0, "not in its last 200 ticks");
+        assert!(
+            shared(-2, 0.0) < 0.7,
+            "a negative duration other than -1 still flickers"
+        );
     }
 }

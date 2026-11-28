@@ -170,6 +170,7 @@ impl Gpu {
             &screen,
             frame,
             &Default::default(),
+            Default::default(),
             SIZE,
             SIZE,
             &[],

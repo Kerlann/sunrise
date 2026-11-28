@@ -1019,6 +1019,19 @@ impl crate::game::ServerGame<'_> {
         self.as_guest_at(gi, conn, f).ok()
     }
 
+    /// `as_guest`, except that a guest whose turn this already is runs `f` where it stands:
+    /// the pickups a mod asks for in a guest's own turn reach the same code the pass uses.
+    pub(in crate::game) fn as_guest_here<R>(
+        &mut self,
+        conn: u32,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> Option<R> {
+        if self.server.lan_acting == Some(conn) {
+            return Some(f(self));
+        }
+        self.as_guest(conn, f)
+    }
+
     /// `as_guest` for the guest at `gi` in the hub's list, which a caller that already found it
     /// passes with its `conn`: the turn starts without another scan, and is refused when the
     /// guest there isn't `conn`.

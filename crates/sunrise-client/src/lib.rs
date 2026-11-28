@@ -38,9 +38,12 @@ pub(crate) use sunrise_level::chunk;
 pub(crate) use sunrise_sim::{datapack_net, entities, motion, raw_payloads};
 pub use sunrise_sim::{lan, orb_limits, save};
 #[cfg(test)]
-#[path = "../../sunrise-core/src/prepared_test_root.rs"]
-mod prepared_test_root;
-#[cfg(test)]
 mod test_game_dir;
+
+// The one way a unit test gets prepared data: `SUNRISE_TEST_RESOURCES`, else the checkout's
+// `.local/sunrise-client/<version>`, with every input it names required.
+#[cfg(test)]
+#[path = "../../sunrise-core/src/prepared_test_root.rs"]
+pub(crate) mod prepared_test_root;
 
 pub use sunrise_level::{crash, logging, spans};

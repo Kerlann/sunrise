@@ -92,6 +92,7 @@ mod renderer_construction;
 mod section_fade;
 mod section_upload;
 mod shader_pack;
+pub use shader_pack::PackPoll;
 mod surface_lifecycle;
 use entity_draw::*;
 #[cfg(test)]
@@ -291,6 +292,8 @@ mod off_page;
 use off_page::move_off_page;
 pub mod submit;
 mod sunrise_fan;
+#[cfg(feature = "test-support")]
+pub mod test_hooks;
 mod timing;
 pub mod translucency;
 pub(crate) mod upload;
@@ -1036,6 +1039,14 @@ mod sprite_upload_tests;
 #[cfg(test)]
 mod shadow_tests;
 
+/// What a pack's thread builds (`Renderer::load_shader_pack`): the pack or why it is refused,
+/// its block ids, and the mod pipelines' state for its targets.
+type PackBuilt = (
+    std::result::Result<pack_post::PackPost, pack_post::Refused>,
+    Vec<i32>,
+    Option<mod_pipelines::BuiltPackState>,
+);
+
 /// A `shaders/` pack building on its own thread (`Renderer::load_shader_pack`): the dimension it
 /// is for, the thread (a panic in it contained), and what the game named it with and when.
 /// Dropping it (another pack, none, or another dimension) cancels the build: the thread stops at
@@ -1044,16 +1055,7 @@ pub(crate) struct PackLoading {
     dimension: i32,
     /// Held to be dropped with it: that cancels the build.
     _cancel: CancelOnDrop,
-    #[allow(clippy::type_complexity)]
-    thread: std::thread::JoinHandle<
-        std::result::Result<
-            (
-                std::result::Result<pack_post::PackPost, pack_post::Refused>,
-                Vec<i32>,
-            ),
-            String,
-        >,
-    >,
+    thread: std::thread::JoinHandle<std::result::Result<PackBuilt, String>>,
     label: String,
     started: std::time::Instant,
     /// What its terrain and shadow programs will draw from the game's sections, as the built
@@ -1062,6 +1064,9 @@ pub(crate) struct PackLoading {
     draws: PackDraws,
     /// Sunrise's HDR as served to it (`Post::hdr`).
     served: Option<sunrise_shaders::Tonemap>,
+    /// Block ids given while it builds (`Renderer::set_pack_block_ids`), which it runs with in
+    /// place of those it was built with.
+    block_ids: Option<Vec<i32>>,
 }
 
 /// A running `shaders/` pack's block ids (`Renderer::pack_block_ids`).
