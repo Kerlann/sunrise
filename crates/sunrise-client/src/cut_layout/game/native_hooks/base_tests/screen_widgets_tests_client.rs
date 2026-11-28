@@ -3697,6 +3697,64 @@ fn press_id_and_mutating_widgets_from_screen_input_hooks_and_lazy_discovery() {
             }
             let _ = game.hud_layers([640, 480]);
             sunrise_client::widgets::end_frame(52_005);
+
+            // Moving an engine slider over another engine button routes press, drag, and release
+            // exclusively to the moved slider; the button underneath receives none.
+            game.open_options(false);
+            game.observe_screen();
+            let online_msg = ApiText::translate("options.online", vec![]);
+            let (fov_id, online_rect) = {
+                let widgets = game.screen_widgets().unwrap();
+                let children = widgets.children();
+                let fov = children
+                    .iter()
+                    .find(|c| {
+                        c.message
+                            .as_ref()
+                            .is_some_and(|m| format!("{m:?}").contains("options.fov"))
+                    })
+                    .expect("Options Main exposes FOV slider")
+                    .id;
+                let online = children
+                    .iter()
+                    .find(|c| c.message.as_ref() == Some(&online_msg))
+                    .expect("Options Main exposes Online button")
+                    .rect;
+                (fov, online)
+            };
+            assert!(
+                game.screen_widgets()
+                    .unwrap()
+                    .set_bounds(fov_id, online_rect)
+            );
+            let _ = game.hud_layers([640, 480]);
+            sunrise_client::widgets::end_frame(52_006);
+            game.client.settings.fov = 70.0;
+            move_mouse(
+                game,
+                win_id,
+                f64::from(online_rect[0] + 10.0),
+                f64::from(online_rect[1] + online_rect[3] * 0.5),
+            );
+            send_mouse_button(game, win_id, MouseButton::Left, true);
+            let fov_after_press = game.client.settings.fov;
+            move_mouse(
+                game,
+                win_id,
+                f64::from(online_rect[0] + online_rect[2] - 10.0),
+                f64::from(online_rect[1] + online_rect[3] * 0.5),
+            );
+            let fov_after_drag = game.client.settings.fov;
+            send_mouse_button(game, win_id, MouseButton::Left, false);
+            assert!(
+                fov_after_drag > fov_after_press,
+                "moved slider over Online button must receive press and drag"
+            );
+            assert_eq!(
+                game.client.chat_ui.options.page(),
+                sunrise_client::options_ui::Page::Main,
+                "button underneath a moved widget must receive neither press, drag, nor release"
+            );
         });
     });
 }

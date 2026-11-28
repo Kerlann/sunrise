@@ -3190,7 +3190,14 @@ impl OptionsUi {
         let mut events = Vec::new();
         if matches!(self.page(), Page::Video | Page::Controls | Page::KeyBinds) {
             let search = &mut self.settings_search;
-            search.focused = ui::hovered((x, y), search.x, search.y, search.width, search.height);
+            let msg = (!search.message.is_empty()).then(|| Text::literal(&search.message));
+            search.focused =
+                crate::widgets::matches_selected_engine_widget(
+                    crate::widgets::WidgetBucket::Field,
+                    msg.as_ref(),
+                    None,
+                    0,
+                ) && ui::hovered((x, y), search.x, search.y, search.width, search.height);
             if search.focused {
                 self.focus = Some(FocusId::Search);
                 self.focus_from_keyboard = false;
@@ -3203,7 +3210,14 @@ impl OptionsUi {
         }
         if self.page() == Page::Language {
             let search = &mut self.language_search;
-            search.focused = ui::hovered((x, y), search.x, search.y, search.width, search.height);
+            let msg = (!search.message.is_empty()).then(|| Text::literal(&search.message));
+            search.focused =
+                crate::widgets::matches_selected_engine_widget(
+                    crate::widgets::WidgetBucket::Field,
+                    msg.as_ref(),
+                    None,
+                    0,
+                ) && ui::hovered((x, y), search.x, search.y, search.width, search.height);
             if search.focused {
                 self.focus = Some(FocusId::Search);
                 self.focus_from_keyboard = false;
@@ -3233,11 +3247,57 @@ impl OptionsUi {
             self.scrollbar_drag_y = Some(y);
             return (events, true);
         }
+        let mut counts: std::collections::HashMap<(String, crate::widgets::WidgetBucket), u32> =
+            std::collections::HashMap::new();
         for (wd_idx, wd) in widgets.iter().enumerate() {
+            let visible = !wd.list || (wd.y < bottom && wd.y + wd.h > top);
+            let occ = match &wd.kind {
+                WKind::Button { label, .. } if visible => {
+                    let entry = counts
+                        .entry((
+                            crate::widgets::stable_key_from_text(label),
+                            crate::widgets::WidgetBucket::Button,
+                        ))
+                        .or_insert(0);
+                    let o = *entry;
+                    *entry += 1;
+                    o
+                }
+                WKind::Slider { label, .. } if visible => {
+                    let entry = counts
+                        .entry((
+                            crate::widgets::stable_key_from_text(label),
+                            crate::widgets::WidgetBucket::Slider,
+                        ))
+                        .or_insert(0);
+                    let o = *entry;
+                    *entry += 1;
+                    o
+                }
+                _ => 0,
+            };
             if !ui::hovered((x, y), wd.x, wd.y, wd.w, wd.h) {
                 continue;
             }
             if wd.list && (y < top || y >= bottom) {
+                continue;
+            }
+            let selected_match = match &wd.kind {
+                WKind::Button { label, .. } => crate::widgets::matches_selected_engine_widget(
+                    crate::widgets::WidgetBucket::Button,
+                    Some(label),
+                    None,
+                    occ,
+                ),
+                WKind::Slider { label, .. } => crate::widgets::matches_selected_engine_widget(
+                    crate::widgets::WidgetBucket::Slider,
+                    Some(label),
+                    None,
+                    occ,
+                ),
+                _ => true,
+            };
+            if !selected_match {
                 continue;
             }
             // AbstractWidget.mouseClicked rejects inactive buttons before the

@@ -191,6 +191,7 @@ thread_local! {
     static COLLECTOR: RefCell<Option<CollectorState>> = const { RefCell::new(None) };
     static ACTIVE_OVERRIDES: RefCell<Option<ActiveOverridePass>> = const { RefCell::new(None) };
     static INPUT_OVERRIDES: RefCell<Option<EngineOverrideMaps>> = const { RefCell::new(None) };
+    static SELECTED_ENGINE_WIDGET: RefCell<Option<EngineWidgetKey>> = const { RefCell::new(None) };
     static LAST_TARGET_META: RefCell<Option<(EngineWidgetKey, i32)>> = const { RefCell::new(None) };
 }
 
@@ -262,6 +263,43 @@ pub fn with_input_overrides<R>(maps: &mut EngineOverrideMaps, f: impl FnOnce() -
     f()
 }
 
+/// Restrict engine widget input dispatch within `f` to the single widget identified by `key`,
+/// matching vanilla `ContainerEventHandler` delivering press/drag/release to the selected child.
+pub fn with_selected_engine_widget<R>(key: &EngineWidgetKey, f: impl FnOnce() -> R) -> R {
+    struct Guard(Option<EngineWidgetKey>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            SELECTED_ENGINE_WIDGET.replace(self.0.take());
+        }
+    }
+    let _guard = Guard(SELECTED_ENGINE_WIDGET.replace(Some(key.clone())));
+    f()
+}
+
+/// Whether the engine widget described by `(bucket, label, explicit_key, occurrence)` is allowed
+/// to receive the current input event (`true` unless a different widget is selected via
+/// [`with_selected_engine_widget`]).
+pub fn matches_selected_engine_widget(
+    bucket: WidgetBucket,
+    label: Option<&Text>,
+    explicit_key: Option<&str>,
+    occurrence: u32,
+) -> bool {
+    SELECTED_ENGINE_WIDGET.with_borrow(|slot| {
+        let Some(selected) = slot.as_ref() else {
+            return true;
+        };
+        if selected.bucket != bucket || selected.occurrence != occurrence {
+            return false;
+        }
+        let key_str = match explicit_key {
+            Some(explicit) => explicit.to_owned(),
+            None => label.map(stable_key_from_text).unwrap_or_default(),
+        };
+        selected.key == key_str
+    })
+}
+
 /// Resolve an engine widget's interactive rectangle for input dispatch (mouse click, keyboard
 /// Enter/Space activation, controller focus) against the active `EngineOverrideMaps`.
 /// Returns `None` when the widget is suppressed, removed, hidden, or inactive (`visible && active`
@@ -274,6 +312,9 @@ pub fn resolve_engine_input(
     default_rect: [f32; 4],
     default_active: bool,
 ) -> Option<[f32; 4]> {
+    if !matches_selected_engine_widget(bucket, label, explicit_key, occurrence) {
+        return None;
+    }
     if !HAS_INPUT_OVERRIDES.get() {
         return default_active.then_some(default_rect);
     }

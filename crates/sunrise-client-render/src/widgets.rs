@@ -13,10 +13,10 @@ pub use widgets_override::{
     ResolvedEngineWidget, ResolvedWidgetProps, WidgetBucket, active_tooltip_overridden,
     apply_narration_overrides, in_override_pass, is_blocking_engine_widget_click,
     is_collecting_widgets, label_abgr_color, label_argb_color, mark_render_vetoed,
-    resolve_engine_input, resolve_engine_widget, scale_abgr_alpha, scale_argb_alpha,
-    stable_key_from_text, take_active_pending_tooltip, white_abgr_alpha,
-    with_blocking_engine_widget_click, with_input_overrides, with_widget_collector,
-    with_widget_overrides, without_engine_overrides,
+    matches_selected_engine_widget, resolve_engine_input, resolve_engine_widget, scale_abgr_alpha,
+    scale_argb_alpha, stable_key_from_text, take_active_pending_tooltip, white_abgr_alpha,
+    with_blocking_engine_widget_click, with_input_overrides, with_selected_engine_widget,
+    with_widget_collector, with_widget_overrides, without_engine_overrides,
 };
 
 /// The mouse cursor a frame's widgets asked for (`CursorTypes`; the others
