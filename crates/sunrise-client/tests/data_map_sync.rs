@@ -32,9 +32,7 @@ fn connect(port: u16, name: &str, data: &Arc<ItemData>, local_data_maps: LocalDa
     )
 }
 
-type SyncPayload = (String, HashMap<String, Vec<(String, Tag)>>);
-
-fn drive_join(host: &mut Host, session: &Session) -> Result<Vec<SyncPayload>, String> {
+fn drive_join(host: &mut Host, session: &Session) -> Result<Vec<play::Clientbound>, String> {
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut pending = Vec::new();
     loop {
@@ -62,13 +60,7 @@ fn drive_join(host: &mut Host, session: &Session) -> Result<Vec<SyncPayload>, St
             match event {
                 Event::Joined { .. } => joined = true,
                 Event::Disconnected { reason, .. } => return Err(reason),
-                Event::Packet(packet) => {
-                    if let play::Clientbound::CustomPayload(p) = *packet
-                        && p.channel == data_map_net::SYNC_CHANNEL
-                    {
-                        pending.push(data_map_net::decode_sync_payload(&p.data).unwrap());
-                    }
-                }
+                Event::Packet(packet) => pending.push(*packet),
                 _ => {}
             }
         }
@@ -80,14 +72,33 @@ fn drive_join(host: &mut Host, session: &Session) -> Result<Vec<SyncPayload>, St
     }
 }
 
+fn take_data_map_sync(
+    pending: &mut Vec<play::Clientbound>,
+    expected_registry: &str,
+) -> Option<HashMap<String, Vec<(String, Tag)>>> {
+    let found = pending.iter().enumerate().find_map(|(i, packet)| {
+        let play::Clientbound::CustomPayload(p) = packet else {
+            return None;
+        };
+        if p.channel != data_map_net::SYNC_CHANNEL {
+            return None;
+        }
+        let (registry, maps) = data_map_net::decode_sync_payload(&p.data).unwrap();
+        (registry == expected_registry).then_some((i, maps))
+    });
+    let (i, maps) = found?;
+    pending.remove(i);
+    Some(maps)
+}
+
 fn wait_data_map_sync(
     host: &mut Host,
     session: &Session,
-    pending: &mut Vec<SyncPayload>,
+    pending: &mut Vec<play::Clientbound>,
     expected_registry: &str,
 ) -> HashMap<String, Vec<(String, Tag)>> {
-    if let Some(pos) = pending.iter().position(|(reg, _)| reg == expected_registry) {
-        return pending.remove(pos).1;
+    if let Some(maps) = take_data_map_sync(pending, expected_registry) {
+        return maps;
     }
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
@@ -100,19 +111,12 @@ fn wait_data_map_sync(
                         "disconnected while waiting for sunrise:data_map_sync for {expected_registry}: {reason}"
                     );
                 }
-                Event::Packet(packet) => {
-                    if let play::Clientbound::CustomPayload(p) = *packet
-                        && p.channel == data_map_net::SYNC_CHANNEL
-                    {
-                        let (registry, maps) = data_map_net::decode_sync_payload(&p.data).unwrap();
-                        if registry == expected_registry {
-                            return maps;
-                        }
-                        pending.push((registry, maps));
-                    }
-                }
+                Event::Packet(packet) => pending.push(*packet),
                 _ => {}
             }
+        }
+        if let Some(maps) = take_data_map_sync(pending, expected_registry) {
+            return maps;
         }
         assert!(
             Instant::now() < deadline,
@@ -463,12 +467,19 @@ fn optional_only_server_allows_vanilla_client_and_sunrise_client_without_map() {
     let session = connect(host.port(), "NoModSunrise", &data, client_known);
     let pending =
         drive_join(&mut host, &session).expect("Sunrise client without optional map must join");
-    assert!(
-        pending.is_empty(),
-        "Sunrise client without optional map must not receive sunrise:data_map_sync: {pending:?}"
-    );
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut saw_commands = false;
+    for packet in pending {
+        match packet {
+            play::Clientbound::CustomPayload(p) if p.channel == data_map_net::SYNC_CHANNEL => {
+                panic!(
+                    "Sunrise client without optional map must not receive sunrise:data_map_sync"
+                );
+            }
+            play::Clientbound::Commands(_) => saw_commands = true,
+            _ => {}
+        }
+    }
     while !saw_commands {
         host.tick();
         for receipt in session.poll() {
