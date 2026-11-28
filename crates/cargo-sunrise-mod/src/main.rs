@@ -9,7 +9,7 @@
 //! - `self-update`: install the newest signed standalone tool without changing any project's SDK pin.
 //! - `internals sync [--repo <path>]`: sync declarations for native mods.
 //! - `internals add <path>… [--kind <kind>]`: declare internals from the prebuilt catalog.
-//! - `build [--update-lock]`: the `.smod` in `target/sunrise-mod/`, with the mod's `assets/`
+//! - `build [--update-lock] [--timings] [--verbose]`: the `.smod` in `target/sunrise-mod/`, with the mod's `assets/`
 //!   and `data/`; a native mod is compiled first (`dev.rs`).
 //! - `release [<version>|patch|minor|major] [--check] [--pull-request]`, `release setup`: prepare or publish a tagged
 //!   release using the registry's shared workflow (`author_release.rs`).
@@ -21,17 +21,19 @@
 //!   shaders; for a native mod, Rust and what the mod uses of its pinned build (`sdk_cmds.rs`).
 //! - `check <file> [--kind <kind>] [--attestation <bundle>] [--repository <id>] [--json]`: check a release package
 //!   (`.smod`, `.spack`, resource pack `.zip`).
-//! - `hooks <text> [--all]`: search the pinned build's hooks (or every item) offline.
+//! - `hooks <text> [--all]`: search the pinned build's hooks (or every item) in the SDK `check` already
+//!   prepared, fetching and writing nothing.
 //! - `sdk diff <build> <build>`: what changed in the surface between two builds.
 //! - `check [<file.smod>] --build <name> [--build <name>]…`: whether the mod fits each build; exit 0 when all
 //!   do, 1 when one does not, 2 when it cannot be told.
 //! - `use-jar <path | modrinth-url | <project> <version>>`: list an exact original Java jar as a passive asset/data source, downloading it from Modrinth when given a Modrinth reference.
-//! - `native-build < plan.json`: compile native mods against an unpacked SDK, as the launcher does
+//! - `native-build < plan.json`: compile native mods against an unpacked SDK
 //!   (docs/modding/src/reference/sdk/08-native-build.md).
 //! - `native-check < plan.json`: how native mods stand against one build before anything compiles (the same page).
 //! - `native-discover < plan.json`, `native-lock < plan.json`: a native mod's internals or its pinned game's build data, and its registry lock (the same page).
 //! - `native-layout < plan.json`: a local prebuilt game checked and laid out as an SDK's slices (the same page).
 use sunrise_mod_package::{Content, Manifest, Package, manifest::MANIFEST};
+use sunrise_native_build::{BuildDiagnostics, CompilerStderr, Timings};
 mod author_release;
 mod bounded;
 mod check;
@@ -95,10 +97,6 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let command = args.first().map(String::as_str);
-    // `hooks` reads the pinned SDK's catalog and stays offline.
-    if command.is_some_and(|c| help::is_everyday(c) && c != "hooks") {
-        self_update::notice();
-    }
     let result = match command {
         Some("new") => new(&args[1..], &sdk_fetch::fetch_pinned).and_then(|code| match code {
             Some(dir) => fetched(&dir),
@@ -116,7 +114,11 @@ fn main() -> ExitCode {
             }) => sdk_cmds::check_mod(entry, Path::new("."), uses, &with, release),
             Ok(Check::File(file)) => check(file),
             Ok(Check::Fit { package, builds }) => {
-                return sdk_cmds::check_fit(entry, package, &builds);
+                let code = sdk_cmds::check_fit(entry, package, &builds);
+                if code != ExitCode::SUCCESS {
+                    return code;
+                }
+                Ok(())
             }
             Err((code, error)) => {
                 eprintln!("error: {error}");
@@ -171,7 +173,13 @@ fn main() -> ExitCode {
         Some(other) => Err(help::unknown(other)),
     };
     match result {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) => {
+            // `hooks` reads the prepared SDK's catalog and does not check for tool updates.
+            if command.is_some_and(|c| help::is_everyday(c) && c != "hooks") {
+                self_update::notice();
+            }
+            ExitCode::SUCCESS
+        }
         Err(e) => {
             eprintln!("error: {e}");
             ExitCode::FAILURE
@@ -183,6 +191,7 @@ fn main() -> ExitCode {
 struct BuildArgs<'a> {
     update_lock: bool,
     with: Vec<&'a Path>,
+    diagnostics: BuildDiagnostics,
 }
 
 fn build_args(args: &[String]) -> Result<BuildArgs<'_>, String> {
@@ -193,8 +202,22 @@ fn build_args(args: &[String]) -> Result<BuildArgs<'_>, String> {
         .map(Path::new)
         .collect::<Vec<_>>();
     let update_lock = options.switch("--update-lock");
+    let timings = if options.switch("--timings") {
+        Timings::Html
+    } else {
+        Timings::Off
+    };
+    let stderr = if options.switch("--verbose") | options.switch("-v") {
+        CompilerStderr::Mirror
+    } else {
+        CompilerStderr::LogOnly
+    };
     options.finish()?;
-    Ok(BuildArgs { update_lock, with })
+    Ok(BuildArgs {
+        update_lock,
+        with,
+        diagnostics: BuildDiagnostics { timings, stderr },
+    })
 }
 
 /// Compile once through native-build, then write the source package.
@@ -202,31 +225,53 @@ fn build_command(
     entry: mod_surface::child::ChildEntry,
     args: &[String],
 ) -> Result<PathBuf, String> {
-    let BuildArgs { update_lock, with } = build_args(args)?;
+    let BuildArgs {
+        update_lock,
+        with,
+        diagnostics,
+    } = build_args(args)?;
     let root = Path::new(".");
     let package = Package::read(root)?;
-    if !with.is_empty() && !package.is_native() {
-        return Err("build --with supplies libraries to a native mod".into());
+    let native = package.is_native();
+    if !native {
+        if !with.is_empty() {
+            return Err("build --with supplies libraries to a native mod".into());
+        }
+        if update_lock {
+            return Err(format!(
+                "build --update-lock rewrites a native mod's Cargo.lock; {MANIFEST} has no [native] table"
+            ));
+        }
+        if diagnostics.timings == Timings::Html {
+            return Err("build --timings is only for native mods".into());
+        }
+        if diagnostics.stderr == CompilerStderr::Mirror {
+            return Err("build --verbose/-v is only for native mods".into());
+        }
     }
-    if update_lock && !package.is_native() {
-        return Err(format!(
-            "build --update-lock rewrites a native mod's Cargo.lock; {MANIFEST} has no [native] table"
-        ));
-    }
-    let output = PackageOutput::in_project(root)?;
-    if package.is_native() {
+    let output = PackageOutput::prepare(root, &package.manifest)?;
+    let bundle = native
+        .then(|| dev::project_bundle(root, &package))
+        .transpose()?;
+    // The SDK source is refused (`E_SDK_SOURCE`) before any SDK is fetched.
+    let cargo = bundle
+        .as_ref()
+        .map(|bundle| sunrise_native_build::api::Project::read(bundle).map_err(|e| e.to_string()))
+        .transpose()?;
+    if cargo.is_some() {
         fetched(root)?;
     }
-    let built = package
-        .is_native()
-        .then(|| {
+    let built = cargo
+        .as_ref()
+        .map(|cargo| {
             dev::build(
-                root,
+                cargo,
                 &package,
                 &with,
                 update_lock,
                 sunrise_native_build::contract::TargetName::Client,
                 false,
+                diagnostics,
             )
         })
         .transpose()?;
@@ -237,7 +282,7 @@ fn build_command(
         built.as_ref().map(|built| built.mixins.as_str()),
     )?;
     println!("Built {}", path.display());
-    if let Some(bundle) = page::write_bundle(root, &output.0, &package.manifest)? {
+    if let Some(bundle) = page::write_bundle(root, &output.dir, &package.manifest)? {
         println!("Built {}", bundle.display());
     }
     Ok(path)
@@ -248,13 +293,8 @@ fn read_manifest(dir: &Path) -> Result<Manifest, String> {
     Manifest::parse(&bounded::read(&dir.join(MANIFEST), bounded::MAX_MANIFEST)?)
 }
 
-/// The SDK the project at `dir` pins, fetched into its `.sunrise/sdk/` when missing or stale; a
-/// project inside a game checkout builds against that tree instead.
+/// The SDK the project at `dir` pins, fetched into its `.sunrise/sdk/` when missing or stale.
 fn fetched(dir: &Path) -> Result<(), String> {
-    if let Some(tree) = sdk_fetch::game_tree(dir)? {
-        println!("Building against the game checkout {}", tree.display());
-        return Ok(());
-    }
     let sdk = sdk_fetch::ensure_sdk(dir)?;
     println!(
         "SDK {} (build {}) in {}",
@@ -305,7 +345,12 @@ fn new(args: &[String], fetch: FetchSdk) -> Result<Option<PathBuf>, String> {
         let value = options
             .next()
             .ok_or_else(|| format!("missing value after {option}\n{}", usage().trim_end()))?;
-        slot.get_or_insert(value);
+        if slot.replace(value).is_some() {
+            return Err(format!(
+                "{option} may only be given once\n{}",
+                usage().trim_end()
+            ));
+        }
     }
     let dir = Path::new(path);
     if dir.exists() {
@@ -326,8 +371,22 @@ fn new(args: &[String], fetch: FetchSdk) -> Result<Option<PathBuf>, String> {
         })
         .collect();
     let name = name.map_or_else(|| base.replace(['-', '_'], " "), str::to_string);
-    let fill = |t: &str| t.replace("{id}", &id).replace("{name}", &name);
+    // `{id}` is filled first and `{name}` only where a template takes the display name, as the text
+    // its file needs: a TOML string in the manifest, the raw name in the README. Nothing is scanned
+    // for placeholders after a name is put in.
+    let toml_name = toml_edit::Value::from(name.as_str()).to_string();
+    let fill = |file: &str, text: &str| {
+        let text = text.replace("{id}", &id);
+        match file {
+            MANIFEST => text.replace("{name}", &toml_name),
+            "README.md" => text.replace("{name}", &name),
+            _ => text,
+        }
+    };
     match template {
+        None | Some("content") if sunrise.is_some() => {
+            return Err("--sunrise needs --template native".into());
+        }
         None | Some("content") => {}
         Some("native") => {
             new_native(dir, &id, sunrise, fetch, fill)?;
@@ -335,12 +394,13 @@ fn new(args: &[String], fetch: FetchSdk) -> Result<Option<PathBuf>, String> {
         }
         Some(_) => return Err("--template is content or native".into()),
     }
+    let manifest_text = fill(
+        MANIFEST,
+        include_str!("../template/content/sunrise-mod.toml"),
+    );
+    let manifest = Manifest::parse(&manifest_text)?;
     // A block copying a vanilla one, with its model, name, loot, recipe and tag.
     let files = [
-        (
-            MANIFEST,
-            include_str!("../template/content/sunrise-mod.toml"),
-        ),
         (
             "data/{id}/sunrise/block/glowing_amethyst.json",
             include_str!("../template/content/block.json"),
@@ -375,16 +435,17 @@ fn new(args: &[String], fetch: FetchSdk) -> Result<Option<PathBuf>, String> {
         ),
         (".gitignore", include_str!("../template/gitignore")),
     ];
-    for (file, text) in files.into_iter().chain(PAGE_TEMPLATE) {
-        let file = fill(file);
-        let file = file.as_str();
+    let rendered = files.into_iter().chain(PAGE_TEMPLATE).map(|(file, text)| {
+        let file = file.replace("{id}", &id);
+        let text = fill(&file, text);
+        (file, text)
+    });
+    for (file, text) in std::iter::once((MANIFEST.to_owned(), manifest_text)).chain(rendered) {
         let to = dir.join(file);
         std::fs::create_dir_all(to.parent().expect("a file in the mod"))
             .map_err(|e| e.to_string())?;
-        std::fs::write(&to, fill(text)).map_err(|e| format!("{}: {e}", to.display()))?;
+        std::fs::write(&to, text).map_err(|e| format!("{}: {e}", to.display()))?;
     }
-    let manifest =
-        Manifest::parse(&std::fs::read_to_string(dir.join(MANIFEST)).map_err(|e| e.to_string())?)?;
     Content::read(dir, &manifest)?;
     author_release::scaffold(dir)?;
     println!(
@@ -483,7 +544,7 @@ fn new_native(
     id: &str,
     sunrise: Option<&str>,
     fetch: FetchSdk,
-    fill: impl Fn(&str) -> String,
+    fill: impl Fn(&str, &str) -> String,
 ) -> Result<(), String> {
     if id.len() > 64 {
         return Err(format!("mod id {id}: 64 characters at most"));
@@ -521,7 +582,7 @@ fn new_native(
         let to = dir.join(file);
         std::fs::create_dir_all(to.parent().expect("a file in the mod"))
             .map_err(|e| e.to_string())?;
-        std::fs::write(&to, fill(text)).map_err(|e| format!("{}: {e}", to.display()))?;
+        std::fs::write(&to, fill(file, text)).map_err(|e| format!("{}: {e}", to.display()))?;
     }
     for folder in ["assets", "data"] {
         std::fs::create_dir_all(dir.join(folder)).map_err(|e| e.to_string())?;
@@ -538,8 +599,7 @@ fn new_native(
 
 /// Packs the mod in the current folder into `target/sunrise-mod/<id>.smod`: the manifest and
 /// the files in `assets/` and `data/`, and for a code mod its source and its uses table, scanned
-/// against the pinned build (none for a mod with rows no list can judge, or built against the game
-/// checkout it lies in, which has no published surface to scan against).
+/// against the pinned build (none for a mod with rows no list can judge).
 fn build(
     entry: mod_surface::child::ChildEntry,
     package: &Package,
@@ -547,9 +607,7 @@ fn build(
     mixins: Option<&str>,
 ) -> Result<PathBuf, String> {
     let root = Path::new(".");
-    let uses = if let Some(native) = &package.manifest.native
-        && sdk_fetch::game_tree(root)?.is_none()
-    {
+    let uses = if let Some(native) = &package.manifest.native {
         let sdk = sdk_fetch::fetch_pinned(root, &native.sunrise)?;
         let surface = uses_table::surface_of(&sdk)?;
         let scanned = uses_table::scan(entry, root, &package.manifest, &surface)?;
@@ -575,25 +633,30 @@ fn build(
 }
 
 fn build_in(root: &Path, manifest: &Manifest) -> Result<PathBuf, String> {
-    pack_into(
-        root,
-        &PackageOutput::in_project(root)?,
-        manifest,
-        None,
-        None,
-    )
+    let output = PackageOutput::prepare(root, manifest)?;
+    pack_into(root, &output, manifest, None, None)
 }
 
-struct PackageOutput(PathBuf);
+struct PackageOutput {
+    dir: PathBuf,
+    path: PathBuf,
+}
 
 impl PackageOutput {
-    /// Check both output components under the project before writing or unlinking packages.
-    fn in_project(root: &Path) -> Result<Self, String> {
+    /// Check both output components, then unlink the previous package. A failed build must not
+    /// leave a package that a later `check <file>` would report as current.
+    fn prepare(root: &Path, manifest: &Manifest) -> Result<Self, String> {
         let target = root.join("target");
         internals::check_output_dir(&target)?;
         let dir = target.join("sunrise-mod");
         internals::check_output_dir(&dir)?;
-        Ok(Self(dir))
+        let path = dir.join(format!("{}.smod", manifest.id));
+        if let Err(e) = std::fs::remove_file(&path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(format!("{}: {e}", path.display()));
+        }
+        Ok(Self { dir, path })
     }
 }
 
@@ -628,23 +691,14 @@ fn pack_into(
     uses: Option<&[u8]>,
     mixins: Option<&str>,
 ) -> Result<PathBuf, String> {
-    let dir = &output.0;
-    // A failed build leaves no earlier package that a later `check <file>` would report as good.
-    let path = dir.join(format!("{}.smod", manifest.id));
-    match std::fs::remove_file(&path) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-            return Err(format!("{}: {e}", path.display()));
-        }
-        _ => {}
-    }
     check::references(root, manifest)?;
     let text = bounded::read(&root.join(MANIFEST), bounded::MAX_MANIFEST)?;
     let bytes = Package::pack_directory_with(root, uses, Some(completed_manifest(&text, mixins)?))?;
-    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&output.dir).map_err(|e| e.to_string())?;
     // Written beside it and renamed, so a running game never reads half a file, through a
     // temporary name made new: a link planted at a guessable name is never followed.
-    internals::atomic_write(&path, bytes)?;
-    Ok(path)
+    internals::atomic_write(&output.path, bytes)?;
+    Ok(output.path.clone())
 }
 
 /// What `check` was asked to check.
@@ -941,12 +995,53 @@ mod tests {
     }
 
     #[test]
+    fn new_refuses_repeated_singleton_options() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("greeter");
+        let pin = format!("--template native --sunrise {OLD_BUILD} --sunrise {OLD_BUILD}");
+        for (option, line) in [
+            ("--name", "--name First --name Second"),
+            ("--template", "--template content --template native"),
+            ("--sunrise", pin.as_str()),
+        ] {
+            let args: Vec<_> = std::iter::once(path.display().to_string())
+                .chain(argv(line))
+                .collect();
+            let fetch = |_: &Path, _: &str| panic!("a repeated option must not fetch an SDK");
+            let error = new(&args, &fetch).unwrap_err();
+            assert_eq!(
+                error.lines().next().unwrap(),
+                format!("{option} may only be given once")
+            );
+            assert!(!path.exists());
+        }
+    }
+
+    #[test]
+    fn new_refuses_a_build_pin_for_content_templates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("greeter");
+        for template in ["", "--template content"] {
+            let line = format!("{template} --sunrise {OLD_BUILD}");
+            let args: Vec<_> = std::iter::once(path.display().to_string())
+                .chain(argv(&line))
+                .collect();
+            let fetch = |_: &Path, _: &str| panic!("content templates must not fetch an SDK");
+            assert_eq!(
+                new(&args, &fetch).unwrap_err(),
+                "--sunrise needs --template native"
+            );
+            assert!(!path.exists());
+        }
+    }
+
+    #[test]
     fn both_templates_scaffold_an_unfinished_registry_page() {
         use sunrise_mod_package::page::Page;
         let workspace = tempfile::tempdir().unwrap();
         for template in ["content", "native"] {
             let project = workspace.path().join(template);
-            new(&code_args(&project, template), &offline).unwrap();
+            new(&template_args(&project, template), &offline).unwrap();
             assert!(project.join("page/.gitkeep").is_file());
             let caller =
                 std::fs::read_to_string(project.join(".github/workflows/sunrise-release.yml"))
@@ -965,6 +1060,39 @@ mod tests {
                     "page.toml: add at least one [[screenshots]] entry",
                 ]
             );
+        }
+    }
+
+    #[test]
+    fn a_display_name_round_trips_through_both_manifests_and_stays_raw_in_the_readme() {
+        let name = r#"A "quote" and a back\slash, {id} {name} {metadata}"#;
+        let workspace = tempfile::tempdir().unwrap();
+        for template in ["content", "native"] {
+            let project = workspace.path().join(template);
+            let mut args = template_args(&project, template);
+            args.extend(["--name".into(), name.into()]);
+            new(&args, &offline).unwrap();
+            assert_eq!(Package::read(&project).unwrap().manifest.name, name);
+        }
+        let readme = std::fs::read_to_string(workspace.path().join("native/README.md")).unwrap();
+        assert_eq!(readme.lines().next().unwrap(), format!("# {name}"));
+    }
+
+    #[test]
+    fn new_refuses_an_overlong_content_id_before_creating_the_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = "x".repeat(65);
+        let path = dir.path().join(&id);
+        for args in [
+            vec![path.display().to_string()],
+            template_args(&path, "content"),
+        ] {
+            let fetch = |_: &Path, _: &str| panic!("a content template must not fetch an SDK");
+            assert_eq!(
+                new(&args, &fetch).unwrap_err(),
+                format!("{MANIFEST}: id {id:?} is not [a-z0-9_]{{1,64}}")
+            );
+            assert!(!path.exists());
         }
     }
 
@@ -988,14 +1116,16 @@ mod tests {
         super::build_in(root, &Package::read(root)?.manifest)
     }
 
-    fn code_args(path: &Path, template: &str) -> [String; 5] {
-        [
+    fn template_args(path: &Path, template: &str) -> Vec<String> {
+        let mut args = vec![
             path.display().to_string(),
             "--template".into(),
             template.into(),
-            "--sunrise".into(),
-            OLD_BUILD.into(),
-        ]
+        ];
+        if template == "native" {
+            args.extend(["--sunrise".into(), OLD_BUILD.into()]);
+        }
+        args
     }
 
     #[cfg(unix)]
@@ -1007,7 +1137,7 @@ mod tests {
         let fetch = |_: &Path, _: &str| -> Result<sdk_fetch::PinnedSdk, String> {
             panic!("a refused path fetches nothing")
         };
-        let error = new(&code_args(&path, "native"), &fetch).unwrap_err();
+        let error = new(&template_args(&path, "native"), &fetch).unwrap_err();
         assert!(error.contains("already exists"), "{error}");
         assert_eq!(
             std::fs::read_link(&path).unwrap(),
@@ -1026,14 +1156,14 @@ mod tests {
             Err("no signed SDK".into())
         };
         assert_eq!(
-            new(&code_args(&path, "native"), &fetch).unwrap_err(),
+            new(&template_args(&path, "native"), &fetch).unwrap_err(),
             "no signed SDK"
         );
         assert!(!path.exists());
         // A folder that was there before is refused, not removed.
         std::fs::create_dir(&path).unwrap();
         std::fs::write(path.join("keep"), "mine").unwrap();
-        assert!(new(&code_args(&path, "native"), &fetch).is_err());
+        assert!(new(&template_args(&path, "native"), &fetch).is_err());
         assert_eq!(std::fs::read_to_string(path.join("keep")).unwrap(), "mine");
     }
 
@@ -1041,7 +1171,7 @@ mod tests {
     fn a_refused_pin_leaves_the_manifest_byte_for_byte() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("greeter");
-        new(&code_args(&path, "native"), &offline).unwrap();
+        new(&template_args(&path, "native"), &offline).unwrap();
         let before = std::fs::read(path.join(MANIFEST)).unwrap();
         // A build whose SDK cannot be fetched: nothing is written.
         let broken = |_: &Path, _: &str| Err("no such build".to_owned());
@@ -1055,7 +1185,7 @@ mod tests {
     fn pin_leaves_a_manifest_linked_outside_the_project_alone() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("greeter");
-        new(&code_args(&path, "native"), &offline).unwrap();
+        new(&template_args(&path, "native"), &offline).unwrap();
         let outside = tempfile::tempdir().unwrap();
         let real = outside.path().join(MANIFEST);
         std::fs::rename(path.join(MANIFEST), &real).unwrap();
@@ -1211,10 +1341,11 @@ mod tests {
         // Only selected content ships, not the Git project's executable hooks.
         std::fs::create_dir_all(path.join(".git/hooks")).unwrap();
         std::fs::write(path.join(".git/hooks/pre-commit"), b"#!/bin/sh\nexit 0\n").unwrap();
+        let manifest = Package::read(&path).unwrap().manifest;
         let smod = pack_into(
             &path,
-            &PackageOutput::in_project(&path).unwrap(),
-            &Package::read(&path).unwrap().manifest,
+            &PackageOutput::prepare(&path, &manifest).unwrap(),
+            &manifest,
             Some(&uses_list("0123456789abcdef0123456789abcdef01234567")),
             None,
         )
@@ -1252,7 +1383,7 @@ mod tests {
         use sunrise_mod_package::{mixins_tool, sdk::Mixins};
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("example");
-        new(&code_args(&root, "native"), &offline).unwrap();
+        new(&template_args(&root, "native"), &offline).unwrap();
         let manifest = root.join(MANIFEST);
         let text = std::fs::read_to_string(&manifest).unwrap();
         let rev = mixins_tool::REV;
@@ -1272,8 +1403,8 @@ mod tests {
             sunrise_native_build::MixinsIdentity::resolve([&bundle], Some(&sdk)).unwrap();
         let smod = pack_into(
             &root,
-            &PackageOutput::in_project(&root).unwrap(),
-            &Package::read(&root).unwrap().manifest,
+            &PackageOutput::prepare(&root, &bundle.manifest).unwrap(),
+            &bundle.manifest,
             None,
             Some(identity.revision()),
         )
@@ -1331,7 +1462,7 @@ mod tests {
         let rev = "fedcba9876543210fedcba9876543210fedcba98";
         let smod = pack_into(
             &path,
-            &PackageOutput::in_project(&path).unwrap(),
+            &PackageOutput::prepare(&path, &written).unwrap(),
             &written,
             None,
             Some(rev),
@@ -1378,7 +1509,7 @@ mod tests {
         let pack = |made_for: &str| {
             let smod = pack_into(
                 &path,
-                &PackageOutput::in_project(&path).unwrap(),
+                &PackageOutput::prepare(&path, &written).unwrap(),
                 &written,
                 Some(&uses_list(made_for)),
                 Some(rev),
@@ -1399,7 +1530,7 @@ mod tests {
         std::fs::write(path.join("src/m.rs"), "").unwrap();
         let smod = pack_into(
             &path,
-            &PackageOutput::in_project(&path).unwrap(),
+            &PackageOutput::prepare(&path, &exact).unwrap(),
             &exact,
             None,
             Some(rev),
@@ -1451,16 +1582,36 @@ mod tests {
             build_args(&[]),
             Ok(BuildArgs {
                 update_lock: false,
-                with: vec![]
+                with: vec![],
+                diagnostics: BuildDiagnostics::default(),
             })
         );
         assert_eq!(
             build_args(&argv("--update-lock --with ../library --with another.smod")),
             Ok(BuildArgs {
                 update_lock: true,
-                with: vec![Path::new("../library"), Path::new("another.smod")]
+                with: vec![Path::new("../library"), Path::new("another.smod")],
+                diagnostics: BuildDiagnostics::default(),
             })
         );
+        for args in [
+            "--timings --verbose",
+            "-v --timings",
+            "-v --verbose --timings",
+        ] {
+            assert_eq!(
+                build_args(&argv(args)).unwrap().diagnostics,
+                BuildDiagnostics {
+                    timings: Timings::Html,
+                    stderr: CompilerStderr::Mirror,
+                },
+            );
+        }
+        assert_eq!(
+            build_args(&argv("--with --verbose")).unwrap().diagnostics,
+            BuildDiagnostics::default(),
+        );
+        assert!(build_args(&argv("-- --timings")).is_err());
         let line = argv("--game g --resources r --jars j --with library -- --with");
         assert_eq!(
             run_args(&line),
@@ -1631,7 +1782,7 @@ served_by = \"horizon_java\"
             let manifest = Package::read(&root).unwrap().manifest;
             pack_into(
                 &root,
-                &PackageOutput::in_project(&root).unwrap(),
+                &PackageOutput::prepare(&root, &manifest).unwrap(),
                 &manifest,
                 None,
                 None,

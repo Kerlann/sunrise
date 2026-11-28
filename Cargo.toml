@@ -1,5 +1,5 @@
 [workspace]
-exclude = ["crates/sunrise-telemetry-server", "crates/sunrise-mod-registry", "third_party/wgpu-hal", "third_party/naga", "third_party/libmimalloc-sys", "third_party/winit", "tools/fixtures/paper-trace-mod", "tools/fixtures/mod-pipeline-bench"]
+exclude = ["crates/sunrise-telemetry-server", "third_party/wgpu-hal", "third_party/naga", "third_party/libmimalloc-sys", "third_party/winit", "tools/fixtures/paper-trace-mod", "tools/fixtures/mod-pipeline-bench"]
 members = [
     "crates/sunrise-mod-vocab",
     "crates/sunrise-game-discovery",
@@ -22,13 +22,16 @@ members = [
     "crates/sunrise-threads",
     "crates/sunrise-hdr",
     "crates/sunrise-world",
+    "crates/sunrise-sim",
+    "crates/sunrise-level",
     "crates/sunrise-client",
     "crates/sunrise-parity-fixtures",
     "crates/sunrise-internals",
     "crates/sunrise-client-lib",
+    "crates/sunrise-gameplay-common",
     "crates/sunrise-gameplay",
     "crates/sunrise-client-gameplay",
-    "crates/sunrise-client-core",
+    "crates/sunrise-game-data",
     "crates/sunrise-client-input",
     "crates/sunrise-border",
     "crates/sunrise-client-render",
@@ -37,6 +40,7 @@ members = [
     "crates/sunrise-command",
     "crates/sunrise-items",
     "crates/sunrise-server-files",
+    "crates/sunrise-server-profiles-http",
     "crates/sunrise-java-properties",
     "crates/sunrise-deflate",
     # The Model Context Protocol, shared by sunrise-ctl, sunrise-server and the launcher.
@@ -130,6 +134,8 @@ debug = "line-tables-only"
 [profile.dev.package.sha2]
 opt-level = 3
 
+[profile.dev.package.sunrise-game-discovery]
+opt-level = 3
 [profile.dev.package.sunrise-mod-api-gen]
 opt-level = 3
 [profile.dev.package.sunrise-stage]

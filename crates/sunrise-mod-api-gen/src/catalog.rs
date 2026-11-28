@@ -7,9 +7,12 @@
 #[cfg(test)]
 mod collect_validation_tests;
 
+mod gameplay;
+pub(crate) use gameplay::{Binding as GameplayBinding, BindingKind};
+
 use quote::ToTokens;
 use serde::Deserialize;
-use std::{collections::HashSet, fmt, fs, path::Path};
+use std::{collections::HashSet, fmt, path::Path};
 
 /// Which side of the connection a hook or helper runs on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -186,6 +189,8 @@ pub struct Hook {
     pub side: Side,
     /// The game function that fires it.
     pub target: String,
+    pub receiver_type: Option<String>,
+    pub(crate) default_module: Option<String>,
     pub contract: Contract,
     /// The event field a cancel, collect or replace hook writes; `None` for a listener.
     pub out: Option<String>,
@@ -343,6 +348,8 @@ struct HookEntry {
     notes: Option<String>,
     side: Side,
     target: String,
+    receiver_type: Option<String>,
+    default_module: Option<String>,
     mod_api: ModApiEntry,
     version: Option<u64>,
     cancellable: Option<bool>,
@@ -600,6 +607,8 @@ impl Hook {
             notes: entry.notes,
             side: entry.side,
             target: entry.target,
+            receiver_type: entry.receiver_type,
+            default_module: entry.default_module,
             contract: api.contract,
             out: api.out,
             answered_by_mod,
@@ -681,8 +690,14 @@ pub struct Catalog {
 pub const DECLARATIONS: &str = "crates/sunrise-mod-vocab/src/hooks";
 
 /// The default binding for a game hook in the same-named `native_hooks` module.
-fn default_target(name: &str, area: &str) -> String {
-    format!("sunrise_client::game::native_hooks::{area}::Game<'_>::native_{name}")
+fn default_target(name: &str, area: &str, side: Option<&str>) -> String {
+    let owner = match side {
+        Some("server") => "ServerGame<'_>",
+        Some("client") => "ClientGame<'_>",
+        Some("both") => "Game<'_, S>",
+        _ => "Game<'_>",
+    };
+    format!("sunrise_client::game::native_hooks::{area}::{owner}::native_{name}")
 }
 
 /// An attribute argument as the entry structs read it.
@@ -829,9 +844,33 @@ impl Declared {
                     .ok_or_else(|| {
                         invalid(format!("{name}: needs a #[{attribute}(...)] attribute"))
                     })?;
-                entry
-                    .entry("target")
-                    .or_insert_with(|| default_target(&name, area).into());
+                let is_free_assoc = entry.get("receiver").and_then(|v| v.as_str())
+                    == Some("associated")
+                    && !matches!(
+                        entry.get("context").and_then(|v| v.as_str()),
+                        Some(
+                            "config"
+                                | "reload"
+                                | "client_reload"
+                                | "client_reload_listener"
+                                | "client_setup"
+                                | "pack_discovery"
+                        )
+                    );
+                let side = entry
+                    .get("side")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned);
+                if !entry.contains_key("target") {
+                    entry.insert("default_module".into(), area.into());
+                }
+                entry.entry("target").or_insert_with(|| {
+                    if is_free_assoc {
+                        format!("sunrise_client::game::native_hooks::{area}::native_{name}").into()
+                    } else {
+                        default_target(&name, area, side.as_deref()).into()
+                    }
+                });
                 if let Some(notes) = string_attribute(&function.attrs, "notes")
                     .map_err(|e| invalid(format!("{name}: {e}")))?
                 {
@@ -905,6 +944,7 @@ impl Declared {
                     }
                     _ => {
                         entry.remove("target");
+                        entry.remove("default_module");
                         if let Some(trait_name) = entry.remove("name") {
                             entry.insert("trait".into(), trait_name);
                         }
@@ -921,19 +961,28 @@ impl Catalog {
     /// The catalog of the checkout at `root`: every file of the declarations directory, sorted by
     /// name, so the order never depends on a list a PR edits.
     pub fn load(root: &Path) -> Result<Self, CatalogError> {
+        Self::load_tracked(root, &mut crate::Inputs::default())
+    }
+
+    pub(crate) fn load_tracked(
+        root: &Path,
+        inputs: &mut crate::Inputs,
+    ) -> Result<Self, CatalogError> {
         let read_error = |path: &Path, error: String| CatalogError::Read {
             path: path.display().to_string(),
             error,
         };
         let dir = root.join(DECLARATIONS);
-        let modules =
-            sunrise_game_discovery::module_files(&dir).map_err(|error| read_error(&dir, error))?;
+        let modules = inputs
+            .module_files(&dir)
+            .map_err(|error| read_error(&dir, error))?;
         let files = modules
             .iter()
             .map(|module| {
                 let path = dir.join(format!("{module}.rs"));
-                let text =
-                    fs::read_to_string(&path).map_err(|e| read_error(&path, e.to_string()))?;
+                let text = inputs
+                    .read_to_string(&path)
+                    .map_err(|e| read_error(&path, e.to_string()))?;
                 Ok((path.display().to_string(), text))
             })
             .collect::<Result<Vec<_>, CatalogError>>()?;
@@ -988,6 +1037,8 @@ impl Hook {
             notes: None,
             side,
             target: target.into(),
+            receiver_type: None,
+            default_module: None,
             contract: Contract::Listen,
             out: None,
             answered_by_mod: false,
@@ -1020,6 +1071,7 @@ impl Hook {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::fs;
 
     fn hook(name: &str, extra: serde_json::Value) -> serde_json::Value {
         let mut hook = json!({
@@ -1208,7 +1260,7 @@ mod tests {
         assert_eq!(thing.doc, "First line.\n\n Indented.");
         assert_eq!(
             thing.target,
-            "sunrise_client::game::native_hooks::a::Game<'_>::native_thing"
+            "sunrise_client::game::native_hooks::a::Game<'_, S>::native_thing"
         );
         assert!(thing.answered_by_mod && thing.cancellable == Some(true));
         assert_eq!((thing.version, thing.counterparts.neoforge.len()), (2, 2));

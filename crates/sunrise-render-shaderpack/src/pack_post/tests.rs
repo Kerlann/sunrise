@@ -339,9 +339,11 @@ fn a_custom_texture_over_a_buffer_ends_when_its_stage_flips_it() {
         jobs: None,
         mod_depth_targets: &[],
         mod_uniforms: &[],
+        display_uniforms: false,
         mod_uniform_mismatches: &mismatches,
         mod_depth_target: std::cell::Cell::new(None),
         depth_compare: std::cell::Cell::new(wgpu::CompareFunction::LessEqual),
+        mod_depth_bias: Default::default(),
         mod_vertex: Default::default(),
     };
     let reads = |group: Group| {
@@ -439,9 +441,11 @@ fn a_png_under_a_name_of_its_own_is_not_bound() {
         packed: [None; BUFFERS],
         mod_depth_targets: &[],
         mod_uniforms: &[],
+        display_uniforms: false,
         mod_uniform_mismatches: &mismatches,
         mod_depth_target: std::cell::Cell::new(None),
         depth_compare: std::cell::Cell::new(wgpu::CompareFunction::LessEqual),
+        mod_depth_bias: Default::default(),
         mod_vertex: Default::default(),
     };
     let (_, samplers, ..) = bindings(
@@ -526,9 +530,11 @@ fn an_image_without_an_entry_reads_zero() {
         jobs: None,
         mod_depth_targets: &[],
         mod_uniforms: &[],
+        display_uniforms: false,
         mod_uniform_mismatches: &mismatches,
         mod_depth_target: std::cell::Cell::new(None),
         depth_compare: std::cell::Cell::new(wgpu::CompareFunction::LessEqual),
+        mod_depth_bias: Default::default(),
         mod_vertex: Default::default(),
     };
     let mut notes = Vec::new();
@@ -656,9 +662,11 @@ fn a_composite_program_blends_onto_its_buffer() {
         jobs: None,
         mod_depth_targets: &[],
         mod_uniforms: &[],
+        display_uniforms: false,
         mod_uniform_mismatches: &mismatches,
         mod_depth_target: std::cell::Cell::new(None),
         depth_compare: std::cell::Cell::new(wgpu::CompareFunction::LessEqual),
+        mod_depth_bias: Default::default(),
         mod_vertex: Default::default(),
     };
     let draws = crate::pack_draw::DrawUniforms::new(&device);
@@ -949,4 +957,37 @@ fn a_rebound_image_is_noted_and_an_exact_one_is_not() {
     )
     .expect_err("refused");
     assert!(refused.contains("`colorimg5`"), "{refused}");
+}
+
+/// A sampler of another class than its image's texture refuses the program with a note naming
+/// the program, the image, the sampler's type and the texture's format (#5223, decision D-6);
+/// one of the texture's class reads it.
+#[test]
+fn a_sampler_of_another_class_than_its_image_refuses_the_program() {
+    let float = wgpu::TextureSampleType::Float { filterable: false };
+    let uint = wgpu::TextureSampleType::Uint;
+    let refused = sampled_image(
+        "composite73_a",
+        "img_rtwImportance2D",
+        "usampler2D",
+        "rtwImportance2D",
+        T::R32Float,
+        float,
+    )
+    .expect_err("refused");
+    for name in [
+        "composite73_a",
+        "`img_rtwImportance2D`",
+        "usampler2D",
+        "R32Float",
+    ] {
+        assert!(refused.contains(name), "{name} in {refused}");
+    }
+    let read = |ty, format, sample_type| {
+        sampled_image("composite73_a", "img", ty, "img", format, sample_type)
+    };
+    assert_eq!(read("sampler2D", T::R32Float, float), Ok(()));
+    assert_eq!(read("usampler2D", T::R32Uint, uint), Ok(()));
+    assert!(read("sampler2D", T::R32Uint, uint).is_err());
+    assert!(read("isampler2D", T::R32Uint, uint).is_err());
 }

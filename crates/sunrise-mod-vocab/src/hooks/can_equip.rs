@@ -24,17 +24,21 @@ pub trait Hooks {
     /// for example `entity.entity().position(host)`. A missing or despawned
     /// target refuses wherever a part is asked; the no-listener data path
     /// performs no conversion or entity lookup. A client without this mod
-    /// predicts vanilla here; the server corrects it.
+    /// predicts vanilla here; the server corrects it. Inside a part,
+    /// `can_equip` is not asked again on the same thread: a nested
+    /// `MenuRef::slot_holds` on an armour slot, or any other equip question
+    /// reached through `host`, keeps the stack's data answer, so a part can
+    /// read the slot it is asked about without recursing.
     #[hook(
         receiver = "read",
         dispatch = "flat",
         side = "both",
-        version = 3,
+        version = 4,
         contract = "listen",
         scope = "item",
         key = "stack",
         host = "read",
-        target = "sunrise_client::game::native_hooks::can_equip::NativeHookHost<'_>::native_can_equip",
+        target = "sunrise_gameplay_common::game::native_hooks::can_equip::NativeHookHost<'_>::native_can_equip",
         cancellable = false,
         neoforge = "IItemExtension.canEquip"
     )]

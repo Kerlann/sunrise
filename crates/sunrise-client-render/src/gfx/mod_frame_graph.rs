@@ -14,8 +14,7 @@ use super::mod_render_targets::{
 use super::world_primitives::WorldPrimitives;
 use mod_api::{
     FrameGraphError, FramePassDescriptor, FramePassId, FramePassRef, FrameTarget, OffscreenPass,
-    OitStage, RenderLevelStage, RenderTargetDepth, RenderTargetDescriptor, RenderTargetFormat,
-    TransientTargetId,
+    OitStage, RenderLevelStage, RenderTargetDescriptor, TransientTargetId,
 };
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap, HashMap, VecDeque};
@@ -340,6 +339,27 @@ pub struct CompiledFrameGraph {
     pub release_after: Vec<Vec<TransientTargetId>>,
 }
 
+/// Discard resolved nodes, then find cycle members in the residual graph left by Kahn's sort.
+fn cycle_members(adj: &mut [BTreeSet<usize>], in_degree: &[usize]) -> Vec<bool> {
+    for (node, edges) in adj.iter_mut().enumerate() {
+        if in_degree[node] == 0 {
+            edges.clear();
+        } else {
+            edges.retain(|&next| in_degree[next] > 0);
+        }
+    }
+    let mut cyclic = vec![false; adj.len()];
+    for component in sunrise_core::graph::strongly_connected_components(adj) {
+        let node = component[0];
+        if component.len() > 1 || adj[node].contains(&node) {
+            for member in component {
+                cyclic[member] = true;
+            }
+        }
+    }
+    cyclic
+}
+
 fn compile_specs(
     passes: &[PassGraphSpec<'_>],
     transient_count: usize,
@@ -534,16 +554,17 @@ fn compile_specs(
     }
 
     if visited < active_count {
+        let cyclic = cycle_members(&mut adj, &in_degree);
         let mut involved = Vec::new();
         for (p, spec) in passes.iter().enumerate() {
             let node = pass_node(p);
-            if is_active(node) && in_degree[node] > 0 {
+            if cyclic[node] {
                 involved.push(spec.label.to_owned());
             }
         }
         if involved.is_empty() {
             for (a, stage) in anchors.iter().enumerate() {
-                if in_degree[a] > 0 {
+                if cyclic[a] {
                     involved.push(format!("{stage:?}"));
                 }
             }
@@ -614,7 +635,7 @@ pub struct PooledTransientTarget {
 }
 
 impl PooledTransientTarget {
-    fn as_resolved(&self) -> ResolvedOffscreenTarget {
+    pub(super) fn as_resolved(&self) -> ResolvedOffscreenTarget {
         ResolvedOffscreenTarget {
             handle: mod_api::__private::built::render_target_ref(1, 0),
             size: self.desc.size,
@@ -632,7 +653,7 @@ impl PooledTransientTarget {
             .map(|c| (c.view_id, c.view.clone()))
     }
 
-    fn depth_view(&self) -> Option<(u64, wgpu::TextureView)> {
+    pub(super) fn depth_view(&self) -> Option<(u64, wgpu::TextureView)> {
         self.depth
             .as_ref()
             .map(|d| (d.view_id, d.sample_view.clone()))
@@ -787,10 +808,10 @@ enum DispatchPick {
 impl FrameGraphRunner {
     /// Compile `recorded` for `oit_on` and prepare a runner, returning `None` when empty or
     /// when a cycle is detected (logging each distinct cycle once without panicking).
-    pub fn prepare(
+    pub(super) fn prepare(
         recorded: RecordedFrameGraph,
         oit_on: bool,
-        warned_cycles: &mut std::collections::HashSet<Vec<String>>,
+        warned: &mut std::collections::HashSet<super::mod_gpu::FrameGraphWarning>,
     ) -> Option<Self> {
         if recorded.is_empty() {
             return None;
@@ -809,7 +830,7 @@ impl FrameGraphRunner {
                 })
             }
             Err(FrameGraphError::Cycle { passes }) => {
-                if warned_cycles.insert(passes.clone()) {
+                if warned.insert(super::mod_gpu::FrameGraphWarning::Cycle(passes.clone())) {
                     log::warn!(
                         "Sunrise: frame graph cycle detected between {}; skipping mod frame graph",
                         passes.join(", ")
@@ -1056,31 +1077,10 @@ fn resolve_dispatch_transients(
     }
 }
 
-/// Validate a transient target sampler binding against its descriptor during draw recording.
-pub fn validate_transient_color_binding(
-    desc: &RenderTargetDescriptor,
-    attachment: u8,
-    filterable: bool,
-    float32_filterable: bool,
-) -> bool {
-    let Some(&fmt) = desc.color_targets.get(attachment as usize) else {
-        return false;
-    };
-    if filterable && fmt == RenderTargetFormat::R32Float && !float32_filterable {
-        return false;
-    }
-    true
-}
-
-/// Validate a transient target depth sampler binding against its descriptor during draw recording.
-pub fn validate_transient_depth_binding(desc: &RenderTargetDescriptor, filterable: bool) -> bool {
-    !filterable && desc.depth != RenderTargetDepth::None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mod_api::RenderTargetRef;
+    use mod_api::{RenderTargetDepth, RenderTargetRef};
 
     fn rt(generation: u64, slot: u32) -> RenderTargetRef {
         mod_api::__private::built::render_target_ref(generation, slot)
@@ -1216,6 +1216,66 @@ mod tests {
             graph.validate_new_pass(&anchor_cycle, false),
             Err(FrameGraphError::Cycle { .. })
         ));
+    }
+
+    #[test]
+    fn cycle_diagnostics_exclude_acyclic_dependents() {
+        let mut graph = RecordedFrameGraph::default();
+        let tmp = graph.add_transient(rgba8_desc([32, 32]));
+        let p_a = push(
+            &mut graph,
+            FramePassDescriptor::new("pass_a", FrameTarget::Transient(tmp)),
+        );
+        push(
+            &mut graph,
+            FramePassDescriptor::new("downstream", FrameTarget::Mod(rt(1, 0)))
+                .reads(FrameTarget::Transient(tmp)),
+        );
+        let cyclic = FramePassDescriptor::new("pass_b", FrameTarget::Mod(rt(1, 1)))
+            .reads(FrameTarget::Transient(tmp))
+            .before_pass(p_a);
+        let expected = FrameGraphError::Cycle {
+            passes: vec!["pass_a".to_owned(), "pass_b".to_owned()],
+        };
+
+        // A -> downstream has no way back to the A <-> B cycle.
+        assert_eq!(
+            graph.validate_new_pass(&cyclic, false),
+            Err(expected.clone())
+        );
+        graph.push_pass(RecordedFramePass::from_descriptor(cyclic, None));
+        assert_eq!(graph.compile(false).unwrap_err(), expected);
+
+        // Two cycles connected in one direction do not make the bridge between them cyclic.
+        let mut graph = RecordedFrameGraph::default();
+        for (index, (label, before)) in [
+            ("pass_a", vec![1]),
+            ("pass_b", vec![0, 2]),
+            ("bridge", vec![3]),
+            ("pass_c", vec![4]),
+            ("pass_d", vec![3, 5]),
+            ("downstream", vec![]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut desc = FramePassDescriptor::new(label, FrameTarget::Mod(rt(1, index as u32)));
+            for next in before {
+                desc = desc.before_pass(FramePassId::from_raw(next));
+            }
+            // Build the cyclic fixture directly; registration correctly refuses its cycles.
+            graph.push_pass(RecordedFramePass::from_descriptor(desc, None));
+        }
+        for oit_on in [false, true] {
+            assert_eq!(
+                graph.compile(oit_on).unwrap_err(),
+                FrameGraphError::Cycle {
+                    passes: ["pass_a", "pass_b", "pass_c", "pass_d"]
+                        .map(str::to_owned)
+                        .to_vec(),
+                }
+            );
+        }
     }
 
     #[test]
@@ -1504,6 +1564,7 @@ mod tests {
                 index_range: None,
             },
             bindings: Some(super::super::mod_pipelines::ResolvedDrawBindings {
+                sampler_layout: Default::default(),
                 entries: vec![ResolvedSet1Entry::TransientColor {
                     target: tmp,
                     attachment: 0,

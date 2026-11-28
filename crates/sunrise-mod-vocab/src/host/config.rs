@@ -190,4 +190,21 @@ pub trait ConfigClientHost {
     /// The selected language's text for a translation key (`Component.translatable`'s lookup), `None`
     /// when no language layer defines it.
     fn translate(&self, key: &str) -> Option<String>;
+    /// Side: client.
+    /// Sets the calling mod's own translation entries for language `code` (`en_us`, `de_de`) from
+    /// its own data, such as language files a pack keeps under `config/`: `translate` components,
+    /// tooltips, chat and other mods' screens then resolve these keys like any pack's. They lie
+    /// over the resource packs' entries (a key a pack also has shows the mod's text) and are
+    /// applied again after every resource reload and language change; the selected language
+    /// falls back to the mod's `en_us` entries for a key it lacks, as pack files do. Each call
+    /// replaces this mod's earlier entries for `code`; an empty list drops them. Mods apply in id
+    /// order, so of two mods setting one key the later id wins. Returns the number of entries
+    /// now set, or `None`, with nothing changed, outside a mod's call, for a `code` that isn't
+    /// 1 to 16 characters of `a`-`z`, `0`-`9` and `_`, or for more than 65,536 entries, a key over
+    /// 256 bytes or a text over 32,767 bytes. Client only; a server resolves no translations.
+    fn set_translations(&self, code: &str, entries: Vec<(String, String)>) -> Option<usize>;
+    /// Side: client.
+    /// Drops every translation entry the calling mod set with `set_translations`, in every
+    /// language. Nothing happens outside a mod's call.
+    fn clear_translations(&self);
 }

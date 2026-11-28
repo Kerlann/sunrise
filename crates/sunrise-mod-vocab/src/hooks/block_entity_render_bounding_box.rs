@@ -6,11 +6,12 @@ pub trait Hooks {
     /// x, y, z, in blocks from the block's lower north-west corner. It starts
     /// as the block with a block of margin around it; widen it when your
     /// `block_entity_submit` draws further (a tall shaft, a beam), or
-    /// set an infinite value for one never culled. Asked once a frame for each
+    /// set an infinite value for one never frustum-culled; the view distance
+    /// (`block_entity_view_distance`) still applies. Asked once a frame for each
     /// within its view distance (`block_entity_view_distance`) whose chunk is drawn.
     /// `entity` borrows the same resident data as `block_entity_submit`.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_block_entity_render_bounding_box",
+        target = "sunrise_client_gameplay::game::native_hooks::base::ClientGame<'_>::native_block_entity_render_bounding_box",
         receiver = "read",
         dispatch = "flat",
         side = "client",

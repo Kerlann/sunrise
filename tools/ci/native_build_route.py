@@ -42,13 +42,13 @@ def main():
     mods = work / "mods"
     mod = mods / "route_probe"
     (mod / "src").mkdir(parents=True)
-    fill = lambda text: text.replace("{id}", "route_probe").replace("{name}", "Route probe").replace("{metadata}", "")
+    fill = lambda text: text.replace("{id}", "route_probe")
     (mod / "Cargo.toml").write_text(fill((TEMPLATE / "api.toml").read_text()))
     (mod / "src/lib.rs").write_text(fill((TEMPLATE / "lib.rs").read_text()))
     (mod / "sunrise-mod.toml").write_text(
-        fill((TEMPLATE / "sunrise-mod.toml").read_text())
+        fill((TEMPLATE / "sunrise-mod.toml").read_text()).replace("{name}", json.dumps("Route probe"))
         + f'\n[native]\ngame = "26.3"\nsunrise = "{identity["commit"]}"\nmixins = "{MIXINS_REV}"\n'
-        + '\n[[internals]]\npath = "sunrise_client::game::Game"\n')
+        + '\n[[internals]]\npath = "sunrise_gameplay_common::game::CommonGame"\n')
 
     command = [str(args.tool), "sunrise-mod"]
     reply, code = tool([*command, "native-layout"], {

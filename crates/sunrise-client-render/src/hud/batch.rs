@@ -113,8 +113,6 @@ pub struct HudBatch {
     pub end_portal: EndPortalFill,
     /// `options.glintStrength` for the glint pass (`GlintAlpha`).
     pub glint_alpha: f32,
-    /// PvP & HUD's glint colour (`pvp::Tweaks::glint_texel`), 0 for vanilla's.
-    pub glint_colour: u32,
     /// A resource pack text shader's `GameTime`: the day's fraction
     /// (`gameTime % 24000` and the partial tick, over 24000).
     pub game_time: f32,
@@ -226,14 +224,6 @@ impl Blend {
     }
 }
 
-/// The backend scissor, intersected with its viewport in device pixels.
-pub(super) fn hud_scissor(clip: [u32; 4], size: [u32; 2], zoom: f32) -> Option<[u32; 4]> {
-    let [x, y, w, h] = clip.map(|v| (v as f32 * zoom) as u32);
-    let (x, y) = (x.min(size[0]), y.min(size[1]));
-    let (w, h) = (w.min(size[0] - x), h.min(size[1] - y));
-    (w != 0 && h != 0).then_some([x, y, w, h])
-}
-
 /// The 2D sampling pipelines that can draw a registered atlas's sprite.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AtlasBlend {
@@ -272,7 +262,6 @@ impl HudBatch {
             scissors: SmallVec::new(),
             end_portal: EndPortalFill::default(),
             glint_alpha: 0.75,
-            glint_colour: 0,
             game_time: 0.0,
             blur_at: 0,
             inline_profiles: Vec::new(),
@@ -677,6 +666,50 @@ impl HudBatch {
         }
     }
 
+    /// Cut the triangles drawn since `start` to `[x0, y0, x1, y1]` (GUI pixels): a triangle
+    /// inside stays as it is, one outside goes, one across an edge is clipped with every
+    /// attribute interpolated. Unlike [`Self::clip_since`] it changes the geometry, so a pose
+    /// applied afterwards (a rotated canvas) carries the crop with it. The draw runs that
+    /// begin at or after `start` follow their triangles; call it before any scissor covers
+    /// them.
+    pub fn crop_since(&mut self, start: usize, rect: [f32; 4]) {
+        let [x0, y0, x1, y1] = rect;
+        let tail = self.vertices.split_off(start);
+        let (triangles, rest) = tail.as_chunks::<3>();
+        // The vertex count after each source triangle.
+        let mut after = Vec::with_capacity(triangles.len() + 1);
+        after.push(start as u32);
+        for triangle in triangles {
+            let inside = triangle.iter().all(|v| {
+                let [x, y] = v.pos;
+                x >= x0 && x <= x1 && y >= y0 && y <= y1
+            });
+            if inside {
+                self.vertices.extend_from_slice(triangle);
+            } else {
+                let poly = clip_triangle(triangle, rect);
+                for i in 1..poly.len().saturating_sub(1) {
+                    let piece = [poly[0], poly[i], poly[i + 1]];
+                    if triangle_area(&piece) != 0.0 {
+                        self.vertices.extend_from_slice(&piece);
+                    }
+                }
+            }
+            after.push(self.vertices.len() as u32);
+        }
+        self.vertices.extend_from_slice(rest);
+        let moved = |old: u32| {
+            let offset = old as usize - start;
+            let whole = (offset / 3).min(triangles.len());
+            after[whole] + (offset - whole * 3) as u32
+        };
+        for (range, _) in &mut self.blends {
+            if range.start as usize >= start {
+                *range = moved(range.start)..moved(range.end);
+            }
+        }
+    }
+
     /// The intervals of a draw run in order, including any unscissored gaps.
     pub fn scissors_in(
         &self,
@@ -702,6 +735,35 @@ impl HudBatch {
             let range = at..end;
             at = end;
             Some((range, clip))
+        })
+    }
+
+    /// The nonempty draws within one blend run, with their physical `[x, y, w, h]` scissors.
+    pub(super) fn scissored_intervals(
+        &self,
+        vertices: Range<u32>,
+        blend: Blend,
+        size: [u32; 2],
+        zoom: f32,
+    ) -> impl Iterator<Item = (Range<u32>, [u32; 4])> + '_ {
+        let [x0, y0, x1, y1] = blend.scissor().map_or([0, 0, size[0], size[1]], |clip| {
+            let [x, y, w, h] = clip.map(|v| (v as f32 * zoom) as u32);
+            [
+                x.min(size[0]),
+                y.min(size[1]),
+                x.saturating_add(w).min(size[0]),
+                y.saturating_add(h).min(size[1]),
+            ]
+        });
+        let scale = self.scale * zoom;
+        self.scissors_in(vertices).filter_map(move |(range, clip)| {
+            let [l, t, r, b] = clip.map_or([x0, y0, x1, y1], |rect| {
+                // Fractional clips select pixels by their centres; integer GUI edges
+                // at vanilla's integer scale already fall on device pixel boundaries.
+                let [l, t, r, b] = rect.map(|v| (v * scale - 0.5).ceil() as u32);
+                [l.max(x0), t.max(y0), r.min(x1), b.min(y1)]
+            });
+            (l < r && t < b).then(|| (range, [l, t, r - l, b - t]))
         })
     }
 
@@ -934,15 +996,10 @@ impl HudBatch {
             bounds[2] = bounds[2].max(x);
             bounds[3] = bounds[3].max(y);
         };
-        for (range, blend) in self.runs_in(start as u32..self.vertices.len() as u32) {
-            let [x, y, w, h] = if let Some(clip) = blend.scissor() {
-                let Some(scissor) = hud_scissor(clip, self.viewport, 1.0) else {
-                    continue;
-                };
-                scissor
-            } else {
-                [0, 0, self.viewport[0], self.viewport[1]]
-            };
+        let intervals = self
+            .runs_in(start as u32..self.vertices.len() as u32)
+            .flat_map(|(range, blend)| self.scissored_intervals(range, blend, self.viewport, 1.0));
+        for (range, [x, y, w, h]) in intervals {
             let [x0, y0, x1, y1] = [x, y, x + w, y + h].map(|v| v as f32 / self.scale);
             let vertices = &self.vertices[range.start as usize..range.end as usize];
             for triangle in vertices.as_chunks::<3>().0 {
@@ -995,19 +1052,13 @@ pub(super) struct HudUniform {
     end_portal: [[f32; 4]; 3],
 }
 impl HudUniform {
-    pub(super) fn new(size: [f32; 4], fill: EndPortalFill, glint_colour: u32) -> Self {
-        let [r, g, b, _] = glint_colour.to_le_bytes().map(|c| f32::from(c) / 255.0);
-        let tint = if glint_colour == 0 {
-            [-1.0, 0.0, 0.0]
-        } else {
-            [r, g, b]
-        };
+    pub(super) fn new(size: [f32; 4], fill: EndPortalFill) -> Self {
         Self {
             size,
             end_portal: [
                 fill.sprites[0],
                 fill.sprites[1],
-                [fill.game_time, tint[0], tint[1], tint[2]],
+                [fill.game_time, 0.0, 0.0, 0.0],
             ],
         }
     }
@@ -1016,6 +1067,60 @@ impl HudUniform {
 #[cfg(test)]
 mod bounds_tests {
     use super::*;
+
+    #[test]
+    fn crop_since_cuts_geometry_to_the_box_and_keeps_its_run() {
+        let mut batch = HudBatch::scratch([320, 240]);
+        batch.quad_3d(
+            [
+                [-8.0, -8.0, 0.0],
+                [24.0, -8.0, 0.0],
+                [24.0, 24.0, 1.0],
+                [-8.0, 24.0, 1.0],
+            ],
+            [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            u32::MAX,
+        );
+        batch.depth_since(0, [0.0, 0.0, 16.0, 16.0]);
+        batch.crop_since(0, [0.0, 0.0, 16.0, 16.0]);
+        assert!(batch.vertices.len() >= 6);
+        assert!(
+            batch
+                .vertices
+                .iter()
+                .all(|v| { (0.0..=16.0).contains(&v.pos[0]) && (0.0..=16.0).contains(&v.pos[1]) })
+        );
+        // The box's corner is a quarter of the way along each texture axis.
+        let corner = batch
+            .vertices
+            .iter()
+            .find(|v| v.pos[0].abs() < 1e-4 && v.pos[1].abs() < 1e-4)
+            .expect("the box's corner is drawn");
+        assert!((corner.uv[0] - 0.25).abs() < 1e-5 && (corner.uv[1] - 0.25).abs() < 1e-5);
+        assert_eq!(batch.blends.len(), 1);
+        assert_eq!(batch.blends[0].0, 0..batch.vertices.len() as u32);
+        assert!(matches!(batch.blends[0].1, Blend::Depth(_)));
+
+        // A quad wholly outside the box goes; one wholly inside stays as it is.
+        let before = batch.vertices.len();
+        batch.rect_uv(
+            40.0,
+            40.0,
+            4.0,
+            4.0,
+            Rect {
+                u0: 0.0,
+                v0: 0.0,
+                u1: 1.0,
+                v1: 1.0,
+                w: 1,
+                h: 1,
+            },
+            u32::MAX,
+        );
+        batch.crop_since(before, [0.0, 0.0, 16.0, 16.0]);
+        assert_eq!(batch.vertices.len(), before);
+    }
 
     #[test]
     fn visible_vertex_bounds_tracks_drawn_slice_and_ignores_empty_geometry() {

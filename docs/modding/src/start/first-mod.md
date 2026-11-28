@@ -66,9 +66,10 @@ After a fresh clone, run `cargo sunrise-mod check` once before opening the proje
 cargo sunrise-mod check
 ```
 
-`check` validates the package and runs `cargo check` against the pinned SDK's API source for this computer.
-Look for the summary naming your mod, what it uses from the API, and the build it was made for. Run `check`
-after an edit to catch mistakes without linking against the game.
+`check` validates the package. For this starter mod, it uses `rustc` to check your code against the pinned SDK's
+compiled API metadata for this computer. It also fetches the API source for your editor. Look for the summary
+naming your mod, what it uses from the API, and the build it was made for. Run `check` after an edit to catch
+mistakes without linking against the game.
 
 ## 5. Build against the prebuilt game
 
@@ -81,8 +82,8 @@ with the library it made, the build log's path and the packed `.smod` path:
 
 ```text
 Compiling greeter (1/1)
-Built …/sunrise-mod/work/greeter/prebuilt-build/…/libmod_greeter.so
-Build log: …/sunrise-mod/work/greeter/build.log
+Built …/sunrise-mod/work/greeter-…/prebuilt-build/…/libmod_greeter.so
+Build log: …/sunrise-mod/work/greeter-…/build.log
 Built ./target/sunrise-mod/greeter.smod
 ```
 
@@ -96,8 +97,14 @@ never builds with another compiler.
 
 A mod with crates.io dependencies is compiled with them, as `cargo build` would, and `build` pins them in
 `Cargo.lock` the first time. After you change `Cargo.toml`, `cargo sunrise-mod build --update-lock` resolves again.
-When a build stops on a package the lock doesn't pin, its error ends with that command. The
-[build log](../how-to/native-mods/04-what-the-launcher-does.md#build-log) shows the compiler's output when a build fails.
+When a build stops on a package the lock doesn't pin, its error ends with that command.
+If compilation fails, look for `Build log:` in the error. It points to the compiler output in
+`work/<mod-id>-<checkout-hash>/build.log` inside the tool's cache.
+
+Use `cargo sunrise-mod build --verbose` (or `-v`) to see compiler stderr live without losing the build log.
+Use `cargo sunrise-mod build --timings` to get the path to Cargo's retained HTML report on stderr after a
+successful Cargo build. It measures Cargo's compile units; the direct Rust routes do not run Cargo and say
+so instead. Both flags are for native mods only.
 
 The template also writes `.github/workflows/sunrise-release.yml`. To publish your mod, see
 [Releasing](../how-to/publish.md#releasing).

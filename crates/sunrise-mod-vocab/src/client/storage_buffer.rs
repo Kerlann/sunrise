@@ -35,8 +35,10 @@ impl<H: crate::ClientHost + ?Sized> StorageBufferContext for H {
 /// Generational handle to a retained GPU storage buffer, created via
 /// [`crate::prelude::ClientRenderClientHost::create_storage_buffer`].
 ///
-/// Handles are owner-checked. The buffer outlives a resource reload and a world close, and is
-/// freed by [`Self::release`] or when its mod unloads.
+/// Handles are owner-checked. The buffer and its queued writes survive resource reloads on the
+/// same device and world close. Release, mod unload, or GPU device replacement retires the
+/// handle ([`BufferError::Stale`]). After device replacement the mod must allocate a new buffer
+/// and repopulate it.
 // no wire: process-local generational handle to a retained GPU storage buffer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 // exhaustive: only the engine creates handles.
@@ -133,8 +135,10 @@ impl crate::__private::game::Fields for StorageBufferRef {
 
 /// A pending readback of a storage buffer range, from [`StorageBufferRef::request_readback`].
 ///
-/// Poll it each frame with [`Self::poll_readback`]. It is freed when its bytes are returned, by
-/// [`Self::release`], or when its mod unloads.
+/// Poll it each frame with [`Self::poll_readback`]. Outstanding tickets survive same-device
+/// resource reloads. A ticket is freed when its bytes are returned, by [`Self::release`], or
+/// on mod unload or GPU device replacement. After device replacement the old ticket returns
+/// [`BufferError::Unavailable`]; request a new readback from a buffer on the new device.
 // no wire: process-local handle to a pending GPU readback.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 // exhaustive: only the engine creates tickets.
@@ -151,8 +155,8 @@ impl ReadbackTicket {
     /// The bytes of the requested range if the GPU has finished the copy (vanilla's `GpuFence`
     /// checked without waiting, then `GpuBuffer.map(read)`): `Ok(None)` while it is in flight,
     /// then `Ok(Some(bytes))` once, after which the ticket is spent. Never waits on the GPU.
-    /// A spent, released or unknown ticket, a copy the frame did not run, and a lost device are
-    /// [`BufferError::Unavailable`].
+    /// A spent, released or unknown ticket, a copy the frame did not run, and device loss or
+    /// replacement are [`BufferError::Unavailable`].
     pub fn poll_readback(
         self,
         host: &(impl StorageBufferContext + ?Sized),
@@ -187,7 +191,8 @@ impl crate::__private::game::Fields for ReadbackTicket {
 ///
 /// A binding takes a range of at most the device's `max_storage_buffer_binding_size` bytes, its
 /// offset a multiple of `min_storage_buffer_offset_alignment`, its length a non-zero multiple of
-/// 4. The buffer itself may be as large as `max_buffer_size`.
+/// 4. The buffer itself may be as large as `max_buffer_size`. Both are in
+/// [`crate::RenderLimits`] (`host.render_capabilities().limits`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 // no wire: local client storage buffer range.
@@ -205,7 +210,8 @@ pub struct StorageBufferSlice {
 #[non_exhaustive]
 // no wire: local client storage buffer descriptor.
 pub struct StorageBufferDescriptor {
-    /// Size in bytes: at least 4, a multiple of 4 and at most the device's `max_buffer_size`.
+    /// Size in bytes: at least 4, a multiple of 4 and at most the device's `max_buffer_size`
+    /// ([`crate::RenderLimits::max_buffer_size`]).
     pub size: u64,
     /// Whether the buffer can also hold indirect draw or dispatch arguments (`wgpu`'s
     /// `BufferUsages::INDIRECT`; vanilla's `USAGE_INDIRECT_PARAMETERS`). Off by default.

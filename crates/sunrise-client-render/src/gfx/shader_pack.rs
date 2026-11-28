@@ -13,9 +13,9 @@ impl Renderer {
         block_ids: &[i32],
     ) -> std::result::Result<Option<(Vec<String>, Vec<String>)>, pack_post::Refused> {
         if pack.is_none() {
-            self.pack_atlas = None;
-            self.pack_material_atlases = None;
+            self.forget_pack_atlas();
         }
+        self.pack_served = pack.as_ref().and_then(|p| p.hdr);
         let draws = self.pack_terrain_draws();
         let buffers = pack_terrain_buffers();
         let buffers = &buffers[..terrain_buffer_count(draws)];
@@ -84,38 +84,35 @@ impl Renderer {
             )
         });
         self.pack_loading = None;
-        self.install_shader_pack(dimension, post.transpose(), block_ids.to_vec())
+        self.install_shader_pack(dimension, post.transpose(), block_ids.to_vec(), None)
     }
     /// Runs the pack `set_shader_pack` or `load_shader_pack` built (`None`: no pack), or none when
     /// it can't run, for the dimension `dimension`; the programs that run and their notes.
-    /// `block_ids` are the pack's, as `set_shader_pack` takes them.
+    /// `block_ids` are the pack's, as `set_shader_pack` takes them. The mod pipelines' pack
+    /// state is published with a pack that runs (`mod_pack_state`, built with the pack, or
+    /// built here), and dropped with one that doesn't.
     fn install_shader_pack(
         &mut self,
         dimension: i32,
         post: std::result::Result<Option<pack_post::PackPost>, pack_post::Refused>,
         block_ids: Vec<i32>,
+        mod_pack_state: Option<mod_pipelines::BuiltPackState>,
     ) -> std::result::Result<Option<(Vec<String>, Vec<String>)>, pack_post::Refused> {
         self.pack_changed();
         let runs = post.as_ref().is_ok_and(Option::is_some);
-        let block_ids = if runs { block_ids } else { Vec::new() };
-        let old = self.pack_block_ids.as_deref().map_or(&[][..], |ids| &ids.0);
-        if block_ids != old {
-            // The normal stream holds each quad's id under the ids it was uploaded with: the
-            // game meshes every section again for this pack's.
-            if runs && self.arena.has_normals() {
-                self.sections_dropped |=
-                    self.sections.len() > 0 || !self.lods.is_empty() || self.lod_pending.is_some();
-                self.clear_sections(self.layout);
+        if let Some(world_primitives) = self.world_primitives.as_mut() {
+            if runs {
+                (world_primitives.pipelines).select_pack(&self.device, mod_pack_state);
+            } else {
+                world_primitives.pipelines.deselect_pack();
             }
-            self.pack_block_ids =
-                (!block_ids.is_empty()).then(|| Box::new(PackBlockIds(block_ids)));
         }
+        self.replace_pack_block_ids(if runs { block_ids } else { Vec::new() }, runs);
         let mut post = match post {
             Ok(post) => post,
             Err(e) => {
                 self.pack_post = Some((dimension, None));
-                self.pack_atlas = None;
-                self.pack_material_atlases = None;
+                self.forget_pack_atlas();
                 return Err(e);
             }
         };
@@ -131,6 +128,51 @@ impl Renderer {
         });
         self.pack_post = Some((dimension, post));
         Ok(report)
+    }
+    /// Makes `block_ids` the running pack's (`runs`: a pack runs with them): when they differ,
+    /// the normal stream, which holds each quad's id under the ids it was uploaded with, is
+    /// dropped, and the game meshes every section again. Whether they differed.
+    fn replace_pack_block_ids(&mut self, block_ids: Vec<i32>, runs: bool) -> bool {
+        let old = self.pack_block_ids.as_deref().map_or(&[][..], |ids| &ids.0);
+        if block_ids == old {
+            return false;
+        }
+        if runs && self.arena.has_normals() {
+            self.sections_dropped |= self.sections.len() > 0;
+            self.clear_sections(self.layout);
+        }
+        self.pack_block_ids = (!block_ids.is_empty()).then(|| Box::new(PackBlockIds(block_ids)));
+        true
+    }
+    /// The pack's flat terrain table (`pack_post::block_ids`) rewritten with the running ids.
+    fn write_pack_terrain_ids(&mut self) {
+        let ids = self.pack_block_ids.as_deref().map_or(&[][..], |ids| &ids.0);
+        let rects = self
+            .pack_atlas
+            .as_ref()
+            .map_or_else(Vec::new, |a| a.rects_table());
+        if let Some((_, Some(post))) = &self.pack_post
+            && !post.write_block_ids(&self.queue, ids, &rects)
+        {
+            log::warn!("shader pack: the block ids no longer fit its terrain table");
+        }
+    }
+    /// Replaces the block ids (`set_shader_pack`'s `block_ids`) of the pack that runs, or of the
+    /// one `load_shader_pack` builds, which then runs with them: the game resolves them again
+    /// when the world's tags its `block.properties` names change. The terrain draws them from
+    /// the next frame on (the normal stream once its sections are meshed again). Nothing without
+    /// a pack.
+    pub fn set_pack_block_ids(&mut self, block_ids: Vec<i32>) {
+        if let Some(loading) = &mut self.pack_loading {
+            loading.block_ids = Some(block_ids);
+            return;
+        }
+        if !matches!(self.pack_post, Some((_, Some(_)))) {
+            return;
+        }
+        if self.replace_pack_block_ids(block_ids, true) {
+            self.write_pack_terrain_ids();
+        }
     }
     /// Sets the external shader pipeline world frames call (`external`), or none.
     pub fn set_external_pipeline(&mut self, pipeline: Option<Box<dyn external::ExternalPipeline>>) {
@@ -250,6 +292,11 @@ impl Renderer {
             .map(|f| f.draw_layout.clone());
         let terrain = self.pack_atlas.is_some();
         let draws_sections = PackLoading::draws_of(&pack, terrain);
+        let served = pack.hdr;
+        #[cfg(feature = "test-support")]
+        {
+            self.test_hooks.pack_loads += 1;
+        }
         let clouds = self.cloud_bindings.clone();
         let mod_runtime = crate::mod_pipelines::pack_runtime_specs();
         let mod_set1_owned: Vec<Option<wgpu::BindGroupLayout>> = self
@@ -268,6 +315,11 @@ impl Renderer {
             .as_ref()
             .map(|wp| wp.pipelines.pack_vertex_stages())
             .unwrap_or_default();
+        // Built with the pack, off the draw path: the mod pipelines' objects for its targets.
+        let mod_pack_state = self
+            .world_primitives
+            .as_ref()
+            .map(|wp| wp.pipelines.pack_state_builder());
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let cancelled = cancel.clone();
         let build = move || {
@@ -309,8 +361,12 @@ impl Renderer {
                     .with_vertex_stages(&mod_vertex_stages),
                 &cancelled,
             );
-            // The ids come back with it, for `install_shader_pack`.
-            (post, block_ids)
+            let mod_pack_state = (post.is_ok())
+                .then_some(mod_pack_state)
+                .flatten()
+                .map(|builder| builder.build(&device));
+            // The ids and the mod pipelines' state come back with it, for `install_shader_pack`.
+            (post, block_ids, mod_pack_state)
         };
         // A pack is not the game's code: a panic building it turns the pack off (#3525).
         let thread = std::thread::Builder::new()
@@ -321,6 +377,9 @@ impl Renderer {
                 // The last pack doesn't draw this dimension meanwhile.
                 self.pack_changed();
                 self.pack_post = None;
+                if let Some(world_primitives) = self.world_primitives.as_mut() {
+                    world_primitives.pipelines.deselect_pack();
+                }
                 self.pack_loading = Some(PackLoading {
                     dimension,
                     thread,
@@ -328,34 +387,59 @@ impl Renderer {
                     started,
                     _cancel: CancelOnDrop(cancel),
                     draws: draws_sections,
+                    served,
+                    block_ids: None,
                 });
             }
             Err(e) => {
-                log::error!("shader pack {label}: no thread to build it on: {e}");
-                // Off for this dimension, as a pack that fails, not tried again every frame.
-                self.pack_loading = None;
-                self.pack_changed();
-                self.pack_post = Some((dimension, None));
+                self.pack_thread_failed(dimension, &label, &e);
+                self.pack_served = served;
             }
         }
+    }
+    /// Whether the pack `load_shader_pack` builds is built, waiting for `poll_shader_pack`.
+    pub fn shader_pack_built(&self) -> bool {
+        self.pack_loading
+            .as_ref()
+            .is_some_and(|l| l.thread.is_finished())
+    }
+    /// `poll_shader_pack`, unless the pack in the renderer is `stale`: loaded, or still
+    /// building, from inputs the game no longer wants (another Iris compatibility). Then it is
+    /// dropped first (`drop_shader_packs`), so a build already done is never installed, and
+    /// nothing comes back.
+    pub fn poll_shader_pack_unless(&mut self, stale: bool) -> Option<PackPoll> {
+        if stale {
+            self.drop_shader_packs();
+            return None;
+        }
+        self.poll_shader_pack()
+    }
+    /// `load_shader_pack` found no thread to build its pack on: the pack is refused for
+    /// `dimension`, as one that fails to build is (`install_shader_pack`), so it is not tried
+    /// again every frame and its atlases go.
+    pub(crate) fn pack_thread_failed(
+        &mut self,
+        dimension: i32,
+        label: &str,
+        error: &std::io::Error,
+    ) {
+        log::error!("shader pack {label}: no thread to build it on: {error}");
+        self.pack_loading = None;
+        let refused = pack_post::Refused {
+            reason: format!("no thread to build it on: {error}"),
+            notes: Vec::new(),
+        };
+        let _ = self.install_shader_pack(dimension, Err(refused), Vec::new(), None);
     }
     /// The pack `load_shader_pack` builds, once its thread is done: it runs from now on, as
     /// `set_shader_pack` would run it. Its dimension, label, start and what `set_shader_pack`
     /// returns.
-    #[allow(clippy::type_complexity)]
-    pub fn poll_shader_pack(
-        &mut self,
-    ) -> Option<(
-        i32,
-        String,
-        std::time::Instant,
-        std::result::Result<Option<(Vec<String>, Vec<String>)>, pack_post::Refused>,
-    )> {
+    pub fn poll_shader_pack(&mut self) -> Option<PackPoll> {
         if !self.pack_loading.as_ref()?.thread.is_finished() {
             return None;
         }
         let loading = self.pack_loading.take()?;
-        let (built, block_ids) = match loading.thread.join() {
+        let (built, block_ids, mod_pack_state) = match loading.thread.join() {
             Ok(Ok(built)) => built,
             // A pack that doesn't run keeps no ids.
             Ok(Err(panic)) => (
@@ -364,6 +448,7 @@ impl Renderer {
                     notes: Vec::new(),
                 }),
                 Vec::new(),
+                None,
             ),
             Err(_) => (
                 Err(pack_post::Refused {
@@ -371,19 +456,63 @@ impl Renderer {
                     notes: Vec::new(),
                 }),
                 Vec::new(),
+                None,
             ),
         };
-        let report = self.install_shader_pack(loading.dimension, built.map(Some), block_ids);
+        self.pack_served = loading.served;
+        // Ids given while it built replace those it was built with, in its terrain table too
+        // where they differ.
+        let given = loading
+            .block_ids
+            .filter(|ids| built.is_ok() && *ids != block_ids);
+        let rewrite = given.is_some();
+        let block_ids = given.unwrap_or(block_ids);
+        let report = self.install_shader_pack(
+            loading.dimension,
+            built.map(Some),
+            block_ids,
+            mod_pack_state,
+        );
+        if rewrite {
+            self.write_pack_terrain_ids();
+        }
         Some((loading.dimension, loading.label, loading.started, report))
+    }
+    /// Drops the pack still building for another served answer of Sunrise's HDR than `served`
+    /// (`Post::hdr`): whatever it ends in, success or refusal, is for a load nobody wants any
+    /// more, so `poll_shader_pack` never reports it against the pack wanted now. A build for
+    /// another dimension with the same answer is kept, to be polled as before. Whether one was
+    /// dropped; the loader then loads the wanted one.
+    pub fn drop_superseded_pack_load(&mut self, served: Option<sunrise_shaders::Tonemap>) -> bool {
+        if self
+            .pack_loading
+            .as_ref()
+            .is_none_or(|l| l.served == served)
+        {
+            return false;
+        }
+        self.pack_loading = None;
+        self.pack_changed();
+        true
     }
     /// Drops the running shader pack.
     pub fn drop_shader_packs(&mut self) {
         self.pack_loading = None;
         self.pack_changed();
         self.pack_post = None;
-        self.pack_atlas = None;
+        self.pack_served = None;
+        if let Some(world_primitives) = self.world_primitives.as_mut() {
+            world_primitives.pipelines.deselect_pack();
+        }
+        self.forget_pack_atlas();
         self.separate_ao = false;
         self.pack_block_ids = None;
+    }
+    /// Frees the pack's block atlas and the material atlases made in its layout
+    /// (`pack_terrain_inputs` makes them again, together).
+    fn forget_pack_atlas(&mut self) {
+        self.pack_atlas = None;
+        self.pack_material_atlases = None;
     }
     /// Sets whether shader pack terrain inputs pass vertex alpha to `hz_Color.a` (`separateAo=true`).
     pub fn set_separate_ao(&mut self, separate_ao: bool) {
@@ -415,7 +544,7 @@ impl Renderer {
         // Flat draws read each sprite's place from a table: the atlas is stitched as the game's.
         // Other draws need the grid.
         if !flat && self.pack_atlas.as_ref().is_some_and(|a| a.is_stitched()) {
-            self.pack_atlas = None;
+            self.forget_pack_atlas();
         }
         if self.pack_atlas.is_none() {
             let mut encoder = self.device.create_command_encoder(&Default::default());
@@ -519,9 +648,11 @@ impl Renderer {
     }
     /// The macros this renderer gives shader packs: the GL extensions this device has
     /// (subgroups, when it has them), and the vendor, renderer and mipmap levels
-    /// (`Macros::define_renderer`).
+    /// (`Macros::define_renderer`); with them, the feature flags this device decides
+    /// (`define_device_features`).
     pub fn define_pack_macros(&self, macros: &mut sunrise_shaders::Macros) {
         macros.define_renderer(self.mipmaps);
+        define_device_features(macros, self.adapter.get_downlevel_capabilities().flags);
         if self.device.features().contains(wgpu::Features::SUBGROUP) {
             macros.define_subgroups();
         }
@@ -544,12 +675,25 @@ impl Renderer {
         }
     }
 
-    /// The dimension the shader pack was last set for.
-    pub fn shader_pack_dimension(&self) -> Option<i32> {
-        let loading = self.pack_loading.as_ref().map(|l| l.dimension);
-        loading.or_else(|| self.pack_post.as_ref().map(|p| p.0))
+    /// The dimension the shader pack building or running was set for and Sunrise's HDR as it
+    /// was served then (`Post::hdr`): a pack set for another dimension or another answer is
+    /// loaded again.
+    pub fn shader_pack_loaded_for(&self) -> Option<(i32, Option<sunrise_shaders::Tonemap>)> {
+        match &self.pack_loading {
+            Some(loading) => Some((loading.dimension, loading.served)),
+            None => self.pack_post.as_ref().map(|p| (p.0, self.pack_served)),
+        }
     }
 }
+
+/// A built pack as `Renderer::poll_shader_pack` gives it: its dimension, label, start, and what
+/// `set_shader_pack` returns.
+pub type PackPoll = (
+    i32,
+    String,
+    std::time::Instant,
+    std::result::Result<Option<(Vec<String>, Vec<String>)>, pack_post::Refused>,
+);
 
 /// The section origins' vertex attribute (`section_instance`).
 const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![5=>Float32x4];
@@ -585,4 +729,14 @@ fn terrain_buffer_count(draws: pack_atlas::TerrainDraws) -> usize {
     } else {
         2
     }
+}
+
+/// The answers a device with `flags` gives to a pack's feature flags (spec 3.2) that depend on
+/// it: `PER_BUFFER_BLENDING` where wgpu draws colour targets that differ in blend
+/// (`DownlevelFlags::INDEPENDENT_BLEND`).
+pub(crate) fn define_device_features(
+    macros: &mut sunrise_shaders::Macros,
+    flags: wgpu::DownlevelFlags,
+) {
+    macros.set_per_buffer_blending(flags.contains(wgpu::DownlevelFlags::INDEPENDENT_BLEND));
 }

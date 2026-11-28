@@ -195,6 +195,15 @@ pub struct EntityUuid(pub u128);
 /// of an entity that is gone, or used on a client. `Host::entity` makes a server
 /// handle from an event's entity id; `ClientHost::crosshair_target` supplies a
 /// client handle for an entity hit.
+///
+/// The base state vanilla gives every `Entity` is read and written through one rule for
+/// every kind: the remaining fire ticks and `isOnFire`, `fireImmune`, `isSilent`,
+/// `hasGlowingTag`, `isNoGravity` and `isInvulnerable`, saved as `Fire`, `Silent`,
+/// `Glowing`, `NoGravity` and `Invulnerable` as `Entity.saveWithoutId` writes them. `None`
+/// or `false` from them means a stale handle, a non-finite input or the wrong side. The
+/// exceptions are a fishing bobber, a leash knot and a dragon's part, which keep no entity
+/// data: they read the defaults and refuse writes. Kinds the game keeps as saved data hold
+/// `Fire` as the saved short.
 #[derive(sunrise_mod_api_macros::Wire, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 // exhaustive: its fields are private, so mods cannot build or destructure it
 pub struct EntityRef {
@@ -830,6 +839,25 @@ impl crate::NoBackend for ExperienceOrbWriteError {
     }
 }
 
+/// Why a player's pickup of an item entity or orb was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, sunrise_mod_api_macros::Wire)]
+#[non_exhaustive]
+pub enum PickupError {
+    /// The player or the item or orb handle is stale, removed, or temporarily held out of lookup,
+    /// or the player is dead.
+    Stale,
+    /// World access is unavailable, or the call ran on a client.
+    Unavailable,
+    /// A transaction is open: the pickup cannot join one, as an abort could not undo it.
+    InTransaction,
+}
+
+impl crate::NoBackend for PickupError {
+    fn no_backend() -> Self {
+        Self::Unavailable
+    }
+}
+
 /// A display entity of the open world (`block_display`, `item_display` or
 /// `text_display`), narrowed with `host.display`.
 #[derive(sunrise_mod_api_macros::Wire, Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1089,6 +1117,10 @@ pub enum PierceLevelError {
 impl NoBackend for PierceLevelError {
     fn no_backend() -> Self {
         Self::Stale
+    }
+
+    fn wrong_side() -> Self {
+        Self::WrongSide
     }
 }
 
@@ -1509,6 +1541,10 @@ impl NoBackend for RespawnRefusal {
     fn no_backend() -> Self {
         Self::Stale
     }
+
+    fn wrong_side() -> Self {
+        Self::Client
+    }
 }
 
 /// Where a player would respawn now, as [`PlayerRef::respawn_target`] finds it: the transition
@@ -1585,6 +1621,10 @@ impl From<StackWriteError> for MenuItemsRefusal {
 impl NoBackend for MenuItemsRefusal {
     fn no_backend() -> Self {
         Self::Unavailable
+    }
+
+    fn wrong_side() -> Self {
+        Self::Client
     }
 }
 

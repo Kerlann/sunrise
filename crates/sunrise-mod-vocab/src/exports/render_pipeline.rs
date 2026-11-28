@@ -25,11 +25,13 @@ pub use client::render_pipeline::{
     PipelineQuad, PipelineState,
 };
 pub use client::render_pipeline::{
-    PipelineTexture, PipelineTextureError, PipelineVertexFormat, PolygonMode, PrimitiveTopology,
-    RenderPipeline, RenderPipelineError, RenderPipelineRef, RenderSetup, RenderTypeError,
-    RenderTypeRef, RenderTypeTexture,
+    PipelineTexture, PipelineTextureError, PolygonMode, PrimitiveTopology, RenderPipeline,
+    RenderPipelineError, RenderPipelineRef, RenderSetup, RenderTypeError, RenderTypeRef,
+    RenderTypeTexture,
 };
-pub use client::render_pipeline::{RenderCapabilities, StorageImageAccess, StorageImageBinding};
+pub use client::render_pipeline::{
+    RenderCapabilities, RenderLimits, StorageImageAccess, StorageImageBinding,
+};
 pub use client::render_pipeline::{
     RenderTypeTextureSource, SamplerAddress, SamplerFilter, TexelBufferFormat, TextureSource,
     TextureTransform, UniformBufferBackendRef, UniformBufferContext, UniformBufferRef,

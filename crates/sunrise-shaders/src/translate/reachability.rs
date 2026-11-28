@@ -179,7 +179,9 @@ fn prune(code: &str) -> Option<String> {
     Some(String::from_utf8(out).expect("whole token spans replaced by spaces"))
 }
 
-/// Prepares a stage for compatibility analysis, refusing rewrites that change its line count.
+/// Stage preparation before compatibility analysis, or `None` if no rewrite changes it.
+/// Refuses rewrites that change the line count, and returns any refusal from the atomic vector
+/// rewrite at its pack file and line.
 pub(super) fn prepare(pp: &Preprocessed) -> Result<Option<Preprocessed>, Error> {
     let pruned = prune(pp.code())
         .map(|code| pp.with_code(code))

@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use super::Error;
-use super::scan::{is_ident, significant};
+use super::scan::{error_at_token, is_ident, significant};
 use crate::Preprocessed;
 use crate::macros::lex;
 
@@ -93,8 +93,10 @@ fn std430(ty: &str) -> Option<(u32, u32)> {
     }
 }
 
-/// `pp` with its shared and buffer vectors that atomic functions use by component rewritten.
-/// Refuses a rewrite that cannot keep the original line map.
+/// `pp` with its shared and buffer vectors that atomic functions use by component rewritten,
+/// or `None` if nothing changes. An unclosed array index or a terminal selector refuses the
+/// stage at the `[` or `.` that starts it, and a rewrite that cannot keep the original line
+/// map is refused at the stage file.
 pub(super) fn rewrite(pp: &Preprocessed) -> Result<Option<Preprocessed>, Error> {
     if !ATOMICS.iter().any(|a| pp.code().contains(a)) {
         return Ok(None);
@@ -474,20 +476,23 @@ pub(super) fn rewrite(pp: &Preprocessed) -> Result<Option<Preprocessed>, Error> 
                 continue;
             };
             let mut depth = 0;
-            let mut close = open;
+            let mut close = None;
             for (j, &t) in tokens.iter().enumerate().skip(open) {
                 match t {
                     "[" => depth += 1,
                     "]" => {
                         depth -= 1;
                         if depth == 0 {
-                            close = j;
+                            close = Some(j);
                             break;
                         }
                     }
                     _ => {}
                 }
             }
+            let close = close.ok_or_else(|| {
+                error_at_token(pp, &tokens, open, "unclosed atomic vector array index")
+            })?;
             let index = tokens[open + 1..close].concat().replace('\n', " ");
             base = format!("{base}[{index}]");
             // GLSL won't turn a `uint` index into the `int` the getter and setter take.
@@ -495,7 +500,6 @@ pub(super) fn rewrite(pp: &Preprocessed) -> Result<Option<Preprocessed>, Error> 
             last = close;
         }
         let after = next(last);
-        let follows = |t: &str| after.is_some_and(|j| tokens[j] == t);
         let assigned = |at: Option<usize>| {
             at.is_some_and(|j| tokens[j] == "=" && next(j).is_none_or(|k| tokens[k] != "="))
         };
@@ -531,9 +535,13 @@ pub(super) fn rewrite(pp: &Preprocessed) -> Result<Option<Preprocessed>, Error> 
             out[semi] = "));".into();
             i = eq + 1;
             continue;
-        } else if follows(".") || (s.array.is_none() && follows("[")) {
-            let at = after.and_then(next).unwrap();
-            if follows("[") {
+        } else if let Some(selector) =
+            after.filter(|&j| tokens[j] == "." || (s.array.is_none() && tokens[j] == "["))
+        {
+            let at = next(selector).ok_or_else(|| {
+                error_at_token(pp, &tokens, selector, "missing atomic vector selector")
+            })?;
+            if tokens[selector] == "[" {
                 // `name[c]`: an element already.
                 replacement = base.clone();
             } else if let Some(c) = component(tokens[at]) {
@@ -651,6 +659,44 @@ mod tests {
             .position(|line| line.contains("int after"))
             .unwrap();
         assert_eq!(out.locate(after), "setup.csh:6");
+    }
+
+    #[test]
+    fn an_unclosed_atomic_vector_array_index_is_refused_at_its_opening_bracket() {
+        let compute = Preprocessed::from_source(
+            "deferred.csh",
+            "layout(local_size_x = 1) in;\nshared uvec2 lights[8];\nvoid main() {\n    \
+             atomicMax(lights[\n        gl_LocalInvocationID[0].x, 2u);\n}\n",
+        );
+        let Err(errors) = crate::translate_compute(&compute) else {
+            panic!("an unclosed index must be refused");
+        };
+        let expected = Error::new("deferred.csh", 4, "unclosed atomic vector array index");
+        assert_eq!(errors, [expected]);
+    }
+
+    #[test]
+    fn a_terminal_atomic_vector_selector_is_refused_at_its_delimiter() {
+        let fragment = Preprocessed::from_source("composite.fsh", "void main() {}\n");
+        for selector in [".", "["] {
+            let vertex = Preprocessed::from_source(
+                "composite.vsh",
+                &format!(
+                    "layout(std430, binding = 2) buffer Counts {{ uvec2 values; }} counts;\n\
+                     void main() {{\n    atomicAdd(counts.values.x, 1u);\n    counts.values{selector}\n"
+                ),
+            );
+            let Err(errors) = crate::translate_composite(
+                &vertex,
+                &fragment,
+                crate::Target::Buffers,
+                crate::DEVICELESS_INTERFACE_LIMITS,
+            ) else {
+                panic!("a terminal `{selector}` must be refused");
+            };
+            let expected = Error::new("composite.vsh", 4, "missing atomic vector selector");
+            assert_eq!(errors, [expected], "{selector}");
+        }
     }
 
     #[test]

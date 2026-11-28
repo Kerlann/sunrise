@@ -19,7 +19,7 @@ lists every public path a mod can name it by. Types inside signatures are normal
 Hooks are named `hook:<name>` in SDK records. Hidden `HookId` discriminants are process-local dispatch indexes,
 never serialized or stable across builds, and native binaries must rebuild for the selected build.
 
-`cargo sunrise-mod hooks <text>` searches the API records offline ([Commands](05-commands.md)).
+`cargo sunrise-mod hooks <text>` searches the API records of the prepared SDK offline ([Commands](05-commands.md)).
 
 ## What a hash covers
 
@@ -154,6 +154,9 @@ catalogs it compares, but SDK publishing leaves engine ids out of its API-only c
 API and engine ids, publishing still checks its API ids and carries the note for those that changed. `sdk.json`
 holds these notes since the previous SDK (`surface.notes`); `cargo sunrise-mod pin` prints a changed item's
 `migrate` line beside it.
+
+For updating native declarations whose game modules live under `client_side` or `server_side`, see
+[Repinning native targets for game side modules](../../how-to/native-mods/16-repinning-side-module-targets.md).
 
 ## Behaviours
 

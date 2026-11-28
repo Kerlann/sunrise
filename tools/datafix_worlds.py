@@ -11,6 +11,7 @@ so that player data exists. The saved world is kept in datafix/worlds/VERSION in
   datafix_worlds.py [--force] [VERSION...]      (default: every version below)
 """
 import argparse
+import contextlib
 import hashlib
 import json
 import math
@@ -210,19 +211,33 @@ class Server:
             props['initial-enabled-packs'] = ','.join(['vanilla', *packs])
         props.update(props_override or {})
         (directory / 'server.properties').write_text(''.join(f'{k}={v}\n' for k, v in props.items()))
+        self._pump_thread = None   # set once it runs: stop() closes stdout only after the reader is gone
         self.process = subprocess.Popen([java, '-Xmx2G', '-jar', str(jar), 'nogui'], cwd=directory,
                                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        self.lines = []
-        self.queue = queue.Queue()
-        self.counter = 0
-        threading.Thread(target=self._pump, daemon=True).start()
-        self.wait('Done (', 600)
+        try:
+            self.lines = []
+            self.queue = queue.Queue()
+            self.counter = 0
+            pump = threading.Thread(target=self._pump, daemon=True)
+            pump.start()
+            self._pump_thread = pump
+            self.wait('Done (', 600)
+        except BaseException:
+            # The caller never gets this Server, so nothing else would stop Java and free its port and world folder.
+            with contextlib.suppress(Exception):   # a failed stop must not replace the startup error
+                self.stop(save=False)
+            raise
 
     def _pump(self):
-        for line in self.process.stdout:
-            line = line.rstrip('\n')
-            self.lines.append(line)
-            self.queue.put(line)
+        try:
+            for line in self.process.stdout:
+                line = line.rstrip('\n')
+                self.lines.append(line)
+                self.queue.put(line)
+        finally:
+            if self.process.stdout is not None:
+                with contextlib.suppress(OSError, ValueError):
+                    self.process.stdout.close()
 
     def wait(self, pattern, timeout=60):
         end = time.time() + timeout
@@ -247,17 +262,31 @@ class Server:
         out = self.wait(marker, timeout)
         return [re.sub(r'^\[[0-9:]+\] \[[^\]]*\]: ', '', l) for l in out[:-1]]
 
-    def stop(self):
+    def stop(self, *, save=True):
+        """Stop the server; with save=False, keep the last explicit save instead of making another."""
         try:
-            # A server already gone is not asked again: datafix_scene_12.populate kills its own once the world is
-            # saved, and closes its stdin.
-            if self.process.poll() is None:
+            if save and self.process.poll() is None:
                 self.process.stdin.write('stop\n')
                 self.process.stdin.flush()
                 self.process.wait(120)
         finally:
-            self.process.kill()   # a no-op once it has exited; after a failed stop the error still reaches the caller
-            self.process.wait()   # the world folder and port are reused only once the process is gone
+            try:
+                if self.process.poll() is None:
+                    self.process.kill()
+                    self.process.wait()   # the world folder and port are reused only once the process is gone
+            finally:
+                if self.process.stdin is not None:
+                    with contextlib.suppress(OSError, ValueError):   # already closed, or a pipe broken by the exit
+                        self.process.stdin.close()
+                # A started pump owns closing stdout in its finally block once it hits EOF, even if it finishes after
+                # join() returns. If no pump started, stop() closes stdout once Java is gone.
+                if self.process.poll() is not None:
+                    pump = getattr(self, '_pump_thread', None)
+                    if pump is not None:
+                        pump.join(5)
+                    elif self.process.stdout is not None:
+                        with contextlib.suppress(OSError, ValueError):
+                            self.process.stdout.close()
 
 
 def failed(lines):
@@ -340,6 +369,8 @@ class Bot:
                 break
 
     def leave(self):
+        if self.stop.is_set():
+            return
         self.stop.set()
         time.sleep(1.5)
         self.sock.close()
@@ -492,11 +523,14 @@ def build(name, force=False):
         # change, so the grid cannot be cleared. The world is wanted for its level.dat alone: its spawn moves far from
         # the grid, the chunks of this first start are dropped, and the world is made again from there, so its saved
         # chunks never hold the grid.
-        out = server.run('setworldspawn -4000 70 -4000')
-        if not any('Set the world spawn point' in line for line in out):
-            server.stop()
-            raise RuntimeError(f'{name}: setworldspawn was refused, so the grid would be saved: {out}')
-        server.stop()
+        spawn_set = False
+        try:
+            out = server.run('setworldspawn -4000 70 -4000')
+            spawn_set = any('Set the world spawn point' in line for line in out)
+            if not spawn_set:
+                raise RuntimeError(f'{name}: setworldspawn was refused, so the grid would be saved: {out}')
+        finally:
+            server.stop(save=spawn_set)   # a failed run is not saved over (its stdin may be gone), only stopped
         shutil.rmtree(work / 'world' / 'region')
         server = Server(work, jar, port, scene.experiments(data_version), java_exe, props)
     problems = []
@@ -510,19 +544,23 @@ def build(name, force=False):
             problems.append((command[:160], bad[:2]))
         return out
 
+    legacy_scene = data_version < 1631 and not props
+    save_on_stop = True
     try:
         try:
-            if data_version < 1631 and not props:   # 1.12 and older: tools/datafix_scene_12.py builds the scene and saves the world itself
-                scene12.populate(server, JoinedBot, port, protocol, BOT, problems)
+            if legacy_scene:
+                scene12.populate(server, JoinedBot, port, protocol, BOT, problems, mcstring=mcstring)
+                save_on_stop = False  # a second save would overwrite the transient states in the last explicit save
             else:
                 build_scene(server, run, JoinedBot, port, protocol, props, era, data_version, states)
         finally:
             for bot in bots:
                 bot.leave()
-        time.sleep(2)
+        if save_on_stop:
+            time.sleep(2)
     finally:
-        server.stop()   # a failed stop still raises, after the bots are closed
-    if data_version < 1631 and not props:
+        server.stop(save=save_on_stop)
+    if legacy_scene:
         scene12.fixtures(work / 'world')   # the few statistics a passive bot cannot cause, written by hand
     # Copy aside, then rename: an interrupted copy must not look like a finished world.
     partial = target.with_name(target.name + '.partial')

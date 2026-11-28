@@ -52,9 +52,7 @@ mod section_gpu;
 mod static_entity;
 
 pub(crate) use section_gpu::collect_animated_layers;
-use section_gpu::{
-    Part, SectionGpu, begin_shrink, decide_fade, forget_records, hold_fading, mark_fades,
-};
+use section_gpu::{Part, SectionGpu, begin_shrink, decide_fade, forget_records, mark_fades};
 use static_entity::{GpuStaticEntitySection, StaticEntityUniform};
 pub mod outline;
 mod overlay;
@@ -94,6 +92,7 @@ mod renderer_construction;
 mod section_fade;
 mod section_upload;
 mod shader_pack;
+pub use shader_pack::PackPoll;
 mod surface_lifecycle;
 use entity_draw::*;
 #[cfg(test)]
@@ -101,6 +100,8 @@ mod sprite_arrays_tests;
 mod terrain_model;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_gpu;
+#[cfg(feature = "test-support")]
+pub use test_gpu::lock as lock_test_gpu;
 mod weather;
 mod world_text;
 use cull::occlusion_culling_requested;
@@ -226,7 +227,9 @@ mod hdr_start;
 mod hdr_stats;
 pub(crate) mod hud_coverage;
 mod in_flight;
-mod sourced_geometry;
+mod material_animation;
+#[cfg(test)]
+mod material_animation_renderer_tests;
 mod terrain_normals;
 use display_watch::DisplayWatch;
 #[cfg(test)]
@@ -240,8 +243,7 @@ pub mod lightning;
 mod linear_blend;
 #[cfg(test)]
 use frame_policy::frame_format;
-use frame_policy::{frame_configuration, overlay_format, sunrise_tone_curve};
-mod lod;
+use frame_policy::{frame_configuration, overlay_format, pack_owns_tone_curve, sunrise_tone_curve};
 pub mod mod_compute;
 pub mod mod_frame_graph;
 pub mod mod_gpu;
@@ -290,6 +292,8 @@ mod off_page;
 use off_page::move_off_page;
 pub mod submit;
 mod sunrise_fan;
+#[cfg(feature = "test-support")]
+pub mod test_hooks;
 mod timing;
 pub mod translucency;
 pub(crate) mod upload;
@@ -643,6 +647,25 @@ impl Renderer {
     pub fn custom_sky_draws(&mut self) -> &mut Vec<crate::custom_sky::Draw> {
         &mut self.custom_sky_draws
     }
+    /// The pack's custom lightmaps (`crate::custom_lightmap::load`): a world with one takes its
+    /// light texture from them in place of the default one. A pack without any costs a frame
+    /// nothing.
+    pub fn set_custom_lightmap(
+        &mut self,
+        pack: std::sync::Arc<dyn crate::custom_lightmap::Lightmaps>,
+    ) {
+        self.custom_lightmap = (!pack.is_empty()).then_some(pack);
+        self.lightmap_uploaded = false;
+    }
+    /// Whether the pack has custom lightmaps: only then does the game hand over the weather.
+    pub fn has_custom_lightmap(&self) -> bool {
+        self.custom_lightmap.is_some()
+    }
+    /// The world and weather of the next frame's light texture (custom lightmaps read them). Only
+    /// that frame reads them: a frame the game sets none for has no custom lightmap.
+    pub fn set_lightmap_weather(&mut self, weather: crate::custom_lightmap::Weather) {
+        self.lightmap_weather = Some(weather);
+    }
     fn quad_indices(device: &wgpu::Device, quads: u32) -> wgpu::Buffer {
         surface_setup::ray_query::quad_indices(device, quads)
     }
@@ -813,50 +836,21 @@ impl Renderer {
             self.own_timing.as_mut(),
         );
         if let Some(arrays) = &self.pbr_maps {
-            for animation in &self.material_animations {
-                if !self.animations.changed().contains(&animation.layer) {
-                    continue;
-                }
-                let Some(pair) = arrays.get((animation.layer / self.sprite_split) as usize) else {
-                    continue;
-                };
-                for kind in 0..2 {
-                    let Some(pixels) = animation.material_pixels(kind, tick) else {
-                        continue;
-                    };
-                    let texture = &pair[kind];
-                    let from = (pixels.len() / 4).isqrt() as u32;
-                    for level in 0..texture.mip_level_count() {
-                        let size = texture.width() >> level;
-                        let pixels = crate::sprites::resample(pixels, from, size);
-                        self.uploads.texture(
-                            encoder,
-                            wgpu::TexelCopyTextureInfo {
-                                texture,
-                                mip_level: level,
-                                origin: wgpu::Origin3d {
-                                    x: 0,
-                                    y: 0,
-                                    z: animation.layer % self.sprite_split,
-                                },
-                                aspect: wgpu::TextureAspect::All,
-                            },
-                            size,
-                            size,
-                            &pixels,
-                        );
-                    }
-                }
-            }
+            let written = self.material_animations.upload(
+                encoder,
+                &mut self.uploads,
+                arrays,
+                self.sprite_split,
+                tick,
+                self.animations.changed(),
+            );
             if let Some(atlases) = &self.pack_material_atlases {
-                for kind in 0..2 {
+                for (kind, layers) in written.into_iter().enumerate() {
+                    if layers.is_empty() {
+                        continue;
+                    }
                     let arrays: Vec<_> = arrays.iter().map(|pair| pair[kind].clone()).collect();
-                    atlases[kind].copy(
-                        &self.device,
-                        encoder,
-                        &arrays,
-                        self.animations.changed().iter().copied(),
-                    );
+                    atlases[kind].copy(&self.device, encoder, &arrays, layers);
                 }
             }
         }
@@ -1064,6 +1058,14 @@ mod sprite_upload_tests;
 #[cfg(test)]
 mod shadow_tests;
 
+/// What a pack's thread builds (`Renderer::load_shader_pack`): the pack or why it is refused,
+/// its block ids, and the mod pipelines' state for its targets.
+type PackBuilt = (
+    std::result::Result<pack_post::PackPost, pack_post::Refused>,
+    Vec<i32>,
+    Option<mod_pipelines::BuiltPackState>,
+);
+
 /// A `shaders/` pack building on its own thread (`Renderer::load_shader_pack`): the dimension it
 /// is for, the thread (a panic in it contained), and what the game named it with and when.
 /// Dropping it (another pack, none, or another dimension) cancels the build: the thread stops at
@@ -1072,22 +1074,18 @@ pub(crate) struct PackLoading {
     dimension: i32,
     /// Held to be dropped with it: that cancels the build.
     _cancel: CancelOnDrop,
-    #[allow(clippy::type_complexity)]
-    thread: std::thread::JoinHandle<
-        std::result::Result<
-            (
-                std::result::Result<pack_post::PackPost, pack_post::Refused>,
-                Vec<i32>,
-            ),
-            String,
-        >,
-    >,
+    thread: std::thread::JoinHandle<std::result::Result<PackBuilt, String>>,
     label: String,
     started: std::time::Instant,
     /// What its terrain and shadow programs will draw from the game's sections, as the built
     /// pack's `has_terrain` and `has_shadow` will say (`PackLoading::draws_of`), for the layouts
     /// the frames drawn meanwhile keep (`Renderer::pack_pending`).
     draws: PackDraws,
+    /// Sunrise's HDR as served to it (`Post::hdr`).
+    served: Option<sunrise_shaders::Tonemap>,
+    /// Block ids given while it builds (`Renderer::set_pack_block_ids`), which it runs with in
+    /// place of those it was built with.
+    block_ids: Option<Vec<i32>>,
 }
 
 /// A running `shaders/` pack's block ids (`Renderer::pack_block_ids`).

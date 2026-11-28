@@ -908,7 +908,6 @@ pub fn main() -> sunrise_client::Result<()> {
     let data = MobData::load(
         &sunrise_assets::resource_source::ResourceRoot::directory(root.to_path_buf()),
         facts.states.len(),
-        false,
     )?;
     let types = MobTypes::load(root)?;
     // The types a bee leaving its hive is loaded with (EntityType.loadEntityRecursive).
@@ -1215,7 +1214,7 @@ pub fn main() -> sunrise_client::Result<()> {
                     registry,
                     facts: &facts,
                     fluid_tables: &motion.fluids,
-                    attributes: &motion.attributes,
+                    attributes: motion.attributes(),
                     movement: &motion.blocks,
                     collision: &collision,
                     suffocation: &suffocation,

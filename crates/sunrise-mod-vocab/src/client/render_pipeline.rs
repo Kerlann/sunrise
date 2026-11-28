@@ -33,8 +33,6 @@ pub struct RenderPipeline {
     /// Each `name` must be a valid non-`GL_` ASCII GLSL identifier, and each `value` (when
     /// present) a non-empty single-line token without comments, backslashes, or `#`.
     pub defines: Vec<(String, Option<String>)>,
-    /// What the pipeline's draws are made of.
-    pub vertex_format: PipelineVertexFormat,
     /// Custom per-binding vertex formats (`withVertexBinding(bindingIndex, format)`). Empty by
     /// default, meaning binding 0 uses [`VertexFormat::position_tex_color`] (stride 24:
     /// `Position: Float32x3`, `UV0: Float32x2`, `Color: Unorm8x4`).
@@ -85,7 +83,7 @@ pub struct RenderPipeline {
     pub push_constant_size: u32,
 }
 impl RenderPipeline {
-    /// Describe a required pipeline that draws [`PipelineVertexFormat::PositionTexColor`]
+    /// Describe a required pipeline that draws [`VertexFormat::position_tex_color`]
     /// geometry with the GLSL core program `shader` (`ns:core/path` ->
     /// `assets/<ns>/shaders/core/<path>.vsh` and `.fsh`).
     pub fn new(
@@ -100,7 +98,6 @@ impl RenderPipeline {
             fragment: shader,
             vertex_shader: None,
             defines: Vec::new(),
-            vertex_format: PipelineVertexFormat::PositionTexColor,
             vertex_bindings: Vec::new(),
             state: PipelineState::new(blend, depth),
             color_targets: Vec::new(),
@@ -238,8 +235,9 @@ impl RenderPipeline {
         }
     }
 
-    /// Whether this pipeline uses the default single `PositionTexColor` vertex binding
-    /// (compatible with the [`crate::WorldDrawContext::pipeline_quads`] shorthand).
+    /// Whether this pipeline uses the default single vertex binding,
+    /// [`VertexFormat::position_tex_color`] (compatible with the
+    /// [`crate::WorldDrawContext::pipeline_quads`] shorthand).
     pub fn uses_default_vertex_format(&self) -> bool {
         self.vertex_bindings.is_empty()
             || (self.vertex_bindings.len() == 1
@@ -320,8 +318,9 @@ impl RenderPipeline {
         self
     }
 
-    /// Set whether fragments write to the depth buffer (`DepthStencilState.writeDepth`).
-    /// Default: `false`.
+    /// Set whether fragments that pass the comparison write to the depth buffer
+    /// (`DepthStencilState.writeDepth`). Default: `false`. See [`PackDepthTarget`] for which
+    /// attachments a linked shader-pack pass can write.
     pub fn depth_write(mut self, write: bool) -> Self {
         match &mut self.state.depth_stencil {
             Some(ds) => ds.write = write,
@@ -709,18 +708,18 @@ pub struct PackBinding {
     /// Optional pass slot override; defaults to [`PipelineGeometryClass::default_slot`].
     pub slot: Option<PackPassSlot>,
     /// Preprocessor defines exposed while compiling the active shader pack when this pipeline
-    /// is active: `(name, optional_value)`. `name` must be a valid GLSL identifier (not
-    /// `GL_`-prefixed) and `value`, when present, must be a non-empty single-line token.
+    /// is active: `(name, optional_value)`. `name` must be a valid GLSL identifier, neither
+    /// `GL_`-prefixed nor `IRIS_FEATURE_`-prefixed (those answer the feature flags a pack lists,
+    /// and only the engine defines them), nor `IS_IRIS` or `IRIS_VERSION` (the engine defines
+    /// those for a pack whose Iris compatibility is on), and `value`, when present, must be a
+    /// non-empty single-line token.
     /// Toggling active defines triggers at most one shader-pack reload.
     pub defines: Vec<(String, Option<String>)>,
-    /// Optional depth target the pipeline draws into: an auxiliary depth plane
-    /// ([`PackDepthTarget::new`]), allocated and populated only while an active pack is bound and
-    /// samples one of its declared samplers, or the pack's main depth ([`PackDepthTarget::Main`]),
-    /// which the pipeline's vertex stage fills with the world's projection of its geometry.
+    /// Optional depth target for non-shadow slots. See [`PackDepthTarget`] for attachment
+    /// selection and write rules.
     pub depth_target: Option<PackDepthTarget>,
-    /// Per-frame pack uniforms supplied by the mod under pack-side GLSL names. If a pack
-    /// declares a uniform with a different GLSL type, the engine leaves it unbound and logs
-    /// once without panicking.
+    /// Per-frame pack uniforms supplied by the mod under pack-side GLSL names. See
+    /// [`PackUniformDecl`] for type mismatches.
     pub frame_uniforms: Vec<PackUniformDecl>,
     /// Mapping from the pipeline's vertex or per-draw inputs to pack-side GLSL names.
     pub glsl_bindings: Vec<PackGlslInput>,
@@ -747,20 +746,24 @@ impl PackBinding {
         self
     }
 
-    /// Declare a preprocessor define `#define NAME` (no value) while this pipeline is active.
+    /// Declare a preprocessor define `#define NAME` (no value) for the active shader pack while
+    /// this pipeline is active. `NAME` follows [`PackBinding::defines`]: an `IRIS_FEATURE_*`
+    /// name, a `GL_` name, and the names only Sunrise's HDR extension defines (`SUNRISE_HDR`,
+    /// `SUNRISE_HDR_TONEMAP_PACK`: set when the game serves it to the pack) are refused at
+    /// registration ([`PackBinding::validate_syntax`]).
     pub fn define(mut self, name: impl Into<String>) -> Self {
         self.defines.push((name.into(), None));
         self
     }
 
-    /// Declare a preprocessor define `#define NAME VALUE` while this pipeline is active.
+    /// Declare a preprocessor define `#define NAME VALUE` for the active shader pack while this
+    /// pipeline is active, with the same name rules as [`PackBinding::define`].
     pub fn define_value(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.defines.push((name.into(), Some(value.into())));
         self
     }
 
-    /// Attach the depth target the pipeline draws into: [`PackDepthTarget::Main`], or an
-    /// auxiliary depth plane shared by pipelines using the same target ID.
+    /// Declare a [`PackDepthTarget`] for the pipeline's non-shadow slot.
     pub fn depth_target(mut self, target: PackDepthTarget) -> Self {
         self.depth_target = Some(target);
         self
@@ -785,7 +788,8 @@ impl PackBinding {
     }
 
     /// Validate GLSL identifier syntax and single-line define token rules on all declared
-    /// entries. Called by the engine during pipeline registration freeze.
+    /// entries, and refuse the define names the engine owns (`GL_`, `IRIS_FEATURE_`, `IS_IRIS`,
+    /// `IRIS_VERSION`). Called by the engine during pipeline registration freeze.
     pub fn validate_syntax(&self) -> Result<(), String> {
         for program in &self.programs {
             if !is_valid_pack_program_name(program) {
@@ -798,6 +802,24 @@ impl PackBinding {
             if !is_valid_glsl_identifier(name) || name.starts_with("GL_") {
                 return Err(format!(
                     "invalid pack define name {name:?}: expected a valid non-GL_ GLSL identifier"
+                ));
+            }
+            if SUNRISE_HDR_DEFINES.contains(&name.as_str()) {
+                return Err(format!(
+                    "reserved pack define name {name:?}: only the game defines it, when it serves \
+                     Sunrise's HDR to the pack"
+                ));
+            }
+            if name.starts_with("IRIS_FEATURE_") {
+                return Err(format!(
+                    "invalid pack define name {name:?}: IRIS_FEATURE_ names answer the feature \
+                     flags a pack lists, and only the engine defines them"
+                ));
+            }
+            if name == "IS_IRIS" || name == "IRIS_VERSION" {
+                return Err(format!(
+                    "invalid pack define name {name:?}: the engine defines it for a pack whose \
+                     Iris compatibility is on"
                 ));
             }
             if let Some(val) = value
@@ -902,14 +924,23 @@ impl PackBinding {
     }
 }
 
-/// The depth target a [`PackBinding`]'s pipeline draws into under a shader pack.
+/// Depth attachment selection for a linked shader-pack pass.
 ///
-/// A pipeline with no depth target draws into the pack's main depth (`depthtex0`) too, but
-/// [`Self::Main`] also enables depth writes there (when the pipeline is depth-tested). The depth
-/// comes from the pipeline's vertex stage: a pass naming [`Self::Main`] writes the depth its
-/// vertex stage's position gives in the world's projection, including geometry the mod projects
-/// itself, so a mod needs no separate copy into it. Under a pack the fragment stage is the
-/// pack's, so `gl_FragDepth` is not the mod's to write.
+/// Writes require an explicit request such as [`RenderPipeline::depth_write`] with `true`.
+/// The comparison is mapped to standard-Z as described by [`DepthCompare`], independently
+/// of writes.
+///
+/// [`PackPassSlot::Shadow`] compares against and, when requested, writes to the pack's shadow
+/// depth (`shadowtex0`), regardless of whether [`Self::Main`] or [`Self::Aux`] is declared.
+///
+/// In non-shadow slots, an explicit target permits writes. Without a target, the pass compares
+/// against the pack's main depth (`depthtex0`), and only [`PackPassSlot::AfterOpaqueGbuffers`]
+/// can write it. Choose [`Self::Main`] to allow writes to main depth in other non-shadow slots,
+/// or [`Self::Aux`] to declare a separate depth plane.
+///
+/// When targeting main depth, a mod's own vertex stage can emit depth in the world's projection
+/// directly, so a mod projecting its own geometry needs no separate depth copy. The fragment
+/// stage is the pack's, so `gl_FragDepth` is not the mod's to write.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 // no wire: local client shader-pack depth target descriptor.
@@ -917,9 +948,16 @@ pub enum PackDepthTarget {
     /// The pack's main depth (`depthtex0`), which the pack's later passes read as the world's.
     Main,
     /// An auxiliary `Depth32Float` attachment shared by pipelines of the same mod using the same
-    /// [`Self::id`] (cleared to OpenGL depth `1.0`, matching `depthtex0`). Allocated and
-    /// populated only while an active pack is bound and samples one of its declared samplers;
-    /// until then the pipeline draws into the pack's main depth.
+    /// `id` (cleared to OpenGL depth `1.0`, matching `depthtex0`).
+    ///
+    /// The engine can select this attachment for a linked non-shadow pass when a loaded pack
+    /// program references one of its samplers. It can retain the attachment even if no built
+    /// pass samples it, so the linked pass can sample pack world depth without attaching
+    /// `depthtex0`.
+    ///
+    /// If the auxiliary attachment is not used, the linked non-shadow pass compares against
+    /// `depthtex0` and can still write it when requested, even in slots that are read-only
+    /// without an explicit target.
     #[non_exhaustive]
     Aux {
         /// Mod-namespaced key identifying the shared depth attachment.
@@ -967,6 +1005,11 @@ impl PackDepthTarget {
 }
 
 /// A per-frame pack uniform declared by a [`PackBinding`].
+///
+/// If the pack program declares the name (or its previous-frame alias) with an incompatible
+/// GLSL type, that uniform is left unwritten and reads zero. The engine does not convert the
+/// value. It logs the program, uniform name, and both types once per program and uniform; the
+/// pipeline stays bound.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 // no wire: local client shader-pack frame uniform declaration.
@@ -1172,6 +1215,10 @@ impl PackGlslInput {
     }
 }
 
+/// The macros only the game defines for a `shaders/` pack, when it serves Sunrise's HDR extension
+/// to it (`sunrise_shaders::Macros::define_sunrise_hdr`): a mod's pack define can't set them.
+const SUNRISE_HDR_DEFINES: [&str; 2] = ["SUNRISE_HDR", "SUNRISE_HDR_TONEMAP_PACK"];
+
 /// Whether `name` is a valid ASCII GLSL identifier (`[A-Za-z_][A-Za-z0-9_]*`).
 pub(crate) fn is_valid_glsl_identifier(name: &str) -> bool {
     let mut bytes = name.bytes();
@@ -1244,15 +1291,6 @@ impl std::fmt::Display for PipelineTextureError {
 }
 
 impl std::error::Error for PipelineTextureError {}
-
-/// The vertex data a pipeline's draws carry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-// no wire: local client render-pipeline vertex format.
-pub enum PipelineVertexFormat {
-    /// A position, a texture coordinate and a colour: what [`PipelineQuad`] gives.
-    PositionTexColor,
-}
 
 /// Required byte alignment for vertex strides (`VertexFormat.VERTEX_ALIGNMENT = 4`).
 pub const VERTEX_ALIGNMENT: u32 = 4;
@@ -1603,7 +1641,8 @@ impl VertexFormat {
         }
     }
 
-    /// Default binding 0 matching [`PipelineVertexFormat::PositionTexColor`] (`Position: Float32x3`
+    /// The default binding 0 of a pipeline, and what [`PipelineQuad`] gives: a position, a texture
+    /// coordinate and a colour (`Position: Float32x3`
     /// at 0, `UV0: Float32x2` at 12, `Color: Unorm8x4` at 20, stride 24).
     pub fn position_tex_color() -> Self {
         Self {
@@ -1862,7 +1901,8 @@ pub enum MeshError {
     InvalidAlignment,
     /// Buffer length is zero, or `byte_offset + data.len()` exceeds the buffer capacity.
     OutOfRange,
-    /// Requested buffer size exceeds `device.limits().max_buffer_size`.
+    /// Requested buffer size exceeds `device.limits().max_buffer_size`
+    /// ([`RenderLimits::max_buffer_size`]).
     ExceedsDeviceLimit,
 }
 
@@ -1918,7 +1958,9 @@ impl<H: crate::ClientHost + ?Sized> MeshContext for H {
 ///
 /// Drawing a [`MeshRef`] via [`crate::WorldDrawContext::draw_mesh`] records a small POD draw
 /// command with zero CPU vertex copying per frame. Handles are owner-checked and retired
-/// automatically on mod disable, world close, resource reload, or [`Self::release`].
+/// automatically on mod disable, world close, resource reload, renderer rebuild (even on
+/// the same device), or [`Self::release`]. A later allocation by the same mod never makes
+/// a retired handle valid again.
 // no wire: process-local generational handle to retained GPU buffers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 // exhaustive: only the engine creates handles.
@@ -2136,11 +2178,12 @@ pub struct Sampler {
     /// The largest mip level of detail the sampler reads (`maxLod`): `Some(0.0)` reads only the
     /// base level. A value above `0.25` blends linearly between the two nearest levels, as
     /// vanilla does. `None` is [`Sampler::new`]'s: no limit, vanilla's absent `maxLod` (1000),
-    /// so it blends between levels too. A sampler that blends is a filtering one: to sample a
-    /// depth target, or an `R32Float` target where
-    /// [`RenderCapabilities::float32_filterable`] is false, set `Some(0.0)` with
-    /// [`SamplerFilter::Nearest`]. A value that is negative or not finite is refused with
-    /// [`BindGroupLayoutError::BadMaxLod`] when the layout is built.
+    /// so it blends between levels too. A depth texture, or an `R32Float` one where
+    /// [`RenderCapabilities::float32_filterable`] is false, cannot be filtered. Standalone draws
+    /// and compute dispatches use nearest sampling without blending between levels for these
+    /// textures. A linked shader-pack draw that needs to change the fixed sampler layout returns
+    /// [`PipelineDrawError::PackSamplerLayout`]. A value that is negative or not finite is refused
+    /// with [`BindGroupLayoutError::BadMaxLod`] when the layout is built.
     pub max_lod: Option<f32>,
 }
 
@@ -2491,10 +2534,10 @@ impl BindGroupLayoutBuilder {
 #[non_exhaustive]
 // no wire: refusal of a local client GPU buffer operation.
 pub enum BufferError {
-    /// No GPU renderer is available in this context.
+    /// No GPU renderer is available in this context, or the requested readback is unavailable.
     Unavailable,
-    /// The handle was released, its owner mod was disabled, the world closed, or resources
-    /// reloaded. Retired handles never become valid again.
+    /// This buffer handle has been retired. See [`UniformBufferRef`] and
+    /// [`crate::StorageBufferRef`] for their respective lifetimes.
     Stale,
     /// The calling mod does not own this buffer.
     NotOwned,
@@ -2577,7 +2620,8 @@ impl<H: crate::ClientHost + ?Sized> UniformBufferContext for H {
 /// [`crate::prelude::ClientRenderClientHost::create_uniform_buffer`].
 ///
 /// Handles are owner-checked and retired automatically on mod disable, world close, resource
-/// reload, or [`Self::release`].
+/// reload, renderer rebuild (even on the same device), or [`Self::release`]. A later allocation
+/// by the same mod never makes a retired handle valid again.
 // no wire: process-local generational handle to a retained GPU uniform buffer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 // exhaustive: only the engine creates handles.
@@ -2652,7 +2696,7 @@ pub enum TextureSource<'a> {
     /// path) loaded from the active resource packs.
     StandaloneTexture(&'a Identifier),
     /// The active world pass's depth texture (usable only when the pipeline does not write
-    /// depth in the same pass).
+    /// depth in the same pass), read with nearest filtering whatever its sampler says.
     WorldDepth,
     /// Vanilla's active 16x16 lightmap texture.
     Lightmap,
@@ -2660,8 +2704,8 @@ pub enum TextureSource<'a> {
     /// [`RenderTargetRef`] created via
     /// [`crate::prelude::ClientRenderClientHost::create_render_target`].
     RenderTargetColor(RenderTargetRef, u8),
-    /// Depth aspect of a mod-owned offscreen [`RenderTargetRef`] (must be bound to a
-    /// non-filtering [`SamplerFilter::Nearest`] sampler).
+    /// Depth aspect of a mod-owned offscreen [`RenderTargetRef`], read with nearest filtering
+    /// whatever its sampler says.
     RenderTargetDepth(RenderTargetRef),
     /// A mip range of a colour attachment of a mod-owned offscreen [`RenderTargetRef`]
     /// (`GpuDevice.createTextureView(texture, baseMipLevel, mipLevels)`). A draw that samples a
@@ -2672,8 +2716,8 @@ pub enum TextureSource<'a> {
     /// allocated via [`crate::FrameGraphContext::create_transient`].
     TransientTargetColor(crate::TransientTargetId, u8),
     /// Depth aspect of a transient per-frame target allocated via
-    /// [`crate::FrameGraphContext::create_transient`] (must be bound to a non-filtering
-    /// [`SamplerFilter::Nearest`] sampler).
+    /// [`crate::FrameGraphContext::create_transient`], read with nearest filtering whatever its
+    /// sampler says.
     TransientTargetDepth(crate::TransientTargetId),
 }
 
@@ -2728,8 +2772,8 @@ pub enum RenderTargetFormat {
     Rgba8Unorm,
     /// 16-bit floating-point RGBA (`Rgba16Float`, filterable).
     Rgba16Float,
-    /// 32-bit single-channel floating-point (`R32Float`; bind with [`SamplerFilter::Nearest`]
-    /// unless the active adapter supports float32 filtering).
+    /// 32-bit single-channel floating-point (`R32Float`; read with nearest filtering unless the
+    /// active adapter supports float32 filtering, whatever the sampler says).
     R32Float,
 }
 
@@ -2755,7 +2799,7 @@ pub enum RenderTargetDepth {
 // no wire: local client render capabilities.
 pub struct RenderCapabilities {
     /// Whether `R32Float` textures can be sampled with a linear filter. Without it an
-    /// `R32Float` render target is bound with [`SamplerFilter::Nearest`] only.
+    /// `R32Float` render target is read with nearest filtering whatever its sampler says.
     pub float32_filterable: bool,
     /// The render target colour formats that support [`StorageImageAccess::ReadWrite`] storage
     /// images on this adapter. Whether a format supports [`StorageImageAccess::WriteOnly`] or
@@ -2775,6 +2819,36 @@ pub struct RenderCapabilities {
     /// adapter lacks `MULTI_DRAW_INDIRECT_COUNT`, and on DirectX 12, whose count draws leave an
     /// indexed command's `base_vertex` out of the vertex fetch.
     pub multi_draw_indirect_count: bool,
+    /// The device's own size limits, the numbers the buffer, binding, dispatch and render target
+    /// refusals are checked against.
+    pub limits: RenderLimits,
+}
+
+/// The device's numeric limits that mod GPU calls are checked against
+/// ([`RenderCapabilities::limits`]), as the adapter reports them (vanilla's
+/// `GpuDevice.getDeviceInfo().limits()`). All zero where no GPU renderer is available. A mod
+/// sizes its buffers, dispatches and targets from these rather than trying an allocation and
+/// reading the refusal.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+// no wire: local client device limits.
+pub struct RenderLimits {
+    /// The largest GPU buffer in bytes (`max_buffer_size`): a [`crate::StorageBuffer`], a mesh
+    /// buffer, a uniform buffer.
+    pub max_buffer_size: u64,
+    /// The longest range one storage binding may take, in bytes
+    /// (`max_storage_buffer_binding_size`, at most `max_buffer_size`). Also the largest inline
+    /// texel payload a draw may bind.
+    pub max_storage_buffer_binding_size: u64,
+    /// The largest inline uniform payload a draw may bind, in bytes
+    /// (`max_uniform_buffer_binding_size`, at most `max_buffer_size`).
+    pub max_uniform_buffer_binding_size: u64,
+    /// The most workgroups a compute dispatch may run along each axis
+    /// (`max_compute_workgroups_per_dimension`).
+    pub max_compute_workgroups_per_dimension: u32,
+    /// The longest side of a 2D texture in pixels (`max_texture_dimension_2d`): render targets
+    /// and dynamic textures.
+    pub max_texture_dimension_2d: u32,
 }
 
 /// Why a mod-owned offscreen [`RenderTargetRef`] operation was refused.
@@ -2784,12 +2858,13 @@ pub struct RenderCapabilities {
 pub enum RenderTargetError {
     /// No GPU renderer is available in this context.
     Unavailable,
-    /// The handle was released or its owner mod was unloaded. Retired handles never become
-    /// valid again.
+    /// The handle was released, its owner mod was unloaded, or the GPU device was replaced.
+    /// Retired handles never become valid again.
     Stale,
     /// The calling mod does not own this render target.
     NotOwned,
-    /// Width or height was zero or exceeded `device.limits().max_texture_dimension_2d`.
+    /// Width or height was zero or exceeded `device.limits().max_texture_dimension_2d`
+    /// ([`RenderLimits::max_texture_dimension_2d`]).
     InvalidSize,
     /// `color_targets.len()` exceeded [`MAX_COLOR_TARGETS`] (`8`).
     TooManyColorTargets,
@@ -2977,8 +3052,10 @@ impl<H: crate::ClientHost + ?Sized> RenderTargetContext for H {
 /// Generational handle to a mod-owned offscreen render target, created via
 /// [`crate::prelude::ClientRenderClientHost::create_render_target`].
 ///
-/// Targets retain their contents across frames until resized. Handles are owner-checked. A target survives a resource reload and a world close, and is freed by
-/// [`Self::release`] or when its mod unloads.
+/// Handles are owner-checked. The target and its contents survive resource reloads on the same
+/// device and world close. Resizing to a different size replaces the attachments. Release, mod
+/// unload, or GPU device replacement retires the handle ([`RenderTargetError::Stale`]). After
+/// device replacement the mod must allocate a new target and populate its attachments.
 // no wire: process-local generational handle to a retained GPU render target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 // exhaustive: only the engine creates handles.
@@ -4124,7 +4201,8 @@ impl PipelineQuad {
     }
 }
 
-/// Why a pipeline draw call was refused; nothing from that call was appended.
+/// Why a pipeline draw was refused. A submit-time refusal appends nothing; the renderer logs
+/// a refusal discovered when preparing a device pipeline variant.
 ///
 /// Individual quads with non-finite coordinates or UVs are skipped without refusing valid quads
 /// in the same slice, and quad storage grows dynamically into the GPU buffers.
@@ -4154,7 +4232,27 @@ pub enum PipelineDrawError {
     /// Set-1 [`DrawBindings`] is missing a declared entry, supplies an unknown/duplicate entry,
     /// mismatches kind or `min_size`, references an unknown/unavailable texture, or provides an
     /// invalid push-constant payload.
+    ///
+    /// A draw or compute dispatch that samples a transient colour or depth attachment must
+    /// declare `.reads(FrameTarget::Transient(id))` on a consumer pass that does not write that
+    /// transient; the graph computes the target's lifetime from declared uses, as vanilla's
+    /// `FramePass.reads` does. An undeclared sample is refused at submit, with this error for a
+    /// draw and [`crate::ComputeDispatchError::InvalidBinding`] for a dispatch, even when the
+    /// pass lists the transient in `.writes(...)`. The renderer logs the refusal once per pass
+    /// label and transient id, not once per command, and only when the id names a transient of
+    /// the graph and the draw is not sampling its own attachment. A draw sampling its own
+    /// transient attachment returns [`Self::TargetReadWriteHazard`] instead. Declaring the read
+    /// on a pass that also writes the transient is refused before recording with
+    /// [`crate::FrameGraphError::SelfDependency`]: split the producer and the consumer. A
+    /// refused command records nothing.
     InvalidBinding,
+    /// An active shader pack links this world draw to a translated pack program, whose fixed
+    /// sampler layout cannot bind one of the draw's textures. Direct mod draws, including those
+    /// into pack targets, do not have this restriction.
+    PackSamplerLayout,
+    /// The device refused the target or sampler pipeline variant in renderer preparation, after
+    /// submission. The draw is refused and the log names the pipeline and the device error.
+    VariantBuildFailed,
     /// A retained [`UniformBufferRef`] in [`DrawBindings`] was stale, not owned, or unavailable.
     /// For an [`IndirectDraw`](crate::IndirectDraw), also its command buffer.
     Buffer(BufferError),
@@ -4172,6 +4270,9 @@ pub enum PipelineDrawError {
     /// [`DrawBindings`] binds a mip level of a [`RenderTargetRef`] both as a storage image and
     /// as something else the draw reads or writes (a sampled view, or a storage image of another
     /// access), which one render pass cannot do.
+    ///
+    /// A draw that samples the transient attachment it renders into also returns this error,
+    /// before the undeclared-read refusal documented on [`Self::InvalidBinding`] applies.
     TargetReadWriteHazard,
 }
 
@@ -4723,7 +4824,19 @@ mod tests {
             ));
         assert_eq!(valid.validate_syntax(), Ok(()));
 
-        for bad_define in ["", "1BAD", "BAD-NAME", "GL_RESERVED", "has space"] {
+        for bad_define in [
+            "",
+            "1BAD",
+            "BAD-NAME",
+            "GL_RESERVED",
+            "has space",
+            "SUNRISE_HDR",
+            "SUNRISE_HDR_TONEMAP_PACK",
+            "IRIS_FEATURE_SSBO",
+            "IRIS_FEATURE_",
+            "IS_IRIS",
+            "IRIS_VERSION",
+        ] {
             assert!(
                 PackBinding::new()
                     .define(bad_define)
@@ -4731,6 +4844,27 @@ mod tests {
                     .is_err(),
                 "expected invalid define name {bad_define:?} to fail"
             );
+        }
+        // Engine-owned names with a value too; a longer name that starts with an HDR one is the
+        // mod's.
+        for reserved in [
+            "SUNRISE_HDR",
+            "SUNRISE_HDR_TONEMAP_PACK",
+            "IRIS_FEATURE_SSBO",
+            "IS_IRIS",
+            "IRIS_VERSION",
+        ] {
+            assert!(
+                PackBinding::new()
+                    .define_value(reserved, "1")
+                    .validate_syntax()
+                    .is_err(),
+                "{reserved}"
+            );
+        }
+        // A longer name of the mod's own stays its.
+        for own in ["SUNRISE_HDR_MOD", "IS_IRIS_LIKE", "MY_IRIS_VERSION"] {
+            assert_eq!(PackBinding::new().define(own).validate_syntax(), Ok(()));
         }
         for bad_val in [
             "",

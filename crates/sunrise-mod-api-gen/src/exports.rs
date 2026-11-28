@@ -7,14 +7,36 @@ pub(crate) const DIRECTORY: &str = "crates/sunrise-mod-vocab/src/exports";
 use sunrise_game_discovery::exports::PREFIX;
 
 pub(crate) fn sources(root: &Path) -> Result<BTreeMap<String, String>, String> {
-    let (mut out, has_parts, has_host) = sunrise_game_discovery::exports::fragments(
-        root,
-        sunrise_game_discovery::module_files(&root.join(DIRECTORY))?,
-    )?;
-    if has_host {
+    sources_tracked(root, None, None, &mut crate::Inputs::default())
+}
+
+pub(crate) fn sources_tracked(
+    root: &Path,
+    areas_source: Option<&str>,
+    parts_trait_exports: Option<&str>,
+    inputs: &mut crate::Inputs,
+) -> Result<BTreeMap<String, String>, String> {
+    let dir = root.join(DIRECTORY);
+    let areas = inputs.module_files(&dir)?;
+    let fragments = sunrise_game_discovery::exports::fragments(root, areas, |path| {
+        inputs.read_to_string(path)
+    })?;
+    for path in &fragments.module_paths {
+        inputs.record_existing(path);
+    }
+    let mut out = fragments.scopes;
+    if fragments.has_host {
+        let areas_owned;
+        let areas_code = match areas_source {
+            Some(code) => code,
+            None => {
+                areas_owned = super::host::areas_source_tracked(root, inputs)?;
+                &areas_owned
+            }
+        };
         // Re-export the generated macro aliases, not the include!-expanded
         // macro_export implementations, at their existing crate-root paths.
-        for item in syn::parse_file(&super::host::areas_source(root)?)
+        for item in syn::parse_file(areas_code)
             .map_err(|e| e.to_string())?
             .items
         {
@@ -28,10 +50,12 @@ pub(crate) fn sources(root: &Path) -> Result<BTreeMap<String, String>, String> {
             }
         }
     }
-    if has_parts {
-        out.get_mut("root")
-            .unwrap()
-            .push_str(&super::parts::trait_exports(root)?);
+    if fragments.has_parts {
+        let exports = match parts_trait_exports {
+            Some(code) => std::borrow::Cow::Borrowed(code),
+            None => std::borrow::Cow::Owned(super::parts::trait_exports(root, inputs)?),
+        };
+        out.get_mut("root").unwrap().push_str(&exports);
     }
     Ok(out
         .into_iter()
@@ -39,16 +63,23 @@ pub(crate) fn sources(root: &Path) -> Result<BTreeMap<String, String>, String> {
         .collect())
 }
 
-/// Expand the same generated surfaces for source consumers such as Host validation.
-pub(crate) fn expand(root: &Path, source: &str) -> Result<String, String> {
+/// Expand already-generated export fragments for source consumers such as Host validation.
+pub(crate) fn expand_with(
+    source: &str,
+    generated: &BTreeMap<String, String>,
+) -> Result<String, String> {
     fn items(input: Vec<Item>, sources: &BTreeMap<String, String>) -> Result<Vec<Item>, String> {
         let mut out = Vec::new();
         for mut item in input {
             if let Item::Macro(mac) = &item
                 && mac.mac.path.is_ident("include")
-                && let Some((_, code)) = sources
-                    .iter()
-                    .find(|(name, _)| mac.mac.tokens.to_string().contains(name.as_str()))
+                && let Some(path) = sunrise_game_discovery::exports::env_concat_include(
+                    mac.mac.tokens.clone(),
+                    "OUT_DIR",
+                    Path::new(""),
+                )?
+                && let Some(file_name) = path.file_name().and_then(|n| n.to_str())
+                && let Some(code) = sources.get(file_name)
             {
                 out.extend(syn::parse_file(code).map_err(|e| e.to_string())?.items);
                 continue;
@@ -62,17 +93,25 @@ pub(crate) fn expand(root: &Path, source: &str) -> Result<String, String> {
         }
         Ok(out)
     }
+    if !source.contains(PREFIX) && !source.contains(super::parts::OUTPUT) {
+        return Ok(source.to_owned());
+    }
+    let mut file = syn::parse_file(source).map_err(|e| e.to_string())?;
+    file.items = items(file.items, generated)?;
+    Ok(file.to_token_stream().to_string())
+}
+
+/// Expand the same generated surfaces for source consumers such as Host validation.
+pub(crate) fn expand(root: &Path, source: &str) -> Result<String, String> {
     let parts = source.contains(super::parts::OUTPUT);
     if !source.contains(PREFIX) && !parts {
         return Ok(source.to_owned());
     }
-    let mut file = syn::parse_file(source).map_err(|e| e.to_string())?;
     let mut generated = sources(root)?;
     if parts {
         generated.insert(super::parts::OUTPUT.to_owned(), super::parts::source(root)?);
     }
-    file.items = items(file.items, &generated)?;
-    Ok(file.to_token_stream().to_string())
+    expand_with(source, &generated)
 }
 
 #[cfg(test)]
@@ -95,8 +134,7 @@ mod tests {
         )
         .unwrap();
         fs::write(api.join("exports/parts.rs"), "mod parts;").unwrap();
-        for expected in [api.join("parts/mod.rs"), api.join("parts.rs")] {
-            fs::write(&expected, "").unwrap();
+        let assert_selected = |expected: &Path| {
             let generated = sources(&root).unwrap();
             let file = syn::parse_file(&generated["mod_api_exports_root.rs"]).unwrap();
             let Item::Mod(module) = &file.items[0] else {
@@ -112,7 +150,21 @@ mod tests {
                 panic!("module path is not a string")
             };
             assert_eq!(Path::new(&value.value()), expected);
-        }
+        };
+        let nested = api.join("parts/mod.rs");
+        let flat = api.join("parts.rs");
+        fs::write(&nested, "").unwrap();
+        assert_selected(&nested);
+        // Adding the flat twin beside the directory root without removing it is refused.
+        fs::write(&flat, "").unwrap();
+        let err = sources(&root).unwrap_err();
+        assert!(
+            err.contains(&flat.to_string_lossy().into_owned())
+                && err.contains(&nested.to_string_lossy().into_owned()),
+            "expected error naming both candidates, got: {err}"
+        );
+        fs::remove_file(&nested).unwrap();
+        assert_selected(&flat);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -185,6 +237,47 @@ mod tests {
             missing.is_empty(),
             "parts families declare public names but have no exports/parts_<family>.rs \
              (add one, or start the family file with `// exports: none`): {missing:?}"
+        );
+    }
+
+    #[test]
+    fn expand_only_replaces_supported_known_out_dir_includes() {
+        let fixture = tempfile::tempdir().unwrap();
+        let dir = fixture.path().join(DIRECTORY);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("probe.rs"),
+            "pub use crate::probe::GeneratedSentinel;",
+        )
+        .unwrap();
+
+        let canonical = r#"include!(concat!(env!("OUT_DIR"), "/mod_api_exports_root.rs"));"#;
+        let expanded = expand(fixture.path(), canonical).unwrap();
+        assert!(expanded.contains("GeneratedSentinel"));
+
+        for source in [
+            r#"include!(concat!("/mod_api_exports_root.rs/", env!("OUT_DIR")));"#,
+            r#"include!(concat!(env!("OUT_DIR"), env!("OUT_DIR"), "/mod_api_exports_root.rs"));"#,
+            r#"include!(concat!(env!("OUT_DIR"), "mod_api_exports_root.rs"));"#,
+            r#"include!(concat!(env!("OUT_DIR"), "/mod_api_exports_unknown.rs"));"#,
+        ] {
+            let expanded = expand(fixture.path(), source).unwrap();
+            let parsed = syn::parse_file(&expanded).unwrap();
+            assert!(
+                matches!(parsed.items.as_slice(), [Item::Macro(mac)] if mac.mac.path.is_ident("include")),
+                "unexpected expansion: {expanded}"
+            );
+        }
+    }
+
+    #[test]
+    fn expand_leaves_ordinary_literal_include_alone() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let source = r#"include!("fixtures/mod_api_exports_root.rs");"#;
+        let expanded = expand(&root, source).expect("expand ordinary literal include");
+        assert!(
+            expanded.contains("fixtures/mod_api_exports_root.rs"),
+            "expected ordinary literal include to remain untouched, got: {expanded}"
         );
     }
 }

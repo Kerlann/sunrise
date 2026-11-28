@@ -76,7 +76,6 @@ impl Renderer {
         let split = check_layers(&adapter, layers)?;
         let info = adapter.get_info();
         surface_setup::log_sprite_split(&info, split, layers);
-        crate::graphics::suggest_reduced_far_detail(crate::graphics::lod_capped(&info));
         let size = window.inner_size();
         let max_side = device.limits().max_texture_dimension_2d;
         let configured = match (&surface, configured) {
@@ -813,11 +812,7 @@ impl Renderer {
                 )
             })
             .collect();
-        let material_animations = animations
-            .iter()
-            .filter(|a| a.has_materials())
-            .cloned()
-            .collect();
+        let material_animations = material_animation::MaterialAnimations::new(animations);
         let animations = animate::SpriteAnimator::new(
             &device,
             animations,
@@ -2289,13 +2284,14 @@ impl Renderer {
             mod_gpu::ModFrameState {
                 entity_atlas: atlas_view.clone(),
                 lightmap: lightmap_view.clone(),
-                world_depth: depth.clone(),
                 entity_quad_capacity: EntityQuadCapacity::from_limits(
                     &device.limits(),
                     entity_skin.is_some(),
                 ),
                 pack_iris: false,
             },
+            depth.clone(),
+            previous.map(|renderer| renderer.mod_gpu()),
         );
         Ok(Self {
             display: None,
@@ -2336,8 +2332,6 @@ impl Renderer {
             cull_on: cull.is_some(),
             sides_on: true,
             gpu_culling: None,
-            sourced: Default::default(),
-            gpu_sourced_frame: false,
             gpu_culling_offer,
             gpu_frame: false,
             #[cfg(debug_assertions)]
@@ -2419,6 +2413,9 @@ impl Renderer {
             stars,
             custom_sky,
             custom_sky_draws: Vec::new(),
+            custom_lightmap: None,
+            lightmap_weather: None,
+            lightmap_drawn: core_lightmap::Drawn::Native,
             entity_outline,
             panorama,
             border_pipeline,
@@ -2495,18 +2492,7 @@ impl Renderer {
             outline,
             depth,
             sections: resident::Resident::default(),
-            lods: FxHashMap::default(),
-            lod_vertex_bytes: 0,
-            lod_cells: lod::TileGrid::default(),
-            lod_cull_free: Vec::new(),
-            lod_cull_next: 0,
-            lod_cutout: Default::default(),
-            lod_retiring: Default::default(),
-            lod_leaving: Vec::new(),
-            lod_pending: None,
-            lod_settled: None,
             detail_columns: Default::default(),
-            detail_revision: 0,
             arena,
             translucent_arena,
             translucent_batching,
@@ -2519,13 +2505,11 @@ impl Renderer {
             indirect_capacity: 1024,
             multi_draw,
             visible: Vec::new(),
-            visible_lods: Vec::new(),
             visible_renderable_sections: Vec::new(),
             visible_renderable_scratch: Vec::new(),
             hook_geometry: Default::default(),
             hook_entities_scratch: Vec::new(),
             hook_see_through_scratch: Vec::new(),
-            translucent_lods: Vec::new(),
             shadow_visible: Vec::new(),
             translucent_draws: Vec::new(),
             translucent_tests: Vec::new(),
@@ -2545,7 +2529,6 @@ impl Renderer {
             block_entity_membership_revisions: Default::default(),
             section_uploaded: Default::default(),
             newest_upload: None,
-            newest_lod_fade: None,
             block_entity_revision: next_block_entity_revision(),
             occlusion: occlusion::Occlusion::new(crate::chunk::MIN_Y, crate::chunk::HEIGHT / 16),
             layout: crate::chunk::ColumnLayout::VANILLA,
@@ -2570,6 +2553,8 @@ impl Renderer {
             pass_timing_gap: std::time::Duration::ZERO,
             keep_timed_frames: false,
             own_timing: None,
+            #[cfg(feature = "test-support")]
+            test_hooks: Default::default(),
             pack_entity_rest: Vec::new(),
             cloud_bindings,
             pack_weather: None,
@@ -2590,7 +2575,6 @@ impl Renderer {
             outline_lines_scratch: Vec::new(),
             debug_lines_scratch: Vec::new(),
             screen_vertices_scratch: Vec::new(),
-            lod_leaving_scratch: crate::fast_hash::FxHashSet::default(),
             shadow_boxed_scratch: Vec::new(),
             shadow_seen_scratch: crate::fast_hash::FxHashSet::default(),
             shadow_translucent_scratch: Vec::new(),
@@ -2608,19 +2592,19 @@ impl Renderer {
             section_draw_calls: 0,
             frame_serial: 0,
             stats_frame: 0,
-            stats_halves: Default::default(),
             uploaded_bytes: 0,
             started: Instant::now(),
             screenshot: None,
             screenshot_result: None,
             pack_hdr: None,
+            pack_hdr_pick: String::new(),
+            pack_served: None,
             screenshot_readbacks: screenshot_readback::Readbacks::default(),
             screenshot_quality: 1,
             screenshot_halvings: 0,
             gamma: 0.5,
             improved_transparency: false,
             oit: None,
-            fullbright: false,
             animated_textures: true,
             present_modes,
             capture_copies: std::env::var_os("SUNRISE_RENDER_CAPTURE")

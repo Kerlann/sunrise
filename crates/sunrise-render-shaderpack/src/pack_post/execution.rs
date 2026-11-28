@@ -419,7 +419,8 @@ impl PackPost {
     /// Runs the pack over the world drawn into `world` (colour) and `world_depth`, then draws
     /// the result onto `screen`. Notifies after the sky if the frame assigned the stage to this
     /// pack, and after the last pack world pass, before composition. A pack's hand is still part
-    /// of its world passes for the depth snapshots.
+    /// of its world passes for the depth snapshots. `display`: the display the frame is shown on,
+    /// which a pack served Sunrise's HDR extension reads (`pack_uniforms::DISPLAY`).
     #[allow(clippy::too_many_arguments)]
     pub fn run_frame(
         &mut self,
@@ -433,6 +434,7 @@ impl PackPost {
         sky: &SkyInputs<'_>,
         hand: &HandInputs<'_>,
         inputs: &PackInputs,
+        display: pack_uniforms::Display,
         size: [u32; 2],
         window: [u32; 2],
         pages: &[TerrainPage],
@@ -552,6 +554,7 @@ impl PackPost {
             .center_depth
             .get_or_insert_with(|| crate::pack_center_depth::CenterDepth::new(device))
             .collect();
+        self.uniforms.display = display;
         self.uniforms.update(frame_view, inputs, size);
         self.mod_uniforms.advance_frame();
         // `smooth` starts on the first frame that knows the camera's biome.
@@ -786,10 +789,12 @@ impl PackPost {
                 .zip(e.late)
                 .any(|(p, late)| p.is_some() && late)
         });
+        // The hand's translucent quads draw in the translucent phase too (`draw_hand_water`).
         let mut water_drawn = !boundaries.translucent_blocks
             && !boundaries.weather
             && !boundaries.custom_geometry
             && self.water.is_none()
+            && self.hand_water.is_none()
             && self.weather.is_none()
             && !late_entities
             && !self.has_mod_slot(ModPassSlot::AfterTranslucentGbuffers)
@@ -1030,28 +1035,38 @@ impl PackPost {
         };
         // Without `final`, colortex0 holds floats (`new` refuses an integer one).
         if !shown {
+            // Served Sunrise's HDR at the window's size, each pixel its own texel.
+            let copy = match &self.copy_texel {
+                Some(texel) if size == window => texel,
+                _ => &self.copy,
+            };
+            let colortex0 = wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(
+                    view(self.main, 0, false).expect("colortex0"),
+                ),
+            };
+            let sampler = wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(&self.linear),
+            };
+            // Served Sunrise's HDR, the copy loads texels and binds no sampler.
+            let entries = if self.hdr.is_some() {
+                &[colortex0][..]
+            } else {
+                &[colortex0, sampler][..]
+            };
             let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Shader pack colortex0"),
-                layout: &self.copy.1,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(
-                            view(self.main, 0, false).expect("colortex0"),
-                        ),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::Sampler(&self.linear),
-                    },
-                ],
+                layout: &copy.1,
+                entries,
             });
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Shader pack colortex0"),
                 color_attachments: &[attach(screen, overwrite)],
                 ..Default::default()
             });
-            rp.set_pipeline(&self.copy.0);
+            rp.set_pipeline(&copy.0);
             rp.set_bind_group(0, &group, &[]);
             rp.draw(0..3, 0..1);
         } else if let Some(picture) = &final_view {
@@ -1404,31 +1419,38 @@ impl PackPost {
         pass: &mut Pass,
         size: [u32; 2],
     ) {
-        let Pipeline::Compute {
-            pipeline,
-            groups,
-            render,
-            local,
-        } = &pass.pipeline
-        else {
+        let Pipeline::Compute { pipeline, dispatch } = &mut pass.pipeline else {
             return;
         };
-        let pipeline = pipeline.get().expect("compiled with its pack");
-        let groups = groups.unwrap_or_else(|| {
-            let n = |k: usize| (size[k] as f32 * render[k] / local[k] as f32).ceil() as u32;
-            [n(0), n(1), 1]
-        });
-        let (pipeline, groups) = (pipeline.clone(), groups);
-        // wgpu panics on a dispatch over its limit. The translator reshapes a large
-        // `workGroups`; a `workGroupsRender` that large is not run.
-        let most = device.limits().max_compute_workgroups_per_dimension;
-        if groups.iter().any(|&n| n > most) {
-            log::warn!(
-                "shader pack: {}: {groups:?} work groups is over {most} per dimension; not run",
-                pass.name
-            );
-            return;
-        }
+        let pipeline = pipeline.get().expect("compiled with its pack").clone();
+        let run = match dispatch {
+            Dispatch::Direct {
+                groups,
+                render,
+                local,
+            } => {
+                let groups = groups.unwrap_or_else(|| {
+                    let n = |k: usize| (size[k] as f32 * render[k] / local[k] as f32).ceil() as u32;
+                    [n(0), n(1), 1]
+                });
+                // wgpu panics on a dispatch over its limit. The translator reshapes a large
+                // `workGroups`; a `workGroupsRender` that large is not run.
+                let most = device.limits().max_compute_workgroups_per_dimension;
+                if groups.iter().any(|&n| n > most) {
+                    log::warn!(
+                        "shader pack: {}: {groups:?} work groups is over {most} per dimension; not run",
+                        pass.name
+                    );
+                    return;
+                }
+                Run::Groups(groups)
+            }
+            // The counts, copied and checked, after every pass before this one wrote them.
+            Dispatch::Indirect(indirect) => match indirect.record(device, encoder, &self.buffers) {
+                Some(counts) => Run::Counts(counts),
+                None => return,
+            },
+        };
         for image in (0..self.images.len()).filter(|k| pass.snapshots & 1 << k != 0) {
             pack_images::snapshot(encoder, &self.images[image]);
         }
@@ -1447,7 +1469,10 @@ impl PackPost {
         {
             cp.set_bind_group(4, g, &[]);
         }
-        cp.dispatch_workgroups(groups[0], groups[1], groups[2]);
+        match &run {
+            Run::Groups([x, y, z]) => cp.dispatch_workgroups(*x, *y, *z),
+            Run::Counts(counts) => cp.dispatch_workgroups_indirect(counts, 0),
+        }
         drop(cp);
         self.mips_valid &= !pass.written;
     }
@@ -2232,6 +2257,11 @@ impl PackPost {
         geometry.prepare(device, queue, hand.vertices, hand.items, projection);
         if geometry.quads > 0 {
             let group = self.bind(device, queue, encoder, &mut pass, size);
+            // Translucent quads wait for `gbuffers_hand_water` when the pack has one.
+            let late = self.hand_water.is_some();
+            let runs =
+                || (geometry.runs.iter()).chain(geometry.translucent_runs.iter().filter(|_| !late));
+            let block_group = self.block_atlas_group(device, &mut pass, runs().any(|r| r.3));
             {
                 let mut rp = self.begin(encoder, &pass);
                 rp.set_pipeline(pass.render());
@@ -2244,19 +2274,15 @@ impl PackPost {
                 rp.set_bind_group(1, &geometry.group, &[]);
                 rp.set_vertex_buffer(0, geometry.vertices());
                 rp.set_index_buffer(geometry.indices.slice(..), wgpu::IndexFormat::Uint32);
-                // The arm and each held item: their own `currentRenderedItemId`. Translucent
-                // quads wait for `gbuffers_hand_water` when the pack has one.
-                let late = self.hand_water.is_some();
-                let runs = geometry
-                    .runs
-                    .iter()
-                    .chain(geometry.translucent_runs.iter().filter(|_| !late));
-                for &(first, quads, offset) in runs {
-                    if pass.draw {
-                        rp.set_bind_group(2, &geometry.slot_group, &[offset]);
-                    }
-                    rp.draw_indexed(first * 6..(first + quads) * 6, 0, 0..1);
-                }
+                // The arm and each held item: their own `currentRenderedItemId`.
+                hand_runs(
+                    &mut rp,
+                    &pass,
+                    &geometry,
+                    runs(),
+                    &group,
+                    block_group.as_ref(),
+                );
             }
             self.mips_valid &= !pass.written;
         }
@@ -2425,6 +2451,8 @@ impl PackPost {
             .filter(|(_, g)| g.quads > 0 && !g.translucent_runs.is_empty())
         {
             let group = self.bind(device, queue, encoder, &mut pass, size);
+            let runs = &geometry.translucent_runs;
+            let block_group = self.block_atlas_group(device, &mut pass, runs.iter().any(|r| r.3));
             {
                 let mut rp = self.begin(encoder, &pass);
                 rp.set_pipeline(pass.render());
@@ -2437,12 +2465,7 @@ impl PackPost {
                 rp.set_bind_group(1, &geometry.group, &[]);
                 rp.set_vertex_buffer(0, geometry.vertices());
                 rp.set_index_buffer(geometry.indices.slice(..), wgpu::IndexFormat::Uint32);
-                for &(first, quads, offset) in &geometry.translucent_runs {
-                    if pass.draw {
-                        rp.set_bind_group(2, &geometry.slot_group, &[offset]);
-                    }
-                    rp.draw_indexed(first * 6..(first + quads) * 6, 0, 0..1);
-                }
+                hand_runs(&mut rp, &pass, geometry, runs, &group, block_group.as_ref());
             }
             self.mips_valid &= !pass.written;
         }
@@ -2588,7 +2611,7 @@ impl PackPost {
         for pass in passes {
             pass.forget_groups();
             for c in &mut pass.compute {
-                c.groups.clear();
+                c.forget_groups();
             }
         }
     }
@@ -2603,7 +2626,10 @@ impl PackPost {
         if pack_images::resize_images(device, &mut self.images, size) {
             self.forget_groups();
         }
-        self.buffers.resize(device, size);
+        // The storage buffers made again: the passes reading counts from them bind the old ones.
+        if self.buffers.resize(device, size) {
+            self.forget_groups();
+        }
         if self.targets.as_ref().is_some_and(|t| t.size == size) {
             return Ok(());
         }
@@ -3106,6 +3132,33 @@ impl PackPost {
     }
 }
 
+/// Draws the hand's `runs` (`PackHand::runs`), each with its slot of `HzDraw` and set 0 of the
+/// atlas it samples: `block` for native terrain quads placed in the block atlas, `plain` (bound
+/// at the start) for the others. Without a block atlas group no run is placed (`PackHand`'s
+/// block atlas comes from the same atlas).
+fn hand_runs<'a>(
+    rp: &mut wgpu::RenderPass<'_>,
+    pass: &Pass,
+    geometry: &pack_hand::PackHand,
+    runs: impl IntoIterator<Item = &'a (u32, u32, u32, bool)>,
+    plain: &wgpu::BindGroup,
+    block: Option<&wgpu::BindGroup>,
+) {
+    let mut on_block = false;
+    for &(first, quads, offset, block_atlas) in runs {
+        if let Some(block) = block
+            && block_atlas != on_block
+        {
+            rp.set_bind_group(0, if block_atlas { block } else { plain }, &[]);
+            on_block = block_atlas;
+        }
+        if pass.draw {
+            rp.set_bind_group(2, &geometry.slot_group, &[offset]);
+        }
+        rp.draw_indexed(first * 6..(first + quads) * 6, 0, 0..1);
+    }
+}
+
 /// Set 0 for draw `d` of an entity pass: of `groups` (plain, End portal, block atlas) and
 /// `dynamic` (a group for each dynamic texture), the one of the atlas it samples (`Draw::portal`,
 /// `Draw::block_atlas`, `Draw::texture`), the plain one when that atlas's is missing. `bound`: the
@@ -3140,4 +3193,10 @@ fn bind_atlas(
         rp.set_bind_group(0, group, &[]);
         *bound = wanted;
     }
+}
+
+/// What a compute pass dispatches this frame: its own counts, or the buffer holding them.
+enum Run {
+    Groups([u32; 3]),
+    Counts(wgpu::Buffer),
 }
