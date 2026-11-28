@@ -1533,27 +1533,63 @@ impl crate::game::ServerGame<'_> {
         let state = self.take_transferred_entity_state(id);
         match list {
             List::Item => {
+                crate::game::record_departure!(
+                    self.common.dim,
+                    id,
+                    "minecraft:item",
+                    Some("changed_dimension")
+                );
                 self.remove_dropped(i);
                 self.detach_entity(id);
             }
             List::Tnt => {
                 self.common.tnts.remove(i);
+                crate::game::record_departure!(
+                    self.common.dim,
+                    id,
+                    "minecraft:tnt",
+                    Some("changed_dimension")
+                );
                 self.forget_entity(id);
             }
             List::Trident => {
                 self.common.tridents.remove(i);
+                crate::game::record_departure!(
+                    self.common.dim,
+                    id,
+                    "minecraft:trident",
+                    Some("changed_dimension")
+                );
                 self.forget_entity(id);
             }
             List::Rocket => {
                 self.common.rockets.remove(i);
+                crate::game::record_departure!(
+                    self.common.dim,
+                    id,
+                    "minecraft:firework_rocket",
+                    Some("changed_dimension")
+                );
                 self.forget_entity(id);
             }
             List::Orb => {
                 self.common.orbs.remove(i);
+                crate::game::record_departure!(
+                    self.common.dim,
+                    id,
+                    "minecraft:experience_orb",
+                    Some("changed_dimension")
+                );
                 self.forget_entity(id);
             }
             List::Projectile => {
-                self.common.creatures.projectiles.remove(i);
+                let _p = self.common.creatures.projectiles.remove(i);
+                crate::game::record_departure!(
+                    self.common.dim,
+                    id,
+                    _p.entity_type(),
+                    Some("changed_dimension")
+                );
                 self.forget_entity(id);
             }
         }

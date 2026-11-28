@@ -748,6 +748,14 @@ impl crate::game::ServerGame<'_> {
                             as sunrise_sim::mobs::living::section_writes::Observer
                     });
                     w.controlling_player_movement = controlling_player_movement;
+                    if !resuming {
+                        crate::game::record_turn!(
+                            self.common.dim,
+                            m.id,
+                            crate::game::native_hooks::mob_kind(m),
+                            m.extra.mount
+                        );
+                    }
                     ticked.insert(m.id);
                     // `sunrise-report`'s cost by mob type (tick_profile.rs).
                     let sampled = if resuming {
@@ -1147,16 +1155,27 @@ impl crate::game::ServerGame<'_> {
             }
             let same_rows = !settle && !gone_rows && pending_effects.is_empty();
             if !same_rows {
+                #[cfg(feature = "state-digest")]
+                let dim = self.common.dim;
                 retain_mob_rows(&mut mobs, &mut player_credit, |m| {
                     // Give the departing vehicle back for its pre-removal effects
                     // and for marking it removed before the dismount hooks.
-                    removing_vehicle == Some(m.id)
+                    let kept = removing_vehicle == Some(m.id)
                         || removal.is_some_and(|(join, _)| join == m.join)
                         || index
                             .get(&m.id)
                             .and_then(|&slot| keep.get(slot as usize))
                             .copied()
-                            .unwrap_or(true)
+                            .unwrap_or(true);
+                    if !kept {
+                        crate::game::record_departure!(
+                            dim,
+                            m.id,
+                            crate::game::native_hooks::mob_kind(m),
+                            if !m.alive() { Some("killed") } else { None }
+                        );
+                    }
+                    kept
                 });
                 gone_rows = false;
             }
@@ -1340,7 +1359,13 @@ impl crate::game::ServerGame<'_> {
                         self.remove_mob_after(id, killed_effects, animate);
                     }
                     if let Some(index) = self.common.mobs.iter().position(|mob| mob.id == id) {
-                        self.common.mobs.remove(index);
+                        let _gone = self.common.mobs.remove(index);
+                        crate::game::record_departure!(
+                            self.common.dim,
+                            _gone.id,
+                            crate::game::native_hooks::mob_kind(&_gone),
+                            if !_gone.alive() { Some("killed") } else { None }
+                        );
                     }
                 }
                 if let Some((shulker, area, delta)) = lid_push {
@@ -1460,18 +1485,38 @@ impl crate::game::ServerGame<'_> {
         }
         laps.lap("creature_loop");
         if dispatch_panic.is_none() && state.stand_result.is_ok() {
+            #[cfg(feature = "state-digest")]
+            let dim = self.common.dim;
             if positions.is_empty() {
                 let mut flags = keep.into_iter();
-                retain_mob_rows(&mut mobs, &mut player_credit, |_| {
-                    flags.next().unwrap_or(true)
+                retain_mob_rows(&mut mobs, &mut player_credit, |_m| {
+                    let kept = flags.next().unwrap_or(true);
+                    if !kept {
+                        crate::game::record_departure!(
+                            dim,
+                            _m.id,
+                            crate::game::native_hooks::mob_kind(_m),
+                            if !_m.alive() { Some("killed") } else { None }
+                        );
+                    }
+                    kept
                 });
             } else {
                 retain_mob_rows(&mut mobs, &mut player_credit, |m| {
-                    index
+                    let kept = index
                         .get(&m.id)
                         .and_then(|&slot| keep.get(slot as usize))
                         .copied()
-                        .unwrap_or(true)
+                        .unwrap_or(true);
+                    if !kept {
+                        crate::game::record_departure!(
+                            dim,
+                            m.id,
+                            crate::game::native_hooks::mob_kind(m),
+                            if !m.alive() { Some("killed") } else { None }
+                        );
+                    }
+                    kept
                 });
             }
             for m in &mut mobs {

@@ -50,19 +50,42 @@ impl crate::game::ServerGame<'_> {
                     .map(|r| r.id),
             )
             .collect();
+        #[cfg(feature = "state-digest")]
+        let dim = self.common.dim;
         self.common.boats.retain(|b| {
             let keep = !gone(b.position) || ridden_roots.contains(&b.id);
             if !keep {
+                crate::game::record_departure!(
+                    dim,
+                    b.id,
+                    sunrise_gameplay_common::game::entity::Entity::native_type(b).as_ref(),
+                    Some("unloaded_to_chunk")
+                );
                 removed.push(b.id);
             }
             keep
         });
-        self.common
-            .crystals
-            .retain(|c| keep_row(c.id, c.position, &mut self.common.persist.transient));
+        self.common.crystals.retain(|c| {
+            let keep = keep_row(c.id, c.position, &mut self.common.persist.transient);
+            if !keep {
+                crate::game::record_departure!(
+                    dim,
+                    c.id,
+                    "minecraft:end_crystal",
+                    Some("unloaded_to_chunk")
+                );
+            }
+            keep
+        });
         self.common.ominous_spawners.retain(|s| {
             let keep = !gone(Vec3::new(s.position[0], s.position[1], s.position[2]));
             if !keep {
+                crate::game::record_departure!(
+                    dim,
+                    s.id,
+                    "minecraft:ominous_item_spawner",
+                    Some("unloaded_to_chunk")
+                );
                 removed.push(s.id);
             }
             keep
@@ -73,11 +96,21 @@ impl crate::game::ServerGame<'_> {
             .as_ref()
             .is_some_and(|d| gone(d.position))
         {
+            #[cfg(feature = "state-digest")]
+            if let Some(d) = self.common.dragon.as_ref() {
+                crate::game::record_departure!(
+                    dim,
+                    d.id,
+                    "minecraft:ender_dragon",
+                    Some("unloaded_to_chunk")
+                );
+            }
             self.discard_resident_dragon();
         }
         self.common.carts.retain(|c| {
             let keep = !gone(c.position) || ridden_roots.contains(&c.id);
             if !keep {
+                crate::game::record_departure!(dim, c.id, c.kind.id(), Some("unloaded_to_chunk"));
                 removed.push(c.id);
             }
             keep
@@ -85,6 +118,12 @@ impl crate::game::ServerGame<'_> {
         self.common.fangs.list.retain(|f| {
             let keep = !gone(Vec3::new(f.pos[0], f.pos[1], f.pos[2]));
             if !keep {
+                crate::game::record_departure!(
+                    dim,
+                    f.id,
+                    "minecraft:evoker_fangs",
+                    Some("unloaded_to_chunk")
+                );
                 removed.push(f.id);
             }
             keep
@@ -92,6 +131,12 @@ impl crate::game::ServerGame<'_> {
         self.server.others.0.retain(|o| {
             let keep = !gone(o.position) || ridden_roots.contains(&o.id);
             if !keep {
+                crate::game::record_departure!(
+                    dim,
+                    o.id,
+                    o.kind.as_str(),
+                    Some("unloaded_to_chunk")
+                );
                 removed.push(o.id);
             }
             keep
@@ -99,6 +144,12 @@ impl crate::game::ServerGame<'_> {
         self.common.armor_stands.retain(|a| {
             let keep = !gone(a.position) || ridden_roots.contains(&a.id);
             if !keep {
+                crate::game::record_departure!(
+                    dim,
+                    a.id,
+                    "minecraft:armor_stand",
+                    Some("unloaded_to_chunk")
+                );
                 removed.push(a.id);
             }
             keep
@@ -111,6 +162,16 @@ impl crate::game::ServerGame<'_> {
                 (lo[2] + hi[2]) / 2.0,
             ));
             if !keep {
+                crate::game::record_departure!(
+                    dim,
+                    f.id,
+                    if f.glow {
+                        "minecraft:glow_item_frame"
+                    } else {
+                        "minecraft:item_frame"
+                    },
+                    Some("unloaded_to_chunk")
+                );
                 removed.push(f.id);
             }
             keep
@@ -118,6 +179,12 @@ impl crate::game::ServerGame<'_> {
         self.common.paintings.retain(|p| {
             let keep = !gone(painting_center(p));
             if !keep {
+                crate::game::record_departure!(
+                    dim,
+                    p.id,
+                    "minecraft:painting",
+                    Some("unloaded_to_chunk")
+                );
                 removed.push(p.id);
             }
             keep
@@ -125,6 +192,12 @@ impl crate::game::ServerGame<'_> {
         self.common.cushions.retain(|c| {
             let keep = !gone(c.position);
             if !keep {
+                crate::game::record_departure!(
+                    dim,
+                    c.id,
+                    "minecraft:cushion",
+                    Some("unloaded_to_chunk")
+                );
                 removed.push(c.id);
             }
             keep
@@ -134,6 +207,12 @@ impl crate::game::ServerGame<'_> {
         self.common.breath_clouds.retain(|c| {
             let keep = c.potion.is_none() || !gone(Vec3::new(c.at[0], c.at[1], c.at[2]));
             if !keep {
+                crate::game::record_departure!(
+                    dim,
+                    c.id,
+                    "minecraft:area_effect_cloud",
+                    Some("unloaded_to_chunk")
+                );
                 removed.push(c.id);
             }
             keep
@@ -142,6 +221,12 @@ impl crate::game::ServerGame<'_> {
         self.common.bolts.retain(|b| {
             let keep = !gone(Vec3::new(b.at[0], b.at[1], b.at[2]));
             if !keep {
+                crate::game::record_departure!(
+                    dim,
+                    b.id,
+                    "minecraft:lightning_bolt",
+                    Some("unloaded_to_chunk")
+                );
                 removed.push(b.id);
             }
             keep
@@ -149,6 +234,12 @@ impl crate::game::ServerGame<'_> {
         self.common.mobs.retain(|m| {
             let keep = !leaving.contains(&m.id);
             if !keep {
+                crate::game::record_departure!(
+                    dim,
+                    m.id,
+                    crate::game::native_hooks::mob_kind(m),
+                    Some("unloaded_to_chunk")
+                );
                 removed.push(m.id);
             }
             keep
@@ -188,13 +279,28 @@ impl crate::game::ServerGame<'_> {
         self.common.dropped.retain(|e| {
             let keep = !gone(e.position);
             if !keep {
+                crate::game::record_departure!(
+                    dim,
+                    e.id,
+                    "minecraft:item",
+                    Some("unloaded_to_chunk")
+                );
                 removed.push(e.id);
             }
             keep
         });
-        self.common
-            .orbs
-            .retain(|o| keep_row(o.id, o.position, &mut self.common.persist.transient));
+        self.common.orbs.retain(|o| {
+            let keep = keep_row(o.id, o.position, &mut self.common.persist.transient);
+            if !keep {
+                crate::game::record_departure!(
+                    dim,
+                    o.id,
+                    "minecraft:experience_orb",
+                    Some("unloaded_to_chunk")
+                );
+            }
+            keep
+        });
         // Unloaded with their chunk: PersistentEntitySectionManager.stopTracking.
         self.native_leaves_flush();
         // the ones saved with the chunk go with it (a trident too, unsaved).
@@ -202,25 +308,73 @@ impl crate::game::ServerGame<'_> {
             let leaves = entity_nbt::saved_with_chunk(p) || p.arrow.is_some();
             let keep = !leaves || !gone(p.position);
             if !keep {
+                crate::game::record_departure!(
+                    dim,
+                    p.id,
+                    p.entity_type(),
+                    Some("unloaded_to_chunk")
+                );
                 removed.push(p.id);
             }
             keep
         });
-        self.common
-            .falling
-            .retain(|f| keep_row(f.id, f.position, &mut self.common.persist.transient));
-        self.common
-            .rockets
-            .retain(|r| keep_row(r.id, r.position, &mut self.common.persist.transient));
-        self.common
-            .tridents
-            .retain(|t| keep_row(t.id, t.position, &mut self.common.persist.transient));
-        self.common
-            .tnts
-            .retain(|t| keep_row(t.id, t.position, &mut self.common.persist.transient));
+        self.common.falling.retain(|f| {
+            let keep = keep_row(f.id, f.position, &mut self.common.persist.transient);
+            if !keep {
+                crate::game::record_departure!(
+                    dim,
+                    f.id,
+                    "minecraft:falling_block",
+                    Some("unloaded_to_chunk")
+                );
+            }
+            keep
+        });
+        self.common.rockets.retain(|r| {
+            let keep = keep_row(r.id, r.position, &mut self.common.persist.transient);
+            if !keep {
+                crate::game::record_departure!(
+                    dim,
+                    r.id,
+                    "minecraft:firework_rocket",
+                    Some("unloaded_to_chunk")
+                );
+            }
+            keep
+        });
+        self.common.tridents.retain(|t| {
+            let keep = keep_row(t.id, t.position, &mut self.common.persist.transient);
+            if !keep {
+                crate::game::record_departure!(
+                    dim,
+                    t.id,
+                    "minecraft:trident",
+                    Some("unloaded_to_chunk")
+                );
+            }
+            keep
+        });
+        self.common.tnts.retain(|t| {
+            let keep = keep_row(t.id, t.position, &mut self.common.persist.transient);
+            if !keep {
+                crate::game::record_departure!(
+                    dim,
+                    t.id,
+                    "minecraft:tnt",
+                    Some("unloaded_to_chunk")
+                );
+            }
+            keep
+        });
         self.common.resident_entities.general.rows.retain(|row| {
             let keep = !leaving.contains(&row.id);
             if !keep {
+                crate::game::record_departure!(
+                    dim,
+                    row.id,
+                    sunrise_gameplay_common::game::entity::Entity::native_type(row).as_ref(),
+                    Some("unloaded_to_chunk")
+                );
                 removed.push(row.id);
             }
             keep

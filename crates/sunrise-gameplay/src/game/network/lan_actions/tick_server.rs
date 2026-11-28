@@ -626,6 +626,16 @@ impl crate::game::ServerGame<'_> {
             {
                 continue;
             }
+            crate::game::record_turn!(
+                self.common.dim,
+                entity_id,
+                sunrise_gameplay_common::game::native_ticks::PLAYER,
+                self.server
+                    .lan
+                    .as_ref()
+                    .and_then(|host| host.hub.guest(conn))
+                    .and_then(|g| g.vehicle)
+            );
             if !passenger && !self.on_server_trip(conn) {
                 self.advance_guest_entity_clock(conn);
             }

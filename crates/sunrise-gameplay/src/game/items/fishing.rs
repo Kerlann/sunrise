@@ -964,13 +964,22 @@ impl crate::game::ServerGame<'_> {
         };
         let (id, join) = (hook.id, hook.join);
         let from = hook.position;
+        crate::game::record_turn!(self.common.dim, id, "minecraft:fishing_bobber", None);
         match self.tick_fishing_extracted(hook) {
             Some(hook) => {
                 let to = hook.position;
                 self.common.hook.put_back(hook);
                 self.entity_section_step(id, [from.x, from.y, from.z], [to.x, to.y, to.z]);
             }
-            None => self.common.hook.retire_extracted(id, join),
+            None => {
+                self.common.hook.retire_extracted(id, join);
+                crate::game::record_departure!(
+                    self.common.dim,
+                    id,
+                    "minecraft:fishing_bobber",
+                    Some("discarded")
+                );
+            }
         }
     }
     pub(in crate::game::server_side) fn tick_fishing_extracted(

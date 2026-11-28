@@ -670,6 +670,7 @@ impl crate::game::ServerGame<'_> {
                 i = now;
             }
             told = Some((id, kind));
+            crate::game::record_turn!(self.common.dim, id, kind, None);
             // `Entity.tickCount` is raised before the rest of the tick, and is not saved.
             self.common.item_frames[i].ticks = self.common.item_frames[i].ticks.saturating_add(1);
             self.common.item_frames[i].check_interval += 1;
@@ -690,6 +691,12 @@ impl crate::game::ServerGame<'_> {
                     }
                     i = now;
                     let mut f = self.common.item_frames.remove(i);
+                    crate::game::record_departure!(
+                        self.common.dim,
+                        f.id,
+                        f.kind(),
+                        Some("discarded")
+                    );
                     // BlockAttachedEntity.tick discards without a death event.
                     self.server_play_sound(&sound(&f, "break"), center(&f), 1.0, 1.0);
                     if f.item.is_some() {

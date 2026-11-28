@@ -1499,10 +1499,22 @@ impl crate::game::ServerGame<'_> {
                 if destroyed {
                     match self.refresh_entity_handle(entity, handle) {
                         Some(EntityHandle::Item(i)) => {
-                            self.common.dropped.remove(i);
+                            let _removed = self.common.dropped.remove(i);
+                            crate::game::record_departure!(
+                                self.common.dim,
+                                _removed.id,
+                                "minecraft:item",
+                                Some("killed")
+                            );
                         }
                         Some(EntityHandle::Orb(i)) => {
-                            self.common.orbs.remove(i);
+                            let _removed = self.common.orbs.remove(i);
+                            crate::game::record_departure!(
+                                self.common.dim,
+                                _removed.id,
+                                "minecraft:experience_orb",
+                                Some("killed")
+                            );
                         }
                         _ => {}
                     }

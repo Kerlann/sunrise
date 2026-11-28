@@ -512,18 +512,16 @@ impl crate::game::ServerGame<'_> {
     ) {
         use sunrise_gameplay_common::game::entity_memory::RemovedVehicle;
         let vehicle = match target {
-            Target::Boat(_) => self
-                .common
-                .boats
-                .iter()
-                .position(|b| b.id == id)
-                .map(|i| RemovedVehicle::Boat(self.common.boats.remove(i))),
-            Target::Cart(_) => self
-                .common
-                .carts
-                .iter()
-                .position(|c| c.id == id)
-                .map(|i| RemovedVehicle::Cart(self.common.carts.remove(i))),
+            Target::Boat(_) => self.common.boats.iter().position(|b| b.id == id).map(|i| {
+                let b = self.common.boats.remove(i);
+                crate::game::record_departure!(self.common.dim, b.id, b.entity_type_name(), None);
+                RemovedVehicle::Boat(b)
+            }),
+            Target::Cart(_) => self.common.carts.iter().position(|c| c.id == id).map(|i| {
+                let c = self.common.carts.remove(i);
+                crate::game::record_departure!(self.common.dim, c.id, c.kind.id(), None);
+                RemovedVehicle::Cart(c)
+            }),
             _ => unreachable!(),
         };
         if let Some(vehicle) = vehicle {

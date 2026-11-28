@@ -619,6 +619,9 @@ pub(in crate::game) mod splash_water;
 #[cfg(feature = "state-digest")]
 #[path = "world/state_digest.rs"]
 pub(in crate::game) mod state_digest;
+#[cfg(feature = "state-digest")]
+#[path = "world/state_transcript.rs"]
+pub(in crate::game) mod state_transcript;
 #[path = "interface/stats.rs"]
 pub mod stats;
 #[path = "administration/structure_blocks.rs"]

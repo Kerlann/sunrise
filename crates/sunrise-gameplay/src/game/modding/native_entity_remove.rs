@@ -262,13 +262,22 @@ impl crate::game::ServerGame<'_> {
         &mut self,
         mut retired: impl FnMut(&ItemEntity),
     ) {
+        #[cfg(feature = "state-digest")]
+        let dim = self.common.dim;
         let dropped = &mut self.common.dropped;
         self.common.persist.removals.retain(|target| {
             let Target::Item(id) = *target else {
                 return true;
             };
             if let Some(i) = dropped.iter().position(|item| item.id == id) {
-                retired(&dropped.remove(i));
+                let removed = dropped.remove(i);
+                crate::game::record_departure!(
+                    dim,
+                    removed.id,
+                    "minecraft:item",
+                    Some("discarded")
+                );
+                retired(&removed);
             }
             false
         });
@@ -289,7 +298,20 @@ impl crate::game::ServerGame<'_> {
                 // before any callback in the sweep can resolve them again.
                 Target::Projectile(id) => self.remove_projectile(id),
                 Target::Trident(id) => {
-                    self.common.tridents.retain(|t| t.id != id);
+                    #[cfg(feature = "state-digest")]
+                    let dim = self.common.dim;
+                    self.common.tridents.retain(|t| {
+                        let keep = t.id != id;
+                        if !keep {
+                            crate::game::record_departure!(
+                                dim,
+                                t.id,
+                                "minecraft:trident",
+                                Some("discarded")
+                            );
+                        }
+                        keep
+                    });
                     self.forget_entity(id);
                 }
                 Target::Boat(_) | Target::Cart(_)
@@ -303,7 +325,22 @@ impl crate::game::ServerGame<'_> {
         for t in pending {
             match t {
                 Target::Projectile(_) | Target::Trident(_) => {}
-                Target::Crystal(id) => self.common.crystals.retain(|c| c.id != id),
+                Target::Crystal(id) => {
+                    #[cfg(feature = "state-digest")]
+                    let dim = self.common.dim;
+                    self.common.crystals.retain(|c| {
+                        let keep = c.id != id;
+                        if !keep {
+                            crate::game::record_departure!(
+                                dim,
+                                c.id,
+                                "minecraft:end_crystal",
+                                Some("discarded")
+                            );
+                        }
+                        keep
+                    });
+                }
                 Target::Dragon(id) => {
                     if self.common.dragon.as_ref().is_some_and(|d| d.id == id) {
                         self.discard_resident_dragon();
@@ -328,9 +365,18 @@ impl crate::game::ServerGame<'_> {
                 // Both command kill and handle removal already notified this row's
                 // leave. Retire its owning slot so tracking drops the row too.
                 Target::General(id) => {
+                    #[cfg(feature = "state-digest")]
+                    let dim = self.common.dim;
                     let rows = &mut self.common.resident_entities.general.rows;
                     if let Some(index) = rows.iter().position(|row| row.id == id) {
-                        rows.remove(index);
+                        let _removed = rows.remove(index);
+                        crate::game::record_departure!(
+                            dim,
+                            _removed.id,
+                            sunrise_gameplay_common::game::entity::Entity::native_type(&_removed)
+                                .as_ref(),
+                            Some("discarded")
+                        );
                         self.forget_entity(id);
                     }
                 }

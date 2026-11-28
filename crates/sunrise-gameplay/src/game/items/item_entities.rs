@@ -165,6 +165,7 @@ impl crate::game::ServerGame<'_> {
                 if round.halted(items[i].id) {
                     break 'tick;
                 }
+                crate::game::record_turn!(self.common.dim, items[i].id, "minecraft:item", None);
                 // `ItemEntity.tick`: after `onEntityItemUpdate`, an empty stack discards itself.
                 if items[i].stack.count == 0 || &*items[i].stack.item == "minecraft:air" {
                     let (id, at) = (items[i].id, items[i].position);
@@ -461,10 +462,15 @@ impl crate::game::ServerGame<'_> {
             self.bubble_column_particles(pos);
         }
         if pass.any_removed {
+            #[cfg(feature = "state-digest")]
+            let dim = self.common.dim;
             let mut k = 0;
-            items.retain(|_| {
+            items.retain(|_item| {
                 let keep = !pass.removed[k];
                 k += 1;
+                if !keep {
+                    crate::game::record_departure!(dim, _item.id, "minecraft:item", None);
+                }
                 keep
             });
         }
@@ -524,10 +530,15 @@ impl crate::game::ServerGame<'_> {
         let same_rows = self.common.dropped.is_empty();
         let compacted = pass.any_removed;
         if compacted {
+            #[cfg(feature = "state-digest")]
+            let dim = self.common.dim;
             let mut k = 0;
-            items.retain(|_| {
+            items.retain(|_item| {
                 let keep = !pass.removed[k];
                 k += 1;
+                if !keep {
+                    crate::game::record_departure!(dim, _item.id, "minecraft:item", None);
+                }
                 keep
             });
             pass.any_removed = false;
@@ -761,7 +772,13 @@ impl crate::game::ServerGame<'_> {
             let age = self.common.orbs[j].age;
             self.common.orbs[i].count = count;
             self.common.orbs[i].age = self.common.orbs[i].age.min(age);
-            self.common.orbs.remove(j);
+            let _removed = self.common.orbs.remove(j);
+            crate::game::record_departure!(
+                self.common.dim,
+                _removed.id,
+                "minecraft:experience_orb",
+                Some("discarded")
+            );
         }
     }
     /// `Entity.unstuckIfPossible`, which `ExperienceOrb`'s constructor runs on an
@@ -885,6 +902,8 @@ impl crate::game::ServerGame<'_> {
         let mut gained = 0i32;
         let mut taken = Vec::new();
         if let Some((min, max)) = bounds {
+            #[cfg(feature = "state-digest")]
+            let dim = self.common.dim;
             orbs.retain_mut(|o| {
                 let touching = o.position.x + 0.25 > min[0]
                     && o.position.x - 0.25 < max[0]
@@ -899,7 +918,16 @@ impl crate::game::ServerGame<'_> {
                     gained = gained.saturating_add(o.value);
                     taken.push(o.clone());
                     o.count -= 1;
-                    return o.count > 0;
+                    let keep = o.count > 0;
+                    if !keep {
+                        crate::game::record_departure!(
+                            dim,
+                            o.id,
+                            "minecraft:experience_orb",
+                            Some("discarded")
+                        );
+                    }
+                    return keep;
                 }
                 true
             });
@@ -1007,6 +1035,7 @@ impl crate::game::ServerGame<'_> {
     /// Item entity `i` leaves the level (`Entity.discard`); mods hear it.
     pub fn remove_dropped(&mut self, i: usize) -> ItemEntity {
         let e = self.common.dropped.remove(i);
+        crate::game::record_departure!(self.common.dim, e.id, "minecraft:item", None);
         self.native_entity_left(e.id);
         e
     }
@@ -1014,6 +1043,7 @@ impl crate::game::ServerGame<'_> {
     /// Experience orb `i` leaves the level (`Entity.discard`); mods hear it.
     pub(in crate::game) fn remove_orb(&mut self, i: usize) -> ExperienceOrb {
         let o = self.common.orbs.remove(i);
+        crate::game::record_departure!(self.common.dim, o.id, "minecraft:experience_orb", None);
         self.native_entity_left(o.id);
         o
     }

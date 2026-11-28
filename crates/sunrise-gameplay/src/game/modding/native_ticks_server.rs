@@ -31,6 +31,7 @@ impl ServerGame<'_> {
         if self.native_tick_pre_one(&mut round, id, &buffers.name)
             && self.server.others.0.locate(join).is_some()
         {
+            crate::game::record_turn!(self.common.dim, id, &buffers.name, None);
             self.native_tick_post_one(&round, id, &buffers.name);
         }
         buffers.name.clear();

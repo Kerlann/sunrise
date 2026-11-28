@@ -1464,7 +1464,22 @@ impl crate::game::ServerGame<'_> {
                 }
             }
             // Entity.kill removes the orb.
-            Target::Orb(id) => self.common.orbs.retain(|o| o.id != id),
+            Target::Orb(id) => {
+                #[cfg(feature = "state-digest")]
+                let dim = self.common.dim;
+                self.common.orbs.retain(|o| {
+                    let keep = o.id != id;
+                    if !keep {
+                        crate::game::record_departure!(
+                            dim,
+                            o.id,
+                            "minecraft:experience_orb",
+                            Some("killed")
+                        );
+                    }
+                    keep
+                });
+            }
             Target::Projectile(id) => self.remove_projectile(id),
             Target::Stand(id) => {
                 if !self.remove_armor_stand_after(id, |_| {}) {
@@ -1476,9 +1491,32 @@ impl crate::game::ServerGame<'_> {
                 if let Some(frame) = self.common.item_frames.iter().find(|f| f.id == id).cloned() {
                     self.remove_framed_map(&frame);
                 }
-                self.common.item_frames.retain(|f| f.id != id);
+                #[cfg(feature = "state-digest")]
+                let dim = self.common.dim;
+                self.common.item_frames.retain(|f| {
+                    let keep = f.id != id;
+                    if !keep {
+                        crate::game::record_departure!(dim, f.id, f.kind(), Some("killed"));
+                    }
+                    keep
+                });
             }
-            Target::Painting(id) => self.common.paintings.retain(|p| p.id != id),
+            Target::Painting(id) => {
+                #[cfg(feature = "state-digest")]
+                let dim = self.common.dim;
+                self.common.paintings.retain(|p| {
+                    let keep = p.id != id;
+                    if !keep {
+                        crate::game::record_departure!(
+                            dim,
+                            p.id,
+                            "minecraft:painting",
+                            Some("killed")
+                        );
+                    }
+                    keep
+                });
+            }
             Target::Boat(_) | Target::Cart(_) => {
                 if !self.kill_vehicle_object(t) {
                     return false;
@@ -1487,7 +1525,15 @@ impl crate::game::ServerGame<'_> {
             Target::Other(id) => {
                 if self
                     .with_destroying_vehicle(t, |game| {
-                        game.server.others.0.retain(|o| o.id != id);
+                        #[cfg(feature = "state-digest")]
+                        let dim = game.common.dim;
+                        game.server.others.0.retain(|o| {
+                            let keep = o.id != id;
+                            if !keep {
+                                crate::game::record_departure!(dim, o.id, &o.kind, Some("killed"));
+                            }
+                            keep
+                        });
                         game.forget_entity(id);
                     })
                     .is_none()
@@ -1495,7 +1541,22 @@ impl crate::game::ServerGame<'_> {
                     return false;
                 }
             }
-            Target::Fangs(id) => self.common.fangs.list.retain(|f| f.id != id),
+            Target::Fangs(id) => {
+                #[cfg(feature = "state-digest")]
+                let dim = self.common.dim;
+                self.common.fangs.list.retain(|f| {
+                    let keep = f.id != id;
+                    if !keep {
+                        crate::game::record_departure!(
+                            dim,
+                            f.id,
+                            "minecraft:evoker_fangs",
+                            Some("killed")
+                        );
+                    }
+                    keep
+                });
+            }
             Target::Crystal(id) => self.kill_crystal(id),
             Target::Dragon(id) => self.kill_dragon(id),
             Target::Tnt(id) => {
@@ -1508,9 +1569,54 @@ impl crate::game::ServerGame<'_> {
                     return false;
                 }
             }
-            Target::Falling(id) => self.common.falling.retain(|f| f.id != id),
-            Target::Rocket(id) => self.common.rockets.retain(|r| r.id != id),
-            Target::Trident(id) => self.common.tridents.retain(|t| t.id != id),
+            Target::Falling(id) => {
+                #[cfg(feature = "state-digest")]
+                let dim = self.common.dim;
+                self.common.falling.retain(|f| {
+                    let keep = f.id != id;
+                    if !keep {
+                        crate::game::record_departure!(
+                            dim,
+                            f.id,
+                            "minecraft:falling_block",
+                            Some("killed")
+                        );
+                    }
+                    keep
+                });
+            }
+            Target::Rocket(id) => {
+                #[cfg(feature = "state-digest")]
+                let dim = self.common.dim;
+                self.common.rockets.retain(|r| {
+                    let keep = r.id != id;
+                    if !keep {
+                        crate::game::record_departure!(
+                            dim,
+                            r.id,
+                            "minecraft:firework_rocket",
+                            Some("killed")
+                        );
+                    }
+                    keep
+                });
+            }
+            Target::Trident(id) => {
+                #[cfg(feature = "state-digest")]
+                let dim = self.common.dim;
+                self.common.tridents.retain(|t| {
+                    let keep = t.id != id;
+                    if !keep {
+                        crate::game::record_departure!(
+                            dim,
+                            t.id,
+                            "minecraft:trident",
+                            Some("killed")
+                        );
+                    }
+                    keep
+                });
+            }
             Target::Spawner(id) => self.remove_ominous_spawner(id),
             Target::Cloud(id) => self.remove_breath_cloud(id),
             Target::Bolt(id) => self.remove_bolt(id),

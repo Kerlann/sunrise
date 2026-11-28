@@ -44,7 +44,13 @@ impl crate::game::ServerGame<'_> {
                         Vec::new()
                     };
                 if let Some(k) = self.common.dropped.iter().position(|item| item.id == id) {
-                    self.common.dropped.remove(k);
+                    let _gone = self.common.dropped.remove(k);
+                    crate::game::record_departure!(
+                        self.common.dim,
+                        _gone.id,
+                        "minecraft:item",
+                        Some("killed")
+                    );
                 }
                 self.spawn_destroyed_contents(
                     contents.into_iter().map(|stack| (stack, at)).collect(),

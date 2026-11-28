@@ -102,6 +102,12 @@ impl crate::game::ServerGame<'_> {
                 return Ok(());
             }
             game.falling.retire_extracted(id, join);
+            crate::game::record_departure!(
+                game.common.dim,
+                id,
+                "minecraft:falling_block",
+                Some("discarded")
+            );
             Ok(())
         })
     }
