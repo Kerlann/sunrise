@@ -1,0 +1,23 @@
+ids = [
+    "type:Form",
+    "type:Form.Ingot",
+    "type:Form.Nugget",
+    "type:Form.Dust",
+    "type:Form.Gem",
+    "type:Form.Rod",
+    "type:Form.RawMaterial",
+    "type:Form.Ore",
+    "type:Form.StorageBlock",
+    "handle:Form::ALL",
+    "handle:Form::is_block",
+    "handle:Form::tag_folder",
+    "handle:Form::convention_tag",
+    "handle:Form::id",
+    "handle:Form::tag",
+    "type:MaterialError",
+    "type:MaterialError.Empty",
+    "type:MaterialError.NotResourcePath",
+    "fn:is_snake_case",
+]
+why = "A GregTech-era material declares one shape per variant; Form names the eight shapes that match a shipped `c:` parent tag (ingot, nugget, dust, gem, rod, raw material, ore, storage block), says whether the id registers an item or a block and which tag folder it belongs to, and suggests a registry id plus the child convention tag (`c:ingots/steel`) for a material. The id is a suggestion for new content: the caller registers an explicit id when a suggestion collides (an ingot of `raw_steel` and a raw form of `steel_ingot` both read `raw_steel_ingot`) or when vanilla names the shape differently (`amethyst_shard`, not `amethyst`), and still keeps the independent convention tag. Materials are any legal resource path (`1steel`, `steel-ingot`); `is_snake_case` reports the narrower naming convention without enforcing it. It does not parse legacy ore-dictionary names: a prefix outside the eight forms, or a size or state word between the form and the material, is ambiguous (`ingotHotSteel` against a material named `Hotstone`), so the port translates that name itself. It replaces each mod re-implementing the id and tag spelling per material."
+migrate = "New surface: nothing to change. Rebuild against the current SDK to name it."
