@@ -172,7 +172,8 @@ public final class StateTranscript implements AutoCloseable {
         row("P\tstep=" + step + "\tphase=" + (tick ? "after_tick" : "after_op") + "\tord=" + ordinal++
             + "\top=" + op + "\tgame_time=" + level.getGameTime() + "\tdim=" + level.dimension().identifier());
         row("L\tlevel_random=" + random(level.getRandom()) + "\trand_value=" + RAND_VALUE.getInt(level)
-            + "\tlast_entity_id=" + ((AtomicInteger) ENTITY_COUNTER.get(null)).get() + "\tmembers=" + members.size());
+            + "\tlast_entity_id=" + ((AtomicInteger) ENTITY_COUNTER.get(null)).get() + "\tmembers=" + members.size()
+            + "\tday_time=" + level.getDefaultClockTime());
         for (int i = 0; i < members.size(); i++) member(i, members.get(i));
         if (tick) {
             for (int i = 0; i < turns.size(); i++) {
