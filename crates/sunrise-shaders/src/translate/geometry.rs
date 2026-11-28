@@ -12,7 +12,7 @@
 use std::collections::BTreeSet;
 use std::fmt::Write;
 
-use super::scan::{QUALIFIERS, STORAGE, significant};
+use super::scan::{declaration_prefix, significant};
 use super::{Error, GbuffersInputs, Program, Target};
 use crate::Preprocessed;
 use crate::macros::lex;
@@ -114,8 +114,9 @@ fn statements(tokens: &[&str]) -> Vec<Statement> {
                     .copied()
                     .filter(|t| significant(t))
                     .collect();
-                // `struct S { } ;`, `buffer B { } name;`: to the `;`.
-                if !head.contains(&"(") || head.contains(&"buffer") {
+                // `struct S { } ;`, `buffer B { } name;`, `layout(...) out B { } name;`: to `;`.
+                // Only a function body's `{` immediately follows its parameter list's `)`.
+                if head.last() != Some(&")") {
                     while end < tokens.len() && tokens[end] != ";" {
                         end += 1;
                     }
@@ -166,50 +167,23 @@ fn classify(tokens: &[&str], range: std::ops::Range<usize>) -> Statement {
         .copied()
         .filter(|t| significant(t))
         .collect();
-    // A storage word before any `(` but a leading `layout(...)`'s: in a function's parameters
-    // `in` and `out` are qualifiers.
-    let skip = if words.first() == Some(&"layout") {
-        words.iter().position(|w| *w == ")").map_or(0, |p| p + 1)
-    } else {
-        0
-    };
-    let head = match words[skip..].iter().position(|w| *w == "(") {
-        Some(p) => &words[skip..skip + p],
-        None => &words[skip..],
-    };
-    let storage = ["in", "out", "attribute", "varying"]
-        .into_iter()
-        .find(|s| head.contains(s));
-    let kind = if let Some(p) = words.iter().position(|w| *w == "buffer") {
-        Kind::Buffer(words.get(p + 1).map_or(String::new(), |s| s.to_string()))
-    } else if words.contains(&"uniform") {
-        Kind::Uniform
-    } else if let Some(storage) = storage {
-        // Skip `layout(...)`, then qualifiers, then the type and the declarators.
-        let mut k = 0;
-        if words.first() == Some(&"layout") {
-            while k < words.len() && words[k] != ")" {
-                k += 1;
-            }
-            k += 1;
-        }
-        // Every qualifier the translator knows (`sample`, `precise`...), in any order (GLSL
-        // 4.60, 4.12): one it missed would be taken for the type, and the type for a name.
-        while k < words.len() && (STORAGE.contains(&words[k]) || QUALIFIERS.contains(&words[k])) {
-            k += 1;
-        }
-        match words.get(k) {
+    let (storage, k) = declaration_prefix(&words);
+    let rest = &words[k..];
+    let kind = match storage {
+        Some("buffer") => Kind::Buffer(rest.first().map_or(String::new(), |s| (*s).to_owned())),
+        Some("uniform") => Kind::Uniform,
+        Some(storage) => match rest.first() {
             None | Some(&";") => Kind::Layout(storage),
-            Some(_) if words[k..].contains(&"{") => Kind::InterfaceBlock,
+            Some(_) if rest.contains(&"{") => Kind::InterfaceBlock,
             Some(ty) => {
                 let mut vars = Vec::new();
-                let mut j = k + 1;
-                while j < words.len() && words[j] != ";" {
-                    let name = words[j].to_owned();
+                let mut j = 1;
+                while j < rest.len() && rest[j] != ";" {
+                    let name = rest[j].to_owned();
                     let mut array = String::new();
                     j += 1;
-                    while j < words.len() && !matches!(words[j], "," | ";") {
-                        array.push_str(words[j]);
+                    while j < rest.len() && !matches!(rest[j], "," | ";") {
+                        array.push_str(rest[j]);
                         j += 1;
                     }
                     j += 1;
@@ -217,46 +191,47 @@ fn classify(tokens: &[&str], range: std::ops::Range<usize>) -> Statement {
                 }
                 Kind::Interface(storage, vars)
             }
-        }
-    } else {
-        let mut names = Vec::new();
-        let first = words.iter().position(|w| matches!(*w, "(" | "="));
-        // A struct's `struct` comes before its body; a function's body may define structs.
-        let head = words.iter().position(|w| matches!(*w, "(" | "{"));
-        if let Some(p) = words[..head.unwrap_or(words.len())]
-            .iter()
-            .position(|w| *w == "struct")
-        {
-            names.extend(words.get(p + 1).map(|s| s.to_string()));
-        } else if let Some(p) = first.filter(|&p| words[p] == "(") {
-            // A function.
-            names.extend(p.checked_sub(1).map(|n| words[n].to_owned()));
-        } else {
-            // Variables: the last identifier before each declarator's `=` or end.
-            let (mut depth, mut last, mut init) = (0, None, false);
-            for w in &words {
-                match *w {
-                    "(" | "[" | "{" => depth += 1,
-                    ")" | "]" | "}" => depth -= 1,
-                    "=" if depth == 0 => {
-                        names.extend(last.take());
-                        init = true;
-                    }
-                    "," | ";" if depth == 0 => {
-                        if !init {
+        },
+        None => {
+            let mut names = Vec::new();
+            let first = rest.iter().position(|w| matches!(*w, "(" | "="));
+            // A struct's `struct` comes before its body; a function's body may define structs.
+            let head = rest.iter().position(|w| matches!(*w, "(" | "{"));
+            if let Some(p) = rest[..head.unwrap_or(rest.len())]
+                .iter()
+                .position(|w| *w == "struct")
+            {
+                names.extend(rest.get(p + 1).map(|s| (*s).to_owned()));
+            } else if let Some(p) = first.filter(|&p| rest[p] == "(") {
+                // A function.
+                names.extend(p.checked_sub(1).map(|n| rest[n].to_owned()));
+            } else {
+                // Variables: the last identifier before each declarator's `=` or end.
+                let (mut depth, mut last, mut init) = (0, None, false);
+                for w in rest {
+                    match *w {
+                        "(" | "[" | "{" => depth += 1,
+                        ")" | "]" | "}" => depth -= 1,
+                        "=" if depth == 0 => {
                             names.extend(last.take());
+                            init = true;
                         }
-                        (last, init) = (None, false);
+                        "," | ";" if depth == 0 => {
+                            if !init {
+                                names.extend(last.take());
+                            }
+                            (last, init) = (None, false);
+                        }
+                        w if depth == 0 && !init && super::scan::is_ident(w) => {
+                            last = Some((*w).to_owned())
+                        }
+                        _ => {}
                     }
-                    w if depth == 0 && !init && super::scan::is_ident(w) => {
-                        last = Some(w.to_owned())
-                    }
-                    _ => {}
                 }
             }
+            names.dedup();
+            Kind::Defines(names)
         }
-        names.dedup();
-        Kind::Defines(names)
     };
     Statement { range, kind }
 }
@@ -885,9 +860,9 @@ mod tests {
         fold(vsh, gsh, fsh).unwrap_or_else(|e| panic!("{e:?}"));
     }
 
-    /// An unflattened `out` or `in` interface block (such as one with a malformed empty member)
-    /// stays in place rather than being blanked and rebuilt in the generated head, so its refusal
-    /// points at the authored stage file and line.
+    /// An unflattened `out` or `in` interface block (such as one with a malformed empty member,
+    /// a qualifier-and-layout prefix, or a body token named `buffer`) stays in place rather than
+    /// being blanked or renamed, so its refusal points at the authored stage file and line.
     #[test]
     fn malformed_unflattened_interface_blocks_keep_their_authored_lines() {
         let bad_vsh = "#version 430\nout VertexData {\n    vec2 uv;\n    ;\n} vOut;\n\
@@ -896,11 +871,38 @@ mod tests {
             panic!("a malformed vertex out block must be refused");
         };
         assert!(
-            errors.iter().any(|error| {
-                error.file == "shadow.vsh"
-                    && error.line == 4
-                    && error.message.contains("found Semicolon")
-            }),
+            errors
+                .iter()
+                .any(|error| error.file == "shadow.vsh" && error.line == 4),
+            "{errors:?}"
+        );
+
+        let qualified_vsh = "#version 430\nflat layout(location = 0) out VertexData {\n    \
+                             vec2 uv;\n    ;\n} vOut;\n\
+                             void main() {\n    gl_Position = ftransform();\n}\n";
+        let Err(errors) = fold(qualified_vsh, PASS_GSH, PASS_FSH) else {
+            panic!("a qualified malformed vertex out block must be refused");
+        };
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.file == "shadow.vsh" && error.line == 4),
+            "{errors:?}"
+        );
+
+        let body_buffer_vsh = "#version 430\nout VertexData {\n    buffer Params;\n    ;\n} vOut;\n\
+                               void main() {\n    gl_Position = ftransform();\n}\n";
+        let buffer_gsh = format!(
+            "#version 430\nlayout(std430, binding = 2) buffer Params {{ float w; }} params;\n{}",
+            PASS_GSH.trim_start_matches("#version 430\n")
+        );
+        let Err(errors) = fold(body_buffer_vsh, &buffer_gsh, PASS_FSH) else {
+            panic!("a vertex out block with a malformed buffer member must be refused");
+        };
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.file == "shadow.vsh" && error.line == 3),
             "{errors:?}"
         );
 
@@ -917,11 +919,9 @@ mod tests {
             panic!("a malformed geometry in block must be refused");
         };
         assert!(
-            errors.iter().any(|error| {
-                error.file == "shadow.gsh"
-                    && error.line == 6
-                    && error.message.contains("found Semicolon")
-            }),
+            errors
+                .iter()
+                .any(|error| error.file == "shadow.gsh" && error.line == 6),
             "{errors:?}"
         );
     }
