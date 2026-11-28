@@ -3,8 +3,7 @@
 //! (`shader_options_macros`), so its device's `IRIS_FEATURE_PER_BUFFER_BLENDING` answer reaches
 //! the pack's `screen` entries; and once a renderer on another device is installed
 //! (`ClientGame::set_renderer`, `native_shaders::follow_device`), a pack refused before is tried
-//! again and an open Shader Options page is read again with its macros. Original fixtures,
-//! written here.
+//! again. Original fixtures, written here.
 use super::native_entity_refs::tests::{run_fresh_cases, test_window, with_game_role_client};
 use super::native_shaders::{fingerprint, refused, remember};
 use super::shader_packs::{read_shader_options, shader_options_macros};
@@ -48,11 +47,10 @@ fn the_options_page_reads_the_device_answer_it_is_given() {
     assert_eq!(sliders(&pack, &able), ["LEVEL"]);
 }
 
-/// Real renderers: the page's macros show the guarded slider exactly when the device answers
-/// the flag, as the load reads it. A renderer made again on the same device
-/// (`RendererDevice::Reuse`) keeps a refusal and leaves an open page as it was read. One on a
-/// newly opened device, as a device recovery opens it, tries the refusal again although it
-/// answers every pack macro the same, and reads the open page again, keeping its chosen value.
+/// Real renderers: the page opened in game shows the guarded slider exactly when the device
+/// answers the flag, as the load reads it. A renderer made again on the same device
+/// (`RendererDevice::Reuse`) keeps a refusal. One on a newly opened device, as a device recovery
+/// opens it, tries the refusal again although it answers every pack macro the same.
 #[test]
 #[ignore = "daily"]
 fn the_renderers_device_reaches_the_options_page_and_the_refusals() {
@@ -98,21 +96,11 @@ fn the_renderers_device_reaches_the_options_page_and_the_refusals() {
         assert_eq!(sliders(&pack, &macros), shown, "per-buffer blending {able}");
         game.client.settings.sunrise.shader_pack = pack.to_string_lossy().into_owned();
         game.open_shader_options();
-        let page = game.client.settings.shader_options.as_mut().unwrap();
+        let page = game.client.settings.shader_options.as_ref().unwrap();
         assert_eq!(page.screens.sliders.iter().collect::<Vec<_>>(), shown);
-        page.cycle("LEVEL", false);
-        assert_eq!(page.value("LEVEL"), Some("1"));
-        // A refusal on this device, and the pack's screens changed on disk since the page read.
+        // A refusal on this device.
         let stamp = fingerprint(&pack);
         remember(&pack, stamp, IrisCompat::Auto, false);
-        let properties = pack.join("shaders/shaders.properties");
-        let text = std::fs::read_to_string(&properties).unwrap();
-        std::fs::write(&properties, format!("{text}profile.fast = LEVEL=1\n")).unwrap();
-        let profiles = |game: &crate::game::ClientGame<'_>| {
-            let page = game.client.settings.shader_options.as_ref().unwrap();
-            assert_eq!(page.value("LEVEL"), Some("1"), "the chosen value stays");
-            page.screens.profiles.len()
-        };
         // Made again on the same device.
         let again = (game.renderer_for(
             window.clone(),
@@ -125,7 +113,6 @@ fn the_renderers_device_reaches_the_options_page_and_the_refusals() {
         assert_eq!(again.device_id(), first_device);
         game.set_renderer(again);
         assert!(refused(&pack, stamp, IrisCompat::Auto));
-        assert_eq!(profiles(game), 0, "the page is not read again");
         // A newly opened device, as `recover_device` opens it: the old one goes first.
         drop(game.client.renderer.0.take());
         game.client.mod_gpu = None;
@@ -148,9 +135,5 @@ fn the_renderers_device_reaches_the_options_page_and_the_refusals() {
         assert_eq!(pack_macros(&other), first_macros, "the same answers");
         game.set_renderer(other);
         assert!(!refused(&pack, stamp, IrisCompat::Auto));
-        assert_eq!(profiles(game), 1, "the page is read again");
-        let page = game.client.settings.shader_options.as_ref().unwrap();
-        assert_eq!(page.screens.sliders.iter().collect::<Vec<_>>(), shown);
-        assert!(page.changed);
     });
 }

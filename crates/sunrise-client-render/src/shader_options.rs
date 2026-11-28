@@ -56,15 +56,6 @@ impl ShaderOptions {
         out
     }
 
-    /// This is `open`'s pack read again (with another device's macros): the values chosen on
-    /// `open`'s page carry over, and the screens it opened while this read has each of them.
-    pub fn carry_over(&mut self, open: &ShaderOptions) {
-        self.restore(open.chosen.clone());
-        if open.path.iter().all(|s| self.screens.screen(s).is_some()) {
-            self.path.clone_from(&open.path);
-        }
-    }
-
     /// The values back to `chosen` (Undo): changed while they differ from the file's.
     pub fn restore(&mut self, chosen: BTreeMap<String, String>) {
         self.chosen = chosen;
@@ -339,30 +330,6 @@ mod tests {
             Some("How much detail.\nMore costs more.")
         );
         assert!(o.comment("option.AO").is_none());
-    }
-
-    /// A page read again keeps the values chosen on the open one and the screen it shows, while
-    /// the new read still has that screen.
-    #[test]
-    fn a_read_again_carries_the_open_pages_choices() {
-        let mut open = options();
-        open.cycle("LEVEL", false);
-        open.path = vec!["more".into()];
-        let mut read = options();
-        read.carry_over(&open);
-        assert_eq!(
-            read.chosen,
-            BTreeMap::from([("LEVEL".to_owned(), "3".to_owned())])
-        );
-        assert!(read.changed);
-        assert_eq!(read.path, ["more"]);
-        // A read without that screen shows the main one.
-        let mut read = options();
-        let text = "screen = AO LEVEL\n";
-        read.screens = Screens::parse(&Properties::parse(text, &Macros::standard()), &read.options);
-        read.carry_over(&open);
-        assert_eq!(read.value("LEVEL"), Some("3"));
-        assert!(read.path.is_empty());
     }
 
     #[test]

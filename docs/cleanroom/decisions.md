@@ -235,8 +235,7 @@ the full list.
     device lacks it drops the answer at once, and each definition of the answers drops the ones the set held before.
     The Shader Options page, on the title screen as in game, reads with the renderer's macros where a renderer
     exists, and with the standard set alone before one is made. Once a renderer on another device is installed (a
-    device recovery, any newly opened device), a pack refused before is tried again and an open Shader Options page is
-    read again with that renderer's macros, keeping the values chosen on it.
+    device recovery, any newly opened device), a pack refused before is tried again.
   - A supported flag Sunrise can't keep on every draw it may take loads without a note but gets no macro:
     `BLOCK_EMISSION_ATTRIBUTE` (`UNANSWERED` in `macros.rs`). Terrain drawn from its vertex attributes alone (when
     neither the arena's pages nor the normal stream fit the pack's vertex stage) has no source block, so

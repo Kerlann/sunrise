@@ -27,14 +27,11 @@ thread_local! {
 /// any newly opened device) every refusal is forgotten: the same files on another device are
 /// other build inputs (its feature answers, such as `IRIS_FEATURE_PER_BUFFER_BLENDING`, its
 /// extensions and its limits), tried again once. Acceptances are kept, and a renderer made again
-/// on the same device keeps everything, so a refusal never makes a rebuild loop. Whether the
-/// device is another than the last one's.
-pub(in crate::game) fn follow_device(device: u64) -> bool {
-    let changed = DEVICE.replace(Some(device)) != Some(device);
-    if changed {
+/// on the same device keeps everything, so a refusal never makes a rebuild loop.
+pub(in crate::game) fn follow_device(device: u64) {
+    if DEVICE.replace(Some(device)) != Some(device) {
         OUTCOMES.with_borrow_mut(|packs| packs.retain(|_, (_, _, accepted)| *accepted));
     }
-    changed
 }
 
 /// Whether the loader accepted the pack at `path` with the Iris compatibility switch `mode`;
@@ -166,23 +163,23 @@ mod tests {
             std::fs::create_dir_all(pack).unwrap();
             std::fs::write(pack.join("post.fsh"), "files").unwrap();
         }
-        assert!(follow_device(7));
+        follow_device(7);
         remember(&refused_pack, fingerprint(&refused_pack), ON, false);
         remember(&accepted_pack, fingerprint(&accepted_pack), ON, true);
         // A renderer made again on the same device: nothing to try again.
-        assert!(!follow_device(7));
+        follow_device(7);
         assert!(refused(&refused_pack, fingerprint(&refused_pack), ON));
         // Another device: the refusal is tried again, the acceptance stays.
-        assert!(follow_device(8));
+        follow_device(8);
         assert!(!refused(&refused_pack, fingerprint(&refused_pack), ON));
         assert_eq!(outcome(&refused_pack, ON), None);
         assert_eq!(outcome(&accepted_pack, ON), Some(true));
         // Refused on that device too: kept while it stays.
         remember(&refused_pack, fingerprint(&refused_pack), ON, false);
-        assert!(!follow_device(8));
+        follow_device(8);
         assert!(refused(&refused_pack, fingerprint(&refused_pack), ON));
         // Back to the first device's number: still another device than the last.
-        assert!(follow_device(7));
+        follow_device(7);
         assert!(!refused(&refused_pack, fingerprint(&refused_pack), ON));
         std::fs::remove_dir_all(root).unwrap();
     }
