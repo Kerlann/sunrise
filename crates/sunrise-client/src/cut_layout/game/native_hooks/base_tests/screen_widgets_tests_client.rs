@@ -4026,7 +4026,7 @@ fn press_id_and_mutating_widgets_from_screen_input_hooks_and_lazy_discovery() {
                     .unwrap()
                     .set_bounds(dismiss_id, link_rect)
             );
-            let _ = game.hud_layers([640, 480]);
+            let _ = game.hud([640, 480]);
             sunrise_client::widgets::end_frame(52_009);
             move_mouse(
                 game,
