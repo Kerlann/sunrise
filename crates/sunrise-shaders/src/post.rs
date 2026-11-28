@@ -1991,43 +1991,38 @@ impl Loader<'_> {
         if self.post.images.is_empty() || !pp.code().contains("image") {
             return pp;
         }
-        let source: Vec<&str> = pp.code().split('\n').collect();
-        let lines: Vec<String> = source
-            .iter()
-            .enumerate()
-            .map(|(n, &line)| {
-                // A qualifier on the line before (`layout(r32ui)` then `uniform uimage3D v;`).
-                let qualified = line.contains("layout")
-                    || source[..n]
-                        .iter()
-                        .rev()
-                        .find(|l| !l.trim().is_empty())
-                        .is_some_and(|l| l.trim_start().starts_with("layout") && !l.contains(';'));
-                let words: Vec<&str> = line
-                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-                    .collect();
-                let image = self
-                    .post
-                    .images
+        pp.map_lines(|n, source| {
+            let line = source[n];
+            // A qualifier on the line before (`layout(r32ui)` then `uniform uimage3D v;`).
+            let qualified = line.contains("layout")
+                || source[..n]
                     .iter()
-                    .find(|i| words.contains(&i.name.as_str()));
-                match image {
-                    Some(i)
-                        if words.contains(&"uniform")
-                            && !qualified
-                            && words.iter().any(|w| {
-                                ["image1D", "image2D", "image3D"]
-                                    .iter()
-                                    .any(|d| w.ends_with(d))
-                            }) =>
-                    {
-                        format!("layout({}) {line}", i.qualifier)
-                    }
-                    _ => line.to_owned(),
+                    .rev()
+                    .find(|l| !l.trim().is_empty())
+                    .is_some_and(|l| l.trim_start().starts_with("layout") && !l.contains(';'));
+            let words: Vec<&str> = line
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .collect();
+            let image = self
+                .post
+                .images
+                .iter()
+                .find(|i| words.contains(&i.name.as_str()));
+            match image {
+                Some(i)
+                    if words.contains(&"uniform")
+                        && !qualified
+                        && words.iter().any(|w| {
+                            ["image1D", "image2D", "image3D"]
+                                .iter()
+                                .any(|d| w.ends_with(d))
+                        }) =>
+                {
+                    format!("layout({}) {line}", i.qualifier)
                 }
-            })
-            .collect();
-        pp.with_code(lines.join("\n"))
+                _ => line.to_owned(),
+            }
+        })
     }
 
     /// A program with a geometry stage, folded into its vertex stage. A refusal notes the
@@ -2162,13 +2157,14 @@ fn default_draw_buffers(shadow: bool) -> Vec<u32> {
     if shadow { (0..8).collect() } else { vec![0] }
 }
 
+/// `pp`'s refusals, located.
 fn diagnostics(pp: &Preprocessed) -> Vec<String> {
-    located(pp, &pp.diagnostics)
+    located(pp, pp.diagnostics())
 }
 
 /// `pp`'s warnings (conditions read as false, unbalanced conditionals), located.
 fn warnings(pp: &Preprocessed) -> Vec<String> {
-    located(pp, &pp.warnings)
+    located(pp, pp.warnings())
 }
 
 fn located(pp: &Preprocessed, list: &[crate::preprocess::Diagnostic]) -> Vec<String> {
