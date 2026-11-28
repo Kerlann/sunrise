@@ -20,7 +20,7 @@ use sunrise_client::{
         data::SyncData,
         hub::{HostEvent, Hub, HubConfig, TickCtx},
     },
-    net::{Event, Session},
+    net::{Event, LocalInventory, Session},
     world::World,
 };
 use sunrise_protocol::{
@@ -209,7 +209,10 @@ fn connect(
         Arc::new(Default::default()),
         Arc::clone(data),
         Arc::default(),
-        local_registries,
+        LocalInventory {
+            custom_registries: local_registries,
+            ..Default::default()
+        },
     )
 }
 

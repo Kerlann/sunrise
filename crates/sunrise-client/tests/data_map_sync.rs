@@ -9,7 +9,6 @@ use std::{
 };
 use sunrise_client::{
     chunk::MIN_Y,
-    custom_registry_net::LocalRegistries,
     data_map_net::{self, KnownEntry, LocalDataMaps, SyncedDataMapsSnapshot},
     lan::{
         Lan, NetConfig,
@@ -17,7 +16,7 @@ use sunrise_client::{
         data::SyncData,
         hub::{HostEvent, Hub, HubConfig, TickCtx},
     },
-    net::{Event, Session},
+    net::{Event, LocalInventory, Session},
     world::World,
 };
 use sunrise_core::nbt::Tag;
@@ -152,7 +151,7 @@ impl Host {
 }
 
 fn connect(port: u16, name: &str, data: &Arc<ItemData>, local_data_maps: LocalDataMaps) -> Session {
-    Session::connect_with_data_maps(
+    Session::connect(
         &format!("127.0.0.1:{port}"),
         name,
         None,
@@ -160,8 +159,10 @@ fn connect(port: u16, name: &str, data: &Arc<ItemData>, local_data_maps: LocalDa
         Arc::new(Default::default()),
         Arc::clone(data),
         Arc::default(),
-        LocalRegistries::new(vec![]),
-        local_data_maps,
+        LocalInventory {
+            data_maps: local_data_maps,
+            ..Default::default()
+        },
     )
 }
 
