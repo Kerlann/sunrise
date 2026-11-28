@@ -2579,6 +2579,10 @@ impl crate::game::ServerGame<'_> {
                 }
                 let spectator = g.spectator();
                 if let Some(body) = g.motion.as_mut() {
+                    if let Some(prepared) = prepared {
+                        let [x, y, z] = prepared.position;
+                        body.position = sunrise_core::geometry::Vec3::new(x, y, z);
+                    }
                     body.yaw = g.yaw;
                     body.pitch = g.pitch;
                     body.spectator = spectator;

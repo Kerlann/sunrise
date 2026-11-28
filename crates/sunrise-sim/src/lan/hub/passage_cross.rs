@@ -232,6 +232,9 @@ impl Hub {
             // the one its TeleportTransition carries.
             [g.yaw, g.pitch] = rotation.unwrap_or(ctx.spawn_angle);
             g.place(at);
+            if let Some(body) = g.motion.as_mut() {
+                body.position = sunrise_core::geometry::Vec3::new(at[0], at[1], at[2]);
+            }
             g.send(&C::Respawn(play::Respawn {
                 spawn: info,
                 keep: i8::from(keep_attributes),
@@ -428,6 +431,7 @@ impl Hub {
             let velocity = self.guests.update(i, |g| {
                 g.first_good = at;
                 let body = g.motion.as_mut()?;
+                body.position = sunrise_core::geometry::Vec3::new(at[0], at[1], at[2]);
                 if !keep_motion {
                     body.velocity = sunrise_core::geometry::Vec3::ZERO;
                 }
@@ -482,6 +486,7 @@ impl Hub {
             let old_yaw = std::mem::replace(&mut g.yaw, yaw);
             let body = g.motion.as_mut()?;
             body.yaw = yaw;
+            body.position = sunrise_core::geometry::Vec3::new(at[0], at[1], at[2]);
             // Neither transition with Relative.DELTA changes pitch. Apply the
             // same absolute delta to the body and the client's position correction.
             use sunrise_core::geometry::Vec3;

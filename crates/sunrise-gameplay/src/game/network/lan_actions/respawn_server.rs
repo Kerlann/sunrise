@@ -594,8 +594,7 @@ impl crate::game::ServerGame<'_> {
                 (g.yaw, g.pitch) = (0.0, 0.0);
                 let body = g.build_motion(motion, [0.0; 3]);
                 if let Some(previous) = previous {
-                    body.apply_saved_attributes(Some(&previous.carried_attributes(!was_death)))
-                        .expect("attributes packed from the previous validated player body");
+                    body.apply_saved_attributes(Some(&previous.carried_attributes(!was_death)));
                     (body.hurt_log, body.attack_log) = (previous.hurt_log, previous.attack_log);
                 }
                 if was_death {

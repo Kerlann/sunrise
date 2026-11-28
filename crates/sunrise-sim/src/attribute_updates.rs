@@ -51,8 +51,9 @@ impl PlayerMotion {
     }
     /// `Player.internalSetAbsorptionAmount`: the amount as given, unclamped
     /// (the saved `AbsorptionAmount`, or what a client's server sent).
-    pub fn internal_set_absorption(&mut self, value: f32) -> Result<()> {
+    pub fn internal_set_absorption(&mut self, value: f32) {
         self.store_absorption(value)
+            .expect("absorption float bound at resource load");
     }
 }
 impl HealthWorld for PlayerMotion {

@@ -1184,16 +1184,16 @@ impl Guest {
         if let Some(saved) = self.loaded_body.take() {
             saved.apply(body);
             if reload_attributes {
-                let _ = body.set_walking_speed_base(self.abilities.walking_speed);
-                let _ = body.apply_saved_attributes(
+                body.set_walking_speed_base(self.abilities.walking_speed);
+                body.apply_saved_attributes(
                     self.saved.as_ref().and_then(|tag| tag.get("attributes")),
                 );
             }
         }
         if let Some(absorption) = self.saved_absorption.take() {
-            let _ = body.internal_set_absorption(absorption);
+            body.internal_set_absorption(absorption);
         }
-        let _ = body.set_health(self.health, false);
+        body.set_loaded_health(self.health);
         body.health.food.food = self.food;
         body.health.food.saturation = self.saturation;
         let [x, y, z] = self.position;
@@ -1220,10 +1220,6 @@ impl Guest {
             self.previous_position,
             self.held_ticket_chunk,
         ) = (at, at, None);
-        if let Some(body) = self.motion.as_mut() {
-            let [x, y, z] = at;
-            body.position = Vec3::new(x, y, z);
-        }
     }
     /// `ServerChunkCache.move` after an accepted move: the tickets follow.
     pub fn accept_move(&mut self, to: [f64; 3]) {
@@ -1719,8 +1715,7 @@ mod tests {
             g.motion = Some(Box::new(m));
             let old = g.motion.take().unwrap();
             let body = g.build_motion(&resources, [0.5, 64.0, 0.5]);
-            body.apply_saved_attributes(Some(&old.carried_attributes(false)))
-                .unwrap();
+            body.apply_saved_attributes(Some(&old.carried_attributes(false)));
             assert_eq!(body.max_health(), want, "base {base}");
         }
     }

@@ -620,7 +620,14 @@ pub fn import_player(
                 body.write_effect_modifiers(effect.registry_index, Some(effect.amplifier));
             }
         }
+        if whole && let Some(body) = g.motion.as_mut() {
+            body.attributes.reset_to_supplier();
+        }
         g.apply_loaded_motion(whole);
+        if whole && let Some(body) = g.motion.as_mut() {
+            // Before confirmation, save the clamped health of the replacement record.
+            g.health = body.health.health();
+        }
     });
     // Everything the import changed reaches the client now, so that a proxy sees the
     // player as it will be; the player stays held until it is placed or dropped.
