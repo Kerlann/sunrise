@@ -3988,11 +3988,9 @@ fn discovery_replay_has_no_callback_or_live_state_side_effects() {
                 .client
                 .creative_screen
                 .0
-                .tabs
-                .iter()
-                .position(|t| t.search)
+                .search_tab()
                 .expect("creative search tab");
-            game.client.creative_screen.0.selected = search_tab;
+            game.client.creative_screen.0.select(search_tab);
             game.client.creative_screen.0.search.x = 7.0;
             game.client.creative_screen.0.search.y = 9.0;
             game.client.creative_screen.0.search.focused = false;
