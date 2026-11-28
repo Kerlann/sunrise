@@ -435,6 +435,7 @@ impl crate::game::ClientGame<'_> {
                     remote.custom_registries = Default::default();
                     remote.client_data_maps = Default::default();
                     remote.client_data_maps_received = false;
+                    remote.biome_keys = None;
                     remote.datapack_vanilla_values = None;
                     remote.has_logical_player = false;
                     remote.viewed.clear();

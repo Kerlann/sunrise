@@ -51,6 +51,12 @@ impl SideOps for crate::game::server_side::ServerState {
     ) -> Option<&'__side_g sunrise_gameplay_common::game::native_data_maps_common::DataMaps> {
         game.server_world_tables().map(|tables| &tables.data_maps)
     }
+    fn side_biome_keys<'__side_g>(
+        game: &'__side_g Self::Game<'_>,
+    ) -> Option<&'__side_g mod_api::__private::BiomeKeys> {
+        game.server_world_tables()
+            .map(|tables| &*tables.data_maps.biome_keys)
+    }
     fn side_acting_player_uuid(game: &Self::Game<'_>) -> Option<u128> {
         game.server_acting_player_uuid()
     }

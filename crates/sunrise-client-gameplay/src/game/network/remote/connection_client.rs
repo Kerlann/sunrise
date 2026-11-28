@@ -315,6 +315,15 @@ impl crate::game::ClientGame<'_> {
             )
             .map_err(|error| format!("refused variant registries: {error}"))?,
         );
+        let biome_keys = registries.registries.get(BIOME_REGISTRY).map(|list| {
+            let keys = list
+                .iter()
+                .filter_map(|(name, _)| mod_api::__private::parse_registered_biome_key(name).ok());
+            Arc::new(mod_api::__private::BiomeKeys::new(
+                sunrise_gameplay_common::game::world_entry::next_biome_keys_session(),
+                keys,
+            ))
+        });
         if let Some(r) = self.client.remote.as_mut() {
             r.enchantments = enchantments;
             let bits = ceil_log2(biomes.len());
@@ -323,6 +332,7 @@ impl crate::game::ClientGame<'_> {
                 Arc::new(ChunkFormat::new(&r.dimension, biomes, bits).in_column(column));
             r.registries = registries;
             r.variants = variants;
+            r.biome_keys = biome_keys;
             r.resolve_clocks();
             r.level_environments.clear();
             self.install_server_items();
