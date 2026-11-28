@@ -437,7 +437,7 @@ impl Hub {
                 }
                 Some(body.velocity.components())
             });
-            self.send_position_correction(i, None, 0, [0.0; 3], velocity);
+            self.send_position_correction(i, None, 0, [0.0; 3], 0.0, velocity);
         }
         let g = &self.guests[i];
         g.send(&g.abilities_packet());
@@ -478,30 +478,41 @@ impl Hub {
     /// The rest of a portal's [`Self::finish_level_change`] once its exit is found:
     /// the position, LEVEL_CHUNKS_LOAD_START (the client's loading screen
     /// closes once its chunk is in) and TeleportTransition.PLAY_PORTAL_SOUND.
-    pub fn land(&mut self, i: usize, at: [f64; 3], yaw: f32, rotate_delta: bool) {
-        let velocity = self.guests.update(i, |g| {
+    pub fn land(&mut self, i: usize, at: [f64; 3], yaw: f32, relatives: i32) {
+        use play::relative::{ROTATE_DELTA, Y_ROT};
+        use sunrise_core::geometry::Vec3;
+
+        self.guests.update(i, |g| {
             g.landing = false;
             g.above_ground_ticks = 0;
             g.place(at); // hold the exit chunk
-            let old_yaw = std::mem::replace(&mut g.yaw, yaw);
-            let body = g.motion.as_mut()?;
-            body.yaw = yaw;
-            body.position = sunrise_core::geometry::Vec3::new(at[0], at[1], at[2]);
-            // Neither transition with Relative.DELTA changes pitch. Apply the
-            // same absolute delta to the body and the client's position correction.
-            use sunrise_core::geometry::Vec3;
-            body.velocity = if rotate_delta {
-                let turn = f64::from(old_yaw - yaw).to_radians() as f32;
-                body.velocity
-                    .rotate_x(0.0)
-                    .rotate_y(turn)
-                    .add_vector(Vec3::ZERO)
+            let old_yaw = g.yaw;
+            g.yaw = if relatives & Y_ROT != 0 {
+                old_yaw + yaw
             } else {
-                Vec3::ZERO
+                yaw
             };
-            Some(body.velocity.components())
+            if let Some(body) = g.motion.as_mut() {
+                body.yaw = g.yaw;
+                body.position = Vec3::new(at[0], at[1], at[2]);
+                // PositionMoveRotation.of uses the client's last known movement.
+                // These transitions either keep all delta axes or none and do not
+                // rotate pitch when keeping motion.
+                body.velocity = if relatives & ROTATE_DELTA != 0 {
+                    let [x, y, z] = g.known_movement;
+                    let turn = f64::from(old_yaw - g.yaw).to_radians() as f32;
+                    Vec3::new(x, y, z)
+                        .rotate_x(0.0)
+                        .rotate_y(turn)
+                        .add_vector(Vec3::ZERO)
+                } else {
+                    Vec3::ZERO
+                };
+            }
         });
-        self.send_position_correction(i, Some(at), 0, [0.0; 3], velocity);
+        // Send the transition, not the server's resolved motion. The client
+        // applies the relative delta to its own potentially newer movement.
+        self.send_position_correction(i, Some(at), relatives, [0.0; 3], yaw, None);
         let g = &self.guests[i];
         g.send(&C::GameEvent(play::GameEvent {
             event: game_event::LEVEL_CHUNKS_LOAD_START,

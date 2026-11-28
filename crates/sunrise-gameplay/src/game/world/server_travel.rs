@@ -1385,13 +1385,13 @@ impl crate::game::ServerGame<'_> {
             let Some(host) = self.server.lan.as_ref() else {
                 return;
             };
-            let yaw = host.hub.guests[i].yaw;
+            let source_yaw = host.hub.guests[i].yaw;
             let (position, yaw) = if let Some(job) = trip.gateway {
                 match self.resolve_gateway(job, trip.target) {
-                    Ok(at) => (at, yaw),
+                    Ok(at) => (at, source_yaw),
                     Err(e) => {
                         log::error!("End gateway exit: {e}");
-                        (trip.target, yaw)
+                        (trip.target, source_yaw)
                     }
                 }
             } else if trip.end {
@@ -1412,7 +1412,7 @@ impl crate::game::ServerGame<'_> {
                         {
                             host.hub.guests.update(i, |guest| guest.pitch = pitch);
                         }
-                        (at, turned.unwrap_or(yaw))
+                        (at, turned.unwrap_or(source_yaw))
                     }
                     Ok(None) => {
                         self.server.server_trips.insert(k, trip);
@@ -1421,7 +1421,7 @@ impl crate::game::ServerGame<'_> {
                     }
                     Err(e) => {
                         log::error!("End arrival: {e}");
-                        (trip.target, yaw)
+                        (trip.target, source_yaw)
                     }
                 }
             } else {
@@ -1432,16 +1432,18 @@ impl crate::game::ServerGame<'_> {
                 match (trip.plan, exit) {
                     (Some(plan), Some(exit)) => {
                         let (at, rotation) = self.arrival(&plan, exit);
-                        (at, yaw + rotation)
+                        (at, rotation)
                     }
-                    _ => (trip.target, yaw),
+                    _ if nether => (trip.target, 0.0),
+                    _ => (trip.target, source_yaw),
                 }
             };
             // The vehicle the player rode comes with it, and waits for it
             // where it arrives (`Entity.teleportCrossDimension` carries the
             // passengers).
             if let Some(vehicle) = trip.vehicle {
-                self.arrive_vehicle(trip.source, vehicle, position, yaw);
+                let vehicle_yaw = if nether { source_yaw + yaw } else { yaw };
+                self.arrive_vehicle(trip.source, vehicle, position, vehicle_yaw);
             }
             // Player.getDimensionChangingDelay.
             let Some(host) = self.server.lan.as_mut() else {
@@ -1452,9 +1454,17 @@ impl crate::game::ServerGame<'_> {
             }
             let at = position.components();
             if portal {
-                // Nether and End entry keep Relative.DELTA (including ROTATE_DELTA).
-                // The End exit's respawn transition instead has no relatives.
-                host.hub.land(i, at, yaw, nether || trip.entering);
+                use play::relative::{DELTA_X, DELTA_Y, DELTA_Z, ROTATE_DELTA, X_ROT, Y_ROT};
+                let delta = DELTA_X | DELTA_Y | DELTA_Z | ROTATE_DELTA;
+                let relatives = if nether {
+                    delta | X_ROT | Y_ROT
+                } else if trip.entering {
+                    delta | X_ROT
+                } else {
+                    // The End exit uses the player's absolute respawn transition.
+                    0
+                };
+                host.hub.land(i, at, yaw, relatives);
             } else {
                 host.hub.guests.update(i, |g| {
                     g.yaw = yaw;

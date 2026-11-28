@@ -231,7 +231,10 @@ fn finish_trip(game: &mut sunrise_gameplay::game::ServerGame<'_>, dim: Dim) {
 #[test]
 #[ignore = "daily"]
 fn deferred_end_entry_turns_the_server_and_client_motion_to_the_west_facing_arrival() {
-    use sunrise_protocol::{buf::Reader, packets::play::Clientbound};
+    use sunrise_protocol::{
+        buf::Reader,
+        packets::play::{Clientbound, relative},
+    };
     use sunrise_sim::lan::Out;
     with_prepared_server(ExecutionRole::DedicatedServer, |game| {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -244,6 +247,7 @@ fn deferred_end_entry_turns_the_server_and_client_motion_to_the_west_facing_arri
                 g.sender = PlayerSender::new(tx, Arc::default());
                 g.yaw = 0.0;
                 g.pitch = 24.0;
+                g.known_movement = [2.0, 0.5, 0.0];
                 g.motion.as_mut().unwrap().velocity = Vec3::new(1.0, 0.25, 0.0);
             })
             .unwrap();
@@ -252,8 +256,9 @@ fn deferred_end_entry_turns_the_server_and_client_motion_to_the_west_facing_arri
         let guest = game.server.lan.as_ref().unwrap().hub.guest(CONN).unwrap();
         assert_eq!(guest.dimension, Dim::End.id());
         let body = guest.motion.as_deref().unwrap();
-        assert_eq!(body.velocity.y, 0.25);
-        assert_eq!(body.velocity.z, 1.0);
+        assert_eq!((guest.yaw, guest.pitch), (90.0, 24.0));
+        assert_eq!(body.velocity.y, 0.5);
+        assert_eq!(body.velocity.z, 2.0);
         let correction = rx
             .try_iter()
             .find_map(|out| {
@@ -266,9 +271,16 @@ fn deferred_end_entry_turns_the_server_and_client_motion_to_the_west_facing_arri
                 }
             })
             .expect("End portal position correction");
-        assert_eq!((correction.yaw, correction.pitch), (90.0, 24.0));
-        assert_eq!(correction.relatives, 0);
-        assert_eq!(correction.delta, body.velocity.components());
+        assert_eq!((correction.yaw, correction.pitch), (90.0, 0.0));
+        assert_eq!(
+            correction.relatives,
+            relative::DELTA_X
+                | relative::DELTA_Y
+                | relative::DELTA_Z
+                | relative::ROTATE_DELTA
+                | relative::X_ROT
+        );
+        assert_eq!(correction.delta, [0.0; 3]);
     });
 }
 
