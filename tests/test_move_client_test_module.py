@@ -129,32 +129,36 @@ class MoveClientTestModuleTests(unittest.TestCase):
             self.assertFalse(paths["destination"].exists())
 
     def test_cfg_test_on_file_backed_module_fails_before_any_file_changes(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            paths = self.make_repo(root)
-            paths["declaration"].write_text(
-                '#[cfg(test)]\n'
-                '#[path = "pieces/moved.rs"]\n'
-                'pub(crate) mod moved;\n'
-                'mod unchanged;\n',
-                encoding="utf-8",
-            )
-            before = {
-                path.relative_to(root): path.read_bytes()
-                for path in root.rglob("*")
-                if path.is_file()
-            }
+        for cfg_attribute in ("#[cfg(test)]", "#[cfg(\n    test\n)]"):
+            with self.subTest(cfg_attribute=cfg_attribute), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                paths = self.make_repo(root)
+                paths["declaration"].write_text(
+                    f'{cfg_attribute}\n'
+                    '#[path = "pieces/moved.rs"]\n'
+                    'pub(crate) mod moved;\n'
+                    'mod unchanged;\n',
+                    encoding="utf-8",
+                )
+                before = {
+                    path.relative_to(root): path.read_bytes()
+                    for path in root.rglob("*")
+                    if path.is_file()
+                }
 
-            with self.assertRaisesRegex(move_client_test_module.ExtractionError, r"preceding #\[cfg\(test\)\]"):
-                self.run_extraction(root, paths)
+                with self.assertRaisesRegex(
+                    move_client_test_module.ExtractionError,
+                    r"preceding #\[cfg\(test\)\]",
+                ):
+                    self.run_extraction(root, paths)
 
-            after = {
-                path.relative_to(root): path.read_bytes()
-                for path in root.rglob("*")
-                if path.is_file()
-            }
-            self.assertEqual(after, before)
-            self.assertFalse(paths["destination"].exists())
+                after = {
+                    path.relative_to(root): path.read_bytes()
+                    for path in root.rglob("*")
+                    if path.is_file()
+                }
+                self.assertEqual(after, before)
+                self.assertFalse(paths["destination"].exists())
 
     def test_destination_collision_and_mismatched_declaration_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:

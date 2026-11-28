@@ -71,16 +71,23 @@ def _module_segments(module_path: str) -> tuple[str, ...]:
 
 
 def _has_preceding_cfg_test_attribute(text: str, position: int) -> bool:
+    attributes = []
+    closing_brackets = 0
     for line in reversed(text[:position].splitlines()):
         stripped = line.strip()
         if not stripped or stripped.startswith("//"):
             continue
-        if stripped.startswith("#["):
-            if CFG_TEST_ATTRIBUTE.search(stripped):
-                return True
+        bracket_delta = line.count("]") - line.count("[")
+        if closing_brackets:
+            attributes.append(line)
+            closing_brackets += bracket_delta
+            continue
+        if stripped.startswith("#[") or bracket_delta > 0:
+            attributes.append(line)
+            closing_brackets += bracket_delta
             continue
         break
-    return False
+    return bool(CFG_TEST_ATTRIBUTE.search("\n".join(reversed(attributes))))
 
 
 def _declaration_to_remove(declaration_file: Path, source: Path, module_name: str) -> tuple[str, int, int]:
