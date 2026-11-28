@@ -2381,3 +2381,172 @@ impl From<BlockStateError> for BlockEditError {
         }
     }
 }
+
+/// The mixer group a sound plays on (`SoundSource`), in vanilla's order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+// no wire: local sound mixer category.
+pub enum SoundSource {
+    /// The master volume, which scales every other source.
+    Master,
+    /// Music discs aside, the game's music.
+    Music,
+    /// Jukeboxes and music discs.
+    Records,
+    /// Rain and thunder.
+    Weather,
+    /// Sounds blocks make.
+    Blocks,
+    /// Hostile creatures.
+    Hostile,
+    /// Friendly and neutral creatures.
+    Neutral,
+    /// Players.
+    Players,
+    /// Ambient and cave sounds.
+    Ambient,
+    /// Voice sounds.
+    Voice,
+    /// Interface sounds, such as a button click.
+    Ui,
+}
+
+impl SoundSource {
+    /// Its position in vanilla's `SoundSource` order, as the network sends it.
+    pub fn index(self) -> usize {
+        self as usize
+    }
+    /// Every source, in vanilla's order (`SoundSource.values()`).
+    pub const ALL: [SoundSource; 11] = [
+        Self::Master,
+        Self::Music,
+        Self::Records,
+        Self::Weather,
+        Self::Blocks,
+        Self::Hostile,
+        Self::Neutral,
+        Self::Players,
+        Self::Ambient,
+        Self::Voice,
+        Self::Ui,
+    ];
+}
+
+/// `ParticleStatus`: how many particles a client shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+#[derive(sunrise_mod_api_macros::Wire)]
+pub enum ParticleStatus {
+    /// All particles.
+    All,
+    /// Fewer particles.
+    Decreased,
+    /// Only the essential particles.
+    Minimal,
+}
+
+/// A custom boss bar (vanilla's `CustomBossEvent`, the `/bossbar` ones) of an
+/// open server world. It holds the world's epoch and the bar's UUID, so a bar
+/// that was removed (even if its id was added again) or a handle from an
+/// earlier open reads as `None` and changes nothing. Mob and raid bars are not
+/// custom boss events and have no handle.
+#[derive(sunrise_mod_api_macros::Wire, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+// exhaustive: its fields are private, so mods cannot build or destructure it
+pub struct BossBarRef {
+    pub(crate) epoch: WorldEpoch,
+    pub(crate) uuid: u128,
+}
+
+/// `BossEvent.BossBarColor`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[derive(sunrise_mod_api_macros::Wire)]
+pub enum BossBarColor {
+    /// A pink bar.
+    Pink,
+    /// A blue bar.
+    Blue,
+    /// A red bar.
+    Red,
+    /// A green bar.
+    Green,
+    /// A yellow bar.
+    Yellow,
+    /// A purple bar.
+    Purple,
+    /// A white bar.
+    White,
+}
+
+impl BossBarColor {
+    /// Every color, in ordinal order.
+    pub const ALL: [Self; 7] = [
+        Self::Pink,
+        Self::Blue,
+        Self::Red,
+        Self::Green,
+        Self::Yellow,
+        Self::Purple,
+        Self::White,
+    ];
+    /// `BossBarColor.getName`: `pink`, `blue`, `red`, `green`, `yellow`,
+    /// `purple` or `white`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Pink => "pink",
+            Self::Blue => "blue",
+            Self::Red => "red",
+            Self::Green => "green",
+            Self::Yellow => "yellow",
+            Self::Purple => "purple",
+            Self::White => "white",
+        }
+    }
+    /// The color with that name, or None for one vanilla doesn't have.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|color| color.name() == name)
+    }
+}
+
+/// `BossEvent.BossBarOverlay`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[derive(sunrise_mod_api_macros::Wire)]
+pub enum BossBarOverlay {
+    /// Progress.
+    Progress,
+    /// Notched6.
+    Notched6,
+    /// Notched10.
+    Notched10,
+    /// Notched12.
+    Notched12,
+    /// Notched20.
+    Notched20,
+}
+
+impl BossBarOverlay {
+    /// Every overlay, in ordinal order.
+    pub const ALL: [Self; 5] = [
+        Self::Progress,
+        Self::Notched6,
+        Self::Notched10,
+        Self::Notched12,
+        Self::Notched20,
+    ];
+    /// `BossBarOverlay.getName`: `progress`, `notched_6`, `notched_10`,
+    /// `notched_12` or `notched_20`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Progress => "progress",
+            Self::Notched6 => "notched_6",
+            Self::Notched10 => "notched_10",
+            Self::Notched12 => "notched_12",
+            Self::Notched20 => "notched_20",
+        }
+    }
+    /// The overlay with that name, or None for one vanilla doesn't have.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|overlay| overlay.name() == name)
+    }
+}
