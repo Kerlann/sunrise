@@ -2,8 +2,10 @@
 
 > Published on 2026-11-08 as the record of the shader-pack clean room (#6739, #1555). The text is as written in
 > October 2026, except that local paths, machine names and the names of private files are replaced by a
-> description of what they were. Nothing else was changed.
+> description of what they were. Nothing else was changed. Later revisions are listed in the changelog at the end.
 
+Revision 2, 2026-11-27: §3.2, §6.1.4 and OQ-23 record what Sunrise does with `blend.*` on composite-style programs
+and the observation behind it (#6453; see the changelog).
 Revision 1, 2026-10-24. Written by the spec team (an AI agent working for Ludovic) from public documentation only.
 Process and rules: [README.md](README.md).
 
@@ -422,8 +424,8 @@ Defaults marked "true" for the shadow-content keys are not stated by `[OF-SP]`; 
 | Key | Value | Meaning | Tier / source |
 |---|---|---|---|
 | `alphaTest.<program>` | `off` or `<func> <ref>`; func ∈ `NEVER LESS EQUAL LEQUAL GREATER NOTEQUAL GEQUAL GL_ALWAYS` | alpha test of a gbuffers program. With `gl_FragColor`/`gl_FragData` output the loader applies it to output 0; with `out` variables only `alphaTestRef` is passed and the pack discards itself | A `[OF-SP]`, `[IR:rendering]`, `[IR:Uniforms/rendering]` |
-| `blend.<program>` | `off` or `<src> <dst> <srcA> <dstA>` | blend factors of a gbuffers program, or of a begin, prepare, deferred or composite program (below); factors: `ZERO ONE SRC_COLOR ONE_MINUS_SRC_COLOR DST_COLOR ONE_MINUS_DST_COLOR SRC_ALPHA ONE_MINUS_SRC_ALPHA DST_ALPHA ONE_MINUS_DST_ALPHA SRC_ALPHA_SATURATE` | A |
-| `blend.<program>.<buffer>` | same | per output buffer (`colortex5`...) of a gbuffers program; others keep the program's. No effect on begin, prepare, deferred or composite programs (below) | A (`PER_BUFFER_BLENDING` E queries support) |
+| `blend.<program>` | `off` or `<src> <dst> <srcA> <dstA>` | blend factors of the program's outputs. Composite-style programs: per group below the table; factors: `ZERO ONE SRC_COLOR ONE_MINUS_SRC_COLOR DST_COLOR ONE_MINUS_DST_COLOR SRC_ALPHA ONE_MINUS_SRC_ALPHA DST_ALPHA ONE_MINUS_DST_ALPHA SRC_ALPHA_SATURATE` | A |
+| `blend.<program>.<buffer>` | same | per output buffer (`colortex5`...) of a gbuffers program; others keep the program's. Composite-style programs: per group below the table | A (`PER_BUFFER_BLENDING` E queries support) |
 | `scale.<program>` | `<s>` or `<s> <ox> <oy>`, each 0..1 | viewport of a composite-style program within its output: only the region is drawn, buffer size unchanged | A `[OF-SP]`, `[IR:rendering]`; `[SD]` says offsets unsupported, OQ-22 |
 | `flip.<program>.<buffer>` | bool | force or suppress the main/alt flip of that buffer after that program (6.1.6) | A |
 | `size.buffer.<buffer>` | `<w> <h>`: integers = pixels, decimals = fraction of the render size | fixed size of a colortex buffer; gbuffers programs cannot render to it; one program renders only to buffers of one size | A `[OF-SP]`, `[IR:rendering]` |
@@ -435,15 +437,41 @@ Defaults marked "true" for the shadow-content keys are not stated by `[OF-SP]`; 
 | `beacon.beam.depth` | bool | the opaque inner beam writes depth (all depth buffers) | A, default false |
 
 The default blend for translucent geometry is `SRC_ALPHA ONE_MINUS_SRC_ALPHA ONE ONE_MINUS_SRC_ALPHA` `[IR:rendering]`.
-Begin, prepare, deferred and composite programs draw with blending disabled when `shaders.properties` has no
-`blend.<program>` for them `[OF-SH Color Attachments]`. A `blend.<program>` line blends every buffer such a program
-writes, and its `blend.<program>.<buffer>` lines have no effect: a buffer's `off` under a program blend still blends,
-and a buffer's factors without a program blend do not blend. Evidence: an observation with Iris 1.11.7 and a probe
-pack of Sunrise's own (commit `0582226502`: 0.25 drawn over 0.75 with `SRC_ALPHA ONE_MINUS_SRC_ALPHA ONE ZERO` read
-0.625). The rules are stated in the comment in `sunrise_shaders::load_post` and pinned for deferred and composite
-programs by its test `composite_programs_blend_as_their_program_says`. No probe of begin or prepare programs is
-recorded: for them both rules are assumed to match, unprobed. `shadowcomp` and `final` were not part of the
-observation; for them the `[OF-SH]` rule (blending disabled) stands. Other per-program defaults: OQ-23.
+`[OF-SH Color Attachments]` documents composite-style programs as drawing with blending disabled. What Sunrise's
+loader and renderer do with `blend.*` for each composite-style group, and for the compute-only `setup`
+(evidence below):
+
+- `begin`, `prepare`, `deferred`, `composite`: `blend.<program>` with four valid factors blends every output the
+  program writes. `off`, an absent key, or a value that is not four valid factors leaves blending off.
+  `blend.<program>.<buffer>` lines are ignored: a buffer's `off` under a program blend still blends, and a buffer's
+  factors without a program blend do not blend.
+- `shadowcomp`: `blend.<program>` is not read. Blending is off, except for an output whose buffer has a
+  `blend.<program>.<buffer>` line with four valid factors, which blends with them.
+- `final`: the loader reads `blend.final` and drops its per-buffer lines, but `final` writes the screen without
+  blending, so neither has an effect.
+- `setup`: no colour outputs; the loader reads `blend.<program>` and drops the per-buffer lines,
+  and neither has an effect.
+
+In these programs factors apply only to an output whose buffer format wgpu reports as blendable
+(`TextureFormatFeatureFlags::BLENDABLE`); any other output is written without blending.
+
+Evidence. Commit `0582226502` records an observation with Iris 1.11.7 and a probe pack of Sunrise's own: a composite
+program writing colour 0.25 with source alpha 0.25 under `blend.composite = SRC_ALPHA ONE_MINUS_SRC_ALPHA ONE ZERO`,
+over a buffer holding 0.75, read 0.625. Sunrise's GPU test `a_composite_program_blends_onto_its_buffer` checks the same
+case. What each source claims for each key:
+
+- `blend.<program>`: the comment in `sunrise_shaders::load_post` lists begin, prepare, deferred and composite programs
+  together as probed. The commit message says the probe blended these programs, and the only reading it records is
+  the composite one above.
+- `blend.<program>.<buffer>`: the commit message and the comment say it was probed on deferred and composite programs
+  only. For begin and prepare it is unprobed and assumed to match (the commit message also names setup and final as
+  assumed).
+- The unit test `composite_programs_blend_as_their_program_says` checks the loader's result: the program factors of
+  `deferred` and `composite`, `blend.composite2 = off`, and that a per-buffer `off` on `composite` and per-buffer factors
+  on `composite1` are dropped. Its `deferred` case has no per-buffer line.
+
+`shadowcomp` and `final` were not observed: their rules above are what Sunrise does, not a recorded observation.
+Other per-program defaults: OQ-23.
 
 #### Custom uniforms
 
@@ -864,9 +892,9 @@ How the smoothing is stepped (per frame with frame time, or per tick) is not doc
   the n-th buffer of the list. Without either, the program writes buffers 0–7 in order. At most 8 outputs at once. `[OF-SH]`, `[IR:Constants/rendertargets]`
 - Begin, prepare, gbuffers, deferred and composite programs can write any colortex buffer. `[IR:Buffers/colortex]`
 - A listed buffer that the shader does not write receives undefined data. `[IR:Constants/rendertargets]`
-- Composite-style programs write with blending off, except that a begin, prepare, deferred or composite program
-  blends as its `blend.<program>` says (3.2). Writing a buffer that the same program samples gives artefacts
-  unless the flip (6.1.6) separates them. `[OF-SH]`
+- Composite-style programs write with blending off. Writing a buffer that the same program samples gives artefacts
+  unless the flip (6.1.6) separates them. `[OF-SH]` In Sunrise, `blend.*` can turn blending on in `begin`, `prepare`,
+  `deferred`, `composite` and `shadowcomp` programs (3.2, after the rendering-state table).
 - `final` writes to the screen; its output 0 is the displayed colour.
 
 #### 6.1.5 Clearing
@@ -1149,7 +1177,7 @@ implementation. Questions back to the spec team go through the README's process.
 | OQ-20 | Precedence of pack vs player settings | `clouds`, `oldHandLight`, `oldLighting`: `[OF-SP]` gives the player's video setting priority, `[IR]` says the pack overrides. |
 | OQ-21 | `oldHandLight` default | true `[IR]` vs false (with optional auto-detection) `[SD]`. |
 | OQ-22 | `scale` offsets | Documented by `[OF-SP]`, `[IR]`; `[SD]` says offsets are not supported. |
-| OQ-23 | Default alpha test and blend per program | Only the translucent default blend and a typical `alphaTestRef` of 0.1 are documented. |
+| OQ-23 | Default alpha test and blend per program | Documented: the translucent default blend `[IR:rendering]`, blending disabled for composite-style programs `[OF-SH Color Attachments]` (3.2), and a typical `alphaTestRef` of 0.1. The default of each gbuffers program is not. |
 | OQ-24 | Undocumented keys | `breaksAnisotropy` and other unknown keys: ignore with a log line? |
 | OQ-25 | Expression language | Operator precedence, int/float/bool conversions, integer division, behaviour on unknown names or type errors. |
 | OQ-26 | Smoothing | `smooth()` fade times in seconds (`[OF-SP]`) or ticks (`[IR]`); how half-life smoothing is stepped (per tick or per frame by elapsed time). |
@@ -1209,10 +1237,10 @@ Downloaded copies and their SHA-256 are in [provenance-log.md](provenance-log.md
 | 1.6 `#version`, built-ins | GLSL §3.3, §7, §8.9.5; OF-SH; IR (compatibility_vs_core, attributes, patcher, guide 6); SL (compiler notes) |
 | 1.7 Comment directives | OF-SH, IR (constants/*), SD (const-directives), SL (pipeline) |
 | 2 Programs and order | OF-SH, OF-SP, IR (programs/*, gbuffers, shadow, ordering, depthtex, guide 1/2), SD (passes/composite), SL (pipeline) |
-| 3 shaders.properties | OF-SP, OF-PF, IR (shaders.properties/*), SD (directives/properties), PACK |
+| 3 shaders.properties | OF-SP, OF-PF, IR (shaders.properties/*), SD (directives/properties), PACK; rev 2 (`blend.*` on composite-style programs): Sunrise's loader and renderer, commit `0582226502` |
 | 4 ID mapping | OF-SH, OF-PF, IR (misc/*, macros/IRIS_TAG_SUPPORT, attributes/mc_Entity), PACK |
 | 5 Interface | OF-SH, OF-SP, IR (uniforms/*, attributes/*, buffers/*, macros/*, how-to), SD (uniforms, vertex-format-extensions, unsupported-features), GLSL §7, GL (enums), LOGL, SL (pipeline, coordinate spaces via IR) |
-| 6 Render targets | OF-SH, OF-SP, IR (buffers/*, constants/*, rendering), SD (const-directives), SL (pipeline, LabPBR), PACK |
+| 6 Render targets | OF-SH, OF-SP, IR (buffers/*, constants/*, rendering), SD (const-directives), SL (pipeline, LabPBR), PACK; rev 2 (6.1.4 blending): as 3 |
 | 7 Shadow parameters | OF-SH, IR (constants/*, programs/shadow), SD (const-directives) |
 | 8 Settings UI | OF-SP, OF-SH (H), IR (shader_settings, overview), PACK |
 | 9 Open questions | all of the above; GL for the errata |
@@ -1222,3 +1250,7 @@ Downloaded copies and their SHA-256 are in [provenance-log.md](provenance-log.md
 ## Changelog
 
 - Revision 1 (2026-10-24): first version, from the sources of section 10.
+- Revision 2 (2026-11-27, #6453): the `blend.<program>` and `blend.<program>.<buffer>` rows of §3.2, the text after
+  that table, §6.1.4 and OQ-23 now state, for each composite-style group, what Sunrise's loader and renderer do with
+  `blend.*`. They cite the Iris 1.11.7 observation recorded in commit `0582226502` and mark per-buffer lines in begin
+  and prepare as unprobed. No new probe was run. Sources: provenance-log.md, 2026-11-27 entry.

@@ -169,3 +169,12 @@ error. No other loader's code was read; nothing from the packs went into Sunrise
 - Sources: the spec (rev 1) §2.4, §3.2 (`shadowPlayer`, `shadowLightBlockEntities`); Sunrise's current main (`entity_culling.rs`, `game/entity_culling.rs`, `game/perspective.rs`, `Game::entity_geometry`, block state light emission in `StateFacts`).
 - Test packs: not opened; only our own debug packs (shadow map and height visualisers, local, uncommitted) used for the checks.
 - No other loader, renderer or pre-removal Sunrise history read.
+
+## 2026-11-27 spec revision 2 (#6453: `blend.*` on composite-style programs)
+- Written by an implementation-side agent session (Claude Opus 5.5), on the issue's request, from Sunrise code and
+  history only: `sunrise_shaders::load_post` (the composite-style group loop, the shadowcomp loader, `blend`,
+  `buffer_blends`, `config::buffer_index`) and its test `composite_programs_blend_as_their_program_says`;
+  `sunrise-render-shaderpack`'s `pack_post/construction.rs` (`build_pass`: per-output blend state, the blendable check,
+  the `final` screen target) and its GPU test `a_composite_program_blends_onto_its_buffer`; the message of commit
+  `0582226502`, which records the Iris 1.11.7 observation the revision cites.
+- No new probe was run. No pack files, no loader source, binaries or docs, and no web pages were opened.
