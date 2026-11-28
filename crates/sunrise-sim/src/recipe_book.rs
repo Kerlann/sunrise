@@ -2840,7 +2840,16 @@ mod tests {
             "result":{"id":"minecraft:leather_helmet"}
         }"#;
         let root = content_recipe_root("dye-display", recipe);
-        let items = crate::items::Items::for_tests(HashMap::new());
+        // red_dye's own default is red, which the displayed stack's blue overrides.
+        std::fs::create_dir_all(root.join("data/minecraft/loot_table")).unwrap();
+        std::fs::write(
+            root.join("items.json"),
+            r#"{"minecraft:red_dye":{"minecraft:dye":"red"},"minecraft:leather_helmet":{}}"#,
+        )
+        .unwrap();
+        let defaults = sunrise_world::item_defaults::read(&root).unwrap();
+        let items = crate::items::Items::catalog(&root, &PackOverlay::NONE, &defaults).unwrap();
+        assert_eq!(items.items["minecraft:red_dye"].dye.as_deref(), Some("red"));
         let recipes = Recipes::load(
             &root,
             &items,
@@ -2852,17 +2861,9 @@ mod tests {
         let entry = book
             .entry("example:test")
             .expect("the dye recipe is in the book");
-        let color = |name: &str| {
-            sunrise_level::dyes::DYES
-                .iter()
-                .find(|(dye, _)| *dye == name)
-                .unwrap()
-                .1 as i32
-        };
-        assert_ne!(color("blue"), color("red"));
         assert_eq!(
             entry.variants[0].data().and_then(|d| d.dyed_color),
-            Some(color("blue")),
+            Some(0x3C44AA),
             "the displayed stack's component wins over red_dye's default"
         );
         std::fs::remove_dir_all(root).unwrap();

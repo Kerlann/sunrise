@@ -498,12 +498,18 @@ impl Special {
                 // DyedSlotDemo: the targets cycle fastest, 16 stacks at most. The dye
                 // ingredient's resolved display stacks carry the effective component.
                 let targets = &target.order;
-                let dyes: Vec<ItemStack> = dye.shown.clone().unwrap_or_else(|| {
-                    dye.order
-                        .iter()
-                        .map(|item| ItemStack::new(item, 1))
-                        .collect()
-                });
+                let defaults: Vec<ItemStack>;
+                let dyes: &[ItemStack] = match &dye.shown {
+                    Some(shown) => shown,
+                    None => {
+                        defaults = dye
+                            .order
+                            .iter()
+                            .map(|item| ItemStack::new(item, 1))
+                            .collect();
+                        &defaults
+                    }
+                };
                 let all: Vec<ItemStack> = (0..targets.len() * dyes.len())
                     .map(|i| {
                         let mut made = result.create();
@@ -2423,9 +2429,16 @@ impl Recipes {
     }
 
     /// A stack's effective `dye` component (`ItemStack.get(DataComponents.DYE)`):
-    /// its own `minecraft:dye` colour name when it carries one, else the item's
-    /// default. Matching and the recipe-book preview share this read.
+    /// absent when the stack removed it, else its own `minecraft:dye` colour name
+    /// when it carries one, else the item's default. Matching and the recipe-book
+    /// preview share this read.
     pub(crate) fn stack_dye(&self, stack: &ItemStack) -> Option<usize> {
+        if stack
+            .data()
+            .is_some_and(|d| d.other("!minecraft:dye").is_some())
+        {
+            return None;
+        }
         if let Some(Tag::String(name)) = stack.data().and_then(|d| d.other("minecraft:dye")) {
             let name = name.to_string_lossy();
             if let Some(index) = sunrise_level::dyes::DYES
