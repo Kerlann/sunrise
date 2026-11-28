@@ -177,10 +177,14 @@ impl crate::game::ClientGame<'_> {
         if sunrise_client::widgets::is_collecting_widgets() {
             return true;
         }
-        match self.screen_render_view(batch) {
+        let drawn = match self.screen_render_view(batch) {
             Some(view) => self.screen_render_begin(batch, &view),
             None => true,
+        };
+        if !drawn {
+            sunrise_client::widgets::mark_render_vetoed();
         }
+        drawn
     }
     /// `draw_screen_with_post_hook` for the title's own screen, once a frame,
     /// after it has drawn and before the toasts.
@@ -198,10 +202,14 @@ impl crate::game::ClientGame<'_> {
         if sunrise_client::widgets::is_collecting_widgets() {
             return true;
         }
-        match self.title_screen_render_view(batch) {
+        let drawn = match self.title_screen_render_view(batch) {
             Some(view) => self.screen_render_begin(batch, &view),
             None => true,
+        };
+        if !drawn {
+            sunrise_client::widgets::mark_render_vetoed();
         }
+        drawn
     }
     /// `Screen.extractBlurredBackground` over the panorama or the world and
     /// HUD, when `menuBackgroundBlurriness` is at least 1.

@@ -4113,3 +4113,73 @@ fn callback_clear_and_replace_does_not_overwrite_replacement_slot() {
         });
     });
 }
+
+#[test]
+#[ignore = "daily"]
+fn render_pre_veto_preserves_widget_ids_and_overrides() {
+    if run_fresh_cases(
+        "cut_layout::game::client_side::native_hooks_client::base::screen_widgets_tests::render_pre_veto_preserves_widget_ids_and_overrides",
+        "SUNRISE_WIDGETS_RENDER_VETO_CHILD",
+        &["window"],
+    ) {
+        return;
+    }
+
+    struct VetoMod {
+        veto: Arc<AtomicBool>,
+    }
+
+    #[mod_api::__subscriptions]
+    impl Hooks for VetoMod {
+        fn screen_render_pre(
+            &self,
+            _host: &dyn ClientHost,
+            _event: &mut mod_api::ScreenRenderPreEvent<'_>,
+        ) -> Flow {
+            if self.veto.load(Ordering::SeqCst) {
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        }
+    }
+
+    let veto = Arc::new(AtomicBool::new(false));
+    let mods = vec![ModEntry::new(
+        "veto_probe",
+        Box::new(VetoMod { veto: veto.clone() }),
+    )]
+    .into();
+    with_mods(mods, || {
+        with_client_game(|game| {
+            let (_el, _win_id) = attach_offscreen_window(game);
+            game.client.pause_menu = true;
+            game.set_screen(Screen::Paused);
+            game.observe_screen();
+
+            let ids_before: Vec<ScreenWidgetId> = game
+                .screen_widgets()
+                .unwrap()
+                .children()
+                .iter()
+                .map(|c| c.id)
+                .collect();
+            assert!(!ids_before.is_empty());
+            let target_id = ids_before[0];
+
+            // Veto one rendered frame via ScreenEvent.Render.Pre.
+            veto.store(true, Ordering::SeqCst);
+            let _ = game.hud_layers([640, 480]);
+            sunrise_client::widgets::end_frame(60_001);
+
+            // Live membership and existing IDs must remain intact after the vetoed frame.
+            let widgets = game.screen_widgets().unwrap();
+            let ids_after: Vec<ScreenWidgetId> = widgets.children().iter().map(|c| c.id).collect();
+            assert_eq!(ids_before, ids_after);
+            assert!(
+                widgets.set_message(target_id, ApiText::literal("Still Alive")),
+                "existing widget id must remain mutable after a Render.Pre veto"
+            );
+        });
+    });
+}

@@ -126,6 +126,7 @@ pub struct EngineWidgetPassOutput {
     pub hovered: HashMap<EngineWidgetKey, bool>,
     pub pending_tooltip: Option<PendingWidgetTooltip>,
     pub seen: Vec<CollectedWidget>,
+    pub render_vetoed: bool,
 }
 
 /// Inputs a shared widget drawer passes to [`resolve_engine_widget`].
@@ -293,6 +294,19 @@ pub fn resolve_engine_input(
     })
 }
 
+/// Mark the active [`with_widget_overrides`] pass as vetoed by `ScreenEvent.Render.Pre` so this
+/// frame's empty draw never clears live widget membership or hit tables.
+pub fn mark_render_vetoed() {
+    if !HAS_OVERRIDES.get() {
+        return;
+    }
+    ACTIVE_OVERRIDES.with_borrow_mut(|slot| {
+        if let Some(pass) = slot.as_mut() {
+            pass.output.render_vetoed = true;
+        }
+    });
+}
+
 /// Take the deferred tooltip scheduled by an overridden engine widget during the active
 /// [`with_widget_overrides`] pass, if any.
 pub fn take_active_pending_tooltip() -> Option<PendingWidgetTooltip> {
@@ -418,7 +432,7 @@ pub fn with_widget_overrides<R>(
             HAS_OVERRIDES.set(self.prev_has_overrides);
             LAST_TARGET_META.set(None);
             if let Some(mut pass) = active {
-                if normal_exit {
+                if normal_exit && !pass.output.render_vetoed {
                     pass.maps.hover_since = pass.next_hover_since;
                 }
                 *self.dest = pass.maps;

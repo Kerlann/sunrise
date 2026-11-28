@@ -4,6 +4,7 @@ sunrise-client cut_layout::game::client_side::native_hooks_client::base::screen_
 sunrise-client cut_layout::game::client_side::native_hooks_client::base::screen_widgets_tests::discovery_replay_has_no_callback_or_live_state_side_effects lib daily child-process
 sunrise-client cut_layout::game::client_side::native_hooks_client::base::screen_widgets_tests::engine_screens_enumerate_stable_ids_and_modify_widgets_across_frames lib daily child-process
 sunrise-client cut_layout::game::client_side::native_hooks_client::base::screen_widgets_tests::press_id_and_mutating_widgets_from_screen_input_hooks_and_lazy_discovery lib daily child-process
+sunrise-client cut_layout::game::client_side::native_hooks_client::base::screen_widgets_tests::render_pre_veto_preserves_widget_ids_and_overrides lib daily child-process
 sunrise-client cut_layout::game::client_side::native_hooks_client::base::screen_widgets_tests::resize_rebuilds_default_screens_and_repositions_overriding_screens lib daily child-process
 sunrise-client cut_layout::game::client_side::native_hooks_client::base::screen_widgets_tests::screen_init_pre_cancel_suppresses_engine_widgets_and_still_runs_init_post lib daily child-process
 sunrise-client cut_layout::game::client_side::native_hooks_client::base::screen_widgets_tests::sub_page_switch_clears_mounted_widgets_and_refires_init_post lib daily child-process

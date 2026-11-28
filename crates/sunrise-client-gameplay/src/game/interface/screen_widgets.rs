@@ -1343,13 +1343,17 @@ impl crate::game::ClientGame<'_> {
         {
             let mut inner = self.client.screen_state.0.widgets.inner.borrow_mut();
             inner.engine_overrides = maps;
-            inner.engine_hits = output.hits;
-            inner.engine_hovered = output.hovered;
-            if output.pending_tooltip.is_some() {
-                inner.pending_tooltip = output.pending_tooltip;
+            if !output.render_vetoed {
+                inner.engine_hits = output.hits;
+                inner.engine_hovered = output.hovered;
+                if output.pending_tooltip.is_some() {
+                    inner.pending_tooltip = output.pending_tooltip;
+                }
             }
         }
-        self.reconcile_engine_children(output.seen);
+        if !output.render_vetoed {
+            self.reconcile_engine_children(output.seen);
+        }
         result
     }
 
