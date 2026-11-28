@@ -135,7 +135,7 @@ type RemovePartialFn =
 /// implements [`CustomRegistryEntry`]) use [`DataMap`] +
 /// [`Registrar::register_data_map`](crate::Registrar::register_data_map).
 // no wire: startup-only registration descriptor holding mod callbacks.
-// exhaustive: builder constructed via `RawDataMap::new`.
+#[non_exhaustive]
 pub struct RawDataMap {
     pub(crate) registry: String,
     pub(crate) id: String,

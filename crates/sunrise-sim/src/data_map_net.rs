@@ -39,7 +39,6 @@ pub const BUILTIN_SYNCED_MAPS: &[(&str, &str)] = &[
     ("minecraft:worldgen/biome", "neoforge:villager_types"),
     ("minecraft:villager_profession", "neoforge:raid_hero_gifts"),
     ("minecraft:game_event", "neoforge:vibration_frequencies"),
-    ("minecraft:item", "neoforge:villager_compostables"),
 ];
 
 /// Vanilla string length limit (`FriendlyByteBuf.DEFAULT_MAX_STRING_LENGTH`).
