@@ -50,7 +50,7 @@ pub struct WorldRegistries<'a> {
     root: &'a std::path::Path,
     overlay: &'a sunrise_world::loot::PackOverlay<'a>,
     id_sets: RefCell<HashMap<String, HashSet<String>>>,
-    tags: RefCell<HashMap<String, HashMap<String, HashSet<String>>>>,
+    tags: RefCell<HashMap<String, HashMap<String, Vec<String>>>>,
 }
 pub type PackTags = sunrise_sim::lan::data::PackTags;
 impl<'a> WorldRegistries<'a> {
@@ -153,10 +153,19 @@ impl MapRegistries for WorldRegistries<'_> {
         true
     }
     fn tag(&self, registry: &str, tag: &str) -> Vec<String> {
-        let members = |tags: &HashMap<String, HashSet<String>>| -> Vec<String> {
-            tags.get(tag)
+        use sunrise_items::items::TagRegistry;
+        let ordered_or_sorted = |ordered: Option<&[String]>,
+                                 fallback: &HashMap<String, HashSet<String>>|
+         -> Vec<String> {
+            if let Some(members) = ordered {
+                return members.to_vec();
+            }
+            let mut members: Vec<String> = fallback
+                .get(tag)
                 .map(|set| set.iter().cloned().collect())
-                .unwrap_or_default()
+                .unwrap_or_default();
+            members.sort();
+            members
         };
         if self.declared(registry) {
             return self.datapack.map_or_else(Vec::new, |set| {
@@ -164,12 +173,22 @@ impl MapRegistries for WorldRegistries<'_> {
             });
         }
         match registry {
-            "minecraft:item" => members(&self.items.item_tags),
-            "minecraft:block" => members(&self.items.block_tags),
-            "minecraft:fluid" => members(&self.items.fluid_tags),
-            sunrise_items::items::EntityTypeTags::REGISTRY => {
-                members(self.items.entity_type_tags.members())
-            }
+            "minecraft:item" => ordered_or_sorted(
+                self.items.tag_members(TagRegistry::Item, tag),
+                &self.items.item_tags,
+            ),
+            "minecraft:block" => ordered_or_sorted(
+                self.items.tag_members(TagRegistry::Block, tag),
+                &self.items.block_tags,
+            ),
+            "minecraft:fluid" => ordered_or_sorted(
+                self.items.tag_members(TagRegistry::Fluid, tag),
+                &self.items.fluid_tags,
+            ),
+            sunrise_items::items::EntityTypeTags::REGISTRY => ordered_or_sorted(
+                self.items.tag_members(TagRegistry::EntityType, tag),
+                self.items.entity_type_tags.members(),
+            ),
             _ => {
                 if let Some(tags) = self.bound_tags.and_then(|tags| {
                     tags.get(registry)
@@ -189,25 +208,29 @@ impl MapRegistries for WorldRegistries<'_> {
                             self.overlay,
                             |id| dir.contains_id(id),
                         )
-                        .map(|loaded| {
-                            loaded
-                                .into_iter()
-                                .map(|(tag, ids)| (tag, ids.into_iter().collect()))
-                                .collect()
-                        })
                         .unwrap_or_else(|e| {
                             log::warn!("Sunrise: the {registry} tags data maps read: {e}");
                             HashMap::new()
                         })
                     } else {
                         sunrise_items::items::load_tags(self.root, &folder(registry), self.overlay)
+                            .map(|loaded| {
+                                loaded
+                                    .into_iter()
+                                    .map(|(tag_id, ids)| {
+                                        let mut ordered: Vec<String> = ids.into_iter().collect();
+                                        ordered.sort();
+                                        (tag_id, ordered)
+                                    })
+                                    .collect()
+                            })
                             .unwrap_or_else(|e| {
                                 log::warn!("Sunrise: the {registry} tags data maps read: {e}");
                                 HashMap::new()
                             })
                     }
                 });
-                members(tags)
+                tags.get(tag).cloned().unwrap_or_default()
             }
         }
     }
@@ -472,5 +495,77 @@ impl DataMaps {
         type_id: &str,
     ) -> Result<&[(String, Tag)], mod_api::DataMapError> {
         self.map(registry, type_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ordered_tag_expansion_determines_which_rows_survive_merger_panic() {
+        let run = |tag_order: Vec<String>| {
+            let mut items = sunrise_items::items::Items::empty();
+            items
+                .item_tag_order
+                .insert("test:fuels".to_owned(), tag_order);
+            let files = vec![(
+                "data_maps/test:item/order_panic".to_owned(),
+                vec![
+                    br#"{"values":{"minecraft:coal":1,"minecraft:stick":2}}"#.to_vec(),
+                    br##"{"values":{"#test:fuels":10}}"##.to_vec(),
+                ],
+            )];
+            let overlay = sunrise_world::loot::PackOverlay {
+                files: &files,
+                ..sunrise_world::loot::PackOverlay::default()
+            };
+            let ids = ["minecraft:coal", "minecraft:stick"].map(String::from);
+            let registries = WorldRegistries::new(
+                [("minecraft:item", ids.as_slice())],
+                None,
+                &items,
+                std::path::Path::new(""),
+                &overlay,
+            );
+            let reg = Arc::new(mod_api::__private::RegisteredDataMap::from_raw(
+                "test",
+                Identifier::parse_namespaced("minecraft:item").unwrap(),
+                Identifier::parse_namespaced("test:order_panic").unwrap(),
+                mod_api::RawDataMap::new("minecraft:item", "test:order_panic").merge(
+                    |entry, existing, incoming| {
+                        if entry.to_string() == "minecraft:stick" {
+                            panic!("stick merger fails");
+                        }
+                        match (existing, incoming) {
+                            (Tag::Int(a), Tag::Int(b)) => Ok(Tag::Int(a + b)),
+                            _ => Ok(incoming.clone()),
+                        }
+                    },
+                ),
+            ));
+            let published = DataMaps::load(&[reg], &overlay, &registries);
+            (
+                published
+                    .value("minecraft:item", "test:order_panic", "minecraft:coal")
+                    .unwrap()
+                    .cloned(),
+                published
+                    .value("minecraft:item", "test:order_panic", "minecraft:stick")
+                    .unwrap()
+                    .cloned(),
+            )
+        };
+
+        // coal before stick: coal merges (1 + 10 = 11) before stick panics (keeps 2).
+        assert_eq!(
+            run(vec!["minecraft:coal".into(), "minecraft:stick".into()]),
+            (Some(Tag::Int(11)), Some(Tag::Int(2)))
+        );
+        // stick before coal: stick panics first (keeps 2) and poisons the merger before coal (keeps 1).
+        assert_eq!(
+            run(vec!["minecraft:stick".into(), "minecraft:coal".into()]),
+            (Some(Tag::Int(1)), Some(Tag::Int(2)))
+        );
     }
 }
