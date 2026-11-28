@@ -388,10 +388,10 @@ fn setup_common_with<'g, G: sunrise_gameplay_common::game::SideGame<'g>>(
     };
     let id = game.pack.assets.registry.resolve(&state).unwrap();
     game.world.set(0, 64, 0, id).unwrap();
-    game.player = Some(
-        sunrise_sim::motion::PlayerMotion::new(game.motion, sunrise_core::geometry::Vec3::ZERO)
-            .unwrap(),
-    );
+    game.player = Some(sunrise_sim::motion::PlayerMotion::new(
+        game.motion,
+        sunrise_core::geometry::Vec3::ZERO,
+    ));
     game.creative = false;
     game.selected = 0;
     game.hand = Hand::Main;

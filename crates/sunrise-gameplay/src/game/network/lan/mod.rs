@@ -5820,10 +5820,10 @@ pub(in crate::game) mod merchant_packet_tests {
             rx.try_iter().for_each(drop);
 
             let at = [0.5, 4.0, 0.5];
-            game.player = Some(
-                sunrise_sim::motion::PlayerMotion::new(game.motion, Vec3::new(at[0], at[1], at[2]))
-                    .unwrap(),
-            );
+            game.player = Some(sunrise_sim::motion::PlayerMotion::new(
+                game.motion,
+                Vec3::new(at[0], at[1], at[2]),
+            ));
             bind_local_player(game, 300, 3);
             game.mobs[0].ambient_timer = 0;
             game.mobs[0].random = LegacyRandom::new(42);

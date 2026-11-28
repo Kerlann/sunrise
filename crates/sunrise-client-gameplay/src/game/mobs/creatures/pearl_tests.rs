@@ -73,7 +73,7 @@ fn a_pearl_feels_the_water_its_box_touches() {
         registry,
         facts: &facts,
         fluid_tables: &motion.fluids,
-        attributes: &motion.attributes,
+        attributes: motion.attributes(),
         movement: &motion.blocks,
         collision: &collision,
         suffocation: &suffocation,

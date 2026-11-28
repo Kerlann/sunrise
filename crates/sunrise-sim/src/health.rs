@@ -7,7 +7,9 @@ use crate::{
     motion::{MotionEvent, PlayerMotion},
 };
 pub use mod_api::entity::health::{HurtSource, ShieldBlock, Victim};
-use std::{fs, io, path::Path};
+#[cfg(test)]
+use std::fs;
+use std::{io, path::Path};
 use sunrise_world::{
     attributes::live::LiveAttributes,
     block_landing::LandingDamage,
@@ -171,8 +173,7 @@ mod tests {
         let assets = crate::assets::Assets::load(&root).unwrap();
         let resources = crate::motion::MotionResources::load(&root, &assets).unwrap();
         let mut player =
-            crate::motion::PlayerMotion::new(&resources, sunrise_core::geometry::Vec3::ZERO)
-                .unwrap();
+            crate::motion::PlayerMotion::new(&resources, sunrise_core::geometry::Vec3::ZERO);
         let (health, rules) = (&resources.health, super::HealthRules::default());
         let id = health.damage.id("minecraft:mob_attack").unwrap();
         let mut hit = |amount| {
@@ -220,7 +221,7 @@ mod tests {
         }
         let assets = crate::assets::Assets::load(&root).unwrap();
         let resources = crate::motion::MotionResources::load(&root, &assets).unwrap();
-        let mut player = crate::motion::PlayerMotion::new(&resources, Default::default()).unwrap();
+        let mut player = crate::motion::PlayerMotion::new(&resources, Default::default());
         let hooks = super::DamageHooks {
             post: Some(post),
             ..super::DamageHooks::NONE
@@ -280,8 +281,7 @@ mod tests {
         let assets = crate::assets::Assets::load(&root).unwrap();
         let resources = crate::motion::MotionResources::load(&root, &assets).unwrap();
         let mut player =
-            crate::motion::PlayerMotion::new(&resources, sunrise_core::geometry::Vec3::ZERO)
-                .unwrap();
+            crate::motion::PlayerMotion::new(&resources, sunrise_core::geometry::Vec3::ZERO);
         let health = &resources.health;
         let rules = super::HealthRules {
             difficulty: sunrise_world::food::Difficulty::Easy,
@@ -332,8 +332,7 @@ mod tests {
         let id = health.damage.id("minecraft:mob_attack").unwrap();
         let lost = |difficulty, living| {
             let mut player =
-                crate::motion::PlayerMotion::new(&resources, sunrise_core::geometry::Vec3::ZERO)
-                    .unwrap();
+                crate::motion::PlayerMotion::new(&resources, sunrise_core::geometry::Vec3::ZERO);
             let rules = super::HealthRules {
                 difficulty,
                 ..Default::default()
@@ -376,8 +375,7 @@ mod tests {
         let assets = crate::assets::Assets::load(&root).unwrap();
         let resources = crate::motion::MotionResources::load(&root, &assets).unwrap();
         let mut player =
-            crate::motion::PlayerMotion::new(&resources, sunrise_core::geometry::Vec3::ZERO)
-                .unwrap();
+            crate::motion::PlayerMotion::new(&resources, sunrise_core::geometry::Vec3::ZERO);
         player.set_health(1.0, false).unwrap();
         let (health, rules) = (&resources.health, super::HealthRules::default());
         let id = health.damage.id("minecraft:arrow").unwrap();
@@ -512,7 +510,7 @@ mod tests {
         let (health, rules) = (&resources.health, super::HealthRules::default());
         let id = health.damage.id("minecraft:arrow").unwrap();
         let player = |entity| {
-            let mut p = crate::motion::PlayerMotion::new(&resources, Default::default()).unwrap();
+            let mut p = crate::motion::PlayerMotion::new(&resources, Default::default());
             p.entity_id = entity;
             p
         };
@@ -695,8 +693,7 @@ mod tests {
         let assets = crate::assets::Assets::load(&root).unwrap();
         let resources = crate::motion::MotionResources::load(&root, &assets).unwrap();
         let mut player =
-            crate::motion::PlayerMotion::new(&resources, sunrise_core::geometry::Vec3::ZERO)
-                .unwrap();
+            crate::motion::PlayerMotion::new(&resources, sunrise_core::geometry::Vec3::ZERO);
         let (health, rules) = (&resources.health, super::HealthRules::default());
         let id = health.damage.id("minecraft:out_of_world").unwrap();
         player.client_loaded = false;
@@ -752,8 +749,7 @@ mod tests {
         // stale, and it is the value a recompute would produce.
         let armoured = |resources: &crate::motion::MotionResources| {
             let mut player =
-                crate::motion::PlayerMotion::new(resources, sunrise_core::geometry::Vec3::ZERO)
-                    .unwrap();
+                crate::motion::PlayerMotion::new(resources, sunrise_core::geometry::Vec3::ZERO);
             let mut handles = Vec::new();
             for name in ["minecraft:armor", "minecraft:armor_toughness"] {
                 let key = player.attributes.key(name).unwrap();

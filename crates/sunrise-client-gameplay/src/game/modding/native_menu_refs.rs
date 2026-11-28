@@ -473,13 +473,10 @@ pub mod tests {
             // In the world, past the level load: the inventory is a screen hooks see.
             game.client.remote.as_mut().unwrap().level_load.finish();
             game.client.title.0 = None;
-            game.player = Some(
-                sunrise_sim::motion::PlayerMotion::new(
-                    game.motion,
-                    sunrise_core::geometry::Vec3::new(0.5, 64.0, 0.5),
-                )
-                .unwrap(),
-            );
+            game.player = Some(sunrise_sim::motion::PlayerMotion::new(
+                game.motion,
+                sunrise_core::geometry::Vec3::new(0.5, 64.0, 0.5),
+            ));
             game.client.screen = super::super::Screen::Inventory;
             let menu = game
                 .player_container_menu(game.local_player().unwrap())
@@ -593,8 +590,7 @@ pub mod tests {
         let mut body = sunrise_sim::motion::PlayerMotion::new(
             game.common.motion,
             sunrise_core::geometry::Vec3::ZERO,
-        )
-        .unwrap();
+        );
         body.entity_id = remote.entity_id;
         game.player = Some(body);
         event_loop

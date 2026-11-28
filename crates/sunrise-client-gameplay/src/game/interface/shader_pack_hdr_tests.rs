@@ -8,14 +8,19 @@ use sunrise_client::gfx::ScreenshotRequest;
 use sunrise_gameplay_common::game::test_fixtures::run_fresh_cases_with_env;
 use sunrise_shaders::Tonemap;
 
-const CASE: &str = "SUNRISE_SHADER_PACK_HDR_CASE";
+pub(super) const CASE: &str = "SUNRISE_SHADER_PACK_HDR_CASE";
 /// Sunrise's HDR under its switch, with HDR10 output offscreen.
-const SERVED: [(&str, &str); 2] = [("SUNRISE_HDR_FRAME", "float"), ("SUNRISE_HDR_OUTPUT", "pq")];
+pub(super) const SERVED: [(&str, &str); 2] =
+    [("SUNRISE_HDR_FRAME", "float"), ("SUNRISE_HDR_OUTPUT", "pq")];
 const VERTEX: &str = "#version 120\nvarying vec2 uv;\nvoid main() { gl_Position = ftransform(); uv = gl_MultiTexCoord0.xy; }\n";
 
 /// A pack folder in `root` named `name` with `files` under `shaders/` (each `.fsh` also gets
 /// `VERTEX` as its `.vsh`).
-fn pack(root: &std::path::Path, name: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
+pub(super) fn pack(
+    root: &std::path::Path,
+    name: &str,
+    files: &[(&str, &str)],
+) -> std::path::PathBuf {
     let shaders = root.join(name).join("shaders");
     std::fs::create_dir_all(&shaders).unwrap();
     for (file, text) in files {
@@ -39,7 +44,7 @@ fn loader_frame(game: &mut crate::game::ClientGame<'_>) {
 /// Frames until the pick runs, installed for `wanted` (its dimension and served answer), with
 /// nothing building: a finished build counts only once a frame has taken and installed it.
 /// At most 60 s.
-fn settle(game: &mut crate::game::ClientGame<'_>, wanted: (i32, Option<Tonemap>)) {
+pub(super) fn settle(game: &mut crate::game::ClientGame<'_>, wanted: (i32, Option<Tonemap>)) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     loop {
         loader_frame(game);
@@ -136,7 +141,14 @@ fn a_served_answer_change_drops_the_stale_build_and_loads_once() {
             loader_frame(game);
         }
         built(game);
-        let loads = game.client.renderer.0.as_ref().unwrap().shader_pack_loads();
+        let loads = game
+            .client
+            .renderer
+            .0
+            .as_ref()
+            .unwrap()
+            .test_hooks
+            .pack_loads;
         // The pick now asks for Sunrise's curve; a scan of the packs reads it again.
         std::fs::write(
             &properties,
@@ -148,7 +160,7 @@ fn a_served_answer_change_drops_the_stale_build_and_loads_once() {
         let renderer = game.client.renderer.0.as_ref().unwrap();
         assert_eq!(renderer.pack_hdr, Some(Tonemap::Sunrise));
         assert_eq!(
-            renderer.shader_pack_loads(),
+            renderer.test_hooks.pack_loads,
             loads + 1,
             "one replacement build"
         );
@@ -161,13 +173,23 @@ fn a_served_answer_change_drops_the_stale_build_and_loads_once() {
             game.client.settings.sunrise.shader_pack,
             path.to_str().unwrap()
         );
-        assert_ne!(outcome(&path), Some(false), "not remembered as refused");
+        assert_ne!(
+            outcome(
+                &path,
+                game.client
+                    .settings
+                    .sunrise
+                    .iris_compat_of(path.to_str().unwrap())
+            ),
+            Some(false),
+            "not remembered as refused"
+        );
         // Later frames leave it running, with no other build.
         for _ in 0..5 {
             loader_frame(game);
         }
         let renderer = game.client.renderer.0.as_ref().unwrap();
-        assert_eq!(renderer.shader_pack_loads(), loads + 1);
+        assert_eq!(renderer.test_hooks.pack_loads, loads + 1);
         assert_eq!(renderer.shader_pack_kind(), Some("iris"));
     });
 }
@@ -212,17 +234,40 @@ fn an_unserved_build_is_still_taken_across_a_dimension_change() {
             loader_frame(game);
         }
         built(game);
-        let loads = game.client.renderer.0.as_ref().unwrap().shader_pack_loads();
+        let loads = game
+            .client
+            .renderer
+            .0
+            .as_ref()
+            .unwrap()
+            .test_hooks
+            .pack_loads;
         game.common.dim = super::Dim::Nether;
         loader_frame(game);
-        assert_eq!(outcome(&path), Some(false), "the refusal is remembered");
+        assert_eq!(
+            outcome(
+                &path,
+                game.client
+                    .settings
+                    .sunrise
+                    .iris_compat_of(path.to_str().unwrap())
+            ),
+            Some(false),
+            "the refusal is remembered"
+        );
         assert!(
             game.client.settings.sunrise.shader_pack.is_empty(),
             "the pick is turned off"
         );
         // Then, in the same frame, the loader starts the Nether's build, as it always has.
         assert_eq!(
-            game.client.renderer.0.as_ref().unwrap().shader_pack_loads(),
+            game.client
+                .renderer
+                .0
+                .as_ref()
+                .unwrap()
+                .test_hooks
+                .pack_loads,
             loads + 1
         );
     });
@@ -279,7 +324,13 @@ fn a_load_under_a_kept_frame_names_the_served_answer() {
             game.shader_pack_inputs(camera, camera, 0.0, &sky);
         }
         assert_eq!(
-            game.client.native_shaders.loaded_log,
+            game.client
+                .renderer
+                .0
+                .as_ref()
+                .unwrap()
+                .test_hooks
+                .loaded_log,
             [
                 "shaders.properties asks for Sunrise's HDR as Some(Pack) with the renderer's \
                  macros, but it is served None: the served answer counts"
@@ -300,7 +351,7 @@ fn drawn(game: &mut crate::game::ClientGame<'_>) -> (u16, bool) {
     game.render_with(|renderer, frame| renderer.render(frame, None))
         .unwrap();
     let renderer = game.client.renderer.0.as_mut().unwrap();
-    let curve = renderer.tone_curve_ran();
+    let curve = renderer.test_hooks.tone_curve_ran;
     let pending = renderer.screenshot_result.take().unwrap().unwrap();
     let ([width, _], pixels) = pending
         .hdr_pixels()
@@ -310,7 +361,7 @@ fn drawn(game: &mut crate::game::ClientGame<'_>) -> (u16, bool) {
 }
 
 /// ST 2084's code for `nits`, in 10 bits, as the PNG's 16 bits repeat it.
-fn pq16(nits: f64) -> u16 {
+pub(super) fn pq16(nits: f64) -> u16 {
     let code = (pq_nits_inverse(nits) * 1023.0).round() as u16;
     code << 6 | code >> 4
 }
@@ -329,7 +380,7 @@ fn pq_nits(e: f64) -> f64 {
 /// 60% of the headroom and at least white), the frame storing each pass's result in vanilla's
 /// gamma as a half float. 5.0's own gamma, 1064/512, lies under half a half-float step above
 /// 1064, so either rounding stores it alike.
-fn curved(light: f64, passes: u32) -> f64 {
+pub(super) fn curved(light: f64, passes: u32) -> f64 {
     let (paper, headroom): (f64, f64) = (203.0, 1000.0 / 203.0);
     let signal = |light: f64| pq_nits_inverse(light * paper);
     let knee = (0.6 * headroom).max(1.0);
@@ -435,7 +486,8 @@ fn the_tone_curve_follows_the_pack_that_drew_the_frame() {
             .0
             .as_mut()
             .unwrap()
-            .fail_scaled_targets(true);
+            .test_hooks
+            .fail_scaled_targets = true;
         let (_, fallback_curve) = drawn(game);
         assert!(
             fallback_curve,

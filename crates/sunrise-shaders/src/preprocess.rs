@@ -200,14 +200,7 @@ impl Preprocessed {
 
 /// Runs the preprocessor on the stage file `path` of `pack` with `macros` defined.
 pub fn preprocess(pack: &Pack, path: &str, macros: &Macros) -> Preprocessed {
-    let mut run = Run {
-        pack,
-        macros: macros.for_file(),
-        conditionals: Conditionals::default(),
-        out: Preprocessed::default(),
-        code: Vec::new(),
-        texts: HashMap::new(),
-    };
+    let mut run = Run::new(pack, macros, None);
     run.file(path, 0, Origin::default());
     // Iris 1.11.7 draws a program whose `#if` stays open to its end: a warning, as there.
     if run.conditionals.open() {
@@ -220,6 +213,38 @@ pub fn preprocess(pack: &Pack, path: &str, macros: &Macros) -> Preprocessed {
     run.out
 }
 
+/// Where the stage file `path` of `pack`, preprocessed with `macros`, first evaluates a
+/// conditional directive that looks up one of `names` ([`condition::apply_noting`]), as `file`
+/// and line: the file is read as [`preprocess`] reads it, its includes with them, and the read
+/// stops there. Its code lines are joined and expanded as there too, so what a directive sees
+/// after them is the same (`__LINE__`, the file's expansion work spent); no output is made.
+/// `texts` keeps the files read, without their comments, for the next scans of the same pack
+/// and options.
+pub(crate) fn first_lookup(
+    pack: &Pack,
+    path: &str,
+    macros: &Macros,
+    names: &[&str],
+    texts: &mut Texts,
+) -> Option<(String, u32)> {
+    let mut run = Run::new(pack, macros, Some(Scan { names, found: None }));
+    run.texts = std::mem::take(texts);
+    run.file(path, 0, Origin::default());
+    *texts = std::mem::take(&mut run.texts);
+    let (file, line) = run.scan?.found?;
+    Some((run.out.files[usize::from(file)].clone(), line))
+}
+
+/// The files a run read, by path (`None`: not there); a scan's without their comments.
+pub(crate) type Texts = HashMap<String, Option<std::rc::Rc<str>>>;
+
+/// A run that only looks for a lookup ([`first_lookup`]).
+struct Scan<'n> {
+    names: &'n [&'n str],
+    /// The first directive that looked one up: its file (an index into the run's files) and line.
+    found: Option<(u16, u32)>,
+}
+
 struct Run<'p> {
     pack: &'p Pack,
     macros: Macros,
@@ -227,15 +252,40 @@ struct Run<'p> {
     out: Preprocessed,
     code: Vec<String>,
     /// Files already read: a guarded header is included many times.
-    texts: HashMap<String, Option<String>>,
+    texts: Texts,
+    /// No output is made, and the read stops once a directive looks up a name the scan looks for.
+    scan: Option<Scan<'p>>,
 }
 
-impl Run<'_> {
+impl<'p> Run<'p> {
+    fn new(pack: &'p Pack, macros: &Macros, scan: Option<Scan<'p>>) -> Self {
+        Self {
+            pack,
+            macros: macros.for_file(),
+            conditionals: Conditionals::default(),
+            out: Preprocessed::default(),
+            code: Vec::new(),
+            texts: HashMap::new(),
+            scan,
+        }
+    }
+
+    /// A scan found what it looks for: the read stops.
+    fn done(&self) -> bool {
+        self.scan.as_ref().is_some_and(|s| s.found.is_some())
+    }
+
     fn file(&mut self, path: &str, depth: usize, from: Origin) {
-        let cached = self
-            .texts
-            .entry(path.to_owned())
-            .or_insert_with(|| self.pack.read_text(path));
+        // A scan keeps no comment: its files are kept without them.
+        let scanning = self.scan.is_some();
+        let cached = self.texts.entry(path.to_owned()).or_insert_with(|| {
+            let text = self.pack.read_text(path)?;
+            Some(if scanning {
+                strip_comments(&text).0.into()
+            } else {
+                text.into()
+            })
+        });
         let Some(text) = cached.clone() else {
             return self.diagnose(from, &format!("can't find `{path}`"));
         };
@@ -246,11 +296,18 @@ impl Run<'_> {
                 self.out.files.len() - 1
             }
         } as u16;
-        let (text, comments) = strip_comments(&text);
+        let stripped;
+        let (text, comments): (&str, _) = if scanning {
+            (&text, Vec::new())
+        } else {
+            let (code, comments) = strip_comments(&text);
+            stripped = code;
+            (&stripped, comments)
+        };
         let lines: Vec<&str> = text.split('\n').map(|l| l.trim_end_matches('\r')).collect();
         let mut comments = comments.into_iter().peekable();
         let mut n = 0;
-        while n < lines.len() {
+        while n < lines.len() && !self.done() {
             let first = n;
             let mut line = lines[n].to_owned();
             while line.ends_with('\\') && n + 1 < lines.len() {
@@ -270,6 +327,9 @@ impl Run<'_> {
                 line: first as u32 + 1,
             };
             self.line(&line, origin, path, depth);
+            if self.scan.is_some() {
+                continue;
+            }
             for k in first + 1..n {
                 self.emit(
                     String::new(),
@@ -306,7 +366,25 @@ impl Run<'_> {
         let Some((word, rest)) = split_directive(after) else {
             return self.diagnose(origin, &format!("unknown directive `#{}`", after.trim()));
         };
-        match condition::apply(&mut self.conditionals, word, rest, &self.macros) {
+        let applied = match &mut self.scan {
+            None => condition::apply(&mut self.conditionals, word, rest, &self.macros),
+            Some(scan) => {
+                let mut seen = false;
+                let applied = condition::apply_noting(
+                    &mut self.conditionals,
+                    word,
+                    rest,
+                    &self.macros,
+                    &mut |name| seen |= scan.names.contains(&name),
+                );
+                if seen {
+                    scan.found = Some((origin.file, origin.line));
+                    return;
+                }
+                applied
+            }
+        };
+        match applied {
             // As Iris loads such a pack: the branch is skipped, the program kept.
             Err(e) if e.ends_with("read as false") => {
                 return self.out.warnings.push(Diagnostic { origin, message: e });
@@ -359,6 +437,9 @@ impl Run<'_> {
     }
 
     fn emit(&mut self, code: String, origin: Origin) {
+        if self.scan.is_some() {
+            return;
+        }
         self.code.push(code);
         self.out.lines.push(origin);
     }

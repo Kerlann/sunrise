@@ -525,7 +525,7 @@ pub(crate) mod h255_mob_piston_ground_tests {
                         .unwrap();
                 }
             }
-            game.player = Some(PlayerMotion::new(game.motion, Vec3::new(2.5, 200.0, 2.5)).unwrap());
+            game.player = Some(PlayerMotion::new(game.motion, Vec3::new(2.5, 200.0, 2.5)));
             game.load_ticking_neighbourhood(0, 0);
             game.creative = true;
             assert!(game.run_command("fill 0 199 0 31 199 31 stone"));

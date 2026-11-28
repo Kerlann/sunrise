@@ -26,7 +26,7 @@ fn a_mod_set_look_is_clamped_and_sent_once_by_the_tick() {
                 .unwrap();
             finish_login(game, &mut server);
             game.client.title.0 = None;
-            game.player = Some(PlayerMotion::new(game.motion, Vec3::new(0.5, 64.0, 0.5)).unwrap());
+            game.player = Some(PlayerMotion::new(game.motion, Vec3::new(0.5, 64.0, 0.5)));
             // The baseline: the first sync sends the position.
             game.remote_send_state(0);
             sent_moves(game, &mut server);
@@ -87,7 +87,7 @@ fn a_player_dead_for_twenty_ticks_sends_nothing_until_it_respawns() {
                 .unwrap();
             finish_login(game, &mut server);
             game.client.title.0 = None;
-            game.player = Some(PlayerMotion::new(game.motion, Vec3::new(0.5, 64.0, 0.5)).unwrap());
+            game.player = Some(PlayerMotion::new(game.motion, Vec3::new(0.5, 64.0, 0.5)));
             game.remote_send_state(0);
             sent_packets(game, &mut server);
 

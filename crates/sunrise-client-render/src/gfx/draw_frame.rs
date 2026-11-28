@@ -1107,11 +1107,19 @@ impl Renderer {
             .and_then(|p| p.1.as_ref())
             .map(|p| p.sky_switches())
             .unwrap_or_default();
-        let scaled = self.world_post.prepare(
-            &self.device,
-            [self.config.width, self.config.height],
-            pack_post || fg,
-        );
+        #[cfg(feature = "test-support")]
+        let failed = self.test_hooks.fail_scaled_target(&mut self.world_post);
+        #[cfg(not(feature = "test-support"))]
+        let failed = false;
+        let scaled = if failed {
+            None
+        } else {
+            self.world_post.prepare(
+                &self.device,
+                [self.config.width, self.config.height],
+                pack_post || fg,
+            )
+        };
         let pack_world_runs = pack_post && scaled.is_some();
         let after_pack_features = live_hooks
             && pack_world_runs
@@ -3976,6 +3984,7 @@ impl Renderer {
                 serial,
                 cpu,
                 lifts_world,
+                display: output.display(),
                 frame_graph,
             },
             if pack_world_runs { hooks } else { None },

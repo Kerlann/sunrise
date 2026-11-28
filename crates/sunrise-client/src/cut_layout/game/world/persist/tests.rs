@@ -304,8 +304,10 @@ mod transient_entities {
     fn a_persistence_write_refuses_players_stale_handles_clients_and_setup() {
         with_server(|game| {
             let display = display(game);
-            game.player =
-                Some(sunrise_sim::motion::PlayerMotion::new(game.motion, Vec3::ZERO).unwrap());
+            game.player = Some(sunrise_sim::motion::PlayerMotion::new(
+                game.motion,
+                Vec3::ZERO,
+            ));
             bind_local_player(game, 100, 25);
             let player = game.entity(100).unwrap();
             assert_eq!(player.set_persistent(game, false), Ok(false));

@@ -150,6 +150,8 @@ path = "tests/it/main.rs"
 workspace = true
 
 [dev-dependencies]
+# The prepared-root boundary and its input lists, for unit tests.
+sunrise-core = { path = "../sunrise-core", features = ["test-support"] }
 sunrise-gameplay-common = { path = "../sunrise-gameplay-common", features = ["test-support"] }
 # Forward test support only when the optional client gameplay dependency is active.
 sunrise-client = { path = ".", default-features = false, features = ["test-support"] }

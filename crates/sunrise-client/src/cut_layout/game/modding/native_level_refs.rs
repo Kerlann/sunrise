@@ -2260,7 +2260,7 @@ mod tests {
         use sunrise_sim::mobs::spawn_selection::{Category, SpawnPlayer, SpawnState};
         use sunrise_sim::motion::PlayerMotion;
         with_machines(|game| {
-            game.player = Some(PlayerMotion::new(game.motion, Vec3::ZERO).unwrap());
+            game.player = Some(PlayerMotion::new(game.motion, Vec3::ZERO));
             for cx in 6..=10 {
                 for cz in 6..=10 {
                     let mut chunk = Chunk::empty(cx, cz);

@@ -264,7 +264,7 @@ impl ServerGame<'_> {
         let resistance = self.common.armor_stands[index]
             .live
             .read(
-                &self.common.motion.attributes,
+                self.common.motion.attributes(),
                 "minecraft:armor_stand",
                 "minecraft:knockback_resistance",
                 sunrise_world::attribute_map::ValueKind::Computed,
@@ -416,7 +416,7 @@ impl ServerGame<'_> {
     ) -> f64 {
         self.common
             .motion
-            .attributes
+            .attributes()
             .definition(attribute)
             .map_or(base, |d| d.sanitize(base))
     }

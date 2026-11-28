@@ -1094,13 +1094,10 @@ pub(crate) mod tests {
                     },
                 ))),
             );
-            game.player = Some(
-                sunrise_sim::motion::PlayerMotion::new(
-                    game.motion,
-                    sunrise_core::geometry::Vec3::new(8.5, 64.0, 8.5),
-                )
-                .unwrap(),
-            );
+            game.player = Some(sunrise_sim::motion::PlayerMotion::new(
+                game.motion,
+                sunrise_core::geometry::Vec3::new(8.5, 64.0, 8.5),
+            ));
             // The owner's file as last saved, with an experience total the panicking tick's
             // state (37) differs from.
             game.level.xp_total = 11;

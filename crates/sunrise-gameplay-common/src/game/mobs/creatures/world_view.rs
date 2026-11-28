@@ -48,7 +48,7 @@ pub trait WorldViewExt<'__sg>: crate::game::SideGame<'__sg> {
             registry: self.pack.assets.registry,
             facts: self.res.facts(),
             fluid_tables: &self.motion.fluids,
-            attributes: &self.motion.attributes,
+            attributes: self.motion.attributes(),
             movement: &self.motion.blocks,
             collision: self.collision,
             suffocation: self.level_suffocation(),

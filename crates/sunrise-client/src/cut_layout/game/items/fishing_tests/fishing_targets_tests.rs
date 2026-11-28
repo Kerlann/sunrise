@@ -121,9 +121,10 @@ pub(crate) fn setup_game<'a>(
     ] {
         let _ = game.run_command(command);
     }
-    game.player = Some(
-        sunrise_sim::motion::PlayerMotion::new(game.motion, Vec3::new(0.5, 64.0, 4.5)).unwrap(),
-    );
+    game.player = Some(sunrise_sim::motion::PlayerMotion::new(
+        game.motion,
+        Vec3::new(0.5, 64.0, 4.5),
+    ));
     sunrise_gameplay::game::native_entity_refs::tests::bind_local_player(&mut game, 7, 7);
     game.server.next_entity = game.server.next_entity.max(100);
     game

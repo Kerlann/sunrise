@@ -5823,8 +5823,7 @@ pub(super) mod tests {
         let assets = crate::assets::Assets::load(&root).unwrap();
         let resources = crate::motion::MotionResources::load(&root, &assets).unwrap();
         let mut body =
-            crate::motion::PlayerMotion::new(&resources, sunrise_core::geometry::Vec3::ZERO)
-                .unwrap();
+            crate::motion::PlayerMotion::new(&resources, sunrise_core::geometry::Vec3::ZERO);
         body.ticks_frozen = 140;
         let (mut hub, rx) = hub_with_a_guest();
         {

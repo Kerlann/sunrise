@@ -20,7 +20,7 @@ mod tests {
     }
 
     fn acting_player(game: &mut sunrise_gameplay::game::ServerGame<'_>) {
-        game.player = Some(PlayerMotion::new(game.motion, Vec3::ZERO).unwrap());
+        game.player = Some(PlayerMotion::new(game.motion, Vec3::ZERO));
         sunrise_gameplay::game::native_entity_refs::tests::bind_local_player(game, 7, 7);
     }
 

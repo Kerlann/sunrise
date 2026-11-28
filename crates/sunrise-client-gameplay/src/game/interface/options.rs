@@ -584,6 +584,7 @@ impl crate::game::ClientGame<'_> {
                     self.client.settings.shader_packs =
                         sunrise_client::shader_pack_list::scan(&Self::shader_packs_dir());
                     self.client.native_shaders.pick_hdr.get_mut().forget();
+                    self.refresh_identity();
                 }
                 // Saved; the next frame's `shader_pack_inputs` loads the pick.
                 Event::ShaderPack => self

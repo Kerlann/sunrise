@@ -403,7 +403,7 @@ pub trait BlockEntityDrawContext {
     /// false, appending nothing, when `render_type` is not one of the three texture-taking
     /// built-ins or is stale, when no dynamic texture named by it is live, when a corner or UV
     /// is not finite, when the frame's batch has no room for the quad, or in a first-person hand
-    /// draw. It never panics.
+    /// or arm draw (`render_hand`, `render_arm`). It never panics.
     fn textured_quad(
         &mut self,
         render_type: RenderTypeRef,

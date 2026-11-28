@@ -198,8 +198,7 @@ impl crate::game::ServerGame<'_> {
         let motion = PlayerMotion::new(
             self.common.motion,
             sunrise_core::geometry::Vec3::new(0.0, 0.0, 0.0),
-        )
-        .ok()?;
+        );
         let host = self.server.lan.as_mut()?;
         let conn = host.hub.lan.shared.next_id()?;
         let mut guest = Guest::connectionless(conn, uuid, name.into(), entity_id, [0.0; 3], motion);
@@ -278,6 +277,18 @@ impl crate::game::ServerGame<'_> {
             return Err(PlayerDataRefusal::Client);
         }
         self.player_handle_turn(player, false)
+            .ok_or(PlayerDataRefusal::Stale)
+    }
+
+    /// `native_resident_player_turn` for a living player only: a dead one is `Stale`.
+    pub(in crate::game) fn native_living_player_turn(
+        &self,
+        player: PlayerRef,
+    ) -> Result<PlayerTurn, PlayerDataRefusal> {
+        if !self.common.is_logical_server() {
+            return Err(PlayerDataRefusal::Client);
+        }
+        self.player_handle_turn(player, true)
             .ok_or(PlayerDataRefusal::Stale)
     }
 
@@ -1531,7 +1542,7 @@ impl crate::game::ServerGame<'_> {
     }
 
     /// Resolves `entity` to a mutable live experience orb in the active or any parked server level.
-    fn native_orb_mut(
+    pub(in crate::game) fn native_orb_mut(
         &mut self,
         entity: EntityRef,
     ) -> Result<&mut sunrise_sim::entities::ExperienceOrb, ExperienceOrbWriteError> {

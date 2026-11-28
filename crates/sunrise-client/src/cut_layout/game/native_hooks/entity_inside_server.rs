@@ -792,8 +792,7 @@ pub(crate) mod sweep_tests {
                 );
                 game.world.set(1, 100, 0, stone).unwrap();
                 let mut player =
-                    sunrise_sim::motion::PlayerMotion::new(game.motion, Vec3::new(1.5, 100.0, 0.5))
-                        .unwrap();
+                    sunrise_sim::motion::PlayerMotion::new(game.motion, Vec3::new(1.5, 100.0, 0.5));
                 player.mod_fire_immune = true;
                 let mut guest = guest(1);
                 guest.loaded = true;
@@ -1342,8 +1341,7 @@ pub(crate) mod sweep_tests {
                 let mut player = sunrise_sim::motion::PlayerMotion::new(
                     game.motion,
                     sunrise_core::geometry::Vec3::new(1.5, 100.0, 0.5),
-                )
-                .unwrap();
+                );
                 player
                     .history
                     .add(sunrise_world::entity_move::MovementRecord {
@@ -1373,8 +1371,7 @@ pub(crate) mod sweep_tests {
                 let mut player = sunrise_sim::motion::PlayerMotion::new(
                     game.motion,
                     sunrise_core::geometry::Vec3::new(1.5, 100.0, 0.5),
-                )
-                .unwrap();
+                );
                 player
                     .history
                     .add(sunrise_world::entity_move::MovementRecord {
@@ -1399,8 +1396,7 @@ pub(crate) mod sweep_tests {
                 let mut player = sunrise_sim::motion::PlayerMotion::new(
                     game.motion,
                     sunrise_core::geometry::Vec3::new(1.5, 100.0, 0.5),
-                )
-                .unwrap();
+                );
                 player.fire_ticks = 0;
                 player
                     .history

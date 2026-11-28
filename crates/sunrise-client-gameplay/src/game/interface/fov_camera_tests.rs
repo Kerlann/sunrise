@@ -53,7 +53,7 @@ fn with_spectator(kind: &str, test: impl FnOnce(&mut Game<'_>, &Calls)) {
                 .unwrap()
                 .level_players
                 .insert(31, SPECTATED);
-            let mut player = PlayerMotion::new(game.motion, Vec3::ZERO).unwrap();
+            let mut player = PlayerMotion::new(game.motion, Vec3::ZERO);
             player.flying = true;
             player.speed = 0.4;
             game.common.player = Some(player);
@@ -68,7 +68,7 @@ fn with_spectator(kind: &str, test: impl FnOnce(&mut Game<'_>, &Calls)) {
 fn sync_spectated_movement_speed(game: &mut Game<'_>) {
     let attribute = game
         .motion
-        .attributes
+        .attributes()
         .id("minecraft:movement_speed")
         .unwrap()
         .registry_id();

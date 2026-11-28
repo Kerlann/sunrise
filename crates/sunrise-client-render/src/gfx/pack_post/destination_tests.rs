@@ -324,6 +324,7 @@ impl Fixture {
                 ..fixture_frame(&hud)
             },
             &Default::default(),
+            Default::default(),
             size,
             size,
             &[],

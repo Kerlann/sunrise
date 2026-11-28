@@ -390,7 +390,7 @@ fn hydrate_hit(
     if !entity_keys_match {
         return Ok(None);
     }
-    publish_entity_type_defaults(&cached.resources.core.motion.attributes);
+    publish_entity_type_defaults(cached.resources.core.motion.attributes());
     sunrise_sim::save::level_mods::set_block_namespaces(Some(cached.mod_namespaces.clone()));
     let registry =
         crate::game::api_values::resolve_cached_block_definitions(cached.pack.assets.registry)?;

@@ -6036,7 +6036,7 @@ impl crate::game::ServerGame<'_> {
             Some((
                 self.entity_ticking_area(),
                 world_items!(self),
-                &self.common.motion.attributes,
+                self.common.motion.attributes(),
             ))
         } else {
             None

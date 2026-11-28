@@ -229,7 +229,7 @@ impl Renderer {
         let curve = sunrise_tone_curve(layered, !frame.title, overlay.pack_tonemap);
         #[cfg(feature = "test-support")]
         if overlay.real {
-            self.tone_curve_ran = curve && self.hdr.is_some();
+            self.test_hooks.tone_curve_ran = curve && self.hdr.is_some();
         }
         if curve && let Some(hdr) = &self.hdr {
             hdr.tonemap(encoder, timing.as_mut());

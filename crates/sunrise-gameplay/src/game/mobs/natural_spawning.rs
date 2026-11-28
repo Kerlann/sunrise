@@ -2712,7 +2712,7 @@ mod tests {
     fn spawn_check_world(game: &mut crate::game::ServerGame<'_>, at: Vec3) {
         use std::sync::Arc;
         use sunrise_level::chunk::Chunk;
-        game.player = Some(sunrise_sim::motion::PlayerMotion::new(game.motion, at).unwrap());
+        game.player = Some(sunrise_sim::motion::PlayerMotion::new(game.motion, at));
         for cx in -2..=4 {
             for cz in -2..=4 {
                 let mut chunk = Chunk::empty(cx, cz);

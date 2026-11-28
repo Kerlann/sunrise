@@ -22,7 +22,11 @@ use sunrise_core::{
 use sunrise_world::native_load_context::LoopContext;
 use sunrise_world::{
     attribute_map::ValueKind,
-    attributes::{Modifier, Operation, entity::Catalog, live::LiveAttributes},
+    attributes::{
+        Modifier, Operation,
+        entity::Catalog,
+        live::{LiveAttributes, Supplier},
+    },
     block_collision::BlockCollisionRegistry,
     block_landing::BlockLandingRegistry,
     climbing::{self, ClimbingRegistry, ClimbingWorld},
@@ -140,7 +144,8 @@ pub use surface::{
 };
 
 pub struct MotionResources {
-    pub attributes: Arc<Catalog>,
+    player_supplier: Supplier,
+    initial_player_health: crate::health::PlayerHealth,
     pub blocks: BoundMovementProperties,
     pub climbable: BTreeSet<String>,
     /// The bound BlockTags.CAUSES_SUFFOCATION predicate input.
@@ -182,18 +187,20 @@ impl MotionResources {
             assets,
             facts,
             &sunrise_world::conditions::LoadConditions::vanilla(),
+            Ok,
         )
     }
-    /// Motion's damage definitions use the owning startup load's inventory.
+    /// Load motion tables using the startup inventory for damage definitions.
+    /// Finalize the attribute catalog before binding the player to its defaults.
     pub fn load_with_conditions(
         root: &Path,
         assets: &Assets,
         facts: &crate::blocks::BlockFacts,
         conditions: &sunrise_world::conditions::LoadConditions,
+        finalize_attributes: impl FnOnce(Catalog) -> Result<Catalog>,
     ) -> Result<Self> {
-        let attributes = Arc::new(Catalog::from_json(&sunrise_world::json_file::read(
-            &root.join("attributes.json"),
-        )?)?);
+        let (player_supplier, maximum_health) =
+            player_init::load_player_attributes(root, finalize_attributes)?;
         let file = BlockTableFile::open(&root.join("movement-properties.nbt"), assets.registry)?;
         let properties = MovementProperties::from_table(file.table("movement")?)?;
         let bundle: BTreeMap<String, String> =
@@ -220,11 +227,13 @@ impl MotionResources {
             &tag("minecraft:climbable"),
             &tag("minecraft:can_glide_through"),
         )?;
+        let health = crate::health::HealthResources::load_with_conditions(root, conditions)?;
         Ok(Self {
             landing: crate::landing::load(root, &properties)?,
-            health: crate::health::HealthResources::load_with_conditions(root, conditions)?,
+            initial_player_health: crate::health::PlayerHealth::initial(&health, maximum_health)?,
+            health,
             fluids: FluidResources::new(assets, facts)?,
-            attributes,
+            player_supplier,
             blocks: properties.bind(&MovementTags {
                 fences: tag("minecraft:fences"),
                 walls: tag("minecraft:walls"),
@@ -239,6 +248,9 @@ impl MotionResources {
             combination_step_sound: tag("minecraft:combination_step_sound_blocks"),
             crystal_sound: tag("minecraft:crystal_sound_blocks"),
         })
+    }
+    pub fn attributes(&self) -> &Arc<Catalog> {
+        self.player_supplier.catalog()
     }
 }
 
@@ -697,23 +709,6 @@ impl PlayerMotion {
         self.set_remaining_fire_ticks(self.fire_ticks.max(scaled));
         self.ticks_frozen = 0;
         Ok(())
-    }
-
-    pub fn new(resources: &MotionResources, position: Vec3) -> Result<Self> {
-        // Process-owned identities determine native collection callback order.
-        // Differential fixtures can replay a reference process's identities.
-        let hashes: Vec<_> = resources
-            .attributes
-            .attributes()
-            .enumerate()
-            .map(|(i, _)| i as i32)
-            .collect();
-        let mut identity = 0i32;
-        let next: Box<dyn sunrise_world::attributes::live::Identities> = Box::new(move || {
-            identity = identity.wrapping_add(1);
-            identity
-        });
-        Self::with_attribute_identities(resources, position, &hashes, next)
     }
 
     /// LivingEntity.aiStep: speeds too small to matter stop.
@@ -2202,7 +2197,7 @@ mod tests {
             return;
         };
         let resources = &v.motion;
-        let mut p = PlayerMotion::new(resources, Vec3::ZERO).unwrap();
+        let mut p = PlayerMotion::new(resources, Vec3::ZERO);
         p.set_pose(crate::pose::Pose::FallFlying).unwrap();
         // Gliding: LivingEntity.isVisuallySwimming is false.
         p.fall_flying = true;
@@ -2226,7 +2221,7 @@ mod tests {
             return;
         };
         let resources = &v.motion;
-        let mut p = PlayerMotion::new(resources, Vec3::ZERO).unwrap();
+        let mut p = PlayerMotion::new(resources, Vec3::ZERO);
         p.ground.on_ground = true;
         p.speed = 0.1;
         assert!(p.is_sweep_attack(1.0, false, true));
@@ -2257,7 +2252,7 @@ mod tests {
             return;
         };
         let resources = &v.motion;
-        let mut p = PlayerMotion::new(resources, Vec3::ZERO).unwrap();
+        let mut p = PlayerMotion::new(resources, Vec3::ZERO);
         let boost = "minecraft:effect.health_boost";
         // Health boost I: +4 max health, and the hearts are filled.
         p.set_modifier("minecraft:max_health", boost, 4.0, "add_value", true)
@@ -2331,7 +2326,7 @@ mod tests {
             return;
         };
         let resources = &v.motion;
-        let mut p = PlayerMotion::new(resources, Vec3::ZERO).unwrap();
+        let mut p = PlayerMotion::new(resources, Vec3::ZERO);
         let set_base = |p: &mut PlayerMotion, name: &str, v: f64| {
             let key = p.attributes.key(name).unwrap();
             let h = p.attributes.get_instance(Some(key)).unwrap().unwrap();
@@ -2362,7 +2357,7 @@ mod tests {
         level = crate::save::Level::default();
         level.read_player(&tag);
         level.player_extra = Some(tag);
-        let mut back = PlayerMotion::new(resources, Vec3::ZERO).unwrap();
+        let mut back = PlayerMotion::new(resources, Vec3::ZERO);
         let mut pending = true;
         back.load_saved_state_once(&mut pending, &level).unwrap();
         let base = |p: &mut PlayerMotion, name: &str| {
@@ -2384,7 +2379,7 @@ mod tests {
         let v = crate::test_fixtures::vanilla().expect("prepared resources");
         let (assets, binding, resources) = (&v.assets, &v.collision, &v.motion);
         let mut scene = World::test_scene_with_placements(assets, &[], 1).unwrap();
-        let mut player = PlayerMotion::new(resources, Vec3::new(10.0, 100.0, 10.0)).unwrap();
+        let mut player = PlayerMotion::new(resources, Vec3::new(10.0, 100.0, 10.0));
         player.entity_id = 5;
         player.ground.on_ground = true;
         install();
@@ -2422,7 +2417,7 @@ mod tests {
         };
         let (assets, binding, resources) = (&v.assets, &v.collision, &v.motion);
         let mut scene = World::test_scene_with_placements(assets, &[], 1).unwrap();
-        let mut player = PlayerMotion::new(resources, Vec3::new(10.0, 100.0, 10.0)).unwrap();
+        let mut player = PlayerMotion::new(resources, Vec3::new(10.0, 100.0, 10.0));
         player.auto_jump_enabled = true;
         player.ground.on_ground = true;
         player.move_vector = [0.0, 1.0];
@@ -2461,7 +2456,7 @@ mod tests {
             Vec3::new(10.0, 80.0, 10.0),
             Vec3::new(14.0, 84.0, 14.0),
         )];
-        let mut player = PlayerMotion::new(resources, Vec3::new(12.0, 84.0, 12.0)).unwrap();
+        let mut player = PlayerMotion::new(resources, Vec3::new(12.0, 84.0, 12.0));
         let mut tick = |player: &mut PlayerMotion, keys| {
             MotionWorld {
                 side: crate::motion::dry_side(),
@@ -2548,7 +2543,7 @@ mod tests {
                 previous_progress: 0.0,
             },
         ));
-        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 6.0, 20.5)).unwrap();
+        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 6.0, 20.5));
         for _ in 0..30 {
             MotionWorld {
                 side: crate::motion::dry_side(),
@@ -2624,14 +2619,14 @@ mod tests {
             .unwrap();
         };
         // Standing on the cauldron's floor, in its lava.
-        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.25, 20.5)).unwrap();
+        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.25, 20.5));
         player.ticks_frozen = 40;
         tick(&mut player);
         assert!(player.health.health() < 20.0, "the lava must hurt");
         assert!(player.fire_ticks > 0, "the lava must ignite");
         assert_eq!(player.ticks_frozen, 0);
         // Beside it, nothing.
-        let mut away = PlayerMotion::new(resources, Vec3::new(22.5, 4.0, 20.5)).unwrap();
+        let mut away = PlayerMotion::new(resources, Vec3::new(22.5, 4.0, 20.5));
         tick(&mut away);
         assert_eq!(away.health.health(), 20.0);
         assert!(away.fire_ticks <= 0);
@@ -2680,13 +2675,13 @@ mod tests {
         };
         // Burning, on the cauldron's floor in its water: put out, and the
         // server is asked to lower the water.
-        let mut burning = PlayerMotion::new(resources, Vec3::new(20.5, 4.25, 20.5)).unwrap();
+        let mut burning = PlayerMotion::new(resources, Vec3::new(20.5, 4.25, 20.5));
         burning.fire_ticks = 100;
         tick(&mut burning);
         assert!(burning.fire_ticks <= 0, "the water must put the fire out");
         assert_eq!(asks(&burning), 1);
         // Not burning: nothing to lower.
-        let mut dry = PlayerMotion::new(resources, Vec3::new(20.5, 4.25, 20.5)).unwrap();
+        let mut dry = PlayerMotion::new(resources, Vec3::new(20.5, 4.25, 20.5));
         tick(&mut dry);
         assert_eq!(asks(&dry), 0);
     }
@@ -2707,7 +2702,7 @@ mod tests {
             .unwrap();
         scene.set(20, 4, 20, snow).unwrap();
         let mut run = |fire: i32| {
-            let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5)).unwrap();
+            let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5));
             player.fire_ticks = fire;
             MotionWorld {
                 side: crate::motion::dry_side(),
@@ -2767,7 +2762,7 @@ mod tests {
         scene.set(24, 4, 20, bush).unwrap();
         let land = |scene: &mut World, x: f64, flying: bool| {
             let at = Vec3::new(x, 4.0, 20.5);
-            let mut player = PlayerMotion::new(resources, at).unwrap();
+            let mut player = PlayerMotion::new(resources, at);
             player.fall_distance = 10.0;
             player.flying = flying;
             let from = at.add_vector(Vec3::new(0.0, 1.5, 0.0));
@@ -2833,7 +2828,7 @@ mod tests {
         // The feet end on the stone, inside the column's bottom block.
         let sink = |scene: &mut World, x: f64| {
             let at = Vec3::new(x, 3.0, 20.5);
-            let mut player = PlayerMotion::new(resources, at).unwrap();
+            let mut player = PlayerMotion::new(resources, at);
             player.fall_distance = 10.0;
             let from = Vec3::new(x, 4.5, 20.5);
             let delta = at.subtract(from);
@@ -2901,7 +2896,7 @@ mod tests {
                 .filter(|e| matches!(e, MotionEvent::InsideWitherRose))
                 .count()
         };
-        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5)).unwrap();
+        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5));
         MotionWorld {
             side: crate::motion::dry_side(),
             tag_items: None,
@@ -2940,7 +2935,7 @@ mod tests {
         .unwrap();
         assert_eq!(roses(&player), 1);
         // Two blocks away, nothing.
-        let mut away = PlayerMotion::new(resources, Vec3::new(22.5, 4.0, 20.5)).unwrap();
+        let mut away = PlayerMotion::new(resources, Vec3::new(22.5, 4.0, 20.5));
         MotionWorld {
             side: crate::motion::dry_side(),
             tag_items: None,
@@ -2978,7 +2973,7 @@ mod tests {
         scene.set(20, 4, 20, snow).unwrap();
         let in_snow = Vec3::new(20.5, 4.0, 20.5);
         let clear = Vec3::new(30.5, 4.0, 30.5);
-        let mut player = PlayerMotion::new(resources, in_snow).unwrap();
+        let mut player = PlayerMotion::new(resources, in_snow);
         player.client_side = true;
         let tick = |player: &mut PlayerMotion, scene: &mut World| {
             MotionWorld {
@@ -3055,7 +3050,7 @@ mod tests {
                 .filter(|e| matches!(e, MotionEvent::Snowflake { .. }))
                 .count()
         };
-        let mut player = PlayerMotion::new(resources, at).unwrap();
+        let mut player = PlayerMotion::new(resources, at);
         let mut found = 0;
         for seed in 0..64 {
             scene.random.set_seed(seed);
@@ -3143,7 +3138,7 @@ mod tests {
         let (assets, binding, resources) = (&v.assets, &v.collision, &v.motion);
         let mut scene = World::test_scene_with_placements(assets, &[], 1).unwrap();
         let at = Vec3::new(20.5, 4.0, 20.5);
-        let mut player = PlayerMotion::new(resources, at).unwrap();
+        let mut player = PlayerMotion::new(resources, at);
         let mut travel = |player: &mut PlayerMotion| {
             MotionWorld {
                 side: crate::motion::dry_side(),
@@ -3214,7 +3209,7 @@ mod tests {
                 scene.set(23, y, z, stone).unwrap();
             }
         }
-        let mut player = PlayerMotion::new(resources, Vec3::new(22.0, 4.0, 20.5)).unwrap();
+        let mut player = PlayerMotion::new(resources, Vec3::new(22.0, 4.0, 20.5));
         player.fall_flying = true;
         // Looking along +x (the `getLookAngle` of a flat -90 yaw) keeps the
         // glide on its course through `updateFallFlyingMovement`'s pull.
@@ -3266,7 +3261,7 @@ mod tests {
                 scene.set(23, y, z, stone).unwrap();
             }
         }
-        let mut player = PlayerMotion::new(resources, Vec3::new(22.0, 4.0, 20.5)).unwrap();
+        let mut player = PlayerMotion::new(resources, Vec3::new(22.0, 4.0, 20.5));
         player.client_side = true;
         player.fall_flying = true;
         // Looking along +x keeps the glide on its course into the wall.
@@ -3326,7 +3321,7 @@ mod tests {
         // On the scene's floor, clear of its stepped pyramid (|x|, |z| <= 10 from y = 4).
         let mut scene = World::test_scene_with_placements(assets, &[], 2).unwrap();
         let start = Vec3::new(20.5, 4.0, 20.5);
-        let mut player = PlayerMotion::new(resources, start).unwrap();
+        let mut player = PlayerMotion::new(resources, start);
         player.client_side = true;
         player.ground.on_ground = true;
         let mut world = MotionWorld {
@@ -3367,7 +3362,7 @@ mod tests {
         let run = |steps| {
             let mut scene = World::test_scene_with_placements(assets, &[], 2).unwrap();
             let start = Vec3::new(20.5, 12.0, 20.5);
-            let mut player = PlayerMotion::new(resources, start).unwrap();
+            let mut player = PlayerMotion::new(resources, start);
             player.spectator = true;
             player.local_spectator = true;
             player.may_fly = true;
@@ -3421,7 +3416,7 @@ mod tests {
                     }
                 }
             }
-            let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 12.0, 20.5)).unwrap();
+            let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 12.0, 20.5));
             player.spectator = spectator;
             player.local_spectator = spectator;
             player.may_fly = spectator;
@@ -3483,7 +3478,7 @@ mod tests {
         // resident player and for LAN/dedicated guests.
         for spectator in [false, true] {
             for food in [0, 1, 20] {
-                let mut player = PlayerMotion::new(resources, Vec3::ZERO).unwrap();
+                let mut player = PlayerMotion::new(resources, Vec3::ZERO);
                 player.health.food.food = food;
                 player.health.food.saturation = 0.0;
                 player.health.food.exhaustion = 0.0;
@@ -3568,7 +3563,7 @@ mod tests {
         };
         let resources = &v.motion;
         for name in ["on_fire", "in_fire", "lava"] {
-            let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5)).unwrap();
+            let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5));
             let source = resources
                 .health
                 .damage
@@ -3626,7 +3621,7 @@ mod tests {
                     .any(|e| matches!(e, MotionEvent::HurtSound(_)))
             );
         }
-        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5)).unwrap();
+        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5));
         let source = resources.health.damage.id("minecraft:mob_attack").unwrap();
         assert!(
             player
@@ -3650,7 +3645,7 @@ mod tests {
             1
         );
         // A fatal hit plays the death sound rather than a hurt sound (#4570).
-        let mut dying = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5)).unwrap();
+        let mut dying = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5));
         assert!(
             dying
                 .hurt(level, &resources.health, Default::default(), source, 100.0)
@@ -3666,7 +3661,7 @@ mod tests {
         // A shield that takes the whole arrow: onBlocked's sound, no damage
         // event, so the player hears no hurt sound.
         use sunrise_world::blocking_rules::{BlockingRules, DamageReduction, ItemDamageFunction};
-        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5)).unwrap();
+        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5));
         let source = resources.health.damage.id("minecraft:arrow").unwrap();
         let shield = crate::health::Blocking {
             rules: BlockingRules {
@@ -3741,7 +3736,7 @@ mod tests {
             player.health.hurt_animation_time, 9,
             "blocking must not erase or restart an existing animation"
         );
-        let mut starving = PlayerMotion::new(resources, Vec3::ZERO).unwrap();
+        let mut starving = PlayerMotion::new(resources, Vec3::ZERO);
         starving.health.food.food = 0;
         starving.health.food.timer = 79;
         starving
@@ -3790,7 +3785,7 @@ mod tests {
         ];
         for (pitch, yaw, want) in cases {
             let mut scene = World::test_scene_with_placements(assets, &[], 2).unwrap();
-            let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 40.0, 20.5)).unwrap();
+            let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 40.0, 20.5));
             player.glider = true;
             player.fall_flying = true;
             player.pitch = pitch;
@@ -3830,7 +3825,7 @@ mod tests {
         // Entity.checkFallDistanceAccumulation: capped above -0.5 a tick, not below.
         for (dy, capped) in [(-0.3, true), (-0.49, true), (-0.8, false)] {
             let mut scene = World::test_scene_with_placements(assets, &[], 2).unwrap();
-            let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 20.0, 20.5)).unwrap();
+            let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 20.0, 20.5));
             player.glider = true;
             player.fall_flying = true;
             player.velocity = Vec3::new(0.0, dy, 0.6);
@@ -3886,7 +3881,7 @@ mod tests {
                     }
                 }
             }
-            let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 20.0, 20.5)).unwrap();
+            let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 20.0, 20.5));
             player.fall_distance = 30.0;
             let mut w = MotionWorld {
                 side: crate::motion::dry_side(),
@@ -3925,7 +3920,7 @@ mod tests {
         let (assets, binding, resources) = (&v.assets, &v.collision, &v.motion);
         for spectator in [false, true] {
             let mut scene = World::test_scene_with_placements(assets, &[], 2).unwrap();
-            let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 20.0, 20.5)).unwrap();
+            let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 20.0, 20.5));
             player.spectator = spectator;
             player.local_spectator = spectator;
             let mut w = MotionWorld {
@@ -3959,7 +3954,7 @@ mod tests {
         let (assets, binding, resources) = (&v.assets, &v.collision, &v.motion);
         for client_side in [false, true] {
             let mut scene = World::test_scene_with_placements(assets, &[], 2).unwrap();
-            let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 20.0, 20.5)).unwrap();
+            let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 20.0, 20.5));
             player.client_side = client_side;
             player.fall_distance = 30.0;
             let mut w = MotionWorld {
@@ -4014,7 +4009,7 @@ mod tests {
         let (assets, binding, resources) = (&v.assets, &v.collision, &v.motion);
         for slow_falling in [false, true] {
             let mut scene = World::test_scene_with_placements(assets, &[], 2).unwrap();
-            let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 9.0, 20.5)).unwrap();
+            let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 9.0, 20.5));
             player.fall_distance = 30.0;
             player.status.slow_falling = slow_falling;
             let mut w = MotionWorld {
@@ -4054,7 +4049,7 @@ mod tests {
         };
         let (assets, binding, resources) = (&v.assets, &v.collision, &v.motion);
         let mut scene = World::test_scene_with_placements(assets, &[], 2).unwrap();
-        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 10.0, 20.5)).unwrap();
+        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 10.0, 20.5));
         player.auto_spin_attack_ticks = 2;
         player.auto_spin_attack_dmg = 8.0;
         let mut w = MotionWorld {
@@ -4100,7 +4095,7 @@ mod tests {
         };
         let (assets, binding, resources) = (&v.assets, &v.collision, &v.motion);
         let mut scene = World::test_scene_with_placements(assets, &[], 2).unwrap();
-        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 10.0, 20.5)).unwrap();
+        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 10.0, 20.5));
         let mut w = MotionWorld {
             side: crate::motion::dry_side(),
             tag_items: None,
@@ -4149,7 +4144,7 @@ mod tests {
         };
         let (assets, binding, resources) = (&v.assets, &v.collision, &v.motion);
         let mut scene = World::test_scene_with_placements(assets, &[], 2).unwrap();
-        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 10.0, 20.5)).unwrap();
+        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 10.0, 20.5));
         player.sprinting = true;
         player.swimming = true;
         player.set_pose(crate::pose::Pose::Swimming).unwrap();
@@ -4190,7 +4185,7 @@ mod tests {
         let mut collided = Vec::new();
         for yaw in [0.0, 180.0] {
             // A hair from the wall at +z: forward at yaw 0 runs into it.
-            let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.69)).unwrap();
+            let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.69));
             player.yaw = yaw;
             let mut w = MotionWorld {
                 side: crate::motion::dry_side(),
@@ -4228,7 +4223,7 @@ mod tests {
         }
         let mut fell = Vec::new();
         for y in [6.2, 10.2] {
-            let mut player = PlayerMotion::new(resources, Vec3::new(20.5, y, 20.5)).unwrap();
+            let mut player = PlayerMotion::new(resources, Vec3::new(20.5, y, 20.5));
             player.fall_distance = 3.0;
             let mut w = MotionWorld {
                 side: crate::motion::dry_side(),
@@ -4264,7 +4259,7 @@ mod tests {
         let mut scene = World::test_scene_with_placements(assets, &[], 2).unwrap();
         // Feet inside the floor block, as on a cushion seat (y - 0.35): away
         // from the pyramid the scene's floor tops out at y = 4.
-        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 3.65, 20.5)).unwrap();
+        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 3.65, 20.5));
         player.swimming = true;
         player.set_pose(crate::pose::Pose::Swimming).unwrap();
         let mut w = MotionWorld {
@@ -4295,7 +4290,7 @@ mod tests {
             return;
         };
         let resources = &v.motion;
-        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 10.0, 20.5)).unwrap();
+        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 10.0, 20.5));
         let walking = player.attribute("minecraft:movement_speed").unwrap();
         let mut copy = player.clone();
         copy.set_sprinting(true).unwrap();
@@ -4338,7 +4333,7 @@ mod tests {
         for y in 4..=6 {
             scene.set(20, y, 20, water).unwrap();
         }
-        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5)).unwrap();
+        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5));
         let mut w = MotionWorld {
             side: crate::motion::dry_side(),
             tag_items: None,
@@ -4383,7 +4378,7 @@ mod tests {
         let mut scene = World::test_scene_with_placements(assets, &[], 2).unwrap();
         let ahead = Aabb::new(Vec3::new(20.2, 9.0, 21.5), Vec3::new(20.8, 11.0, 22.1));
         for target in [None, Some(ahead)] {
-            let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 10.0, 20.5)).unwrap();
+            let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 10.0, 20.5));
             player.auto_spin_attack_ticks = 20;
             player.auto_spin_attack_dmg = 8.0;
             player.velocity = Vec3::new(0.0, 0.0, 1.0);
@@ -4425,7 +4420,7 @@ mod tests {
         };
         let (assets, binding, resources) = (&v.assets, &v.collision, &v.motion);
         let mut scene = World::test_scene_with_placements(assets, &[], 2).unwrap();
-        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.2, 20.5)).unwrap();
+        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.2, 20.5));
         let mut w = MotionWorld {
             side: crate::motion::dry_side(),
             tag_items: None,
@@ -4475,7 +4470,7 @@ mod tests {
         };
         let (assets, binding, resources) = (&v.assets, &v.collision, &v.motion);
         let mut scene = World::test_scene_with_placements(assets, &[], 2).unwrap();
-        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.2, 20.5)).unwrap();
+        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.2, 20.5));
         let mut w = MotionWorld {
             side: crate::motion::dry_side(),
             tag_items: None,
@@ -4537,7 +4532,7 @@ mod tests {
         };
         let (assets, binding, resources) = (&v.assets, &v.collision, &v.motion);
         let mut scene = World::test_scene_with_placements(assets, &[], 3).unwrap();
-        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5)).unwrap();
+        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5));
         let water = assets.registry.default_state("minecraft:water").unwrap();
         for x in 19..=21 {
             for y in 3..=7 {
@@ -4764,7 +4759,7 @@ mod tests {
             ),
             (13.0, 11, 2.25)
         );
-        let mut respawn = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5)).unwrap();
+        let mut respawn = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5));
         respawn.load_saved_state_once(&mut pending, &level).unwrap();
         assert_eq!((respawn.fire_ticks, respawn.air), (-20, 300));
         assert!(!respawn.flying);
@@ -4799,7 +4794,7 @@ mod tests {
         for y in 4..=6 {
             scene.set(20, y, 20, water).unwrap();
         }
-        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5)).unwrap();
+        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5));
         let mut w = MotionWorld {
             side: crate::motion::dry_side(),
             tag_items: None,
@@ -4898,7 +4893,7 @@ mod tests {
             let mut scene = World::test_scene_with_placements(assets, &[], 3).unwrap();
             let fluid = assets.registry.default_state(name).unwrap();
             scene.set(20, 4, 20, fluid).unwrap();
-            let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5)).unwrap();
+            let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5));
             player.fire_ticks = 160;
             player.fall_distance = 8.0;
             let mut w = MotionWorld {
@@ -4953,7 +4948,7 @@ mod tests {
         let water = assets.registry.default_state("minecraft:water").unwrap();
         scene.set(20, 4, 20, water).unwrap();
         scene.set(20, 5, 20, water).unwrap();
-        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5)).unwrap();
+        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5));
         let mut w = MotionWorld {
             side: crate::motion::dry_side(),
             tag_items: None,
@@ -4997,7 +4992,7 @@ mod tests {
         let water = assets.registry.default_state("minecraft:water").unwrap();
         scene.set(20, 4, 20, water).unwrap();
         scene.set(20, 5, 20, water).unwrap();
-        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5)).unwrap();
+        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5));
         let mut w = MotionWorld {
             side: crate::motion::dry_side(),
             tag_items: None,
@@ -5082,7 +5077,7 @@ mod tests {
                     .set(x, 4, 20, assets.registry.id(&state).unwrap())
                     .unwrap();
             }
-            let mut player = PlayerMotion::new(resources, Vec3::new(21.0, 4.0, 20.5)).unwrap();
+            let mut player = PlayerMotion::new(resources, Vec3::new(21.0, 4.0, 20.5));
             player.ground.on_ground = true;
             let mut w = MotionWorld {
                 side: crate::motion::dry_side(),
@@ -5139,7 +5134,7 @@ mod tests {
             (21.0, depth, depth),
             (25.5, 0.0, 0.0),
         ] {
-            let mut player = PlayerMotion::new(resources, Vec3::new(x, 4.0, 20.5)).unwrap();
+            let mut player = PlayerMotion::new(resources, Vec3::new(x, 4.0, 20.5));
             player.ground.on_ground = true;
             let mut w = MotionWorld {
                 side: crate::motion::dry_side(),
@@ -5175,7 +5170,7 @@ mod tests {
         let assets = &v.assets;
         let mut scene = World::test_scene_with_placements(assets, &[], 3).unwrap();
         let (binding, resources) = (&v.collision, &v.motion);
-        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5)).unwrap();
+        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5));
         let mut steps = |player: &mut PlayerMotion, keys: crate::sprint::Keys, ticks: usize| {
             let mut count = 0;
             for _ in 0..ticks {
@@ -5250,7 +5245,7 @@ mod tests {
                     }
                 }
             }
-            let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5)).unwrap();
+            let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5));
             let mut w = MotionWorld {
                 side: crate::motion::dry_side(),
                 tag_items: None,
@@ -5301,7 +5296,7 @@ mod tests {
         };
         let (assets, binding, resources) = (&v.assets, &v.collision, &v.motion);
         let mut scene = World::test_scene_with_placements(assets, &[], 3).unwrap();
-        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5)).unwrap();
+        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5));
         let mut w = MotionWorld {
             side: crate::motion::dry_side(),
             tag_items: None,
@@ -5359,7 +5354,7 @@ mod tests {
         };
         let (assets, binding, resources) = (&v.assets, &v.collision, &v.motion);
         let mut scene = World::test_scene_with_placements(assets, &[], 3).unwrap();
-        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5)).unwrap();
+        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5));
         let mut w = MotionWorld {
             side: crate::motion::dry_side(),
             tag_items: None,
@@ -5411,7 +5406,7 @@ mod tests {
         };
         let (assets, binding, resources) = (&v.assets, &v.collision, &v.motion);
         let mut scene = World::test_scene_with_placements(assets, &[], 3).unwrap();
-        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5)).unwrap();
+        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5));
         let mut w = MotionWorld {
             side: crate::motion::dry_side(),
             tag_items: None,
@@ -5458,7 +5453,7 @@ mod tests {
         let (assets, binding, resources) = (&v.assets, &v.collision, &v.motion);
         let mut scene = World::test_scene_with_placements(assets, &[], 3).unwrap();
         let start = Vec3::new(20.5, 20.0, 20.5);
-        let mut player = PlayerMotion::new(resources, start).unwrap();
+        let mut player = PlayerMotion::new(resources, start);
         player.may_fly = false;
         player.flying = true;
         player.flying_speed = 0.0;
@@ -5514,7 +5509,7 @@ mod tests {
         };
         let (assets, binding, resources) = (&v.assets, &v.collision, &v.motion);
         let mut scene = World::test_scene_with_placements(assets, &[], 3).unwrap();
-        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 10.0, 20.5)).unwrap();
+        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 10.0, 20.5));
         let mut w = MotionWorld {
             side: crate::motion::dry_side(),
             tag_items: None,
@@ -5575,7 +5570,7 @@ mod tests {
         };
         let (assets, binding, resources) = (&v.assets, &v.collision, &v.motion);
         let mut scene = World::test_scene_with_placements(assets, &[], 2).unwrap();
-        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 100.0, 20.5)).unwrap();
+        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 100.0, 20.5));
         player.glider = true;
         player.fall_flying = true;
         let mut w = MotionWorld {
@@ -5619,7 +5614,7 @@ mod tests {
             // Far outside the test scene's chunks.
             let at = Vec3::new(10_000.5, 20.0, 10_000.5);
             assert!(!scene.chunks.contains_key(&(10_000 >> 4, 10_000 >> 4)));
-            let mut player = PlayerMotion::new(resources, at).unwrap();
+            let mut player = PlayerMotion::new(resources, at);
             player.client_side = client_side;
             MotionWorld {
                 side: crate::motion::dry_side(),
@@ -5655,7 +5650,7 @@ mod tests {
         };
         let (assets, binding, resources) = (&v.assets, &v.collision, &v.motion);
         let mut scene = World::test_scene_with_placements(assets, &[], 1).unwrap();
-        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5)).unwrap();
+        let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.5));
         player.client_side = true;
         let speed = player
             .attributes
@@ -5742,7 +5737,7 @@ mod tests {
             (false, true, false, false),
         ] {
             let mut scene = World::test_scene_with_placements(assets, &[], 2).unwrap();
-            let mut player = PlayerMotion::new(resources, Vec3::new(0.5, 64.0, 0.5)).unwrap();
+            let mut player = PlayerMotion::new(resources, Vec3::new(0.5, 64.0, 0.5));
             player.client_side = client_side;
             player.flying = flying;
             player.shift_key_down = sneaking;
@@ -5784,7 +5779,7 @@ mod tests {
         let mut kept = |floor: &str, y: f64, flying: bool, gliding: bool| {
             let state = assets.registry.default_state(floor).unwrap();
             scene.set(20, -61, 20, state).unwrap();
-            let mut player = PlayerMotion::new(resources, Vec3::new(20.5, y, 20.5)).unwrap();
+            let mut player = PlayerMotion::new(resources, Vec3::new(20.5, y, 20.5));
             (player.may_fly, player.flying) = (flying, flying);
             (player.glider, player.fall_flying) = (gliding, gliding);
             player.velocity = Vec3::new(0.1, 0.0, 0.0);

@@ -2141,7 +2141,6 @@ sunrise-client cut_layout::game::server_side::player_residency_tests::dragon_par
 sunrise-client cut_layout::game::server_side::player_residency_tests::owned_hooks_keep_their_own_uuid_and_source_across_nested_actor_loans lib daily resources
 sunrise-client cut_layout::game::server_side::player_residency_tests::parked_mob_attachment_values_survive_other_level_cleanup lib daily resources
 sunrise-client cut_layout::game::server_side::player_residency_tests::production_login_and_local_body_constructor_admit_profile_and_real_loan lib daily resources
-sunrise-client cut_layout::game::server_side::player_residency_tests::refused_body_construction_does_not_begin_guest_or_hook_loans lib daily resources
 sunrise-client cut_layout::game::server_side::player_save_projection_tests::actual_player_save_tracks_mutable_body_and_keeps_guest_context lib daily resources
 sunrise-client cut_layout::game::portal_ticking_tests::mobs_past_the_simulation_distance_neither_enter_portals_nor_cool_down lib daily resources
 sunrise-client cut_layout::game::server_side::potent_sulfur::pass_tests::nausea_listener_moving_a_mob_invalidates_the_pass_grid lib daily resources

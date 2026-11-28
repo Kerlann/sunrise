@@ -1120,13 +1120,10 @@ mod fire_radius_tests {
                 game.ui
                     .rules
                     .set("fire_spread_radius_around_player", Value::Int(radius));
-                game.player = Some(
-                    sunrise_sim::motion::PlayerMotion::new(
-                        game.motion,
-                        Vec3::new(player_x, 65.0, 8.5),
-                    )
-                    .unwrap(),
-                );
+                game.player = Some(sunrise_sim::motion::PlayerMotion::new(
+                    game.motion,
+                    Vec3::new(player_x, 65.0, 8.5),
+                ));
                 let random = game.world.random.clone();
                 let mut bolt_random = LegacyRandom::new(0);
                 let set = game.bolt_fire(bolt, 4, &mut bolt_random);

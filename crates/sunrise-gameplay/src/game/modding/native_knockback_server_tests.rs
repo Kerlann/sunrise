@@ -74,7 +74,7 @@ fn heard(test: impl FnOnce(&mut ServerGame<'_>, &Mutex<Heard>)) -> Heard {
 
 fn player_with_sword(game: &mut ServerGame<'_>) {
     use sunrise_sim::motion::PlayerMotion;
-    let mut player = PlayerMotion::new(game.motion, Vec3::ZERO).unwrap();
+    let mut player = PlayerMotion::new(game.motion, Vec3::ZERO);
     player.entity_id = 7;
     game.player = Some(player);
     game.common.inventory[game.common.selected] = Some(ItemStack::new("minecraft:iron_sword", 1));

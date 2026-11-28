@@ -673,7 +673,7 @@ pub(crate) mod tests {
             ));
             std::fs::create_dir_all(&scratch).unwrap();
             game.server.world_root = scratch.clone();
-            game.player = Some(PlayerMotion::new(game.motion, Vec3::new(4.5, 62.0, 4.5)).unwrap());
+            game.player = Some(PlayerMotion::new(game.motion, Vec3::new(4.5, 62.0, 4.5)));
             game.player.as_mut().unwrap().ground.on_ground = true;
             game.creative = false;
             game.build_registries();
@@ -1769,8 +1769,7 @@ pub(crate) mod tests {
             let motion = sunrise_sim::motion::PlayerMotion::new(
                 game.motion,
                 sunrise_core::geometry::Vec3::new(3.0, 64.0, 5.0),
-            )
-            .unwrap();
+            );
             game.server
                 .lan
                 .as_mut()
@@ -2178,7 +2177,7 @@ pub(crate) mod tests {
                         .loop_context(sunrise_world::native_load_context::LoopSide::Server, []),
                 ),
             );
-            let motion = PlayerMotion::new(game.motion, Vec3::ZERO).unwrap();
+            let motion = PlayerMotion::new(game.motion, Vec3::ZERO);
             let fake = Guest::connectionless(fake_id, 2, "fake".into(), 2, [0.0; 3], motion);
             assert!(fake.placed && fake.motion.is_some());
             assert!(fake.loaded && fake.client_loaded());
@@ -4855,8 +4854,7 @@ pub(crate) mod tests {
             remote.logged_in = true;
             remote.entity_id = 7;
             remote.profile = 42;
-            let mut local =
-                sunrise_sim::motion::PlayerMotion::new(game.motion, Vec3::ZERO).unwrap();
+            let mut local = sunrise_sim::motion::PlayerMotion::new(game.motion, Vec3::ZERO);
             local.entity_id = 7;
             game.player = Some(local);
             game.spawn_entity(15, "minecraft:pig", [2.0, 0.0, 0.0], [0.0; 3]);
@@ -4941,8 +4939,7 @@ pub(crate) mod tests {
                 .unwrap()
                 .id("minecraft:player")
                 .unwrap();
-            let mut local =
-                sunrise_sim::motion::PlayerMotion::new(game.motion, Vec3::ZERO).unwrap();
+            let mut local = sunrise_sim::motion::PlayerMotion::new(game.motion, Vec3::ZERO);
             local.entity_id = 7;
             game.player = Some(local);
             game.spawn_entity(15, "minecraft:pig", [2.0, 0.0, 0.0], [0.0; 3]);
@@ -5026,8 +5023,7 @@ pub(crate) mod tests {
             remote.logged_in = true;
             remote.entity_id = 7;
             remote.profile = 42;
-            let mut local =
-                sunrise_sim::motion::PlayerMotion::new(game.motion, Vec3::ZERO).unwrap();
+            let mut local = sunrise_sim::motion::PlayerMotion::new(game.motion, Vec3::ZERO);
             local.entity_id = 7;
             game.player = Some(local);
             game.spawn_entity(15, "minecraft:pig", [2.0, 0.0, 0.0], [0.0; 3]);

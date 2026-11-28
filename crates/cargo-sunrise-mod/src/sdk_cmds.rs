@@ -805,6 +805,7 @@ fn check_mod_with_fetch(
             false,
             sunrise_native_build::contract::TargetName::Client,
             true,
+            sunrise_native_build::BuildDiagnostics::default(),
         )
         .map(|_| ())
     } else {
