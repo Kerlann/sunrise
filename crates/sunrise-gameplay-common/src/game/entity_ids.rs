@@ -1,16 +1,16 @@
-//! Entity ids are `u32` storage bits; the wire and NBT carry them as `i32`, so
-//! an id with the high bit set is stored negative and must be converted back
-//! through its bits, never by a checked narrowing (#6335, #6336).
-//!
-//! Signed fields such as `HurtSource::causing` and a guest's `entity_id` carry
-//! those storage bits; `EntityRef` and `LivingRef` expose the `u32` id.
+//! `EntityRef` and `LivingRef` expose an unsigned `u32` id. The wire, NBT, and
+//! signed engine fields such as a guest's `entity_id` carry the same bits as
+//! `i32`. An id with the high bit set is negative in its signed representation,
+//! not out of range (#6335, #6336).
 
-/// The `i32` an entity id is stored as on the wire and in NBT.
+/// Encode an unsigned entity id for the wire or a signed storage field,
+/// preserving all 32 bits.
 pub const fn wire_entity_id(id: u32) -> i32 {
     id as i32
 }
 
-/// The `u32` storage id a wire or API `i32` carries, high bit included.
+/// Decode a wire or stored `i32` id to the unsigned id used by `EntityRef`,
+/// preserving all 32 bits, including the sign bit.
 pub const fn entity_id_bits(id: i32) -> u32 {
     id as u32
 }
