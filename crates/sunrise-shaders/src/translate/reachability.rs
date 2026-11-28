@@ -184,15 +184,17 @@ fn prune(code: &str) -> Option<String> {
 /// rewrite at its pack file and line.
 pub(super) fn prepare(pp: &Preprocessed) -> Result<Option<Preprocessed>, Error> {
     let pruned = prune(pp.code())
-        .map(|code| pp.with_code(code))
+        .map(|code| pp.with_code("reachability pruning", code))
         .transpose()?;
     let pp = pruned.as_ref().unwrap_or(pp);
     let named = anonymous_structs::name(pp.code());
     let code = named.as_deref().unwrap_or(pp.code());
-    let flat = interface_blocks::flatten(code)
-        .or(named)
-        .map(|code| pp.with_code(code))
-        .transpose()?;
+    let flat = match interface_blocks::flatten(code) {
+        Some(code) => Some(pp.with_code("interface block flattening", code)?),
+        None => named
+            .map(|code| pp.with_code("anonymous struct naming", code))
+            .transpose()?,
+    };
     let split = atomic_vectors::rewrite(flat.as_ref().unwrap_or(pp))?;
     Ok(split.or(flat).or(pruned))
 }

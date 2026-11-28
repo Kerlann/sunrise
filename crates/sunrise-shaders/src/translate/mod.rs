@@ -1028,7 +1028,7 @@ pub(crate) fn translate_compute_with(
     indirect: Option<crate::post::Indirect>,
 ) -> Result<ComputeProgram, Vec<Error>> {
     let named = anonymous_structs::name(compute.code())
-        .map(|code| compute.with_code(code))
+        .map(|code| compute.with_code("anonymous struct naming", code))
         .transpose()
         .map_err(|error| vec![error])?;
     let compute = named.as_ref().unwrap_or(compute);

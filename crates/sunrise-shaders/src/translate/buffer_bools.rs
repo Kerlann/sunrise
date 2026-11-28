@@ -321,7 +321,7 @@ pub(super) fn rewrite(pp: &Preprocessed) -> (Option<Preprocessed>, Vec<Error>) {
             code.push_str(text);
         }
     }
-    match pp.with_code(code) {
+    match pp.with_code("buffer bool rewrite", code) {
         Ok(out) => (Some(out), errors),
         Err(error) => (None, vec![error]),
     }

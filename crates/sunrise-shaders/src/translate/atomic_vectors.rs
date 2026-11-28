@@ -578,7 +578,8 @@ pub(super) fn rewrite(pp: &Preprocessed) -> Result<Option<Preprocessed>, Error> 
         }
         i = end + 1;
     }
-    pp.with_code(out.concat()).map(Some)
+    pp.with_code("atomic vector rewrite", out.concat())
+        .map(Some)
 }
 
 /// `hz_get_<key>` and `hz_set_<key>`: a whole vector of `split` (of an array: the `k`th),

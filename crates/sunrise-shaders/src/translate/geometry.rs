@@ -485,8 +485,28 @@ fn combine(
     main.push_str(&result);
     main.push_str("}\n");
 
-    // Map the generated lines to the stage without an authored line number. Map each rewritten
-    // stage separately: a dropped vertex line must not cancel an added geometry line.
+    let gs_text = gs_text.concat();
+    let vs_text = vs_text.concat();
+    let out = join_stages(vertex, &vs_text, geometry, &gs_text, &head, &emit, &main)?;
+    // A strip of n vertices is n - 2 triangles: at most `max_vertices - 2`, whichever of the
+    // stage's paths runs.
+    let triangles = max_vertices.saturating_sub(2).max(1);
+    Ok((out, triangles))
+}
+
+/// Joins the rewritten geometry and vertex stages with our generated glue, checking each stage's
+/// line count against its own source map so a dropped line in one cannot cancel an added line in
+/// the other.
+fn join_stages(
+    vertex: &Preprocessed,
+    vs_text: &str,
+    geometry: &Preprocessed,
+    gs_text: &str,
+    head: &str,
+    emit: &str,
+    main: &str,
+) -> Result<Preprocessed, Vec<Error>> {
+    let error = |message: String| vec![Error::new(geometry.file(), 0, message)];
     let (mut code, mut lines, mut files) = (String::new(), Vec::new(), Vec::new());
     let ours = |code: &mut String, lines: &mut Vec<crate::Origin>, text: &str| {
         for l in text.lines() {
@@ -499,8 +519,7 @@ fn combine(
         ("geometry", geometry, gs_text, head),
         ("vertex", vertex, vs_text, emit),
     ] {
-        let text = text.concat();
-        check_line_count(&text, stage.lines().len()).map_err(|message| {
+        check_line_count(text, stage.lines().len()).map_err(|message| {
             vec![Error::new(
                 stage.file(),
                 0,
@@ -509,23 +528,20 @@ fn combine(
         })?;
         let offset = files.len();
         files.extend_from_slice(stage.files());
-        ours(&mut code, &mut lines, &before);
-        code.push_str(&text);
+        ours(&mut code, &mut lines, before);
+        code.push_str(text);
         code.push('\n');
         lines.extend(stage.lines().iter().map(|o| crate::Origin {
             file: o.file + offset,
             line: o.line,
         }));
     }
-    ours(&mut code, &mut lines, &main);
+    ours(&mut code, &mut lines, main);
     // The final `}` line needs no separator after it.
     code.pop();
     let mut out = Preprocessed::new(code, lines, files).map_err(error)?;
     out.version = geometry.version.clone().or(vertex.version.clone());
-    // A strip of n vertices is n - 2 triangles: at most `max_vertices - 2`, whichever of the
-    // stage's paths runs.
-    let triangles = max_vertices.saturating_sub(2).max(1);
-    Ok((out, triangles))
+    Ok(out)
 }
 
 /// Functions whose calls write memory other invocations see.
@@ -944,6 +960,50 @@ mod tests {
             .unwrap();
         let error = crate::translate::scan::error_at_token(&folded, &tokens, at, "bad_vertex");
         assert_eq!((error.file.as_str(), error.line), ("shadow.vsh", 4));
+    }
+
+    #[test]
+    fn cancelling_stage_line_count_deltas_are_still_refused() {
+        let vertex = Preprocessed::from_source("shadow.vsh", "float a;\nfloat b;");
+        let geometry = Preprocessed::from_source("shadow.gsh", "float c;\nfloat d;");
+        // Vertex loses one line and geometry gains one (total unchanged: 4 == 4).
+        let err = join_stages(
+            &vertex,
+            "float a;",
+            &geometry,
+            "float c;\nfloat d;\nfloat extra;",
+            "void head();",
+            "void emit();",
+            "void main() {}",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            [Error::new(
+                "shadow.gsh",
+                0,
+                "geometry stage: 2 line origins for 3 lines of code",
+            )]
+        );
+        // Geometry matches while vertex loses one line: refused at the vertex stage file.
+        let err = join_stages(
+            &vertex,
+            "float a;",
+            &geometry,
+            "float c;\nfloat d;",
+            "void head();",
+            "void emit();",
+            "void main() {}",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            [Error::new(
+                "shadow.vsh",
+                0,
+                "vertex stage: 2 line origins for 1 line of code",
+            )]
+        );
     }
 
     #[test]

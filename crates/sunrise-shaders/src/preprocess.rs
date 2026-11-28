@@ -133,10 +133,12 @@ impl Preprocessed {
     }
 
     /// This stage with `code` in place of its own, for a rewrite that keeps its lines where they
-    /// are. Refuses a different line count at the stage file, without changing the source map.
-    pub(crate) fn with_code(&self, code: String) -> Result<Self, crate::Error> {
-        check_line_count(&code, self.lines.len())
-            .map_err(|message| crate::Error::new(self.file(), 0, message))?;
+    /// are. Refuses a different line count at the stage file, naming `rewrite`, without changing
+    /// the source map.
+    pub(crate) fn with_code(&self, rewrite: &str, code: String) -> Result<Self, crate::Error> {
+        check_line_count(&code, self.lines.len()).map_err(|message| {
+            crate::Error::new(self.file(), 0, format!("{rewrite}: {message}"))
+        })?;
         Ok(Self {
             code,
             lines: self.lines.clone(),
@@ -149,12 +151,20 @@ impl Preprocessed {
         })
     }
 
-    /// Records a fatal error about the stage as a whole, without assigning it an authored line.
-    pub(crate) fn refuse(&mut self, message: String) {
-        self.diagnostics.push(Diagnostic {
-            origin: Origin::default(),
-            message,
-        });
+    /// This stage with each line rewritten in place, keeping its source map.
+    /// Each mapped line must stay on a single line.
+    pub(crate) fn map_lines(&self, mut map: impl FnMut(usize, &[&str]) -> String) -> Self {
+        let source: Vec<&str> = self.code.split('\n').collect();
+        let mut out = self.clone();
+        out.code = (0..source.len())
+            .map(|n| {
+                let line = map(n, &source);
+                debug_assert!(!line.contains('\n'), "map_lines added a newline");
+                line
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        out
     }
 
     /// This stage with `declaration` on its own lines after its leading directives (`#version`,
@@ -224,8 +234,10 @@ impl Preprocessed {
 pub(crate) fn check_line_count(code: &str, origins: usize) -> Result<(), String> {
     let expected = code.split('\n').count();
     if origins != expected {
+        let origin_word = if origins == 1 { "origin" } else { "origins" };
+        let line_word = if expected == 1 { "line" } else { "lines" };
         return Err(format!(
-            "{origins} line origins for {expected} lines of code"
+            "{origins} line {origin_word} for {expected} {line_word} of code"
         ));
     }
     Ok(())
@@ -1095,13 +1107,27 @@ mod tests {
     fn a_line_preserving_rewrite_refuses_added_or_removed_lines() {
         let stage = Preprocessed::from_source("stage.fsh", "one\ntwo");
         for (code, message) in [
-            ("one", "2 line origins for 1 lines of code"),
-            ("one\ntwo\n", "2 line origins for 3 lines of code"),
+            ("one", "test rewrite: 2 line origins for 1 line of code"),
+            (
+                "one\ntwo\n",
+                "test rewrite: 2 line origins for 3 lines of code",
+            ),
         ] {
-            let err = stage.with_code(code.to_owned()).unwrap_err();
+            let err = stage
+                .with_code("test rewrite", code.to_owned())
+                .unwrap_err();
             assert_eq!((err.file.as_str(), err.line), ("stage.fsh", 0));
             assert_eq!(err.message, message);
         }
+        let one = Preprocessed::from_source("stage.fsh", "one");
+        let err = one
+            .with_code("test rewrite", "one\ntwo".to_owned())
+            .unwrap_err();
+        assert_eq!((err.file.as_str(), err.line), ("stage.fsh", 0));
+        assert_eq!(
+            err.message,
+            "test rewrite: 1 line origin for 2 lines of code"
+        );
     }
 
     #[test]
