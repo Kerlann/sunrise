@@ -2551,44 +2551,35 @@ impl crate::game::ServerGame<'_> {
     /// Capture the entity records before committing a chunk unload
     /// (`PersistentEntitySectionManager.processChunkUnload`), with the chunks
     /// whose record was refused: those stay loaded with their entities.
-    /// Pending entity chunks (whose read failed) stay out of the snapshot and
-    /// out of `entities_unload` notices.
     pub fn unloading_entity_snapshots(
         &mut self,
         keys: &HashSet<ChunkKey>,
     ) -> (Vec<(ChunkKey, Vec<Tag>)>, HashSet<ChunkKey>) {
         self.spawn_loaded_entities();
-        let ready = self
-            .server
-            .save
-            .0
-            .entity_chunks_ready_to_unload(keys.iter().copied());
-        if ready.is_empty() {
+        if keys.is_empty() {
             return (Vec::new(), HashSet::new());
         }
         if self
             .common
             .dragon
             .as_ref()
-            .is_some_and(|d| d.death_canceled && ready.contains(&chunk_of(d.position)))
+            .is_some_and(|d| d.death_canceled && keys.contains(&chunk_of(d.position)))
         {
             let _ = self.save_entity_metadata();
         }
-        self.snapshot_entity_chunks(&ready, EntitySnapshot::Save)
+        self.snapshot_entity_chunks(keys, EntitySnapshot::Save)
     }
+    /// Remove the entities and kept unknown records for `keys` (the chunks
+    /// actually queued by `SaveDir::save_entities_later` / `save_eviction`,
+    /// minus any refused or kept columns).
     pub fn remove_unloading_entities(&mut self, keys: &HashSet<ChunkKey>) {
-        let ready = self
-            .server
-            .save
-            .0
-            .entity_chunks_ready_to_unload(keys.iter().copied());
-        if ready.is_empty() {
+        if keys.is_empty() {
             return;
         }
-        for key in &ready {
+        for key in keys {
             self.common.persist.unknown.remove(key);
         }
-        self.unload_removed_entities(&ready);
+        self.unload_removed_entities(keys);
     }
 }
 

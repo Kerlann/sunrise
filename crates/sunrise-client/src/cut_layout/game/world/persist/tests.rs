@@ -219,7 +219,6 @@ fn terrain_unload_keeps_entities_in_a_pending_entity_chunk() {
                     .chunks
                     .insert((x, z), Arc::new(Chunk::empty(x, z)));
             }
-            assert!(game.server.save.0.load_entities(b.0, b.1).is_err());
             let target = game
                 .summon_with_nbt("minecraft:text_display", at_a, "{UUID:[I;0,0,0,2]}")
                 .unwrap()
@@ -235,14 +234,14 @@ fn terrain_unload_keeps_entities_in_a_pending_entity_chunk() {
             let _chunk_b = game.world.chunks.remove(&b).unwrap();
             let keys = HashSet::from([a, b]);
             let (entities, refused_entities) = game.unloading_entity_snapshots(&keys);
-            assert_eq!(
-                entities.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
-                vec![a],
-                "pending entity chunk B stays out of the snapshot and entities_unload counts"
-            );
             assert!(refused_entities.is_empty());
-            game.server.save.0.save_entities_later(entities).unwrap();
-            game.remove_unloading_entities(&keys);
+            // Latch B's read failure even after snapshot capture: `entity_records`
+            // is the single filter and `save_entities_later` returns only the
+            // chunks actually queued (`{a}`), so B's live entity stays resident.
+            assert!(game.server.save.0.load_entities(b.0, b.1).is_err());
+            let queued = game.server.save.0.save_entities_later(entities).unwrap();
+            assert_eq!(queued, HashSet::from([a]));
+            game.remove_unloading_entities(&queued);
             game.server.save.0.flush().unwrap();
             assert_eq!(display.position(game), Some(at_b));
             assert!(

@@ -719,14 +719,6 @@ impl SaveDir {
         }
         Ok(out)
     }
-    /// Failed reads leave entity chunks pending, even when their terrain unloads.
-    pub fn entity_chunks_ready_to_unload(
-        &self,
-        keys: impl Iterator<Item = (i32, i32)>,
-    ) -> HashSet<(i32, i32)> {
-        let failed = self.failed_entity_reads.lock().unwrap();
-        keys.filter(|key| !failed.contains(key)).collect()
-    }
     /// Write `chunks` into their region files and wait until they are on disk.
     pub fn save(
         &self,
@@ -855,9 +847,16 @@ impl SaveDir {
     pub fn save_entities(&self, chunks: Vec<((i32, i32), Vec<Tag>)>) -> Result<()> {
         self.queue(Folder::Entities, self.entity_records(chunks, None), true)
     }
-    /// `save_entities` on the writer thread.
-    pub fn save_entities_later(&self, chunks: Vec<((i32, i32), Vec<Tag>)>) -> Result<()> {
-        self.queue(Folder::Entities, self.entity_records(chunks, None), false)
+    /// `save_entities` on the writer thread. Returns the entity chunk keys
+    /// actually queued (excluding any whose earlier read failed).
+    pub fn save_entities_later(
+        &self,
+        chunks: Vec<((i32, i32), Vec<Tag>)>,
+    ) -> Result<HashSet<(i32, i32)>> {
+        let records = self.entity_records(chunks, None);
+        let queued = records.iter().map(|(key, _)| *key).collect();
+        self.queue(Folder::Entities, records, false)?;
+        Ok(queued)
     }
     /// `PersistentEntitySectionManager.storeChunkSections`: never store a pending entity chunk.
     fn entity_records(
